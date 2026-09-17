@@ -22,7 +22,7 @@ $ lets-code
 ```bash
 # 1. get the script
 mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/Umutayb/lets-code/main/lets-code \
+curl -fsSL https://raw.githubusercontent.com/civitas-cerebrum/lets-code/main/lets-code \
      -o ~/.local/bin/lets-code
 chmod +x ~/.local/bin/lets-code
 

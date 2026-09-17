@@ -45,7 +45,7 @@ adapters. **pi is the default and the only v1-implemented harness**;
 
 | Input | Resolved from | Written to pi |
 |---|---|---|
-| endpoint | `--url` > config/env `ENDPOINTS` (first reachable) | `providers["lets-code"].baseUrl` |
+| endpoint | `--url` > config/env `ENDPOINTS` (first reachable); trailing `/v1` accepted, normalized | `providers["lets-code"].baseUrl` — `<base>/v1` for openai dialects (pi's OpenAI SDK never appends `/v1` itself), bare base for anthropic/google |
 | model | `--model` > config/env `MODEL` > `/v1/models` discovery > error | `models[0].id`, compaction key |
 | context | `--context` > config/env `CONTEXT` > `max_model_len` > 128000 | `models[0].contextWindow` |
 | output cap | `--output-cap` > config/env `OUTPUT_CAP` > 32768 | `models[0].maxTokens` + `reserveTokens` |

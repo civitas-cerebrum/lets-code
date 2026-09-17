@@ -1,0 +1,586 @@
+#!/usr/bin/env bash
+#
+# lets-code — run an agentic coding CLI against your own self-hosted LLM server
+# (vLLM, SGLang, Ollama, LM Studio, OpenRouter, or any OpenAI-compatible
+# server exposing /v1/models).
+#
+#   lets-code setup              interactive onboarding (start here)
+#   lets-code [args...]          launch pi (args pass to `pi`, e.g.
+#                                `lets-code -p "hello"` for one-shot print mode)
+#   lets-code --url <base> ...   one-off endpoint override
+#   lets-code --model <id> ...   one-off model override
+#   lets-code --context <tok>    context window (default: auto-discovered)
+#   lets-code --output-cap <tok> max output tokens (default 32768)
+#   lets-code --api <dialect>    openai-completions (default) | openai-responses |
+#                                anthropic-messages | google-generative-ai
+#   lets-code --harness <name>   pi (default; only v1 harness) |
+#                                deepseek | claude | codex (roadmap)
+#   lets-code --insecure ...     skip TLS verification (self-signed certs)
+#   lets-code --verbose ...      show endpoint probing
+#
+# What it does at launch:
+#   1. probes your configured endpoints in order, first reachable wins
+#   2. discovers the resident model AND its context window from /v1/models
+#   3. registers the endpoint with pi (~/.pi/agent/models.json) and reserves
+#      the output budget in pi's compaction settings (settings.json), so
+#      compaction fires before a response can overflow the server's window
+#   4. exports LETS_CODE_TOKEN (pi resolves it via $ENV interpolation) and
+#      execs:  pi --provider lets-code --model <id>
+#
+# Harness: pi is the default (and only v1) harness; --harness deepseek|claude|codex
+# are roadmap items, not yet available.
+#
+# Config: ~/.config/lets-code/config   (created by `lets-code setup`)
+# Env overrides: LETS_CODE_ENDPOINTS (space-separated), LETS_CODE_TOKEN,
+#                LETS_CODE_CA, LETS_CODE_MODEL, LETS_CODE_CONTEXT,
+#                LETS_CODE_OUTPUT_CAP, LETS_CODE_API
+# Needs: bash >= 3.2 (stock macOS is fine), curl, python3, pi CLI
+# (auto-installed on request).
+
+set -eu
+(set -o pipefail) 2>/dev/null && set -o pipefail   # pipefail is bash 4+; keep 3.2 alive
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lets-code"
+CONFIG_FILE="${CONFIG_DIR}/config"
+PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"   # pi's config home (overridable)
+PROVIDER_ID="lets-code"          # fixed provider id we upsert into pi's files
+DEFAULT_CONTEXT=128000
+DEFAULT_OUTPUT_CAP=32768
+DEFAULT_API="openai-completions"
+
+VERBOSE=false
+LOG_PREFIX="[lets-code]"
+log()         { echo "${LOG_PREFIX} ${1}"; }
+log_verbose() { if [ "${VERBOSE}" = "true" ]; then echo "${LOG_PREFIX} ${1}"; fi; }
+log_error()   { echo "${LOG_PREFIX} ERROR: ${1}" >&2; }
+
+# ------------------------------------------------------------------ probing
+# The probe is PERMISSIVE over TLS on purpose: it runs against every
+# configured endpoint (first reachable wins), so a strict check here would
+# wrongly kill LAN/VPN fallbacks. Certificate trust is enforced separately,
+# before launch, for the endpoint that won (see the https block in main).
+
+tls_args_for() {
+    case "$1" in
+        https://*)
+            if   [ -n "${CA_FOUND:-}" ];        then echo "--cacert|${CA_FOUND}"
+            elif [ "${INSECURE:-false}" = true ]; then echo "-k"
+            else echo "-k"   # permissive probe; trust is enforced before launch
+            fi ;;
+        *) echo "" ;;
+    esac
+}
+
+PROBE_ERR=""
+PROBE_OUT="${TMPDIR:-/tmp}/.lets-code-probe.$$"
+trap 'rm -f "${PROBE_OUT}"' EXIT
+probe() {  # probe <base-url> -> prints /v1/models JSON on success; PROBE_ERR explains failure
+    local base="$1" tls rc; tls="$(tls_args_for "$base")"
+    local IFS='|'; # shellcheck disable=SC2086
+    if curl -sf --max-time 4 ${tls:+$tls} -H "Authorization: Bearer ${TOKEN:-dummy-key}" "${base}/v1/models" 2>/dev/null; then
+        PROBE_ERR=""; return 0
+    else
+        rc=$?
+    fi
+    case "${rc}" in
+        6)  PROBE_ERR="DNS: cannot resolve host" ;;
+        7)  PROBE_ERR="connection refused (host up, port closed?)" ;;
+        28) PROBE_ERR="timed out (host unreachable / wrong IP?)" ;;
+        35) PROBE_ERR="TLS handshake failed" ;;
+        60) PROBE_ERR="TLS certificate not trusted" ;;
+        22) PROBE_ERR="HTTP error from server (4xx/5xx)" ;;
+        *)  PROBE_ERR="curl exit ${rc}" ;;
+    esac
+    return "${rc}"
+}
+
+# ---------------------------------------------------------- pi config writes
+# pi keeps its state under ~/.pi/agent (override: $PI_CODING_AGENT_DIR).
+# lets-code owns exactly two slices, both keyed by the fixed provider id
+# 'lets-code', so it never clobbers the user's own providers or defaults:
+#   models.json   -> providers["lets-code"]
+#                    (endpoint, api dialect, model, contextWindow, maxTokens)
+#   settings.json -> compaction.modelOverrides["lets-code/<model>"]
+#                    .reserveTokens = output cap
+# The token is never written to disk: apiKey points at $LETS_CODE_TOKEN (pi's
+# $ENV interpolation), exported at launch — the secret stays in
+# ~/.config/lets-code/config (mode 600). Writes are atomic (tmp + rename),
+# every other key in the files is preserved, and a corrupt file fails loudly.
+pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-cap>
+    PI_AGENT_DIR="${PI_AGENT_DIR}" python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json, os, sys, tempfile
+
+base, api, model, context, cap = sys.argv[1:6]
+agent_dir = os.environ["PI_AGENT_DIR"]
+ctx = int(context)
+cap = int(cap)
+
+def upsert(path, mutate):
+    doc = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+        except Exception as exc:
+            sys.exit("[lets-code] cannot parse %s: %s\n"
+                     "  fix or move the file aside, then re-run lets-code." % (path, exc))
+    if not isinstance(doc, dict):
+        sys.exit("[lets-code] %s must contain a JSON object." % path)
+    mutate(doc)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    existed = os.path.exists(path)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".lets-code-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2)
+            f.write("\n")
+        os.chmod(tmp, os.stat(path).st_mode & 0o777 if existed else 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+def to_models(doc):
+    providers = doc.get("providers")
+    if not isinstance(providers, dict):
+        providers = {}
+    providers["lets-code"] = {
+        "baseUrl": base,
+        "api": api,
+        "apiKey": "$LETS_CODE_TOKEN",
+        "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
+        "models": [{"id": model, "contextWindow": ctx, "maxTokens": cap}],
+    }
+    doc["providers"] = providers
+
+def to_settings(doc):
+    compaction = doc.get("compaction")
+    if not isinstance(compaction, dict):
+        compaction = {}
+    overrides = compaction.get("modelOverrides")
+    if not isinstance(overrides, dict):
+        overrides = {}
+    overrides["lets-code/" + model] = {"reserveTokens": cap}
+    compaction["modelOverrides"] = overrides
+    doc["compaction"] = compaction
+
+upsert(os.path.join(agent_dir, "models.json"), to_models)
+upsert(os.path.join(agent_dir, "settings.json"), to_settings)
+PY
+}
+
+# ------------------------------------------------------------ harness gating
+# v1 implements exactly one harness (pi). The others are roadmap items and
+# must fail loudly rather than silently fall back or misconfigure.
+harness_gate() {  # harness_gate <name>
+    case "$1" in
+        pi) return 0 ;;
+        *)
+            log_error "harness '$1' is a roadmap item — not yet available in v1."
+            log_error "pi is the default (and only implemented) harness: run 'lets-code' without --harness, or with --harness pi."
+            exit 1
+            ;;
+    esac
+}
+
+# ------------------------------------------------------ pi presence + install
+# Detects a missing pi and offers to install it (confirm, then install).
+# Never blocks a non-interactive session: it prints the command and returns 1
+# so the caller can abort with a pointer.
+ensure_pi() {
+    command -v pi >/dev/null 2>&1 && return 0
+    log "pi (the agentic coding CLI) is not installed."
+    log "install command: npm install -g --ignore-scripts @earendil-works/pi-coding-agent"
+    if [ ! -t 0 ]; then
+        log_error "non-interactive session — refusing to auto-install."
+        log_error "run the command above yourself, then re-run lets-code."
+        return 1
+    fi
+    printf "Install now? [Y/n] "
+    local answer; read -r answer
+    case "$answer" in
+        [Nn]*)
+            log "skipped — install pi manually (command above) and re-run lets-code."
+            return 1
+            ;;
+    esac
+    if ! command -v npm >/dev/null 2>&1; then
+        log_error "npm not found — cannot auto-install pi."
+        log_error "install Node.js (>= 22.19.0) + npm, then re-run lets-code."
+        return 1
+    fi
+    local nv major minor=""
+    nv="$(node -v 2>/dev/null | sed 's/^v//')" || nv=""
+    major="${nv%%.*}"
+    case "${nv}" in *.*) minor="${nv#*.}"; minor="${minor%%.*}" ;; esac
+    [ -n "${minor}" ] || minor=0
+    if [ -z "${nv}" ] || [ "${major}" -lt 22 ] || { [ "${major}" -eq 22 ] && [ "${minor}" -lt 19 ]; }; then
+        log_error "Node.js >= 22.19.0 required (found: ${nv:-none}) — pi 0.85+ needs it."
+        log_error "upgrade Node, then re-run lets-code."
+        return 1
+    fi
+    log "installing pi via npm (this may take a minute) ..."
+    if ! npm install -g --ignore-scripts @earendil-works/pi-coding-agent; then
+        log_error "npm install failed — check the npm output above and retry."
+        return 1
+    fi
+    if ! command -v pi >/dev/null 2>&1; then
+        log_error "npm reported success but 'pi' is not on PATH — check your npm global prefix, then re-run."
+        return 1
+    fi
+    log "installed pi: $(pi --version 2>/dev/null | head -n1)"
+    return 0
+}
+
+# ---------------------------------------------------------------- onboarding
+run_setup() {
+    echo ""
+    echo "lets-code setup — point the pi harness at your own LLM server."
+    echo "Answers are saved to ${CONFIG_FILE} (edit it any time, or re-run setup)."
+    echo ""
+
+    # 1. prerequisites
+    local missing=""
+    command -v curl    >/dev/null || missing="${missing} curl"
+    command -v python3 >/dev/null || missing="${missing} python3"
+    if [ -n "${missing}" ]; then
+        log_error "missing prerequisites:${missing} — install them and re-run setup."
+        exit 1
+    fi
+
+    # 2. pi harness (confirm, then install)
+    ensure_pi || exit 1
+
+    # 3. endpoints
+    echo ""
+    echo "Enter your server base URL(s), most-preferred first (no /v1 suffix)."
+    echo "Examples:  http://localhost:8000    https://llm.my-lan.example"
+    echo "You can list several separated by spaces — the first reachable one wins"
+    echo "(useful if the same server has a localhost, LAN, and VPN address)."
+    printf "Endpoints [http://localhost:8000]: "
+    local endpoints
+    read -r endpoints
+    endpoints="${endpoints:-http://localhost:8000}"
+
+    # 4. token
+    echo ""
+    echo "API token. vLLM without --api-key accepts anything; a placeholder is fine."
+    printf "Token [dummy-key]: "
+    local token
+    read -r token
+    token="${token:-dummy-key}"
+
+    # 5. CA for private TLS
+    local ca=""
+    case " ${endpoints}" in *" https://"*|" https://"*)
+        echo ""
+        echo "You listed an https endpoint. If it uses a private CA (e.g. mkcert),"
+        echo "pi (Node) needs the root CA file — Node ignores the OS trust store."
+        printf "Path to root CA .pem (empty to skip): "
+        read -r ca
+        if [ -n "${ca}" ] && [ ! -f "${ca}" ]; then
+            log_error "no file at ${ca} — saving anyway; fix it in ${CONFIG_FILE} later."
+        fi ;;
+    esac
+
+    # 6. save config
+    mkdir -p "${CONFIG_DIR}"
+    {
+        echo "# lets-code configuration (shell syntax). Re-run 'lets-code setup' to regenerate."
+        echo "ENDPOINTS=\"${endpoints}\""
+        echo "TOKEN=\"${token}\""
+        echo "CA_PATH=\"${ca}\""
+        echo ""
+        echo "# Optional pins (empty = auto-discovered at launch):"
+        echo "MODEL=\"\""
+        echo "CONTEXT=\"\""
+        echo "OUTPUT_CAP=\"\""
+        echo "API=\"\""
+    } > "${CONFIG_FILE}"
+    chmod 600 "${CONFIG_FILE}"
+    echo ""
+    log "saved ${CONFIG_FILE}"
+
+    # 7. register as a command: install + make executable + ensure PATH
+    local self target
+    self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    echo ""
+    echo "Where should the 'lets-code' command be installed?"
+    echo "  1) ${HOME}/.local/bin   (this user only — default)"
+    echo "  2) /usr/local/bin       (system-wide, needs sudo)"
+    printf "Choice [1]: "
+    local reply
+    read -r reply
+    if [ "${reply:-1}" = "2" ]; then
+        target="/usr/local/bin/lets-code"
+        sudo cp "${self}" "${target}" && sudo chmod 755 "${target}"
+        log "installed ${target}"
+    else
+        target="${HOME}/.local/bin/lets-code"
+        mkdir -p "${HOME}/.local/bin"
+        [ "${self}" = "${target}" ] || cp "${self}" "${target}"
+        chmod +x "${target}"
+        log "installed ${target}"
+        # ensure ~/.local/bin is on PATH — offer to persist it in the shell profile
+        case ":${PATH}:" in
+            *":${HOME}/.local/bin:"*) ;;
+            *)
+                local profile
+                case "$(basename "${SHELL:-/bin/sh}")" in
+                    zsh)  profile="${HOME}/.zshrc" ;;
+                    bash) if [ "$(uname)" = "Darwin" ]; then profile="${HOME}/.bash_profile"; else profile="${HOME}/.bashrc"; fi ;;
+                    *)    profile="" ;;
+                esac
+                echo ""
+                echo "~/.local/bin is not on your PATH, so 'lets-code' won't be found yet."
+                if [ -n "${profile}" ]; then
+                    printf "Add 'export PATH=\"\$HOME/.local/bin:\$PATH\"' to %s? [Y/n] " "${profile}"
+                    read -r reply
+                    case "${reply}" in n|N)
+                        echo "Add it manually, then restart your shell." ;;
+                    *)
+                        printf '\n# added by lets-code setup\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "${profile}"
+                        log "PATH line appended to ${profile} — restart your shell (or: source ${profile})" ;;
+                    esac
+                else
+                    echo "Add this line to your shell profile, then restart your shell:"
+                    echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+                fi ;;
+        esac
+    fi
+    # verify registration
+    if command -v lets-code >/dev/null 2>&1; then
+        log "command registered: $(command -v lets-code)"
+    else
+        log "command will be available in a fresh shell."
+    fi
+
+    # 8. live test
+    echo ""
+    printf "Probe the server now? [Y/n] "
+    read -r reply
+    case "${reply}" in
+        n|N)
+            echo "Setup done. Run: lets-code"
+            offer_fresh_shell
+            exit 0
+            ;;
+    esac
+    TOKEN="${token}"; CA_FOUND=""; [ -f "${ca}" ] && CA_FOUND="${ca}"
+    local found=""
+    for cand in ${endpoints}; do
+        if probe "${cand%/}" > "${PROBE_OUT}"; then found="${cand%/}"; MODELS_JSON="$(cat "${PROBE_OUT}")"; break; fi
+        echo "  ${cand}: ${PROBE_ERR}"
+    done
+    if [ -z "${found}" ]; then
+        log_error "no endpoint reachable right now — config saved; check the server and try 'lets-code --verbose'."
+        offer_fresh_shell
+        exit 1
+    fi
+    local info
+    info="$(printf '%s' "${MODELS_JSON}" | python3 -c '
+import json, sys
+d = (json.load(sys.stdin).get("data") or [{}])[0]
+print(d.get("id","?"), "| context:", d.get("max_model_len","?"))' 2>/dev/null || echo "?")"
+    log "reachable: ${found}"
+    log "resident model: ${info}"
+
+    # 9. register the resident model with pi (so it is selectable in the fresh shell)
+    local reg reg_id reg_len
+    reg="$(printf '%s' "${MODELS_JSON}" | python3 -c '
+import json, sys
+d = (json.load(sys.stdin).get("data") or [{}])[0]
+print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || true)"
+    reg_id="${reg%%|*}"
+    reg_len="${reg##*|}"
+    if [ -z "${reg_id}" ]; then
+        log "could not parse a model id from /v1/models — skipping pi registration (launch re-registers anyway)."
+    else
+        case "${reg_len}" in
+            *[!0-9]*|"") reg_len="${DEFAULT_CONTEXT}" ;;
+        esac
+        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}"
+        log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${DEFAULT_OUTPUT_CAP})"
+    fi
+
+    echo ""
+    echo "All set. Run:  lets-code          (interactive session)"
+    echo "          or:  lets-code -p \"hi\"  (one-shot print mode)"
+    offer_fresh_shell
+    exit 0
+}
+
+# The parent shell caches its command/completion tables at startup, so a
+# just-installed command isn't tab-completable there. A child process cannot
+# refresh the parent — but we can hand the user a fresh login shell instead.
+offer_fresh_shell() {
+    if [ -t 0 ]; then
+        printf "Open a refreshed shell now so 'lets-code' + tab-completion work immediately? [Y/n] "
+        read -r reply
+        case "${reply}" in
+            n|N) echo "OK — run 'rehash' (zsh) / 'hash -r' (bash), or open a new terminal." ;;
+            *)   exec "${SHELL:-/bin/sh}" -l ;;
+        esac
+    else
+        echo "Note: run 'rehash' (zsh) / 'hash -r' (bash) or open a new terminal for tab-completion."
+    fi
+}
+
+# --------------------------------------------------------------------- main
+# setup is a terminal path: it exits on every branch
+[ "${1:-}" = "setup" ] && { CA_FOUND=""; TOKEN="dummy-key"; run_setup; }
+
+# load config (defaults, then file, then env overrides)
+ENDPOINTS=""
+TOKEN="dummy-key"
+CA_PATH=""
+MODEL=""
+CONTEXT=""
+OUTPUT_CAP=""
+API=""
+# shellcheck disable=SC1090
+[ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
+ENDPOINTS="${LETS_CODE_ENDPOINTS:-${ENDPOINTS}}"
+TOKEN="${LETS_CODE_TOKEN:-${TOKEN}}"
+CA_PATH="${LETS_CODE_CA:-${CA_PATH}}"
+MODEL="${LETS_CODE_MODEL:-${MODEL}}"
+CONTEXT="${LETS_CODE_CONTEXT:-${CONTEXT}}"
+OUTPUT_CAP="${LETS_CODE_OUTPUT_CAP:-${OUTPUT_CAP}}"
+API="${LETS_CODE_API:-${API}}"
+
+HARNESS="pi"
+URL_OVERRIDE=""
+MODEL_OVERRIDE=""
+CONTEXT_OVERRIDE=""
+OUTPUT_CAP_OVERRIDE=""
+API_OVERRIDE=""
+INSECURE=false
+PASSTHROUGH=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --harness)  [ -n "${2:-}" ] || { log_error "--harness requires an argument."; exit 1; }
+                    HARNESS="$2"; shift 2 ;;
+        --url)      [ -n "${2:-}" ] || { log_error "--url requires an argument."; exit 1; }
+                    URL_OVERRIDE="${2%/}"; shift 2 ;;
+        --model)    [ -n "${2:-}" ] || { log_error "--model requires an argument."; exit 1; }
+                    MODEL_OVERRIDE="$2"; shift 2 ;;
+        --context)  [ -n "${2:-}" ] || { log_error "--context requires an argument."; exit 1; }
+                    case "$2" in *[!0-9]*|0|"") log_error "--context expects a positive integer (tokens), got: $2"; exit 1 ;; esac
+                    CONTEXT_OVERRIDE="$2"; shift 2 ;;
+        --output-cap) [ -n "${2:-}" ] || { log_error "--output-cap requires an argument."; exit 1; }
+                    case "$2" in *[!0-9]*|0|"") log_error "--output-cap expects a positive integer (tokens), got: $2"; exit 1 ;; esac
+                    OUTPUT_CAP_OVERRIDE="$2"; shift 2 ;;
+        --api)      [ -n "${2:-}" ] || { log_error "--api requires an argument."; exit 1; }
+                    API_OVERRIDE="$2"; shift 2 ;;
+        --insecure) INSECURE=true; shift ;;
+        --verbose|--debug) VERBOSE=true; shift ;;
+        -h|--help)  sed -n '3,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)          PASSTHROUGH+=("$1"); shift ;;
+    esac
+done
+
+case "${API_OVERRIDE}" in
+    ""|openai-completions|openai-responses|anthropic-messages|google-generative-ai) ;;
+    *) log_error "unsupported --api dialect: ${API_OVERRIDE} (openai-completions | openai-responses | anthropic-messages | google-generative-ai)"; exit 1 ;;
+esac
+
+harness_gate "${HARNESS}"
+
+if [ -z "${ENDPOINTS}" ] && [ -z "${URL_OVERRIDE}" ]; then
+    log_error "no configuration found. Run:  lets-code setup"
+    exit 1
+fi
+
+ensure_pi || exit 1
+command -v curl    >/dev/null || { log_error "curl not found."; exit 1; }
+command -v python3 >/dev/null || { log_error "python3 not found."; exit 1; }
+
+CA_FOUND=""
+if [ -n "${CA_PATH}" ] && [ -f "${CA_PATH}" ]; then CA_FOUND="${CA_PATH}"; fi
+
+BASE_URL=""
+MODELS_JSON=""
+if [ -n "${URL_OVERRIDE}" ]; then
+    BASE_URL="${URL_OVERRIDE}"
+    probe "${BASE_URL}" > "${PROBE_OUT}" || { log_error "server not reachable at ${BASE_URL} (${PROBE_ERR})"; exit 1; }
+    MODELS_JSON="$(cat "${PROBE_OUT}")"
+else
+    FAILS=""
+    for cand in ${ENDPOINTS}; do
+        log_verbose "probing ${cand} ..."
+        if probe "${cand%/}" > "${PROBE_OUT}"; then BASE_URL="${cand%/}"; MODELS_JSON="$(cat "${PROBE_OUT}")"; break; fi
+        FAILS="${FAILS}
+  ${cand}  ->  ${PROBE_ERR}"
+        log_verbose "  ${cand}: ${PROBE_ERR}"
+    done
+    if [ -z "${BASE_URL}" ]; then
+        log_error "no endpoint reachable:${FAILS}"
+        log_error "hints: 'DNS' = this machine isn't using your LAN's DNS server; 'timed out' = name resolves to the wrong IP (public instead of LAN?); 'refused' = server/port down."
+        exit 1
+    fi
+fi
+
+case "${BASE_URL}" in
+    https://*)
+        if [ -z "${CA_FOUND}" ] && [ "${INSECURE}" != true ]; then
+            # only refuse if the cert actually fails system trust
+            if ! curl -sf --max-time 4 -H "Authorization: Bearer ${TOKEN}" "${BASE_URL}/v1/models" >/dev/null 2>&1; then
+                log_error "${BASE_URL} uses a certificate this machine doesn't trust."
+                log_error "Set the CA in ${CONFIG_FILE} (CA_PATH=...) or run with --insecure."
+                exit 1
+            fi
+        fi ;;
+esac
+
+DISCOVERED="$(printf '%s' "${MODELS_JSON}" | python3 -c '
+import json, sys
+d = (json.load(sys.stdin).get("data") or [{}])[0]
+print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null)" || DISCOVERED=""
+DISCOVERED_ID="${DISCOVERED%%|*}"
+DISCOVERED_LEN="${DISCOVERED##*|}"
+
+MODEL="${MODEL_OVERRIDE:-${MODEL}}"
+[ -n "${MODEL}" ] || MODEL="${DISCOVERED_ID}"
+[ -n "${MODEL}" ] || { log_error "could not discover a model from ${BASE_URL}/v1/models and no --model given."; exit 1; }
+
+CONTEXT="${CONTEXT_OVERRIDE:-${CONTEXT}}"
+[ -n "${CONTEXT}" ] || CONTEXT="${DISCOVERED_LEN}"
+[ -n "${CONTEXT}" ] || CONTEXT="${DEFAULT_CONTEXT}"
+OUTPUT_CAP="${OUTPUT_CAP_OVERRIDE:-${OUTPUT_CAP}}"
+[ -n "${OUTPUT_CAP}" ] || OUTPUT_CAP="${DEFAULT_OUTPUT_CAP}"
+API="${API_OVERRIDE:-${API}}"
+[ -n "${API}" ] || API="${DEFAULT_API}"
+
+case "${CONTEXT}" in
+    *[!0-9]*|0) log_error "context length must be a positive integer (tokens); got: ${CONTEXT} (from --context or config/env)."; exit 1 ;;
+esac
+case "${OUTPUT_CAP}" in
+    *[!0-9]*|0) log_error "output cap must be a positive integer (tokens); got: ${OUTPUT_CAP} (from --output-cap or config/env)."; exit 1 ;;
+esac
+if [ "${CONTEXT}" -le "${OUTPUT_CAP}" ]; then
+    log_error "context (${CONTEXT}) must exceed the output cap (${OUTPUT_CAP}) — no room left for input."
+    exit 1
+fi
+
+pi_write_configs "${BASE_URL}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}"
+
+export LETS_CODE_TOKEN="${TOKEN}"
+export PI_SKIP_VERSION_CHECK=1
+case "${BASE_URL}" in
+    https://*)
+        if [ -n "${CA_FOUND}" ]; then
+            export NODE_EXTRA_CA_CERTS="${CA_FOUND}"
+        elif [ "${INSECURE}" = true ]; then
+            export NODE_TLS_REJECT_UNAUTHORIZED=0
+        fi ;;
+esac
+
+log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  api: ${API}"
+if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
+    exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
+else
+    exec pi --provider "${PROVIDER_ID}" --model "${MODEL}" "${PASSTHROUGH[@]}"
+fi

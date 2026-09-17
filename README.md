@@ -46,7 +46,7 @@ confirm, then install.
 | Flag | Meaning |
 |---|---|
 | `--harness <name>` | Harness to launch. v1 implements **pi** (the default); `deepseek`, `claude`, `codex` are roadmap items and fail loudly. |
-| `--url <base>` | One-off endpoint override (no `/v1` suffix) |
+| `--url <base>` | One-off endpoint override (`/v1` suffix optional — it's normalized) |
 | `--model <id>` | One-off model override |
 | `--context <tok>` | Context window (default: discovered from the server) |
 | `--output-cap <tok>` | Max output tokens (default 32768) |

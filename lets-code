@@ -503,15 +503,18 @@ if [ -n "${CA_PATH}" ] && [ -f "${CA_PATH}" ]; then CA_FOUND="${CA_PATH}"; fi
 
 BASE_URL=""
 MODELS_JSON=""
+# Normalize: accept endpoints with or without a trailing /v1 — the probe
+# always hits <base>/v1/models, and /v1 is re-added for pi below.
 if [ -n "${URL_OVERRIDE}" ]; then
-    BASE_URL="${URL_OVERRIDE}"
+    BASE_URL="${URL_OVERRIDE%/}"; BASE_URL="${BASE_URL%/v1}"
     probe "${BASE_URL}" > "${PROBE_OUT}" || { log_error "server not reachable at ${BASE_URL} (${PROBE_ERR})"; exit 1; }
     MODELS_JSON="$(cat "${PROBE_OUT}")"
 else
     FAILS=""
     for cand in ${ENDPOINTS}; do
-        log_verbose "probing ${cand} ..."
-        if probe "${cand%/}" > "${PROBE_OUT}"; then BASE_URL="${cand%/}"; MODELS_JSON="$(cat "${PROBE_OUT}")"; break; fi
+        cbase="${cand%/}"; cbase="${cbase%/v1}"
+        log_verbose "probing ${cbase} ..."
+        if probe "${cbase}" > "${PROBE_OUT}"; then BASE_URL="${cbase}"; MODELS_JSON="$(cat "${PROBE_OUT}")"; break; fi
         FAILS="${FAILS}
   ${cand}  ->  ${PROBE_ERR}"
         log_verbose "  ${cand}: ${PROBE_ERR}"
@@ -565,7 +568,14 @@ if [ "${CONTEXT}" -le "${OUTPUT_CAP}" ]; then
     exit 1
 fi
 
-pi_write_configs "${BASE_URL}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}"
+# pi's OpenAI SDK builds request paths relative to baseUrl and never appends
+# /v1 itself, so OpenAI-family dialects get the /v1 suffix written into pi;
+# anthropic-messages/google-generative-ai gateways take the bare base.
+PROVIDER_BASE="${BASE_URL}"
+case "${API}" in
+    openai-completions|openai-responses) PROVIDER_BASE="${BASE_URL}/v1" ;;
+esac
+pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}"
 
 export LETS_CODE_TOKEN="${TOKEN}"
 export PI_SKIP_VERSION_CHECK=1

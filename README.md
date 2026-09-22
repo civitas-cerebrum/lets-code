@@ -51,13 +51,14 @@ confirm, then install.
 | `--context <tok>` | Context window (default: discovered from the server) |
 | `--output-cap <tok>` | Max output tokens (default 32768) |
 | `--api <dialect>` | `openai-completions` (default) \| `openai-responses` \| `anthropic-messages` \| `google-generative-ai` |
+| `--vision` \| `--no-vision` | The model accepts image input (off by default). `--vision` registers the model with `input: ["text","image"]` so pi actually sends images (e.g. screenshots) to it; `--no-vision` forces off even if `VISION=true` is set. |
 | `--insecure` | Skip TLS verification (self-signed certs) |
 | `--verbose` \| `--debug` | Show endpoint probing |
 | `-h` \| `--help` | Help |
 
 Env overrides: `LETS_CODE_ENDPOINTS` (space-separated), `LETS_CODE_TOKEN`,
 `LETS_CODE_CA`, `LETS_CODE_MODEL`, `LETS_CODE_CONTEXT`, `LETS_CODE_OUTPUT_CAP`,
-`LETS_CODE_API`.
+`LETS_CODE_API`, `LETS_CODE_VISION` (`true`/`false`).
 
 ## What onboarding sets up
 
@@ -185,6 +186,7 @@ content.
 | Garbage thinking text in output | Missing `--reasoning-parser` on the server. |
 | Session dies mid-way on long tasks | Context overflow — confirm the launch line shows the right `context:` value; if your server hides `max_model_len`, pin it with `--context <tok>` (or `CONTEXT=` in the config file). |
 | pi says provider `lets-code` unknown | pi's files were hand-edited while lets-code was running; just re-run `lets-code` — it re-registers on every launch. |
+| Model can't see images / pi treats it as text-only | pi only sends images to models declared with image input. Set `VISION=true` in `~/.config/lets-code/config` (or launch with `--vision`) and re-run `lets-code` — the model is re-registered on every launch, and pi re-reads `models.json` when you open `/model`. |
 
 ## Roadmap
 

@@ -50,6 +50,7 @@ adapters. **pi is the default and the only v1-implemented harness**;
 | context | `--context` > config/env `CONTEXT` > `max_model_len` > 128000 | `models[0].contextWindow` |
 | output cap | `--output-cap` > config/env `OUTPUT_CAP` > 32768 | `models[0].maxTokens` + `reserveTokens` |
 | api dialect | `--api` > config/env `API` > `openai-completions` | `providers["lets-code"].api` |
+| vision | `--vision` / `--no-vision` > config/env `VISION` > false | `models[0].input` — `["text","image"]` when true, `["text"]` when false (pi defaults an undeclared model to text-only, so image input must be declared explicitly) |
 | token | `--…` n/a; config/env `TOKEN` > `dummy-key` | exported as `LETS_CODE_TOKEN` (never written) |
 | CA | `--insecure` / config/env `CA` + file exists | `NODE_EXTRA_CA_CERTS` (https only) |
 

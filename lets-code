@@ -13,6 +13,8 @@
 #   lets-code --output-cap <tok> max output tokens (default 32768)
 #   lets-code --api <dialect>    openai-completions (default) | openai-responses |
 #                                anthropic-messages | google-generative-ai
+#   lets-code --vision ...       model accepts images (default: off)
+#   lets-code --no-vision ...    force image input off (config has VISION=true)
 #   lets-code --harness <name>   pi (default; only v1 harness) |
 #                                deepseek | claude | codex (roadmap)
 #   lets-code --insecure ...     skip TLS verification (self-signed certs)
@@ -33,7 +35,7 @@
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
 # Env overrides: LETS_CODE_ENDPOINTS (space-separated), LETS_CODE_TOKEN,
 #                LETS_CODE_CA, LETS_CODE_MODEL, LETS_CODE_CONTEXT,
-#                LETS_CODE_OUTPUT_CAP, LETS_CODE_API
+#                LETS_CODE_OUTPUT_CAP, LETS_CODE_API, LETS_CODE_VISION
 # Needs: bash >= 3.2 (stock macOS is fine), curl, python3, pi CLI
 # (auto-installed on request).
 
@@ -99,18 +101,19 @@ probe() {  # probe <base-url> -> prints /v1/models JSON on success; PROBE_ERR ex
 # lets-code owns exactly two slices, both keyed by the fixed provider id
 # 'lets-code', so it never clobbers the user's own providers or defaults:
 #   models.json   -> providers["lets-code"]
-#                    (endpoint, api dialect, model, contextWindow, maxTokens)
+#                    (endpoint, api dialect, model, contextWindow, maxTokens,
+#                     input types: ["text","image"] when vision is enabled)
 #   settings.json -> compaction.modelOverrides["lets-code/<model>"]
 #                    .reserveTokens = output cap
 # The token is never written to disk: apiKey points at $LETS_CODE_TOKEN (pi's
 # $ENV interpolation), exported at launch — the secret stays in
 # ~/.config/lets-code/config (mode 600). Writes are atomic (tmp + rename),
 # every other key in the files is preserved, and a corrupt file fails loudly.
-pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-cap>
-    PI_AGENT_DIR="${PI_AGENT_DIR}" python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-cap> <vision>
+    PI_AGENT_DIR="${PI_AGENT_DIR}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY'
 import json, os, sys, tempfile
 
-base, api, model, context, cap = sys.argv[1:6]
+base, api, model, context, cap, vision = sys.argv[1:7]
 agent_dir = os.environ["PI_AGENT_DIR"]
 ctx = int(context)
 cap = int(cap)
@@ -152,7 +155,14 @@ def to_models(doc):
         "api": api,
         "apiKey": "$LETS_CODE_TOKEN",
         "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
-        "models": [{"id": model, "contextWindow": ctx, "maxTokens": cap}],
+        # pi defaults a model's input to ["text"] unless declared otherwise,
+        # so image support must be declared explicitly for images to pass
+        "models": [{
+            "id": model,
+            "contextWindow": ctx,
+            "maxTokens": cap,
+            "input": ["text", "image"] if vision == "true" else ["text"],
+        }],
     }
     doc["providers"] = providers
 
@@ -299,6 +309,9 @@ run_setup() {
         echo "CONTEXT=\"\""
         echo "OUTPUT_CAP=\"\""
         echo "API=\"\""
+        echo ""
+        echo "# Set true if your model accepts images (default: false):"
+        echo "VISION=\"\""
     } > "${CONFIG_FILE}"
     chmod 600 "${CONFIG_FILE}"
     echo ""
@@ -402,8 +415,8 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
         case "${reg_len}" in
             *[!0-9]*|"") reg_len="${DEFAULT_CONTEXT}" ;;
         esac
-        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}"
-        log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${DEFAULT_OUTPUT_CAP})"
+        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}" "${LETS_CODE_VISION:-false}"
+        log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${DEFAULT_OUTPUT_CAP}, vision: ${LETS_CODE_VISION:-false})"
     fi
 
     echo ""
@@ -441,6 +454,7 @@ MODEL=""
 CONTEXT=""
 OUTPUT_CAP=""
 API=""
+VISION=""
 # shellcheck disable=SC1090
 [ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
 ENDPOINTS="${LETS_CODE_ENDPOINTS:-${ENDPOINTS}}"
@@ -450,6 +464,7 @@ MODEL="${LETS_CODE_MODEL:-${MODEL}}"
 CONTEXT="${LETS_CODE_CONTEXT:-${CONTEXT}}"
 OUTPUT_CAP="${LETS_CODE_OUTPUT_CAP:-${OUTPUT_CAP}}"
 API="${LETS_CODE_API:-${API}}"
+VISION="${LETS_CODE_VISION:-${VISION}}"
 
 HARNESS="pi"
 URL_OVERRIDE=""
@@ -457,6 +472,7 @@ MODEL_OVERRIDE=""
 CONTEXT_OVERRIDE=""
 OUTPUT_CAP_OVERRIDE=""
 API_OVERRIDE=""
+VISION_OVERRIDE=""
 INSECURE=false
 PASSTHROUGH=()
 while [ $# -gt 0 ]; do
@@ -475,9 +491,11 @@ while [ $# -gt 0 ]; do
                     OUTPUT_CAP_OVERRIDE="$2"; shift 2 ;;
         --api)      [ -n "${2:-}" ] || { log_error "--api requires an argument."; exit 1; }
                     API_OVERRIDE="$2"; shift 2 ;;
+        --vision)   VISION_OVERRIDE=true; shift ;;
+        --no-vision) VISION_OVERRIDE=false; shift ;;
         --insecure) INSECURE=true; shift ;;
         --verbose|--debug) VERBOSE=true; shift ;;
-        -h|--help)  sed -n '3,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)  sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          PASSTHROUGH+=("$1"); shift ;;
     esac
 done
@@ -556,6 +574,12 @@ OUTPUT_CAP="${OUTPUT_CAP_OVERRIDE:-${OUTPUT_CAP}}"
 [ -n "${OUTPUT_CAP}" ] || OUTPUT_CAP="${DEFAULT_OUTPUT_CAP}"
 API="${API_OVERRIDE:-${API}}"
 [ -n "${API}" ] || API="${DEFAULT_API}"
+VISION="${VISION_OVERRIDE:-${VISION}}"
+[ -n "${VISION}" ] || VISION="false"
+case "${VISION}" in
+    true|false) ;;
+    *) log_error "vision must be true or false (got: ${VISION}) — set it via --vision / --no-vision, LETS_CODE_VISION, or VISION= in ${CONFIG_FILE} (if present)."; exit 1 ;;
+esac
 
 case "${CONTEXT}" in
     *[!0-9]*|0) log_error "context length must be a positive integer (tokens); got: ${CONTEXT} (from --context or config/env)."; exit 1 ;;
@@ -575,7 +599,7 @@ PROVIDER_BASE="${BASE_URL}"
 case "${API}" in
     openai-completions|openai-responses) PROVIDER_BASE="${BASE_URL}/v1" ;;
 esac
-pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}"
+pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}" "${VISION}"
 
 export LETS_CODE_TOKEN="${TOKEN}"
 export PI_SKIP_VERSION_CHECK=1
@@ -588,7 +612,7 @@ case "${BASE_URL}" in
         fi ;;
 esac
 
-log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  api: ${API}"
+log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  api: ${API}"
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
     exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
 else

@@ -25,6 +25,8 @@ adapters. **pi is the default and the only v1-implemented harness**;
 3. **Overflow impossible by construction** — instead of lets-claude's manual
    context partition, pi reserves the output budget natively:
    `contextWindow` = full discovered length,
+   `compaction.enabled` = true (written explicitly by lets-code, not left to
+   pi's implicit default) +
    `compaction.modelOverrides["lets-code/<model>"].reserveTokens` = output
    cap. pi auto-compacts when `contextTokens > contextWindow - reserveTokens`,
    so compaction always fires before `input + max_tokens` can exceed the

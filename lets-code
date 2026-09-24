@@ -178,7 +178,8 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 #                    (endpoint, api dialect, model, contextWindow, maxTokens,
 #                     input types: ["text","image"] when vision is enabled,
 #                     reasoning + chat-template thinking kwargs when thinking)
-#   settings.json -> compaction.modelOverrides["lets-code/<model>"]
+#   settings.json -> compaction.enabled = true +
+#                    compaction.modelOverrides["lets-code/<model>"]
 #                    .reserveTokens = output cap
 #                    + modelThinkingLevels["lets-code/<model>"] = startup
 #                    thinking level (when thinking is registered)
@@ -265,6 +266,7 @@ def to_settings(doc):
         overrides = {}
     overrides["lets-code/" + model] = {"reserveTokens": cap}
     compaction["modelOverrides"] = overrides
+    compaction["enabled"] = True  # auto-compaction explicit, not pi's implicit default
     doc["compaction"] = compaction
     if reasoning == "true":
         # pi's per-model startup thinking level (global default is "medium")

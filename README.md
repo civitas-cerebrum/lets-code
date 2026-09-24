@@ -52,13 +52,15 @@ confirm, then install.
 | `--output-cap <tok>` | Max output tokens (default 32768) |
 | `--api <dialect>` | `openai-completions` (default) \| `openai-responses` \| `anthropic-messages` \| `google-generative-ai` |
 | `--vision` \| `--no-vision` | The model accepts image input (off by default). `--vision` registers the model with `input: ["text","image"]` so pi actually sends images (e.g. screenshots) to it; `--no-vision` forces off even if `VISION=true` is set. |
+| `--thinking-level <lvl>` | Startup thinking level: `off`\|`minimal`\|`low`\|`medium`\|`high` (xhigh\|max). Default `medium`. Thinking support itself is **auto-detected at launch** with a minimal test request (pin `REASONING=true`/`false` in the config to override); setup offers a level suggested from your context window. |
 | `--insecure` | Skip TLS verification (self-signed certs) |
 | `--verbose` \| `--debug` | Show endpoint probing |
 | `-h` \| `--help` | Help |
 
 Env overrides: `LETS_CODE_ENDPOINTS` (space-separated), `LETS_CODE_TOKEN`,
 `LETS_CODE_CA`, `LETS_CODE_MODEL`, `LETS_CODE_CONTEXT`, `LETS_CODE_OUTPUT_CAP`,
-`LETS_CODE_API`, `LETS_CODE_VISION` (`true`/`false`).
+`LETS_CODE_API`, `LETS_CODE_VISION`, `LETS_CODE_THINKING`, `LETS_CODE_REASONING`
+(the last two `true`/`false` pins).
 
 ## What onboarding sets up
 
@@ -81,7 +83,11 @@ Setup then **registers `lets-code` as a command**:
    (`~/.zshrc`, `~/.bashrc`, or `~/.bash_profile` on macOS bash),
 4. verifies with `command -v lets-code`,
 5. and finishes with a live probe that shows the model your server is
-   currently serving — and registers that model with pi.
+   currently serving — probes whether it thinks (a minimal test request
+   with thinking forced on), offers a **thinking level** whose suggested
+   default follows your context window (largest built-in budget fitting
+   ⅛ of the window and ½ of the output cap), and registers the model —
+   thinking included — with pi.
 
 After setup (and a shell restart if the PATH line was just added), typing
 `lets-code` anywhere just works.
@@ -169,10 +175,23 @@ lets-code --api anthropic-messages   # Anthropic-compatible gateways
 
 ### Recipe 5 — thinking models
 
-If your model thinks by default (Qwen3 family etc.), pi can surface the
-thinking stream (see `/thinking` in the pi TUI). But keep the output cap
-generous — thinking can consume the whole budget and return empty visible
-content.
+If your model thinks (Qwen3 family etc.), lets-code **auto-detects it at
+launch** — one minimal `chat/completions` request with `enable_thinking:
+true`, and `reasoning_tokens > 0` in the usage report (or a reasoning
+stream / think markers) means the model is registered with
+`reasoning: true`. The startup level comes from `THINKING=` in the config
+(set during onboarding; suggested value follows your context window), and
+pi sends `chat_template_kwargs: {enable_thinking, thinking_budget}` per
+request, so thinking is bounded by pi's per-level budget and can never eat
+the whole response. `REASONING=false` disables the probe, `REASONING=true`
+force-registers a model the probe missed. Without a `--reasoning-parser`
+on the server, thinking text can leak into visible output — see Recipe 1.
+
+### Recipe 6 — thinking levels in-session
+
+`/thinking` in the pi TUI switches levels per session (Ctrl+S saves the
+startup level); `lets-code --thinking-level low` overrides the configured
+level for one launch. Levels `xhigh`/`max` map to pi's high budget.
 
 ## Troubleshooting
 
@@ -187,6 +206,7 @@ content.
 | Session dies mid-way on long tasks | Context overflow — confirm the launch line shows the right `context:` value; if your server hides `max_model_len`, pin it with `--context <tok>` (or `CONTEXT=` in the config file). |
 | pi says provider `lets-code` unknown | pi's files were hand-edited while lets-code was running; just re-run `lets-code` — it re-registers on every launch. |
 | Model can't see images / pi treats it as text-only | pi only sends images to models declared with image input. Set `VISION=true` in `~/.config/lets-code/config` (or launch with `--vision`) and re-run `lets-code` — the model is re-registered on every launch, and pi re-reads `models.json` when you open `/model`. |
+| Model doesn't think / no thinking blocks although it should | Thinking support is auto-detected at launch; check the `thinking support:` line. If the probe is inconclusive or the model needs a nudge, pin `REASONING=true` in `~/.config/lets-code/config` and re-run `lets-code`. Then set a non-`off` level (`THINKING=` or `--thinking-level`) and open `/thinking` to confirm. |
 
 ## Roadmap
 

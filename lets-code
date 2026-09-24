@@ -15,6 +15,8 @@
 #                                anthropic-messages | google-generative-ai
 #   lets-code --vision ...       model accepts images (default: off)
 #   lets-code --no-vision ...    force image input off (config has VISION=true)
+#   lets-code --thinking-level <l> startup thinking level, default: medium
+#                                (auto-detected when the resident model thinks)
 #   lets-code --harness <name>   pi (default; only v1 harness) |
 #                                deepseek | claude | codex (roadmap)
 #   lets-code --insecure ...     skip TLS verification (self-signed certs)
@@ -22,7 +24,8 @@
 #
 # What it does at launch:
 #   1. probes your configured endpoints in order, first reachable wins
-#   2. discovers the resident model AND its context window from /v1/models
+#   2. discovers the resident model, its context window, and whether it
+#      thinks (a minimal test request with thinking forced on)
 #   3. registers the endpoint with pi (~/.pi/agent/models.json) and reserves
 #      the output budget in pi's compaction settings (settings.json), so
 #      compaction fires before a response can overflow the server's window
@@ -35,7 +38,8 @@
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
 # Env overrides: LETS_CODE_ENDPOINTS (space-separated), LETS_CODE_TOKEN,
 #                LETS_CODE_CA, LETS_CODE_MODEL, LETS_CODE_CONTEXT,
-#                LETS_CODE_OUTPUT_CAP, LETS_CODE_API, LETS_CODE_VISION
+#                LETS_CODE_OUTPUT_CAP, LETS_CODE_API, LETS_CODE_VISION,
+#                LETS_CODE_THINKING, LETS_CODE_REASONING
 # Needs: bash >= 3.2 (stock macOS is fine), curl, python3, pi CLI
 # (auto-installed on request).
 
@@ -49,6 +53,7 @@ PROVIDER_ID="lets-code"          # fixed provider id we upsert into pi's files
 DEFAULT_CONTEXT=128000
 DEFAULT_OUTPUT_CAP=32768
 DEFAULT_API="openai-completions"
+DEFAULT_THINKING="medium"
 
 VERBOSE=false
 LOG_PREFIX="[lets-code]"
@@ -96,24 +101,92 @@ probe() {  # probe <base-url> -> prints /v1/models JSON on success; PROBE_ERR ex
     return "${rc}"
 }
 
+# Thinking probe: one minimal chat completion with thinking forced on.
+# A server that reports reasoning tokens (or streams reasoning content)
+# has a thinking model resident. Cost: one tiny request per launch.
+# Sets THINKING_DETECTED: true | false | unknown (inconclusive).
+probe_thinking() {  # probe_thinking <base-url-without-/v1> <model>
+    local base="$1" model="$2" payload tls out
+    payload="$(python3 -c '
+import json, sys
+print(json.dumps({
+    "model": sys.argv[1],
+    "max_tokens": 16,
+    "temperature": 0,
+    "chat_template_kwargs": {"enable_thinking": True},
+    "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
+}))' "${model}" 2>/dev/null)" || { THINKING_DETECTED="unknown"; return 0; }
+    tls="$(tls_args_for "${base}")"
+    local IFS='|'; # shellcheck disable=SC2086
+    if out="$(curl -sf --max-time 30 ${tls:+$tls} -H "Authorization: Bearer ${TOKEN:-dummy-key}" \
+        -H "Content-Type: application/json" -d "${payload}" \
+        "${base}/v1/chat/completions" 2>/dev/null)"; then
+        THINKING_DETECTED="$(printf '%s' "${out}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("unknown"); sys.exit()
+ch = (d.get("choices") or [{}])[0]
+m = ch.get("message") or {}
+usage = d.get("usage") or {}
+details = usage.get("completion_tokens_details") or {}
+rt = details.get("reasoning_tokens") or 0
+rc = m.get("reasoning_content") or m.get("reasoning") or ""
+content = m.get("content") or ""
+if isinstance(rt, (int, float)) and rt > 0:
+    print("true")
+elif isinstance(rc, str) and rc.strip():
+    print("true")
+elif "think" in content.lower():
+    print("true")
+else:
+    print("false")' 2>/dev/null)"
+    else
+        THINKING_DETECTED="unknown"
+    fi
+    case "${THINKING_DETECTED}" in
+        true|false) ;;
+        *) THINKING_DETECTED="unknown" ;;
+    esac
+}
+
+# Suggested thinking level from context window + output cap: the largest
+# built-in budget (minimal 1k / low 2k / medium 8k / high 16k) that fits in
+# 1/8 of the window AND half the output cap — thinking must neither crowd
+# the compaction headroom nor eat the whole response budget.
+suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
+    local ctx="$1" cap="$2" room
+    room=$(( ctx / 8 ))
+    if [ $(( cap / 2 )) -lt "${room}" ]; then room=$(( cap / 2 )); fi
+    if   [ "${room}" -ge 16384 ]; then echo "high"
+    elif [ "${room}" -ge 8192  ]; then echo "medium"
+    elif [ "${room}" -ge 2048  ]; then echo "low"
+    elif [ "${room}" -ge 1024  ]; then echo "minimal"
+    else echo "off"; fi
+}
+
 # ---------------------------------------------------------- pi config writes
 # pi keeps its state under ~/.pi/agent (override: $PI_CODING_AGENT_DIR).
 # lets-code owns exactly two slices, both keyed by the fixed provider id
 # 'lets-code', so it never clobbers the user's own providers or defaults:
 #   models.json   -> providers["lets-code"]
 #                    (endpoint, api dialect, model, contextWindow, maxTokens,
-#                     input types: ["text","image"] when vision is enabled)
+#                     input types: ["text","image"] when vision is enabled,
+#                     reasoning + chat-template thinking kwargs when thinking)
 #   settings.json -> compaction.modelOverrides["lets-code/<model>"]
 #                    .reserveTokens = output cap
+#                    + modelThinkingLevels["lets-code/<model>"] = startup
+#                    thinking level (when thinking is registered)
 # The token is never written to disk: apiKey points at $LETS_CODE_TOKEN (pi's
 # $ENV interpolation), exported at launch — the secret stays in
 # ~/.config/lets-code/config (mode 600). Writes are atomic (tmp + rename),
 # every other key in the files is preserved, and a corrupt file fails loudly.
-pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-cap> <vision>
-    PI_AGENT_DIR="${PI_AGENT_DIR}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY'
+pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-cap> <vision> <reasoning> <thinking>
+    PI_AGENT_DIR="${PI_AGENT_DIR}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" <<'PY'
 import json, os, sys, tempfile
 
-base, api, model, context, cap, vision = sys.argv[1:7]
+base, api, model, context, cap, vision, reasoning, thinking = sys.argv[1:9]
 agent_dir = os.environ["PI_AGENT_DIR"]
 ctx = int(context)
 cap = int(cap)
@@ -150,19 +223,32 @@ def to_models(doc):
     providers = doc.get("providers")
     if not isinstance(providers, dict):
         providers = {}
+    compat = {"supportsDeveloperRole": False, "supportsReasoningEffort": False}
+    model_doc = {
+        "id": model,
+        "contextWindow": ctx,
+        "maxTokens": cap,
+        # pi defaults a model's input to ["text"] unless declared otherwise,
+        # so image support must be declared explicitly for images to pass
+        "input": ["text", "image"] if vision == "true" else ["text"],
+    }
+    if reasoning == "true":
+        # pi only offers thinking levels for models that declare reasoning.
+        # The chat-template kwargs map pi's level onto the server's chat
+        # template variables (vLLM/SGLang pass chat_template_kwargs through;
+        # Qwen3 & friends take enable_thinking + thinking_budget).
+        model_doc["reasoning"] = True
+        compat["thinkingFormat"] = "chat-template"
+        compat["chatTemplateKwargs"] = {
+            "enable_thinking": {"$var": "thinking.enabled"},
+            "thinking_budget": {"$var": "thinking.budget", "omitWhenOff": True},
+        }
     providers["lets-code"] = {
         "baseUrl": base,
         "api": api,
         "apiKey": "$LETS_CODE_TOKEN",
-        "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
-        # pi defaults a model's input to ["text"] unless declared otherwise,
-        # so image support must be declared explicitly for images to pass
-        "models": [{
-            "id": model,
-            "contextWindow": ctx,
-            "maxTokens": cap,
-            "input": ["text", "image"] if vision == "true" else ["text"],
-        }],
+        "compat": compat,
+        "models": [model_doc],
     }
     doc["providers"] = providers
 
@@ -176,6 +262,22 @@ def to_settings(doc):
     overrides["lets-code/" + model] = {"reserveTokens": cap}
     compaction["modelOverrides"] = overrides
     doc["compaction"] = compaction
+    if reasoning == "true":
+        # pi's per-model startup thinking level (global default is "medium")
+        levels = doc.get("modelThinkingLevels")
+        if not isinstance(levels, dict):
+            levels = {}
+        levels["lets-code/" + model] = thinking
+        doc["modelThinkingLevels"] = levels
+    elif "lets-code/" + model in (doc.get("modelThinkingLevels") or {}):
+        # thinking unregistered — drop our stale level so it cannot surprise
+        # a later /model rebind; other providers' entries are untouched
+        levels = dict(doc["modelThinkingLevels"])
+        del levels["lets-code/" + model]
+        if levels:
+            doc["modelThinkingLevels"] = levels
+        else:
+            doc.pop("modelThinkingLevels", None)
 
 upsert(os.path.join(agent_dir, "models.json"), to_models)
 upsert(os.path.join(agent_dir, "settings.json"), to_settings)
@@ -296,24 +398,33 @@ run_setup() {
         fi ;;
     esac
 
-    # 6. save config
+    # 6. save config (re-emitted after the live probe with the thinking level)
+    setup_emit_config() {  # setup_emit_config <thinking-level>
+        {
+            echo "# lets-code configuration (shell syntax). Re-run 'lets-code setup' to regenerate."
+            echo "ENDPOINTS=\"${endpoints}\""
+            echo "TOKEN=\"${token}\""
+            echo "CA_PATH=\"${ca}\""
+            echo ""
+            echo "# Optional pins (empty = auto-discovered at launch):"
+            echo "MODEL=\"\""
+            echo "CONTEXT=\"\""
+            echo "OUTPUT_CAP=\"\""
+            echo "API=\"\""
+            echo ""
+            echo "# Set true if your model accepts images (default: false):"
+            echo "VISION=\"\""
+            echo ""
+            echo "# Thinking support pin (empty = auto-detected at launch): true|false"
+            echo "REASONING=\"\""
+            echo "# Thinking level for new sessions (default: medium; setup"
+            echo "# suggests one based on the detected context window):"
+            echo "THINKING=\"${1}\""
+        } > "${CONFIG_FILE}"
+        chmod 600 "${CONFIG_FILE}"
+    }
     mkdir -p "${CONFIG_DIR}"
-    {
-        echo "# lets-code configuration (shell syntax). Re-run 'lets-code setup' to regenerate."
-        echo "ENDPOINTS=\"${endpoints}\""
-        echo "TOKEN=\"${token}\""
-        echo "CA_PATH=\"${ca}\""
-        echo ""
-        echo "# Optional pins (empty = auto-discovered at launch):"
-        echo "MODEL=\"\""
-        echo "CONTEXT=\"\""
-        echo "OUTPUT_CAP=\"\""
-        echo "API=\"\""
-        echo ""
-        echo "# Set true if your model accepts images (default: false):"
-        echo "VISION=\"\""
-    } > "${CONFIG_FILE}"
-    chmod 600 "${CONFIG_FILE}"
+    setup_emit_config ""
     echo ""
     log "saved ${CONFIG_FILE}"
 
@@ -415,8 +526,37 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
         case "${reg_len}" in
             *[!0-9]*|"") reg_len="${DEFAULT_CONTEXT}" ;;
         esac
-        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}" "${LETS_CODE_VISION:-false}"
-        log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${DEFAULT_OUTPUT_CAP}, vision: ${LETS_CODE_VISION:-false})"
+        # probe thinking support (launch re-detects; this informs onboarding)
+        probe_thinking "${found}" "${reg_id}"
+        local suggested thinking_level reasoning_reg
+        reasoning_reg="false"
+        suggested="$(suggested_thinking_level "${reg_len}" "${DEFAULT_OUTPUT_CAP}")"
+        case "${THINKING_DETECTED}" in
+            true)
+                reasoning_reg="true"
+                echo ""
+                log "thinking: detected on ${reg_id} (probe: minimal request with thinking forced on)"
+                echo "Thinking level for new sessions: off|minimal|low|medium|high (xhigh|max)."
+                echo "Suggested for ${reg_len} context / ${DEFAULT_OUTPUT_CAP} output cap: ${suggested}"
+                printf "Thinking level [%s]: " "${suggested}"
+                read -r thinking_level
+                thinking_level="${thinking_level:-${suggested}}"
+                case "${thinking_level}" in
+                    off|minimal|low|medium|high|xhigh|max) ;;
+                    *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max (got: ${thinking_level})"; exit 1 ;;
+                esac ;;
+            *)
+                thinking_level="${suggested}"
+                case "${THINKING_DETECTED}" in
+                    false) log "thinking: not detected on ${reg_id} — registering without thinking" ;;
+                    *)     log "thinking: probe inconclusive for ${reg_id} — registering without thinking (pin REASONING=true in ${CONFIG_FILE} if it supports it)" ;;
+                esac
+                log "startup thinking level saved as ${thinking_level} in case the resident model changes" ;;
+        esac
+        setup_emit_config "${thinking_level}"
+        log "updated ${CONFIG_FILE} (thinking level: ${thinking_level})"
+        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}" "${LETS_CODE_VISION:-false}" "${reasoning_reg}" "${thinking_level}"
+        log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${DEFAULT_OUTPUT_CAP}, vision: ${LETS_CODE_VISION:-false}, thinking: ${reasoning_reg}, level: ${thinking_level})"
     fi
 
     echo ""
@@ -455,6 +595,8 @@ CONTEXT=""
 OUTPUT_CAP=""
 API=""
 VISION=""
+REASONING=""
+THINKING=""
 # shellcheck disable=SC1090
 [ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
 ENDPOINTS="${LETS_CODE_ENDPOINTS:-${ENDPOINTS}}"
@@ -465,6 +607,8 @@ CONTEXT="${LETS_CODE_CONTEXT:-${CONTEXT}}"
 OUTPUT_CAP="${LETS_CODE_OUTPUT_CAP:-${OUTPUT_CAP}}"
 API="${LETS_CODE_API:-${API}}"
 VISION="${LETS_CODE_VISION:-${VISION}}"
+REASONING="${LETS_CODE_REASONING:-${REASONING}}"
+THINKING="${LETS_CODE_THINKING:-${THINKING}}"
 
 HARNESS="pi"
 URL_OVERRIDE=""
@@ -473,6 +617,7 @@ CONTEXT_OVERRIDE=""
 OUTPUT_CAP_OVERRIDE=""
 API_OVERRIDE=""
 VISION_OVERRIDE=""
+THINKING_OVERRIDE=""
 INSECURE=false
 PASSTHROUGH=()
 while [ $# -gt 0 ]; do
@@ -493,9 +638,11 @@ while [ $# -gt 0 ]; do
                     API_OVERRIDE="$2"; shift 2 ;;
         --vision)   VISION_OVERRIDE=true; shift ;;
         --no-vision) VISION_OVERRIDE=false; shift ;;
+        --thinking-level) [ -n "${2:-}" ] || { log_error "--thinking-level requires an argument."; exit 1; }
+                          THINKING_OVERRIDE="$2"; shift 2 ;;
         --insecure) INSECURE=true; shift ;;
         --verbose|--debug) VERBOSE=true; shift ;;
-        -h|--help)  sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)  sed -n '3,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          PASSTHROUGH+=("$1"); shift ;;
     esac
 done
@@ -580,6 +727,16 @@ case "${VISION}" in
     true|false) ;;
     *) log_error "vision must be true or false (got: ${VISION}) — set it via --vision / --no-vision, LETS_CODE_VISION, or VISION= in ${CONFIG_FILE} (if present)."; exit 1 ;;
 esac
+case "${REASONING}" in
+    ""|true|false) ;;
+    *) log_error "REASONING must be empty (auto-detect), true, or false (got: ${REASONING}) — pin it in ${CONFIG_FILE} (if present) or via LETS_CODE_REASONING."; exit 1 ;;
+esac
+THINKING="${THINKING_OVERRIDE:-${THINKING}}"
+[ -n "${THINKING}" ] || THINKING="${DEFAULT_THINKING}"
+case "${THINKING}" in
+    off|minimal|low|medium|high|xhigh|max) ;;
+    *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max (got: ${THINKING}) — set it via --thinking-level, LETS_CODE_THINKING, or THINKING= in ${CONFIG_FILE} (if present)."; exit 1 ;;
+esac
 
 case "${CONTEXT}" in
     *[!0-9]*|0) log_error "context length must be a positive integer (tokens); got: ${CONTEXT} (from --context or config/env)."; exit 1 ;;
@@ -599,7 +756,31 @@ PROVIDER_BASE="${BASE_URL}"
 case "${API}" in
     openai-completions|openai-responses) PROVIDER_BASE="${BASE_URL}/v1" ;;
 esac
-pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}" "${VISION}"
+# thinking support: the REASONING pin (config/env) wins; otherwise one
+# minimal test request auto-detects a resident thinking model
+# (OpenAI-dialect endpoints only).
+REASONING_SUPPORTED="false"
+if [ -n "${REASONING}" ]; then
+    REASONING_SUPPORTED="${REASONING}"
+else
+    case "${API}" in
+        openai-completions|openai-responses)
+            log_verbose "probing thinking support for ${MODEL} ..."
+            probe_thinking "${BASE_URL}" "${MODEL}"
+            case "${THINKING_DETECTED}" in
+                true)  REASONING_SUPPORTED="true" ;;
+                false) ;;
+                *)     log "thinking probe inconclusive — registering without thinking; pin REASONING=true in ${CONFIG_FILE} (if present) if ${MODEL} supports it." ;;
+            esac ;;
+        *)
+            log "thinking auto-detection needs an OpenAI-dialect endpoint — registering without thinking (pin REASONING=true if ${MODEL} supports it)." ;;
+    esac
+fi
+log "thinking support: ${REASONING_SUPPORTED} (startup level: ${THINKING})"
+if [ "${REASONING_SUPPORTED}" = false ] && [ "${THINKING}" != off ]; then
+    log "note: thinking level ${THINKING} not applied — model not registered as a thinking model."
+fi
+pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}" "${VISION}" "${REASONING_SUPPORTED}" "${THINKING}"
 
 export LETS_CODE_TOKEN="${TOKEN}"
 export PI_SKIP_VERSION_CHECK=1
@@ -612,7 +793,7 @@ case "${BASE_URL}" in
         fi ;;
 esac
 
-log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  api: ${API}"
+log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING}  api: ${API}"
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
     exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
 else

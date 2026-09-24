@@ -29,7 +29,11 @@ adapters. **pi is the default and the only v1-implemented harness**;
    cap. pi auto-compacts when `contextTokens > contextWindow - reserveTokens`,
    so compaction always fires before `input + max_tokens` can exceed the
    server window (vLLM 400s on exactly that, e.g. 2026-08-17 incident:
-   129,793 input + 32,000 requested).
+   129,793 input + 32,000 requested). Thinking cannot break this invariant:
+   pi's thinking budgets expand `max_tokens` only up to the model's
+   `maxTokens` (= our output cap), the sent `thinking_budget` is clamped to
+   `max_tokens − 1024`, and pi additionally keeps a 4096-token context safety
+   margin beyond the server's own arithmetic.
 4. **Deterministic launch, no default hijacking** — `exec pi --provider
    lets-code --model <id>`; the launcher does not write pi's global
    `defaultProvider`/`defaultModel`.
@@ -51,6 +55,8 @@ adapters. **pi is the default and the only v1-implemented harness**;
 | output cap | `--output-cap` > config/env `OUTPUT_CAP` > 32768 | `models[0].maxTokens` + `reserveTokens` |
 | api dialect | `--api` > config/env `API` > `openai-completions` | `providers["lets-code"].api` |
 | vision | `--vision` / `--no-vision` > config/env `VISION` > false | `models[0].input` — `["text","image"]` when true, `["text"]` when false (pi defaults an undeclared model to text-only, so image input must be declared explicitly) |
+| thinking support | config/env `REASONING` pin (true/false) > launch-time probe (minimal `chat/completions` with `enable_thinking: true`; `reasoning_tokens` in usage / reasoning stream / think-markers) > false | `models[0].reasoning: true` + `compat.thinkingFormat: "chat-template"` with `$var` kwargs (`enable_thinking`, `thinking_budget` omitWhenOff) when true; omitted otherwise |
+| thinking level | `--thinking-level` > config/env `THINKING` > `medium`; suggested at setup = largest pi built-in budget (1k/2k/8k/16k) fitting ⅛ of context AND ½ of output cap | `settings.json → modelThinkingLevels["lets-code/<model>"]` (written only when thinking is registered; stale key removed when unregistered) |
 | token | `--…` n/a; config/env `TOKEN` > `dummy-key` | exported as `LETS_CODE_TOKEN` (never written) |
 | CA | `--insecure` / config/env `CA` + file exists | `NODE_EXTRA_CA_CERTS` (https only) |
 
@@ -62,7 +68,9 @@ hang on pi's update check.
 ## Module map (single file, append-only build)
 
 1. header + globals + logging (the header block doubles as `--help`)
-2. probing (`tls_args_for`, `probe` — curl rc → human diagnostics)
+2. probing (`tls_args_for`, `probe` — curl rc → human diagnostics,
+   `probe_thinking` — reasoning-token detection, `suggested_thinking_level` —
+   context/cap → startup level heuristic)
 3. pi config writer (`pi_write_configs`: python3 JSON upsert, atomic)
 4. harness gate + pi presence/auto-install (`harness_gate`, `ensure_pi`)
 5. onboarding (`run_setup`, `offer_fresh_shell`)
@@ -91,5 +99,4 @@ replaced by `if` statements where `set -e` could bite.
 
 ## Out of scope for v1
 
-dsh/claude/codex adapters, thinking-level flags, pi extensions, multi-model
-sessions.
+dsh/claude/codex adapters, pi extensions, multi-model sessions.

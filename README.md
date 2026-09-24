@@ -103,7 +103,8 @@ your other providers and settings are preserved):
 
 - `~/.pi/agent/models.json` → `providers["lets-code"]` with the discovered
   `contextWindow` and the model's `maxTokens` (the output cap, default 32768),
-- `~/.pi/agent/settings.json` →
+- `~/.pi/agent/settings.json` → `compaction.enabled: true` (auto-compaction
+  explicit, not left to pi's implicit default) and
   `compaction.modelOverrides["lets-code/<model>"].reserveTokens` = output cap.
 
 pi auto-compacts once the conversation exceeds `contextWindow - reserveTokens`,

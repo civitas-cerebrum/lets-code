@@ -85,9 +85,9 @@ Setup then **registers `lets-code` as a command**:
 5. and finishes with a live probe that shows the model your server is
    currently serving — probes whether it thinks (a minimal test request
    with thinking forced on), offers a **thinking level** whose suggested
-   default follows your context window (largest built-in budget fitting
-   ⅛ of the window and ½ of the output cap), and registers the model —
-   thinking included — with pi.
+   default follows your context window (largest published pi budget —
+   1k/2k/8k/16k — that fits ¼ of the window and ½ of the output cap), and
+   registers the model — thinking included — with pi.
 
 After setup (and a shell restart if the PATH line was just added), typing
 `lets-code` anywhere just works.

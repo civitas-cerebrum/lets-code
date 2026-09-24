@@ -151,13 +151,17 @@ else:
     esac
 }
 
-# Suggested thinking level from context window + output cap: the largest
-# built-in budget (minimal 1k / low 2k / medium 8k / high 16k) that fits in
-# 1/8 of the window AND half the output cap — thinking must neither crowd
-# the compaction headroom nor eat the whole response budget.
+# Suggested thinking level from context window + output cap. Level costs
+# are pi's published budgets (minimal ~1k / low ~2k / medium ~8k /
+# high ~16k). A level is suggested only when 4x its cost fits the window
+# (pi's own model catalog follows this: 64k deployments top out at high,
+# 131k just misses xhigh's 32k, 256k gets xhigh) and half the output cap
+# (thinking must not eat the response budget). xhigh/max are never
+# suggested: on the chat-template path pi clamps their budget to high's
+# 16k, so they behave identically to high.
 suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
     local ctx="$1" cap="$2" room
-    room=$(( ctx / 8 ))
+    room=$(( ctx / 4 ))
     if [ $(( cap / 2 )) -lt "${room}" ]; then room=$(( cap / 2 )); fi
     if   [ "${room}" -ge 16384 ]; then echo "high"
     elif [ "${room}" -ge 8192  ]; then echo "medium"

@@ -183,9 +183,14 @@ stream / think markers) means the model is registered with
 `reasoning: true`. The startup level comes from `THINKING=` in the config
 (set during onboarding; suggested value follows your context window), and
 pi sends `chat_template_kwargs: {enable_thinking, thinking_budget}` per
-request, so thinking is bounded by pi's per-level budget and can never eat
-the whole response. `REASONING=false` disables the probe, `REASONING=true`
-force-registers a model the probe missed. Without a `--reasoning-parser`
+request — but that template budget is a **soft** hint a model can overthink
+past. To make the bound hard, lets-code also registers
+`samplingParams.thinking_token_budget` (half the output cap) on the model;
+vLLM with a reasoning parser enforces it engine-side, force-terminating the
+thinking section at the budget so the response always continues. Servers
+that don't know the field ignore it (extra fields are allowed), and with
+thinking off it is inert. `REASONING=false` disables the probe,
+`REASONING=true` force-registers a model the probe missed. Without a `--reasoning-parser`
 on the server, thinking text can leak into visible output — see Recipe 1.
 
 ### Recipe 6 — thinking levels in-session

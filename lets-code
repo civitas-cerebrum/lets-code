@@ -177,7 +177,8 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 #   models.json   -> providers["lets-code"]
 #                    (endpoint, api dialect, model, contextWindow, maxTokens,
 #                     input types: ["text","image"] when vision is enabled,
-#                     reasoning + chat-template thinking kwargs when thinking)
+#                     reasoning + chat-template thinking kwargs when thinking,
+#                     + hard thinking_token_budget ceiling when thinking)
 #   settings.json -> compaction.enabled = true +
 #                    compaction.modelOverrides["lets-code/<model>"]
 #                    .reserveTokens = output cap
@@ -247,6 +248,20 @@ def to_models(doc):
         compat["chatTemplateKwargs"] = {
             "enable_thinking": {"$var": "thinking.enabled"},
             "thinking_budget": {"$var": "thinking.budget", "omitWhenOff": True},
+        }
+        # Hard ceiling on thinking tokens. The template budget above is a
+        # SOFT hint the model can overthink past (observed: a 16K hint
+        # spiralled to the server's 32K output cap, starving the answer).
+        # thinking_token_budget is enforced engine-side by vLLM (with a
+        # reasoning parser): the thinking section is force-terminated at the
+        # budget and the response continues. Servers that don't know the
+        # field ignore it (OpenAI-compatible servers allow extra fields),
+        # and with thinking off the budget is inert (no thinking section).
+        # Half the output cap, so a runaway thinker can never starve the
+        # answer; with the default 32K cap this equals pi's default high
+        # thinking budget, so well-behaved models see no change.
+        model_doc["samplingParams"] = {
+            "thinking_token_budget": max(1024, cap // 2),
         }
     providers["lets-code"] = {
         "baseUrl": base,

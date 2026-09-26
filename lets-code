@@ -1089,13 +1089,12 @@ esac
 
 mem_guard_plan
 case "${MG_MODE}" in
-    off) MG_DESC="off (${MG_NOTE})" ;;
+    off) MG_DESC="memory guard is off (${MG_NOTE})" ;;
     *)   pi_write_memguard_extension
-         if [ -d /run/memguard ]; then MG_DESC="on (machine-wide memguard active; deferring to it)"
-         else MG_DESC="on (stops this session's largest process below 5% free RAM${MG_NOTE:+; ${MG_NOTE}})"; fi ;;
+         MG_DESC="memory guard is on" ;;
 esac
 
-log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING}  api: ${API}  memory guard: ${MG_DESC}"
+log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING}  api: ${API}  ${MG_DESC}"
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
     mem_guard_exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
 else

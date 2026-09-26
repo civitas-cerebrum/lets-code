@@ -20,6 +20,7 @@
 #   lets-code --harness <name>   pi (default; only v1 harness) |
 #                                deepseek | claude | codex (roadmap)
 #   lets-code --insecure ...     skip TLS verification (self-signed certs)
+#   lets-code --no-mem-guard     launch without the memory guard
 #   lets-code --verbose ...      show endpoint probing
 #
 # What it does at launch:
@@ -31,6 +32,9 @@
 #      compaction fires before a response can overflow the server's window
 #   4. exports LETS_CODE_TOKEN (pi resolves it via $ENV interpolation) and
 #      execs:  pi --provider lets-code --model <id>
+#   5. memory guard (Linux): when the machine runs low on RAM, stops the
+#      largest process this session started (never anything else) instead
+#      of letting it freeze the machine; pi is warned first and told why
 #
 # Harness: pi is the default (and only v1) harness; --harness deepseek|claude|codex
 # are roadmap items, not yet available.
@@ -39,7 +43,8 @@
 # Env overrides: LETS_CODE_ENDPOINTS (space-separated), LETS_CODE_TOKEN,
 #                LETS_CODE_CA, LETS_CODE_MODEL, LETS_CODE_CONTEXT,
 #                LETS_CODE_OUTPUT_CAP, LETS_CODE_API, LETS_CODE_VISION,
-#                LETS_CODE_THINKING, LETS_CODE_REASONING
+#                LETS_CODE_THINKING, LETS_CODE_REASONING,
+#                LETS_CODE_MEM_GUARD (true|false)
 # Needs: bash >= 3.2 (stock macOS is fine), curl, python3, pi CLI
 # (auto-installed on request).
 
@@ -305,6 +310,267 @@ upsert(os.path.join(agent_dir, "settings.json"), to_settings)
 PY
 }
 
+# ------------------------------------------------------------- memory guard
+# A runaway command the agent runs (an unbounded search in a test, a leaking
+# build) can eat the whole machine. When that machine also hosts the model
+# server, the result is minutes of swap thrash and then a global OOM kill that
+# can hit the server or the desktop (2026-09-25: a pi-run unittest reached
+# 26 GB twice on the box serving the model).
+#
+# The guard watches the machine's REMAINING RAM (MemAvailable) and acts only on
+# processes this lets-code session started -- never on anything else:
+#   < 20 % free   pi is warned after each tool call
+#   < 10 % free   pi's new non-cleanup bash commands are blocked
+#   <  5 % free   (3 s) the largest session process is stopped gracefully:
+#                 other big session processes paused, SIGINT -> SIGTERM -> SIGKILL
+#   < 2.5 % free  the largest session process is SIGKILLed immediately
+# No memory caps: nothing is limited until the machine as a whole runs low.
+# It lives in a pi extension (lets-code-memguard.ts) that runs inside pi, so
+# "this session" = descendants of that pi, plus anything in the session's
+# systemd user scope (orphans re-parented to PID 1 keep their scope). The scope
+# (lets-code-<pid>.scope, no root needed) also sets OOMPolicy=continue: if the
+# kernel OOM-kills one process, systemd's default would stop the whole session.
+# A machine-wide memguard daemon (github.com/civitas-cerebrum/memguard,
+# /run/memguard present) already covers lets-code sessions: the extension then
+# stays out of the way. Linux only; elsewhere the guard is off.
+mem_limited_ancestor() {  # prints the nearest ancestor cgroup with a finite memory.max, if any
+    local rel d
+    rel="$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)" || return 0
+    d="/sys/fs/cgroup${rel}"
+    while [ "${d}" != "/sys/fs/cgroup" ] && [ -n "${d}" ]; do
+        if [ -r "${d}/memory.max" ] && [ "$(cat "${d}/memory.max")" != "max" ]; then
+            echo "${d#/sys/fs/cgroup}"; return 0
+        fi
+        d="${d%/*}"
+    done
+}
+
+mem_guard_plan() {  # sets MG_MODE (scope|process|off) and MG_NOTE
+    MG_MODE=off; MG_NOTE=""
+    case "${MEM_GUARD}" in false|no|0|off) MG_NOTE="disabled"; return 0 ;; esac
+    if [ "$(uname -s)" != Linux ]; then MG_NOTE="not available on $(uname -s)"; return 0; fi
+    MG_MODE=process   # the extension alone: this pi's descendants
+    local limited
+    limited="$(mem_limited_ancestor)"
+    if [ -n "${limited}" ]; then
+        # a user scope would move pi OUT of a cgroup that has its own memory limits
+        MG_NOTE="inside memory-limited cgroup ${limited}; no session scope"; return 0
+    fi
+    if ! command -v systemd-run >/dev/null 2>&1; then
+        MG_NOTE="systemd-run not found; no session scope"; return 0
+    fi
+    # one cheap probe: user manager reachable and OOMPolicy accepted on scopes (systemd >= 253)
+    if ! systemd-run --user --scope --quiet --collect -p OOMPolicy=continue true >/dev/null 2>&1; then
+        MG_NOTE="systemd user scopes unavailable; no session scope"; return 0
+    fi
+    MG_MODE=scope
+}
+
+mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
+    if [ "${MG_MODE}" != off ]; then export LETS_CODE_SESSION=1; fi
+    if [ "${MG_MODE}" = scope ]; then
+        exec systemd-run --user --scope --quiet --collect --unit="lets-code-$$" \
+            -p OOMPolicy=continue -- "$@"
+    fi
+    exec "$@"
+}
+
+# The pi extension that IS the guard. Inert unless LETS_CODE_SESSION=1 (set by
+# lets-code at launch) and silent while the machine has RAM to spare.
+# Rewritten when its content changes.
+pi_write_memguard_extension() {
+    local dir="${PI_AGENT_DIR}/extensions" f tmp
+    f="${dir}/lets-code-memguard.ts"
+    mkdir -p "${dir}"
+    tmp="$(mktemp "${dir}/.lets-code-memguard.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (memory guard); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code (LETS_CODE_SESSION=1). Watches the
+// machine's free RAM and acts only on processes this session started.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+
+const ACTIVE = process.env.LETS_CODE_SESSION === "1";
+// A machine-wide memguard daemon already covers lets-code sessions: defer to it.
+const DEFER = existsSync("/run/memguard") && process.env.LETS_CODE_MEM_IGNORE_SYSTEM_GUARD !== "1";
+const GRACE_MS = 10_000, NEED = 3, PAUSE_MIN = 512 * 2 ** 20;
+const CLEANUP_OK = /^\s*(sudo\s+)?(kill|pkill|killall|ps|pgrep|top|htop|free|vmstat|cat\s+\/proc|cat\s+\/sys\/fs\/cgroup|systemctl\s+(--user\s+)?(status|show)|docker\s+(ps|stop|rm|kill)|tmux\s+kill|echo|true|sleep\s+\d)\b/;
+
+const read = (p: string): string | null => { try { return readFileSync(p, "utf8"); } catch { return null; } };
+const gib = (b: number) => `${(b / 2 ** 30).toFixed(1)} GiB`;
+
+function meminfo(): { total: number; avail: number } {
+	const t = read("/proc/meminfo") ?? "";
+	const kb = (k: string) => Number(new RegExp(`^${k}:\\s+(\\d+)`, "m").exec(t)?.[1] ?? 0) * 1024;
+	return { total: kb("MemTotal"), avail: kb("MemAvailable") || kb("MemFree") };
+}
+
+// Levels: % of MemTotal or sizes like 3G; env overrides are for tests.
+function level(spec: string, total: number): number {
+	const m = /^\s*(\d+(?:\.\d+)?)\s*([%KMGT]?)/i.exec(spec);
+	if (!m) return 0;
+	const n = Number(m[1]), u = m[2].toUpperCase();
+	return u === "%" ? (total * n) / 100 : n * 1024 ** "BKMGT".indexOf(u || "B");
+}
+function levels(total: number) {
+	const e = process.env;
+	return {
+		warn: level(e.LETS_CODE_MEM_WARN ?? "20%", total),
+		critical: level(e.LETS_CODE_MEM_CRITICAL ?? "10%", total),
+		stop: level(e.LETS_CODE_MEM_STOP ?? "5%", total),
+		emergency: level(e.LETS_CODE_MEM_EMERGENCY ?? "2.5%", total),
+	};
+}
+type Level = "ok" | "warn" | "critical" | "stop" | "emergency";
+function levelOf(avail: number, th: ReturnType<typeof levels>): Level {
+	return avail < th.emergency ? "emergency" : avail < th.stop ? "stop" : avail < th.critical ? "critical" : avail < th.warn ? "warn" : "ok";
+}
+
+type Proc = { pid: number; ppid: number; bytes: number; start: number; cmd: string; argv: string[]; cgroup: string };
+function procTable(): Map<number, Proc> {
+	const out = new Map<number, Proc>();
+	for (const d of readdirSync("/proc")) {
+		if (!/^\d+$/.test(d)) continue;
+		const stat = read(`/proc/${d}/stat`), st = read(`/proc/${d}/status`), cl = read(`/proc/${d}/cmdline`);
+		if (!stat || !st || !cl) continue;
+		const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+		const kb = (k: string) => Number(new RegExp(`${k}:\\s+(\\d+)`).exec(st)?.[1] ?? 0);
+		const argv = cl.split("\0").filter(Boolean);
+		if (!argv.length) continue;
+		out.set(Number(d), {
+			pid: Number(d), ppid: Number(rest[1]), start: Number(rest[19]),
+			bytes: (kb("VmRSS") + kb("VmSwap")) * 1024, argv, cmd: argv.join(" ").slice(0, 60),
+			cgroup: (read(`/proc/${d}/cgroup`) ?? "").trim().split("::").pop() ?? "",
+		});
+	}
+	return out;
+}
+
+// The agents themselves (pi, its node entry, claude, tmux) are never stopped.
+function isAgent(argv: string[]): boolean {
+	const base = (argv[0] ?? "").split("/").pop() ?? "";
+	if (/^(pi|claude|tmux)$/.test(base)) return true;
+	return /^(node|nodejs)$/.test(base) && /pi-coding-agent\//.test(argv[1] ?? "");
+}
+
+const SCOPE = /\/(lets-code-\d+\.scope)(\/|$)/.exec(read("/proc/self/cgroup") ?? "")?.[1] ?? null;
+
+// Processes this session started: descendants of this pi, or in this session's scope.
+function sessionProcs(t: Map<number, Proc>): Proc[] {
+	const memo = new Map<number, boolean>();
+	const under = (pid: number, depth = 0): boolean => {
+		if (memo.has(pid)) return memo.get(pid)!;
+		const p = t.get(pid);
+		const r = !!p && depth < 200 && p.ppid !== 0 && (p.ppid === process.pid || under(p.ppid, depth + 1));
+		memo.set(pid, r);
+		return r;
+	};
+	return [...t.values()].filter((p) => p.pid !== process.pid && !isAgent(p.argv) &&
+		(under(p.pid) || (SCOPE !== null && p.cgroup.includes(`/${SCOPE}`))));
+}
+
+const alive = (pid: number) => { const s = read(`/proc/${pid}/stat`); return !!s && !/^[ZX]$/.test(s.slice(s.lastIndexOf(")") + 2, s.lastIndexOf(")") + 3)); };
+const ignoresInt = (pid: number) => { const m = /SigIgn:\s+([0-9a-f]+)/.exec(read(`/proc/${pid}/status`) ?? ""); return !!m && (BigInt(`0x${m[1]}`) & 2n) !== 0n; };
+const signal = (pid: number, sig: NodeJS.Signals) => { try { process.kill(pid, sig); return true; } catch { return false; } };
+
+export default function (pi: ExtensionAPI) {
+	if (!ACTIVE || DEFER) return;
+
+	type Stop = { pid: number; cmd: string; bytes: number; avail: number; signals: string[]; step: number; sentAt: number; paused: number[]; done: boolean };
+	let stop: Stop | null = null;
+	const unreported: Stop[] = [];
+	let below = 0, timer: NodeJS.Timeout | undefined;
+	const LADDER: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGKILL"];
+
+	const send = (s: Stop) => {
+		let sig = LADDER[s.step];
+		if (sig === "SIGINT" && ignoresInt(s.pid)) sig = LADDER[++s.step];
+		signal(s.pid, sig);
+		s.signals.push(sig);
+		s.sentAt = Date.now();
+	};
+	const release = (s: Stop) => {
+		for (const p of s.paused) signal(p, "SIGCONT");
+		s.paused = [];
+		s.done = true;
+		stop = null;
+		below = 0;
+	};
+
+	const tick = () => {
+		const m = meminfo(), lv = levelOf(m.avail, levels(m.total));
+		if (stop) {
+			if (!alive(stop.pid)) return release(stop);
+			if (lv === "emergency" && stop.step < 2) { stop.step = 2; send(stop); }
+			else if (Date.now() - stop.sentAt >= GRACE_MS) {
+				if (stop.step < 2) { stop.step++; send(stop); } else release(stop);  // unkillable: never leave others paused
+			}
+			return;
+		}
+		below = lv === "stop" || lv === "emergency" ? below + 1 : 0;
+		if (lv !== "emergency" && below < NEED) return;
+		const mine = sessionProcs(procTable());
+		const target = mine.sort((a, b) => b.bytes - a.bytes || b.start - a.start)[0];
+		if (!target) { below = 0; return; }
+		const s: Stop = { pid: target.pid, cmd: target.cmd, bytes: target.bytes, avail: m.avail, signals: [],
+			step: lv === "emergency" ? 2 : 0, sentAt: 0, paused: [], done: false };
+		if (lv !== "emergency") {
+			for (const p of mine) if (p.pid !== s.pid && p.bytes >= PAUSE_MIN && signal(p.pid, "SIGSTOP")) s.paused.push(p.pid);
+		}
+		send(s);
+		stop = s;
+		unreported.push(s);
+	};
+
+	pi.on("session_start", async () => {
+		timer = setInterval(() => { try { tick(); } catch { /* never break pi */ } }, 1000);
+		timer.unref?.();
+	});
+	pi.on("session_shutdown", async () => {
+		if (timer) clearInterval(timer);
+		if (stop) release(stop);  // never leave processes paused
+	});
+
+	function status() {
+		if (stop && !alive(stop.pid)) release(stop);  // don't report "stopping" once the target is gone
+		const m = meminfo(), th = levels(m.total), lv = levelOf(m.avail, th);
+		return { m, th, level: (stop ? "critical" : lv === "stop" || lv === "emergency" ? "critical" : lv) as "ok" | "warn" | "critical" };
+	}
+	function message(st: ReturnType<typeof status>): string {
+		const top = sessionProcs(procTable()).filter((p) => p.bytes >= PAUSE_MIN).sort((a, b) => b.bytes - a.bytes).slice(0, 3);
+		const lines = [`[lets-code] MEMORY ${st.level.toUpperCase()}: the machine has ${gib(st.m.avail)} of RAM left (of ${gib(st.m.total)}). Below ${gib(st.th.stop)} lets-code stops the largest process this session started.`];
+		if (top.length) lines.push("Largest processes this session started: " + top.map((p) => `pid ${p.pid} ${gib(p.bytes)} \`${p.cmd}\``).join("; "));
+		lines.push(st.level === "critical"
+			? "New commands are blocked except cleanup (kill/pkill/ps/free/...). Kill processes you started and no longer need, then retry with smaller inputs, bounded depth/caches, or streaming."
+			: "Before starting anything memory-heavy: stop background jobs you no longer need, and keep inputs, recursion depth and caches bounded.");
+		return lines.join("\n");
+	}
+
+	pi.on("tool_call", async (event) => {
+		if (event.toolName !== "bash") return undefined;
+		const st = status();
+		if (st.level !== "critical") return undefined;
+		const cmd = String((event.input as { command?: string }).command ?? "");
+		return CLEANUP_OK.test(cmd) ? undefined : { block: true, reason: message(st) };
+	});
+
+	pi.on("tool_result", async (event) => {
+		const notes: string[] = [];
+		while (unreported.length) {
+			const s = unreported.shift()!;
+			notes.push(`[lets-code] Stopped pid ${s.pid} (\`${s.cmd}\`, ${gib(s.bytes)}) with ${s.signals.join(" -> ")} because the machine was down to ${gib(s.avail)} of free RAM. If a command above ended abruptly (KeyboardInterrupt, Terminated, Killed, exit 130/137/143, or output cut short behind a pipe such as | tail), that is why: it used too much memory; it is not a bug where it stopped. Reduce input size or recursion depth, bound caches, or stream data.`);
+		}
+		const st = status();
+		if (st.level !== "ok") notes.push(message(st));
+		if (!notes.length) return undefined;
+		return { content: [...event.content, { type: "text", text: `\n${notes.join("\n")}` }] };
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+}
+
 # ------------------------------------------------------------ harness gating
 # v1 implements exactly one harness (pi). The others are roadmap items and
 # must fail loudly rather than silently fall back or misconfigure.
@@ -441,6 +707,10 @@ run_setup() {
             echo "# Thinking level for new sessions (default: medium; setup"
             echo "# suggests one based on the detected context window):"
             echo "THINKING=\"${1}\""
+            echo ""
+            echo "# Memory guard (Linux): when the machine runs low on RAM, stop the"
+            echo "# largest process this session started. MEM_GUARD=false disables it."
+            echo "MEM_GUARD=\"true\""
         } > "${CONFIG_FILE}"
         chmod 600 "${CONFIG_FILE}"
     }
@@ -618,6 +888,7 @@ API=""
 VISION=""
 REASONING=""
 THINKING=""
+MEM_GUARD="true"
 # shellcheck disable=SC1090
 [ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
 ENDPOINTS="${LETS_CODE_ENDPOINTS:-${ENDPOINTS}}"
@@ -630,6 +901,7 @@ API="${LETS_CODE_API:-${API}}"
 VISION="${LETS_CODE_VISION:-${VISION}}"
 REASONING="${LETS_CODE_REASONING:-${REASONING}}"
 THINKING="${LETS_CODE_THINKING:-${THINKING}}"
+MEM_GUARD="${LETS_CODE_MEM_GUARD:-${MEM_GUARD}}"
 
 HARNESS="pi"
 URL_OVERRIDE=""
@@ -662,8 +934,9 @@ while [ $# -gt 0 ]; do
         --thinking-level) [ -n "${2:-}" ] || { log_error "--thinking-level requires an argument."; exit 1; }
                           THINKING_OVERRIDE="$2"; shift 2 ;;
         --insecure) INSECURE=true; shift ;;
+        --no-mem-guard) MEM_GUARD=false; shift ;;
         --verbose|--debug) VERBOSE=true; shift ;;
-        -h|--help)  sed -n '3,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)  sed -n "3,$(grep -n '^# (auto-installed on request)\.$' "$0" | cut -d: -f1)p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          PASSTHROUGH+=("$1"); shift ;;
     esac
 done
@@ -814,9 +1087,17 @@ case "${BASE_URL}" in
         fi ;;
 esac
 
-log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING}  api: ${API}"
+mem_guard_plan
+case "${MG_MODE}" in
+    off) MG_DESC="off (${MG_NOTE})" ;;
+    *)   pi_write_memguard_extension
+         if [ -d /run/memguard ]; then MG_DESC="on (machine-wide memguard active; deferring to it)"
+         else MG_DESC="on (stops this session's largest process below 5% free RAM${MG_NOTE:+; ${MG_NOTE}})"; fi ;;
+esac
+
+log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING}  api: ${API}  memory guard: ${MG_DESC}"
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
-    exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
+    mem_guard_exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
 else
-    exec pi --provider "${PROVIDER_ID}" --model "${MODEL}" "${PASSTHROUGH[@]}"
+    mem_guard_exec pi --provider "${PROVIDER_ID}" --model "${MODEL}" "${PASSTHROUGH[@]}"
 fi

@@ -54,13 +54,14 @@ confirm, then install.
 | `--vision` \| `--no-vision` | The model accepts image input (off by default). `--vision` registers the model with `input: ["text","image"]` so pi actually sends images (e.g. screenshots) to it; `--no-vision` forces off even if `VISION=true` is set. |
 | `--thinking-level <lvl>` | Startup thinking level: `off`\|`minimal`\|`low`\|`medium`\|`high` (xhigh\|max). Default `medium`. Thinking support itself is **auto-detected at launch** with a minimal test request (pin `REASONING=true`/`false` in the config to override); setup offers a level suggested from your context window. |
 | `--insecure` | Skip TLS verification (self-signed certs) |
+| `--no-mem-guard` | Launch without the [memory guard](#memory-guard) |
 | `--verbose` \| `--debug` | Show endpoint probing |
 | `-h` \| `--help` | Help |
 
 Env overrides: `LETS_CODE_ENDPOINTS` (space-separated), `LETS_CODE_TOKEN`,
 `LETS_CODE_CA`, `LETS_CODE_MODEL`, `LETS_CODE_CONTEXT`, `LETS_CODE_OUTPUT_CAP`,
 `LETS_CODE_API`, `LETS_CODE_VISION`, `LETS_CODE_THINKING`, `LETS_CODE_REASONING`
-(the last two `true`/`false` pins).
+(`true`/`false` pins), `LETS_CODE_MEM_GUARD` (`true`/`false`).
 
 ## What onboarding sets up
 
@@ -114,6 +115,47 @@ that vLLM throws when `input + max_tokens > window` is impossible —
 automatically correct even after you swap models. Want longer conversations
 over longer responses? Launch with `--output-cap 16384` — the context share
 grows to match.
+
+## Memory guard
+
+A coding agent runs whatever commands it writes. One test with an unbounded
+search or a leaking build can take all of the machine's RAM. When the same
+machine serves the model, you get minutes of swap thrash and then a global
+OOM kill that can hit the model server or your desktop. This happened for
+real: a pi-run `unittest` reached 26 GB twice on the box serving the model.
+
+On Linux, `lets-code` guards the session by watching the machine's
+**remaining RAM**. It only ever acts on **processes this session started**,
+never on anything else on the machine:
+
+| Free RAM | What happens |
+|---|---|
+| < 20 % | pi is warned after each tool call, with the session's largest processes listed |
+| < 10 % | pi's new bash commands are blocked, except cleanup (`kill`, `ps`, `free`, …) |
+| < 5 % for 3 s | the session's largest process is stopped gracefully: other big session processes are paused, then SIGINT → SIGTERM → SIGKILL (10 s apart), then they're resumed |
+| < 2.5 % | the session's largest process is SIGKILLed immediately |
+
+There are no memory caps: nothing is limited until the machine as a whole
+runs low. After a stop, pi is told what was stopped and why. A bare
+`KeyboardInterrupt` or `Killed` otherwise reads like a bug in the code.
+
+The guard lives in a pi extension that `lets-code` writes
+(`~/.pi/agent/extensions/lets-code-memguard.ts`). It is inert in pi sessions
+not launched by `lets-code`.
+- **What counts as "this session":** descendants of that pi, plus anything
+  in the session's systemd user scope (`lets-code-<pid>.scope`, no root
+  needed). The scope catches orphaned background jobs.
+- **`OOMPolicy=continue`:** the scope sets it, so a kernel OOM kill takes one
+  process, not the whole session.
+- **Deferral:** when a machine-wide
+  [memguard](https://github.com/civitas-cerebrum/memguard) daemon is running
+  (`/run/memguard`), the extension defers to it.
+- **Off switch:** `--no-mem-guard` or `MEM_GUARD=false`.
+
+`tests/mem-guard-live.sh` runs it end to end: interactive pi in tmux, the
+prompt typed in with `send-keys`, leftover memory hogs moved into the
+session, levels relative to the RAM free at test start, and an independent
+safety cap plus watchdog.
 
 ## Cookbook
 

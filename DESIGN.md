@@ -52,6 +52,24 @@ adapters. **pi is the default and the only v1-implemented harness**;
    a plain strict `curl` fails.
 6. **Atomic, fail-loud writes** — pi's files are rewritten tmp+rename; every
    other key is preserved; a corrupt file fails with a clear message.
+7. **A runaway command can't take the machine down** (memory guard, Linux).
+   A pi extension watches the machine's free RAM. It warns below 20 %,
+   blocks non-cleanup bash below 10 %, and stops this session's largest
+   process below 5 % (graceful ladder) or 2.5 % (immediate SIGKILL). It only
+   ever touches processes this session started: descendants of pi, or
+   members of its `lets-code-<pid>.scope`, which also sets
+   `OOMPolicy=continue`.
+
+   There are no memory caps (user decision 2026-09-26). An earlier cap-based
+   design (`MemoryMax` + `ulimit -d`) worked, but it limited sessions even
+   when the machine had RAM to spare. It also taught three things: the
+   default `OOMPolicy=stop` kills the whole session after one OOM kill; swap
+   at a cap livelocks instead of triggering the OOM killer; and a user scope
+   must never be created inside an already memory-limited cgroup, because
+   the scope would escape that cgroup's limits.
+
+   The extension defers to a machine-wide memguard daemon
+   (`civitas-cerebrum/memguard`) when `/run/memguard` exists.
 
 ## Flag → pi mapping
 
@@ -82,9 +100,12 @@ hang on pi's update check.
 3. pi config writer (`pi_write_configs`: python3 JSON upsert, atomic)
 4. harness gate + pi presence/auto-install (`harness_gate`, `ensure_pi`)
 5. onboarding (`run_setup`, `offer_fresh_shell`)
-6. main: arg parse → gate → config load + env overrides → probe → strict-TLS
+6. memory guard (`mem_limited_ancestor`, `mem_guard_plan` — scope|process|off
+   decision, `mem_guard_exec` — `LETS_CODE_SESSION=1` + `systemd-run --user
+   --scope -p OOMPolicy=continue`, `pi_write_memguard_extension` — the guard itself)
+7. main: arg parse → gate → config load + env overrides → probe → strict-TLS
    trust check → discovery → budget resolution → `pi_write_configs` →
-   env exports → `exec pi`
+   env exports → `mem_guard_plan` → `mem_guard_exec pi`
 
 Bash-3.2/portability notes: no `set -o pipefail` unguarded (bash 4+ only —
 guarded idiom); empty `"${PASSTHROUGH[@]}"` under `set -u` handled by the

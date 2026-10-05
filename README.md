@@ -46,7 +46,7 @@ confirm, then install.
 | Flag | Meaning |
 |---|---|
 | `--harness <name>` | Harness to launch. v1 implements **pi** (the default); `deepseek`, `claude`, `codex` are roadmap items and fail loudly. |
-| `--url <base>` | One-off endpoint override (`/v1` suffix optional — it's normalized) |
+| `--url <base>` | One-off endpoint override (`/v1` suffix and scheme optional — both are normalized) |
 | `--model <id>` | One-off model override |
 | `--context <tok>` | Context window (default: discovered from the server) |
 | `--output-cap <tok>` | Max output tokens (default 32768) |
@@ -70,7 +70,7 @@ Env overrides: `LETS_CODE_ENDPOINTS` (space-separated), `LETS_CODE_TOKEN`,
 
 | Question | Meaning |
 |---|---|
-| **Endpoints** | One or more base URLs, most-preferred first. At launch the first reachable one wins — so you can list `http://localhost:8000 https://llm.home.example` and the same script works on the server box, on your LAN, and over your VPN. |
+| **Endpoints** | One or more base URLs, most-preferred first. At launch the first reachable one wins — so you can list `http://localhost:8000 https://llm.home.example` and the same script works on the server box, on your LAN, and over your VPN. The scheme is optional: IPs, `localhost`, bare hostnames and `*.local` get `http://`, other domains get `https://` (`192.168.0.10/vllm` → `http://192.168.0.10/vllm`, `llm.home.example` → `https://llm.home.example`). |
 | **Token** | Sent as the API key (via `LETS_CODE_TOKEN`, which pi resolves from the environment). vLLM without `--api-key` accepts anything — the default placeholder is fine. |
 | **Root CA** | Only for `https` endpoints with a private CA (mkcert, step-ca, …). Node ignores the OS trust store, so the script exports `NODE_EXTRA_CA_CERTS` for you. |
 

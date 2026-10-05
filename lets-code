@@ -38,8 +38,10 @@
 #      of letting it freeze the machine; pi is warned first and told why
 #   6. git guard: in a git repo, work happens on a pi/* branch. lets-code
 #      creates pi/<timestamp> at launch if needed (uncommitted changes come
-#      along), and a pi hook blocks edits/writes/commands while HEAD is on
-#      any other branch. Zero tokens unless the model leaves the branch.
+#      along); a pi hook blocks edits/writes/commands while HEAD is on any
+#      other branch, and refuses irreversible commands (force push, branch
+#      -D, reset --hard, checkout ., clean -f, stash drop, rm .git) on every
+#      branch. Zero tokens unless a call is blocked.
 #
 # Harness: pi is the default (and only v1) harness; --harness deepseek|claude|codex
 # are roadmap items, not yet available.
@@ -626,9 +628,10 @@ TS
 #     not on a pi/* branch, `git switch -c pi/<timestamp>` — uncommitted
 #     changes travel with the switch, nothing is lost.
 #   * a pi extension (lets-code-gitguard.ts) that blocks edit/write/bash
-#     while HEAD is off a pi/* branch, except the git commands needed to get
-#     back on one. It reads .git/HEAD from disk; nothing is added to the
-#     system prompt or to tool results while the rule holds.
+#     while HEAD is off a pi/* branch (only plain git inspection and a
+#     switch to a pi/* branch may run), and on any branch refuses commands
+#     that destroy work irreversibly. It reads .git/HEAD from disk; nothing
+#     is added to the system prompt or to tool results while the rules hold.
 git_guard_plan() {  # sets GG_MODE (on|off) and GG_NOTE
     GG_MODE=off; GG_NOTE=""
     case "${GIT_GUARD}" in false|no|0|off) GG_NOTE="disabled"; return 0 ;; esac
@@ -641,16 +644,26 @@ git_guard_plan() {  # sets GG_MODE (on|off) and GG_NOTE
     case "${head}" in
         pi/*) ;;
         *)
-            local name; name="pi/$(date +%Y%m%d-%H%M)"
-            if git show-ref --verify -q "refs/heads/${name}"; then
-                git switch -q "${name}" 2>/dev/null || git checkout -q "${name}" 2>/dev/null || true
-            else
-                git switch -q -c "${name}" 2>/dev/null || git checkout -q -b "${name}" 2>/dev/null || true
-            fi
+            # A merge/rebase/cherry-pick in progress would be silently dropped
+            # by a branch switch: leave it, pi can only inspect until it's done.
+            local g op
+            g="$(git rev-parse --git-path . 2>/dev/null)"
+            for op in MERGE_HEAD rebase-merge rebase-apply CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+                if [ -e "${g}/${op}" ]; then
+                    log_error "git guard: ${op%%_*} in progress on '${head:-detached HEAD}'; finish or abort it first. pi can only run git inspection commands until a pi/* branch is checked out."
+                    GG_MODE=on; GG_BRANCH=""; export LETS_CODE_GIT_GUARD_ON=1; return 0
+                fi
+            done
+            # Always a fresh branch: switching to an existing one can fail on a
+            # conflicting dirty file; creating never does.
+            local name base n=1
+            base="pi/$(date +%Y%m%d-%H%M)"; name="${base}"
+            while git show-ref --verify -q "refs/heads/${name}"; do n=$((n + 1)); name="${base}-${n}"; done
+            git switch -q -c "${name}" 2>/dev/null || git checkout -q -b "${name}" 2>/dev/null || true
             head="$(git symbolic-ref --short -q HEAD 2>/dev/null || true)"
             case "${head}" in
                 pi/*) ;;
-                *) log_error "git guard: could not switch to ${name} (from '${head:-detached HEAD}'); pi will have to create a pi/* branch before it can write." ;;
+                *) log_error "git guard: could not create ${name} (from '${head:-detached HEAD}'); pi will have to create a pi/* branch before it can write." ;;
             esac ;;
     esac
     GG_MODE=on; GG_BRANCH="${head}"
@@ -667,11 +680,17 @@ pi_write_gitguard_extension() {
     cat > "${tmp}" <<'TS'
 // Written by lets-code (git guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the git guard on
-// (LETS_CODE_GIT_GUARD_ON=1). Blocks edit/write/bash while the target repo's
-// HEAD is not on a pi/* branch. Reads .git/HEAD from disk: no subprocess, no
-// prompt text, no tokens unless a call is actually blocked.
+// (LETS_CODE_GIT_GUARD_ON=1). Two rules, checked before edit/write/bash:
+//   1. the target repo's HEAD must be on a pi/* branch, else only a few
+//      read-only / branch-switching git commands may run;
+//   2. on any branch, commands that destroy work irreversibly are refused
+//      (force push, branch delete/force-move, reset --hard, discarding working
+//      changes, clean -f, stash drop, rm of .git), and new branches must be pi/*.
+// Reads .git/HEAD from disk: no subprocess, no prompt text, no tokens unless a
+// call is actually blocked (then one short line).
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 const ACTIVE = process.env.LETS_CODE_GIT_GUARD_ON === "1";
@@ -681,14 +700,23 @@ const read = (p: string): string | null => { try { return readFileSync(p, "utf8"
 const isDir = (p: string): boolean => { try { return statSync(p).isDirectory(); } catch { return false; } };
 const isFile = (p: string): boolean => { try { return statSync(p).isFile(); } catch { return false; } };
 
+// Absolute, ~-expanded (as pi's own tool path resolution does), symlinks
+// resolved on the deepest existing ancestor (the file may not exist yet).
+function realDir(p: string, cwd: string): string {
+	if (p === "~" || p.startsWith("~/")) p = join(homedir(), p.slice(1));
+	let d = isAbsolute(p) ? p : resolve(cwd, p);
+	for (let i = 0; i < 64 && !isDir(d); i++) { const up = dirname(d); if (up === d) break; d = up; }
+	try { return realpathSync(d); } catch { return d; }
+}
+
 // Nearest enclosing git dir of `start` (handles `.git` files of worktrees/submodules).
 function gitDirOf(start: string): string | null {
-	let d = resolve(start);
+	let d = start;
 	for (let i = 0; i < 64; i++) {
 		const g = join(d, ".git");
 		if (isDir(g)) return g;
 		if (isFile(g)) {
-			const m = /^gitdir:\s*(.+)\s*$/m.exec(read(g) ?? "");
+			const m = /^gitdir:\s*(.+?)\s*$/m.exec(read(g) ?? "");
 			if (m) return isAbsolute(m[1]) ? m[1] : resolve(d, m[1]);
 		}
 		const up = dirname(d);
@@ -699,56 +727,105 @@ function gitDirOf(start: string): string | null {
 }
 
 // Branch HEAD points at, "" when detached, null when not a repo.
-function branchOf(start: string): string | null {
-	const g = gitDirOf(start);
+function branchOf(dir: string): string | null {
+	const g = gitDirOf(dir);
 	if (!g) return null;
-	// A worktree's HEAD lives in its own gitdir; the main repo's in .git/HEAD.
-	const head = read(join(g, "HEAD")) ?? "";
-	const m = /^ref:\s*refs\/heads\/(.+?)\s*$/.exec(head);
+	const m = /^ref:\s*refs\/heads\/(.+?)\s*$/.exec(read(join(g, "HEAD")) ?? "");
 	return m ? m[1] : "";
 }
+const onPi = (b: string | null) => b === null || b.startsWith(PREFIX);  // no repo = nothing to protect
 
-// Git commands pi may run while off-branch: inspect state, stash, and switch.
-const GIT_OK = /^\s*git\s+(switch|checkout|branch|status|stash|log|diff|show|rev-parse|symbolic-ref|fetch|remote\s+-v|worktree\s+list)\b/;
-// Branch creation: `git switch -c NAME`, `git checkout -b NAME` (and -C/-B).
-const GIT_NEW = /\bgit\s+(?:switch\s+(?:.*\s)?-[cC]|checkout\s+(?:.*\s)?-[bB])\s+(\S+)/;
+// --- command classification -------------------------------------------------
+// `git [global options] <verb>`: -C <dir>, -c k=v, --git-dir=..., --no-pager ...
+const G = String.raw`\bgit(?:\s+(?:-[cC]\s+\S+|--[\w-]+(?:=\S+)?|-\S+))*\s+`;
+// Shell metacharacters: a second command, redirection or substitution hidden
+// behind an allowed git command.
+const META = /[;&|<>`\n\\]|\$\(/;
+
+// Off a pi/* branch: the whole command must be ONE of these, with plain args.
+// Listing/inspection, fetching, and switching to (or creating) a pi/* branch.
+const OK_OFF = new RegExp(String.raw`^\s*` + G + String.raw`(?:` +
+	String.raw`(?:status|log|diff|show|rev-parse|symbolic-ref|fetch|ls-files|blame|describe)(?:\s+(?!--output)\S+)*` +
+	String.raw`|branch(?:\s+(?:-[avr]+|--list|--all|--remotes|--show-current|--verbose|--contains\s+\S+))*` +
+	String.raw`|stash\s+(?:list|show)(?:\s+\S+)*` +
+	String.raw`|remote(?:\s+-v|\s+show\s+\S+)?|worktree\s+list` +
+	String.raw`|(?:switch|checkout)(?:\s+(?:-c|-C|-b|-B|--create|--force-create))?\s+pi/\S+` +
+	String.raw`)\s*$`);
+
+// On any branch: irreversible loss. Matched anywhere in the command.
+const DENY = new RegExp(G + String.raw`(?:` +
+	String.raw`push(?:\s+\S+)*?\s+(?:-\w*f\w*|--force(?:-with-lease)?(?:=\S+)?|--delete|-d|\+\S+|\S+:\S+)\b` +
+	String.raw`|branch(?:\s+\S+)*?\s+(?:-\w*[dDfM]\w*|--delete|--force|--move)\b` +
+	String.raw`|reset(?:\s+\S+)*?\s+--(?:hard|merge)\b` +
+	String.raw`|checkout(?:\s+\S+)*?\s+(?:--\s|\.(?:\s|$)|-f\b|--force\b)` +
+	String.raw`|restore\b(?!(?:\s+\S+)*\s+(?:--staged|-S)\b(?!(?:\s+\S+)*\s+(?:--worktree|-W)\b))` +
+	String.raw`|clean(?:\s+\S+)*?\s+(?:-\w*[fdx]\w*|--force)\b` +
+	String.raw`|stash\s+(?:drop|clear)\b` +
+	String.raw`|update-ref\b|reflog\s+(?:expire|delete)\b|gc(?:\s+\S+)*?\s+--prune|prune\b|filter-branch\b|filter-repo\b` +
+	String.raw`|worktree\s+remove(?:\s+\S+)*?\s+(?:-f|--force)\b` +
+	String.raw`)` +
+	// rm -r (any flag order) of .git, or of the whole tree (., .., *, ~, /, $HOME, $PWD)
+	String.raw`|\brm\s+(?:-\S*\s+)*?(?:-\S*r\S*\s+(?:-\S+\s+)*)?(?:\S*/)?\.git(?:/\S*)?(?:\s|$)` +
+	String.raw`|\brm\s+(?:-\S+\s+)*?-\S*r\S*\s+(?:-\S+\s+)*(?:\.|\.\.|\./|\*|~|~/|/|\$HOME|\$\{HOME\}|\$PWD)(?:\s|$)`);
+
+// Branch creation anywhere in the command: the name must be pi/*.
+const NEW = new RegExp(G + String.raw`(?:switch(?:\s+\S+)*?\s+(?:-c|-C|--create|--force-create)\s*(\S+)` +
+	String.raw`|checkout(?:\s+\S+)*?\s+(?:-b|-B|--orphan)\s*(\S+)` +
+	String.raw`|worktree\s+add(?:\s+\S+)*?\s+-[bB]\s*(\S+)` +
+	String.raw`|branch\s+(?!-)(\S+))`, "g");
+const BRANCH_LIST = /^(?:-|--list|--show-current|--contains|--merged|--no-merged|--points-at)/;
+function badNewBranch(cmd: string): string | null {
+	for (const m of cmd.matchAll(NEW)) {
+		const name = m[1] ?? m[2] ?? m[3] ?? m[4];
+		if (m[4] !== undefined && BRANCH_LIST.test(cmd.slice(m.index!))) continue;  // `git branch -a`: a listing
+		if (name && !name.startsWith(PREFIX)) return name;
+	}
+	return null;
+}
+
+// Directories a bash command moves into (cd/pushd/git -C): judged like the cwd.
+const DIRS = /(?:\bcd|\bpushd|\bgit\s+-C)\s+(?!-)("[^"]+"|'[^']+'|[^\s;&|]+)/g;
+function dirsIn(cmd: string, cwd: string): string[] {
+	const out: string[] = [];
+	for (const m of cmd.matchAll(DIRS)) { const d = m[1].replace(/^["']|["']$/g, ""); if (d !== "-") out.push(realDir(d, cwd)); }
+	return out;
+}
 
 // Block reasons are the only text the model ever sees from this guard, and
 // only when a call is blocked, so they are kept to one short line.
-function reason(branch: string): string {
-	const state = branch === "" ? "detached HEAD" : `branch '${branch}'`;
-	return `git guard: HEAD is on ${state}; work only on a ${PREFIX}* branch. Run \`git switch -c ${PREFIX}<topic>\` (changes come along), then retry.`;
-}
+const offBranch = (b: string) =>
+	`git guard: HEAD is on ${b === "" ? "detached HEAD" : `branch '${b}'`}; work only on a ${PREFIX}* branch. Run \`git switch -c ${PREFIX}<topic>\` (changes come along), then retry.`;
+const destructive = () =>
+	`git guard: command refused as irreversible (force push, branch -D/-f, reset --hard, checkout/restore discarding changes, clean -f, stash drop, rm .git). Use a reversible alternative.`;
+const badName = (n: string) =>
+	`git guard: new branches must be named ${PREFIX}<topic>; use \`git switch -c ${PREFIX}${n}\`.`;
 
 export default function (pi: ExtensionAPI) {
 	if (!ACTIVE) return;
 
 	pi.on("tool_call", async (event, ctx) => {
 		const input = event.input as Record<string, unknown>;
-		let target: string;
 		switch (event.toolName) {
 			case "edit": case "write": {
-				const p = String(input.path ?? "");
-				target = dirname(isAbsolute(p) ? p : resolve(ctx.cwd, p));
-				break;
+				const b = branchOf(realDir(dirname(String(input.path ?? "")) || ".", ctx.cwd));
+				return onPi(b) ? undefined : { block: true, reason: offBranch(b as string) };
 			}
-			case "bash": case "powershell": target = ctx.cwd; break;
+			case "bash": case "powershell": {
+				const cmd = String(input.command ?? "");
+				if (DENY.test(cmd)) return { block: true, reason: destructive() };
+				const bad = badNewBranch(cmd);
+				if (bad) return { block: true, reason: badName(bad) };
+				const cwd = realDir(ctx.cwd, ctx.cwd);
+				for (const d of [cwd, ...dirsIn(cmd, cwd)]) {
+					const b = branchOf(d);
+					if (onPi(b)) continue;
+					if (d === cwd && OK_OFF.test(cmd) && !META.test(cmd)) continue;
+					return { block: true, reason: offBranch(b as string) };
+				}
+				return undefined;
+			}
 			default: return undefined;  // read-only tools and custom tools are never blocked
 		}
-		const branch = branchOf(target);
-		if (branch === null) return undefined;  // not a git repo: nothing to protect
-
-		if (event.toolName === "bash" || event.toolName === "powershell") {
-			const cmd = String(input.command ?? "");
-			// Naming is enforced even on a pi/* branch: new branches must be pi/* too.
-			const nb = GIT_NEW.exec(cmd)?.[1];
-			if (nb && !nb.startsWith(PREFIX)) {
-				return { block: true, reason: `git guard: new branches must be named ${PREFIX}<topic>; use \`git switch -c ${PREFIX}${nb}\`.` };
-			}
-			if (branch.startsWith(PREFIX)) return undefined;
-			return GIT_OK.test(cmd) ? undefined : { block: true, reason: reason(branch) };
-		}
-		return branch.startsWith(PREFIX) ? undefined : { block: true, reason: reason(branch) };
 	});
 }
 TS

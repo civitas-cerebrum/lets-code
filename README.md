@@ -197,34 +197,43 @@ work irreversibly are refused outright.
   matter (`*`, `.*`, `.[!.]*`, `.??*` at the repo top; `../*`, `~/*`,
   `/*`). Stale `.git/*.lock` files may be removed. Writes into `.git` by
   any tool are refused. Git's unique-prefix abbreviations (`--har`,
-  `--forc`) and aliases (`[alias]` in repo/user config, `-c alias.x=…`,
-  `!`-shell aliases) are resolved before the check. New branches must be
-  named `pi/*` however they are created (`switch -c/--create/-t`,
-  `checkout -b/--orphan/--track`, `branch <name>`, `branch -m`, `worktree
-  add [-b]`).
+  `--forc`) and aliases (as `git config --get-regexp alias.` resolves them,
+  plus `-c alias.x=…`; `!`-shell aliases are lexed) are resolved before the
+  check. `checkout --ours|--theirs` is allowed while a merge or rebase is
+  in progress, refused otherwise. New branches must be named `pi/*` however
+  they are created (`switch -c/--create/-t`, `checkout -b/--orphan/--track`,
+  `branch <name>`, `branch -m`, `stash branch`, `worktree add [-b]`).
 - **How commands are read:** the hook lexes a `bash` call like a shell:
   quotes (`g''it` is `git`, `$'…'`/`$"…"` too), `{a,b}` expansion, `; &&
   || | & ;;`, newlines, `$(…)`, backticks, `<(…)`, `( )` subshells (a `cd`
   inside does not leak out) and `{ }` groups, `if/then/for/do/while/case/!`
-  keywords, heredoc bodies (skipped: they are data, so a commit message or
+  keywords, heredoc bodies (data for most commands, so a commit message or
   a doc mentioning `reset --hard` is not a command; `$(…)` inside an
   unquoted heredoc does run and is checked), `#` comments, `sh -c "…"`,
   `bash -lc`, `eval`, and `env`/`sudo`/`command`/`timeout`/`xargs`/`nice`/
-  `VAR=x` prefixes. `cd`, `pushd`/`popd`, `git -C`, `--git-dir`/
-  `--work-tree` and `GIT_DIR`/`GIT_WORK_TREE` move the directory a command
-  is judged in, and a `git switch`/`checkout` moves the **branch** the rest
-  of the call is judged on (`git switch main && echo x > f` is refused).
+  `VAR=x` prefixes. A heredoc or here-string fed to `sh`/`bash` **is** a
+  script and is lexed like one; a script piped in from another command
+  (`curl … | sh`, `echo … | bash`) cannot be seen and is refused with a
+  reason. `cd`, `pushd`/`popd`, `git -C`, `--git-dir`/`--work-tree` and
+  `GIT_DIR`/`GIT_WORK_TREE` move the directory a command is judged in, and
+  a `git switch`/`checkout`/`rebase <up> <branch>`/`worktree add` moves the
+  **branch** the rest of the call is judged on (`git switch main && echo x
+  > f` is refused, with a reason that names the switch).
   Redirections (`> file`) and the targets of `cp mv tee sed -i touch
   mkdir chmod tar -x unzip patch …` are judged by the repo they land in.
   Paths are `~`-expanded, `@`/`file://`-stripped like pi does, and
-  symlink-resolved; `$PWD`, `$HOME`, `$(pwd)` and variables assigned
-  earlier in the same call (`D=../x; … $D`, `for d in x`) are expanded.
-  A path the hook cannot resolve (an unknown `$VAR`, a `$(…)`, an `xargs`
-  `{}`) is refused when it would be written or recursively removed, with a
-  reason asking for a literal path; reading it is fine. In a directory
-  that is on a non-`pi/*` branch, read-only commands (`cat ls grep diff
-  find …`) still run. A call with more than 500 simple commands is refused
-  rather than judged partially.
+  symlink-resolved; `$PWD`, `$HOME`, `$TMPDIR`, `$(pwd)`, `$(mktemp [-d])`,
+  `$(git rev-parse --show-toplevel)` and variables assigned earlier in the
+  same call (`D=../x; … $D`, `${D%.txt}`, `for d in x`) are expanded. A path
+  the hook cannot resolve (an unknown `$VAR`, another `$(…)`, an `xargs`
+  `{}`, `… | xargs rm -r`) is refused when it would be written or
+  recursively removed, with a reason asking for a literal path; reading it
+  is fine. `find … -delete`/`-exec rm` is judged by its tests: a `-name`
+  that cannot match `.git` placed before the action and not negated, or a
+  `-name .git -prune -o` branch, makes it safe; `… | xargs rm -f` fed by
+  such a `find` likewise. In a directory that is on a non-`pi/*` branch,
+  read-only commands (`cat ls grep diff find …`) still run. A call with more
+  than 500 simple commands is refused rather than judged partially.
 - **Context cost: none while the rules hold.** The guard adds nothing to the
   system prompt and nothing to tool results. The only text the model ever
   sees is a one-line reason on a blocked call (under 200 characters), e.g.
@@ -247,10 +256,14 @@ work irreversibly are refused outright.
   `git stash list` look exactly as before (`git log --all` and `gitk --all`
   do show the checkpoint commits); nothing is pushed by `git push` or
   `--all`; the model sees nothing. Identical trees are not stored twice;
-  the last 200 per branch are kept; unreadable files are skipped and
-  failures are logged to `.git/lets-code-checkpoint.log`, never to pi. A
-  repo whose snapshot takes over 2 s is only snapshotted in the
-  background.
+  the last 200 per branch are kept (checkpoints of branches you have
+  deleted stay until you remove their refs); unreadable files are skipped
+  and failures are logged to `.git/lets-code-checkpoint.log`, never to pi.
+  If untracked files total over 500 MB (an un-ignored `node_modules`), only
+  tracked files are snapshotted and the log says so. A repo whose warm
+  snapshot takes over 2 s is only snapshotted in the background (logged).
+  A pre-call snapshot waits for a background one of the same repo, so no
+  state falls between them.
   Recover with plain git:
   ```bash
   git for-each-ref refs/pi-checkpoints/                   # list
@@ -259,7 +272,8 @@ work irreversibly are refused outright.
   git restore --source=refs/pi-checkpoints/pi/x/20261005-231502.117 -- src/a.c
   ```
   Off: `LETS_CODE_GIT_CHECKPOINTS=0`; `LETS_CODE_GIT_CHECKPOINT_KEEP` sets
-  the count, `LETS_CODE_GIT_CHECKPOINT_MAX_FILE_MB` the size cap. Cost: a
+  the count, `LETS_CODE_GIT_CHECKPOINT_MAX_FILE_MB` and
+  `…_MAX_UNTRACKED_MB` the size caps. Cost: a
   `git add -A` into the private index before each tool call (tens of ms
   on a typical repo, ~200 ms on 30k files) and one more per burst of
   edits in the background; zero tokens.

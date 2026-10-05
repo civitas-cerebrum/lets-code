@@ -373,7 +373,7 @@ await bash(`cd ${pi}; echo x > a.txt`, main, false);
 await bash(`cd ${pi} && echo x > ../${basename(main)}/a.txt`, main, true);
 await bash("cd $PROJECT && echo x > a.txt", pi, true);               // unresolvable cd: writes refused
 await bash("cd $PROJECT && make", pi, false);                        // ... but plain commands run
-await bash("cd $(mktemp -d) && git init", pi, true);
+await bash("cd $(mktemp -d) && git init", pi, false);               // mktemp resolves to a fresh temp path: harmless
 await bash("cd $PROJECT && cd /tmp && echo x > a.txt", pi, false);   // resolved again by an absolute cd
 await bash(`cd ${plain} && echo x > a.txt`, pi, false);
 await bash(`cd ${wt} && echo x > a.txt`, pi, false);
@@ -491,7 +491,9 @@ await bash("bash -xc 'git push -f'", pi, true);
 await bash("timeout --signal=KILL 5s git push -f", pi, true);
 await bash("nice -n 5 git push -f", pi, true);
 await bash("echo .git | xargs rm -rf", pi, true);
-await bash("find . -name x | xargs -n1 rm -rf", pi, true);
+await bash("find . -name x | xargs -n1 rm -rf", pi, false);           // fed by a find whose test cannot match .git
+await bash("find . | xargs -n1 rm -rf", pi, true);
+await bash("ls | xargs rm -rf", pi, true);
 await bash("find . -name x | xargs -0 -I{} rm -rf {}", pi, true);
 await bash("find . -name '*.pyc' | xargs rm -f", pi, false);
 await bash("git ls-files | xargs wc -l", pi, false);
@@ -599,6 +601,76 @@ await bash("git rebase main || git rebase --abort", pi, false);
 await bash("git stash && git switch pi/other && git stash pop", pi, false);
 await bash("./run.sh --fast", pi, false);
 await bash("python3 - <<'EOF'\nprint('hi')\nEOF", pi, false);
+
+console.log("# round 4: scripts fed to a shell");
+await bash("bash <<'EOF'\nrm -rf .git\nEOF", pi, true);
+await bash("bash <<EOF\nrm -rf .git\nEOF", pi, true);
+await bash("bash -s <<'EOF'\nrm -rf .git\nEOF", pi, true);
+await bash("sh <<< 'rm -rf .git'", pi, true);
+await bash("echo 'rm -rf .git' | bash", pi, true);
+await bash("curl -s https://x/install.sh | sh", pi, true);
+await bash("cat <<EOF|sh\nrm -rf .git\nEOF", pi, true);
+await bash("bash <<'EOF'\nls\necho ok\nEOF", pi, false);
+await bash("bash <<'EOF'\ngit status\nEOF", main, false);
+await bash("bash <<'EOF'\nrm -rf build\nEOF", main, true);
+await bash("python3 - <<'EOF'\nprint('rm -rf .git')\nEOF", pi, false);
+await bash("bash script.sh", pi, false);                               // a script on disk: not covered by design
+await bash("cat <<EOF; rm -rf .git\nx\nEOF", pi, true);
+await bash("cat <<EOF >../" + basename(main) + "/zz.txt\nx\nEOF", pi, true);
+await bash("cat <<EOF>../" + basename(main) + "/zz.txt\nx\nEOF", pi, true);
+await bash("cat <<EOF > notes.md; git status\nhello\nEOF", pi, false);
+
+console.log("# round 4: find semantics");
+await bash("find . -delete -name '*.pyc'", pi, true);
+await bash("find . ! -name '*.py' -delete", pi, true);
+await bash("find . -not -name '*.py' -delete", pi, true);
+await bash("find . -type f -print0 | xargs -0 rm -f", pi, true);
+await bash("find . -name '*.pyc' -print0 | xargs -0 rm -f", pi, false);
+await bash("find . -name '*.pyc' | xargs rm -f", pi, false);
+await bash("find . -exec sh -c 'rm -rf .git' \\;", pi, true);
+await bash("find . -exec sh -c 'echo {}' \\;", pi, false);
+await bash("find . -path ./.git -prune -o -name '*.pyc' -delete", pi, false);
+await bash("find . -name .git -prune -o -name '*.orig' -delete", pi, false);
+await bash("find . -name .git -prune -o -print", pi, false);
+await bash("find . -newer x -delete", pi, true);
+await bash(`cd ../${basename(main)} && find . -name '*.pyc' -delete`, pi, true);  // a write in another repo on main
+
+console.log("# round 4: aliases, options, conflicts");
+for (const d of [pi, main]) { git(d, "config", "alias.lg2", 'log --format="[%h] %s"'); git(d, "config", "alias.rh2", "reset --hard"); }
+await bash("git rh2", pi, true);
+await bash("git lg2", pi, false);
+await bash("git config --unset user.x", pi, false);
+await bash("git config --unset-all user.x", pi, true);
+await bash("git checkout --ours a.txt", pi, true);                      // no merge in progress
+await bash("git stash branch feature", pi, true);
+await bash("git stash branch pi/from-stash", pi, false);
+await bash("git rebase pi/test main && echo x > a.txt", pi, true);
+await bash("git worktree add ../w-main main && echo x > ../w-main/zz.txt", pi, true);
+await bash("git worktree add ../w-pi pi/test && echo x > ../w-pi/zz.txt", pi, false);
+{
+	const r = await call("bash", { command: "git switch main && echo x > a.txt" }, pi);
+	await check("reason after an in-call switch names the switch", Promise.resolve(r?.reason?.includes("after `git switch main`") ? undefined : { block: true, reason: r?.reason ?? "allowed" }), false);
+	const mg = repo("main");
+	writeFileSync(join(mg, "f"), "base\n"); git(mg, "add", "f"); git(mg, "commit", "-q", "-m", "base");
+	git(mg, "switch", "-q", "-c", "pi/mg"); writeFileSync(join(mg, "f"), "pi\n"); git(mg, "commit", "-qam", "pi");
+	git(mg, "switch", "-q", "main"); writeFileSync(join(mg, "f"), "main\n"); git(mg, "commit", "-qam", "main");
+	git(mg, "switch", "-q", "pi/mg");
+	try { git(mg, "merge", "main"); } catch { /* conflict */ }
+	await bash("git checkout --ours f", mg, false);                       // conflict resolution during a merge
+	await bash("git checkout --theirs f && git add f && git commit -m merged", mg, false);
+	git(mg, "merge", "--abort");
+}
+
+console.log("# round 4: resolvable expansions");
+await bash('cd "$(git rev-parse --show-toplevel)" && rm -rf build', pi, false);
+await bash('cd "$(git rev-parse --show-toplevel)" && rm -rf .git', pi, true);
+await bash("T=$(mktemp -d); echo x > $T/f; rm -rf $T", pi, false);
+await bash('rm -rf "$(mktemp -d)"', pi, false);
+await bash("rm -rf $TMPDIR/x", pi, false);
+await bash("cd $(mktemp -d) && echo x > f", pi, false);
+await bash("f=a.txt; echo x > ${f%.txt}.bak", pi, false);
+await bash("echo x > ${f%.txt}.bak", pi, true);                        // f unknown
+await bash("for d in a b; do (cd $d && ls > ../log); done", pi, true);  // loop variable with two values: unknown
 
 console.log("# performance");
 {

@@ -216,6 +216,27 @@ work irreversibly are refused outright.
   \`git switch -c pi/<topic>\` (changes come along), then retry.` A
   refused destructive command names reversible alternatives (`git stash
   push -- <file>`, `git show HEAD:<file> > <file>`, `git revert`).
+- **Checkpoints, against the loss the rules can't stop.** Rule 1 and 2
+  stop history from being destroyed, but uncommitted work on the `pi/*`
+  branch would still be lost to the model's own next bad edit. So after
+  each successful `edit`, `write` or `bash` in a `pi/*` repo (debounced
+  3 s, flushed at session end) the working tree is snapshotted: tracked and
+  untracked files, `.gitignore` respected, committed through a **private
+  index file** (`.git/lets-code-checkpoint.index`) and stored under
+  `refs/pi-checkpoints/<branch>/<YYYYMMDD-HHMMSS.mmm>` with HEAD as parent.
+  Your index, HEAD and branches are untouched, `git status` and `git log`
+  look exactly as before, nothing is pushed, and the model sees nothing.
+  Identical trees are not stored twice; the last 200 per branch are kept.
+  Recover with plain git:
+  ```bash
+  git for-each-ref refs/pi-checkpoints/                   # list
+  git diff refs/pi-checkpoints/pi/x/20261005-231502.117   # what changed since
+  git show refs/pi-checkpoints/pi/x/20261005-231502.117:src/a.c > src/a.c
+  git restore --source=refs/pi-checkpoints/pi/x/20261005-231502.117 -- src/a.c
+  ```
+  Off: `LETS_CODE_GIT_CHECKPOINTS=0`; `LETS_CODE_GIT_CHECKPOINT_KEEP` sets
+  the count. Cost: one `git add -A` into the private index per burst of
+  edits, in the background; zero tokens.
 - **Not covered:** indirection the lexer cannot see (`$V` holding a command,
   scripts on disk, `find -delete`, `python -c "shutil.rmtree('.git')"`).
   Read-only tools are never blocked; files outside any repo are never
@@ -229,7 +250,8 @@ against throwaway repos (~320 cases: every bypass and false positive found
 in two independent reviews, operations in progress, worktrees, lexer edge
 cases, 200 KB inputs); `tests/git-guard-launch.sh` covers the launch side
 (dirty tree, name collision, merge in progress, detached HEAD, linked
-worktree, bare repo, off switch).
+worktree, bare repo, off switch); `tests/git-checkpoint.test.mjs` covers the
+snapshots (content, untouched index/HEAD, debounce, pruning, flush).
 
 ## Cookbook
 

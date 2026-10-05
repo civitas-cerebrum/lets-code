@@ -21,6 +21,7 @@
 #                                deepseek | claude | codex (roadmap)
 #   lets-code --insecure ...     skip TLS verification (self-signed certs)
 #   lets-code --no-mem-guard     launch without the memory guard
+#   lets-code --no-git-guard     launch without the git guard
 #   lets-code --verbose ...      show endpoint probing
 #
 # What it does at launch:
@@ -35,6 +36,10 @@
 #   5. memory guard (Linux): when the machine runs low on RAM, stops the
 #      largest process this session started (never anything else) instead
 #      of letting it freeze the machine; pi is warned first and told why
+#   6. git guard: in a git repo, work happens on a pi/* branch. lets-code
+#      creates pi/<timestamp> at launch if needed (uncommitted changes come
+#      along), and a pi hook blocks edits/writes/commands while HEAD is on
+#      any other branch. Zero tokens unless the model leaves the branch.
 #
 # Harness: pi is the default (and only v1) harness; --harness deepseek|claude|codex
 # are roadmap items, not yet available.
@@ -44,7 +49,7 @@
 #                LETS_CODE_CA, LETS_CODE_MODEL, LETS_CODE_CONTEXT,
 #                LETS_CODE_OUTPUT_CAP, LETS_CODE_API, LETS_CODE_VISION,
 #                LETS_CODE_THINKING, LETS_CODE_REASONING,
-#                LETS_CODE_MEM_GUARD (true|false)
+#                LETS_CODE_MEM_GUARD (true|false), LETS_CODE_GIT_GUARD (true|false)
 # Needs: bash >= 3.2 (stock macOS is fine), curl, python3, pi CLI
 # (auto-installed on request).
 
@@ -614,6 +619,143 @@ TS
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
 
+# ------------------------------------------------------------------ git guard
+# Safety net for small self-hosted models: all work happens on a pi/* branch,
+# so a broken edit or a bad `git` command never lands on main. Two parts:
+#   * here, at launch (zero tokens): if the cwd is a git work tree and HEAD is
+#     not on a pi/* branch, `git switch -c pi/<timestamp>` — uncommitted
+#     changes travel with the switch, nothing is lost.
+#   * a pi extension (lets-code-gitguard.ts) that blocks edit/write/bash
+#     while HEAD is off a pi/* branch, except the git commands needed to get
+#     back on one. It reads .git/HEAD from disk; nothing is added to the
+#     system prompt or to tool results while the rule holds.
+git_guard_plan() {  # sets GG_MODE (on|off) and GG_NOTE
+    GG_MODE=off; GG_NOTE=""
+    case "${GIT_GUARD}" in false|no|0|off) GG_NOTE="disabled"; return 0 ;; esac
+    command -v git >/dev/null 2>&1 || { GG_NOTE="git not found"; return 0; }
+    if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" != true ]; then
+        GG_NOTE="not a git repo"; return 0
+    fi
+    local head
+    head="$(git symbolic-ref --short -q HEAD 2>/dev/null || true)"
+    case "${head}" in
+        pi/*) ;;
+        *)
+            local name; name="pi/$(date +%Y%m%d-%H%M)"
+            if git show-ref --verify -q "refs/heads/${name}"; then
+                git switch -q "${name}" 2>/dev/null || git checkout -q "${name}" 2>/dev/null || true
+            else
+                git switch -q -c "${name}" 2>/dev/null || git checkout -q -b "${name}" 2>/dev/null || true
+            fi
+            head="$(git symbolic-ref --short -q HEAD 2>/dev/null || true)"
+            case "${head}" in
+                pi/*) ;;
+                *) log_error "git guard: could not switch to ${name} (from '${head:-detached HEAD}'); pi will have to create a pi/* branch before it can write." ;;
+            esac ;;
+    esac
+    GG_MODE=on; GG_BRANCH="${head}"
+    export LETS_CODE_GIT_GUARD_ON=1
+}
+
+# The pi extension that enforces the rule. Inert unless LETS_CODE_GIT_GUARD_ON=1.
+# Rewritten when its content changes.
+pi_write_gitguard_extension() {
+    local dir="${PI_AGENT_DIR}/extensions" f tmp
+    f="${dir}/lets-code-gitguard.ts"
+    mkdir -p "${dir}"
+    tmp="$(mktemp "${dir}/.lets-code-gitguard.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (git guard); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code with the git guard on
+// (LETS_CODE_GIT_GUARD_ON=1). Blocks edit/write/bash while the target repo's
+// HEAD is not on a pi/* branch. Reads .git/HEAD from disk: no subprocess, no
+// prompt text, no tokens unless a call is actually blocked.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readFileSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+
+const ACTIVE = process.env.LETS_CODE_GIT_GUARD_ON === "1";
+const PREFIX = "pi/";
+
+const read = (p: string): string | null => { try { return readFileSync(p, "utf8"); } catch { return null; } };
+const isDir = (p: string): boolean => { try { return statSync(p).isDirectory(); } catch { return false; } };
+const isFile = (p: string): boolean => { try { return statSync(p).isFile(); } catch { return false; } };
+
+// Nearest enclosing git dir of `start` (handles `.git` files of worktrees/submodules).
+function gitDirOf(start: string): string | null {
+	let d = resolve(start);
+	for (let i = 0; i < 64; i++) {
+		const g = join(d, ".git");
+		if (isDir(g)) return g;
+		if (isFile(g)) {
+			const m = /^gitdir:\s*(.+)\s*$/m.exec(read(g) ?? "");
+			if (m) return isAbsolute(m[1]) ? m[1] : resolve(d, m[1]);
+		}
+		const up = dirname(d);
+		if (up === d) return null;
+		d = up;
+	}
+	return null;
+}
+
+// Branch HEAD points at, "" when detached, null when not a repo.
+function branchOf(start: string): string | null {
+	const g = gitDirOf(start);
+	if (!g) return null;
+	// A worktree's HEAD lives in its own gitdir; the main repo's in .git/HEAD.
+	const head = read(join(g, "HEAD")) ?? "";
+	const m = /^ref:\s*refs\/heads\/(.+?)\s*$/.exec(head);
+	return m ? m[1] : "";
+}
+
+// Git commands pi may run while off-branch: inspect state, stash, and switch.
+const GIT_OK = /^\s*git\s+(switch|checkout|branch|status|stash|log|diff|show|rev-parse|symbolic-ref|fetch|remote\s+-v|worktree\s+list)\b/;
+// Branch creation: `git switch -c NAME`, `git checkout -b NAME` (and -C/-B).
+const GIT_NEW = /\bgit\s+(?:switch\s+(?:.*\s)?-[cC]|checkout\s+(?:.*\s)?-[bB])\s+(\S+)/;
+
+// Block reasons are the only text the model ever sees from this guard, and
+// only when a call is blocked, so they are kept to one short line.
+function reason(branch: string): string {
+	const state = branch === "" ? "detached HEAD" : `branch '${branch}'`;
+	return `git guard: HEAD is on ${state}; work only on a ${PREFIX}* branch. Run \`git switch -c ${PREFIX}<topic>\` (changes come along), then retry.`;
+}
+
+export default function (pi: ExtensionAPI) {
+	if (!ACTIVE) return;
+
+	pi.on("tool_call", async (event, ctx) => {
+		const input = event.input as Record<string, unknown>;
+		let target: string;
+		switch (event.toolName) {
+			case "edit": case "write": {
+				const p = String(input.path ?? "");
+				target = dirname(isAbsolute(p) ? p : resolve(ctx.cwd, p));
+				break;
+			}
+			case "bash": case "powershell": target = ctx.cwd; break;
+			default: return undefined;  // read-only tools and custom tools are never blocked
+		}
+		const branch = branchOf(target);
+		if (branch === null) return undefined;  // not a git repo: nothing to protect
+
+		if (event.toolName === "bash" || event.toolName === "powershell") {
+			const cmd = String(input.command ?? "");
+			// Naming is enforced even on a pi/* branch: new branches must be pi/* too.
+			const nb = GIT_NEW.exec(cmd)?.[1];
+			if (nb && !nb.startsWith(PREFIX)) {
+				return { block: true, reason: `git guard: new branches must be named ${PREFIX}<topic>; use \`git switch -c ${PREFIX}${nb}\`.` };
+			}
+			if (branch.startsWith(PREFIX)) return undefined;
+			return GIT_OK.test(cmd) ? undefined : { block: true, reason: reason(branch) };
+		}
+		return branch.startsWith(PREFIX) ? undefined : { block: true, reason: reason(branch) };
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+}
+
 # ------------------------------------------------------------ harness gating
 # v1 implements exactly one harness (pi). The others are roadmap items and
 # must fail loudly rather than silently fall back or misconfigure.
@@ -756,6 +898,10 @@ run_setup() {
             echo "# Memory guard (Linux): when the machine runs low on RAM, stop the"
             echo "# largest process this session started. MEM_GUARD=false disables it."
             echo "MEM_GUARD=\"true\""
+            echo ""
+            echo "# Git guard: in a git repo, work on a pi/* branch (created at launch);"
+            echo "# edits off such a branch are blocked. GIT_GUARD=false disables it."
+            echo "GIT_GUARD=\"true\""
         } > "${CONFIG_FILE}"
         chmod 600 "${CONFIG_FILE}"
     }
@@ -934,6 +1080,7 @@ VISION=""
 REASONING=""
 THINKING=""
 MEM_GUARD="true"
+GIT_GUARD="true"
 # shellcheck disable=SC1090
 [ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
 ENDPOINTS="${LETS_CODE_ENDPOINTS:-${ENDPOINTS}}"
@@ -947,6 +1094,7 @@ VISION="${LETS_CODE_VISION:-${VISION}}"
 REASONING="${LETS_CODE_REASONING:-${REASONING}}"
 THINKING="${LETS_CODE_THINKING:-${THINKING}}"
 MEM_GUARD="${LETS_CODE_MEM_GUARD:-${MEM_GUARD}}"
+GIT_GUARD="${LETS_CODE_GIT_GUARD:-${GIT_GUARD}}"
 
 HARNESS="pi"
 URL_OVERRIDE=""
@@ -980,6 +1128,7 @@ while [ $# -gt 0 ]; do
                           THINKING_OVERRIDE="$2"; shift 2 ;;
         --insecure) INSECURE=true; shift ;;
         --no-mem-guard) MEM_GUARD=false; shift ;;
+        --no-git-guard) GIT_GUARD=false; shift ;;
         --verbose|--debug) VERBOSE=true; shift ;;
         -h|--help)  sed -n "3,$(grep -n '^# (auto-installed on request)\.$' "$0" | cut -d: -f1)p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          PASSTHROUGH+=("$1"); shift ;;
@@ -1140,7 +1289,15 @@ case "${MG_MODE}" in
          MG_DESC="memory guard is on" ;;
 esac
 
-log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING}  api: ${API}  ${MG_DESC}"
+GG_BRANCH=""
+git_guard_plan
+case "${GG_MODE}" in
+    off) GG_DESC="git guard is off (${GG_NOTE})" ;;
+    *)   pi_write_gitguard_extension
+         GG_DESC="git guard: ${GG_BRANCH:-no pi/* branch yet}" ;;
+esac
+
+log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING}  api: ${API}  ${MG_DESC}  ${GG_DESC}"
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
     mem_guard_exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
 else

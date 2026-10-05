@@ -707,7 +707,7 @@ pi_write_gitguard_extension() {
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile, execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const ACTIVE = process.env.LETS_CODE_GIT_GUARD_ON === "1";
@@ -738,6 +738,9 @@ function realPath(p: string, cwd: string): string {
 const realDir = (p: string, cwd: string): string => { const r = realPath(p, cwd); return isDir(r) ? r : dirname(r); };
 const within = (p: string, dir: string): boolean => { const r = relative(dir, p); return r === "" || (!r.startsWith("..") && !isAbsolute(r)); };
 const isRoot = (p: string) => dirname(p) === p;
+// Shell glob -> RegExp (*, ?, [..], [!..]).
+const globRe = (pat: string) => new RegExp("^" + pat.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".").replace(/\[!/g, "[^") + "$");
+const hasGlob = (s: string) => /[*?[]/.test(s);
 
 // ================================================================ repo state
 type Repo = { top: string; gitdir: string; branch: string; op: string | null };  // branch "" = detached
@@ -777,20 +780,22 @@ const onPi = (r: Repo | null) => r === null || isPi(r.branch);  // no repo = not
 const inGitDir = (p: string, r: Repo | null) => !!r && (within(p, r.gitdir) || p.split(sep).includes(".git"));
 
 // ================================================================ shell lexing
-type Simple = { argv: string[]; writes: string[] };  // argv "(" / ")" mark subshells
+// argv "(" / ")" mark subshells. writes: redirection targets. stdin: text fed
+// to the command (heredoc or here-string), or "|" when piped from another one.
+type Simple = { argv: string[]; writes: string[]; stdin?: string };
 const RESERVED = new Set(["if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "in", "case", "esac", "!", "time", "coproc", "function", "select", "[[", "]]"]);
 
 // Splits a bash command line into the simple commands it would run, quotes
-// removed. $(..), backticks, sh -c strings and eval are lexed too (they run as
-// well). Heredoc bodies are data and skipped, except that an unquoted heredoc's
-// $(..) substitutions run, so those are lexed. {a,b} is expanded one level.
-// Unknown constructs degrade to "a word", never to "nothing".
+// removed. $(..), backticks and <(..) are lexed too (they run as well).
+// Heredoc bodies are attached as stdin: data for most commands, a script for
+// a shell. {a,b} is expanded one level. Unknown constructs degrade to "a
+// word", never to "nothing".
 function lex(src: string, out: Simple[] = []): Simple[] {
-	let cur: Simple = { argv: [], writes: [] }, word = "", hasWord = false;
-	const heredocs: { delim: string; quoted: boolean }[] = [];
+	let cur: Simple = { argv: [], writes: [] }, word = "", hasWord = false, piped = false;
+	const heredocs: { delim: string; quoted: boolean; owner: Simple }[] = [];
 	const endWord = () => { if (hasWord) { for (const w of braces(word)) cur.argv.push(w); } word = ""; hasWord = false; };
-	const endCmd = () => { endWord(); if (cur.argv.length || cur.writes.length) out.push(cur); cur = { argv: [], writes: [] }; };
-	const matching = (i: number, close: string): number => {  // index after the `)` matching the `(` at i
+	const endCmd = () => { endWord(); if (piped) { cur.stdin ??= "|"; piped = false; } if (cur.argv.length || cur.writes.length) out.push(cur); cur = { argv: [], writes: [] }; };
+	const matching = (i: number): number => {  // index after the `)` matching the `(` at i
 		let depth = 0, q: string | null = null;
 		for (let j = i; j < src.length; j++) {
 			const c = src[j];
@@ -798,13 +803,13 @@ function lex(src: string, out: Simple[] = []): Simple[] {
 			if (c === "'" || c === '"') q = c;
 			else if (c === "\\") j++;
 			else if (c === "(") depth++;
-			else if (c === close && --depth === 0) return j + 1;
+			else if (c === ")" && --depth === 0) return j + 1;
 		}
 		return src.length;
 	};
 	const subst = (i: number): number => {  // $(..) or `..` at i: lex inner, keep raw text in the word; returns index after
 		if (src[i] === "`") { const e = src.indexOf("`", i + 1); const end = e < 0 ? src.length : e; lex(src.slice(i + 1, end), out); word += src.slice(i, end + 1); return end + 1; }
-		const e = matching(i + 1, ")"); lex(src.slice(i + 2, e - 1), out); word += src.slice(i, e); return e;
+		const e = matching(i + 1); lex(src.slice(i + 2, e - 1), out); word += src.slice(i, e); return e;
 	};
 	for (let i = 0; i < src.length; i++) {
 		const c = src[i];
@@ -827,35 +832,42 @@ function lex(src: string, out: Simple[] = []): Simple[] {
 		if (c === "#" && !hasWord) { const e = src.indexOf("\n", i); i = e < 0 ? src.length : e - 1; continue; }
 		if (c === "\n" || c === "\r") {
 			endCmd();
-			while (heredocs.length) {  // skip heredoc bodies that start after this line
-				const { delim, quoted } = heredocs.shift()!;
-				let j = i + 1;
+			while (heredocs.length) {  // heredoc bodies start after this line
+				const { delim, quoted, owner } = heredocs.shift()!;
+				let j = i + 1, body = "";
 				for (;;) {
 					const e = src.indexOf("\n", j); const line = src.slice(j, e < 0 ? src.length : e);
 					if (line.replace(/^\t+/, "") === delim || e < 0) { i = e < 0 ? src.length : e; break; }
 					if (!quoted) for (const m of line.matchAll(/\$\(|`/g)) { subst(j + m.index!); word = ""; hasWord = false; }  // substitutions in an unquoted body run
-					j = e + 1;
+					body += line + "\n"; j = e + 1;
 				}
+				owner.stdin = body;
 			}
 			continue;
 		}
 		if (c === "(" && src[i + 1] !== ")") { endCmd(); out.push({ argv: ["("], writes: [] }); continue; }
 		if (c === ")") { endCmd(); out.push({ argv: [")"], writes: [] }); continue; }
-		if (c === ";" || c === "|" || (c === "&" && src[i + 1] !== ">")) { endCmd(); if ((c === "&" || c === "|" || c === ";") && src[i + 1] === c) i++; if (c === "|" && src[i + 1] === "&") i++; continue; }
+		if (c === ";" || c === "|" || (c === "&" && src[i + 1] !== ">")) {
+			const pipe = c === "|" && src[i + 1] !== "|";
+			endCmd(); piped = pipe;
+			if ((c === "&" || c === "|" || c === ";") && src[i + 1] === c) i++;
+			if (c === "|" && src[i + 1] === "&") i++;
+			continue;
+		}
 		if ((c === "{" || c === "}") && !hasWord && (i + 1 >= src.length || /[\s;&|]/.test(src[i + 1]))) { endCmd(); continue; }  // group braces
 		if (c === "<" || c === ">" || c === "&") {
 			if (hasWord && /^\d+$/.test(word)) { word = ""; hasWord = false; } else endWord();  // a bare fd number belongs to the redirection
 			let j = i; while (j < src.length && "<>&|".includes(src[j])) j++;
 			const op = src.slice(i, j);
-			if (op.startsWith("<<") && !op.startsWith("<<<")) {  // heredoc: remember the delimiter, body skipped at the next newline
-				while (src[j] === " " || src[j] === "-" || src[j] === "\t") j++;
+			while (src[j] === " " || src[j] === "\t") j++;
+			if (op.startsWith("<<") && !op.startsWith("<<<")) {  // heredoc: remember the delimiter, body attached at the next newline
+				while (src[j] === "-" || src[j] === " ") j++;
 				let d = ""; const q = src[j] === "'" || src[j] === '"' ? src[j] : null;
 				if (q) { const e = src.indexOf(q, j + 1); d = src.slice(j + 1, e < 0 ? src.length : e); j = e < 0 ? src.length : e + 1; }
-				else { while (j < src.length && !/\s/.test(src[j])) d += src[j++]; }
-				heredocs.push({ delim: d.replace(/\\/g, ""), quoted: q !== null || d.includes("\\") }); i = j - 1; continue;
+				else { while (j < src.length && !/[\s;&|<>()]/.test(src[j])) d += src[j++]; }
+				heredocs.push({ delim: d.replace(/\\/g, ""), quoted: q !== null || d.includes("\\"), owner: cur }); i = j - 1; continue;
 			}
-			while (src[j] === " " || src[j] === "\t") j++;
-			if (src[j] === "(") { const e = matching(j, ")"); lex(src.slice(j + 1, e - 1), out); i = e - 1; continue; }  // process substitution
+			if (src[j] === "(") { const e = matching(j); lex(src.slice(j + 1, e - 1), out); i = e - 1; continue; }  // process substitution
 			let t = "", q: string | null = null;
 			for (; j < src.length; j++) {
 				const ch = src[j];
@@ -864,8 +876,8 @@ function lex(src: string, out: Simple[] = []): Simple[] {
 				if (/[\s;&|<>()]/.test(ch)) break;
 				t += ch;
 			}
-			const input = op.startsWith("<"), dup = op.endsWith("&") || t.startsWith("&");  // <file, 2>&1, >&2
-			if (!input && !dup && t && t !== "/dev/null") cur.writes.push(t);
+			if (op.startsWith("<<<")) cur.stdin = t + "\n";  // here-string
+			else if (!op.startsWith("<") && !op.endsWith("&") && !t.startsWith("&") && t && t !== "/dev/null") cur.writes.push(t);  // not 2>&1, >&2, <file
 			i = j - 1; continue;
 		}
 		if (c === " " || c === "\t") { endWord(); continue; }
@@ -881,15 +893,19 @@ function braces(w: string): string[] {
 	return m[2].split(",").flatMap((alt) => braces(m[1] + alt + m[3]));
 }
 
-// ================================================================ words: variables and ~
+// ================================================================ words: variables, ~, $(..)
 type Env = Record<string, string>;
-const UNRESOLVED = "\0";  // marker: a $VAR we do not know
+const UNRESOLVED = "\0";  // marker: an expansion we do not know
+// Expands what can be known: ~, $PWD/$HOME/$TMPDIR, variables assigned earlier
+// in the call (with or without ${..} modifiers), $(pwd), $(mktemp [-d]) (a fresh
+// path under the temp dir: never a repo), $(git rev-parse --show-toplevel).
 function expand(w: string, vars: Env, cwd: string): string {
-	let s = w.replace(/\$\{([A-Za-z_]\w*)(?::?[-=?+]([^}]*))?\}|\$([A-Za-z_]\w*)|\$\((pwd)\)/g, (_, b, def, n, pwd) => {
+	let s = w.replace(/\$\{([A-Za-z_]\w*)(?::?[-=?+]([^}]*)|[#%/^,][^}]*)?\}|\$([A-Za-z_]\w*)|\$\(\s*(pwd|mktemp(?:\s+-d)?|git\s+rev-parse\s+--show-toplevel)\s*\)/g, (_, b, def, n, cmd) => {
+		if (cmd) return cmd === "pwd" ? cwd : cmd.startsWith("mktemp") ? join(tmpdir(), "lets-code-unknown-tmp") : repoOf(cwd)?.top ?? cwd;
 		const name = b ?? n;
-		if (pwd) return cwd;
 		if (name === "PWD") return cwd;
 		if (name === "HOME") return homedir();
+		if (name === "TMPDIR") return process.env.TMPDIR ?? tmpdir();
 		if (name in vars) return vars[name];
 		return def !== undefined ? def : UNRESOLVED;
 	});
@@ -900,26 +916,31 @@ const unresolved = (s: string) => s.includes(UNRESOLVED);
 
 // ================================================================ wrappers
 // Commands that run their arguments. Per wrapper: short flags that take a value.
-const WRAPPERS: Record<string, string> = { env: "uCS", sudo: "ugpChUrtT", doas: "u", command: "", exec: "a", builtin: "", nice: "n", nohup: "", time: "f", timeout: "sk", xargs: "nIPLsdaE", stdbuf: "ioe", chronic: "", caffeinate: "t", setsid: "", unbuffer: "", ionice: "cn", chrt: "p", flock: "wE", strace: "oe", ltrace: "o" };
-function unwrap(argv: string[], vars: Env): { argv: string[]; env: Env; script?: string } {
+const WRAPPERS: Record<string, string> = { env: "uCS", sudo: "ugpChUrtT", doas: "u", command: "", exec: "a", builtin: "", nice: "n", nohup: "", time: "f", timeout: "sk", xargs: "nIPLsdaE", stdbuf: "ioe", chronic: "", caffeinate: "t", setsid: "", unbuffer: "", ionice: "cn", chrt: "p", flock: "wE", strace: "oe", ltrace: "o", watch: "n", script: "c" };
+const WRAP_LONG = /^--(signal|kill-after|user|group|host|prompt|unset|chdir|max-args|max-procs|replace|delimiter|arg-file|eof|max-lines|max-chars|adjustment|output|input|error|interval|command)$/;
+const SHELLS = /^(sh|bash|zsh|dash|ksh)$/;
+// Strips wrappers and VAR=val; a shell with -c, a shell fed a script on stdin,
+// or eval yields `script` instead (to be lexed), "|" when the script is piped in.
+function unwrap(cmd: Simple): { argv: string[]; env: Env; script?: string } {
 	const env: Env = {};
-	let a = argv.slice();
+	let a = cmd.argv.slice();
 	for (let guard = 0; guard < 8 && a.length; guard++) {
 		while (a.length && /^[A-Za-z_]\w*=/.test(a[0])) { const i = a[0].indexOf("="); env[a[0].slice(0, i)] = a[0].slice(i + 1); a.shift(); }
 		if (!a.length) break;
 		const w = basename(a[0]);
-		if (/^(sh|bash|zsh|dash|ksh)$/.test(w)) {  // bash -c 'script' (also bundled -lc / -xc)
+		if (SHELLS.test(w)) {
 			const i = a.findIndex((x, k) => k > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x));
 			if (i > 0) return { argv: [], env, script: a[i + 1] ?? "" };
+			if (!a.slice(1).some((x) => !x.startsWith("-"))) return { argv: [], env, script: cmd.stdin ?? "" };  // no script file: stdin is the script
 		}
 		if (w === "eval") return { argv: [], env, script: a.slice(1).join(" ") };
 		if (!(w in WRAPPERS)) break;
 		const valued = WRAPPERS[w]; a.shift();
 		while (a.length && a[0].startsWith("-") && a[0] !== "--") {
 			const f = a.shift()!;
-			if (f.startsWith("--")) { if (!f.includes("=") && /^--(signal|kill-after|user|group|host|prompt|unset|chdir|max-args|max-procs|replace|delimiter|arg-file|eof|max-lines|max-chars|adjustment|output|input|error)$/.test(f)) a.shift(); }
+			if (f.startsWith("--")) { if (WRAP_LONG.test(f)) a.shift(); }
 			else if (f.length === 2 && valued.includes(f[1])) a.shift();            // -n 5
-			else if (f.length > 2 && valued.includes(f[1]) && !/^-[a-zA-Z]+$/.test(f)) { /* -n5: value attached */ }
+			else if (f.length > 2 && valued.includes(f[1]) && !/^-[a-zA-Z]+$/.test(f)) { /* -n5 */ }
 			else if (f.length > 2 && valued.includes(f[f.length - 1])) a.shift();  // -0n 5
 		}
 		if (a[0] === "--") a.shift();
@@ -951,20 +972,21 @@ function gitRepo(g: Git): Repo | null {
 	if (g.worktree) return repoOf(realDir(expandTilde(g.worktree), g.dir));
 	return repoOf(g.dir);
 }
-// [alias] entries from the repo, the user and the command line (-c alias.x=..).
-function aliasOf(name: string, repo: Repo | null, cli: Env): string | null {
+// Aliases as git itself resolves them (repo, user, system, includes), once per call.
+function aliasOf(name: string, dir: string, cli: Env, cache: Map<string, Env>): string | null {
 	if (name in cli) return cli[name];
-	const files = [repo ? join(commonDir(repo), "config") : null, join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "git/config"), join(homedir(), ".gitconfig")];
-	for (const f of files) {
-		const m = f && new RegExp(`^\\[alias\\][^[]*?^\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*=\\s*(.+?)\\s*$`, "ms").exec(read(f) ?? "");
-		if (m) return m[1].replace(/^"(.*)"$/, "$1");
+	if (!cache.has(dir)) {
+		const table: Env = {};
+		try { for (const line of execFileSync("git", ["-C", dir, "config", "--get-regexp", "^alias\\."], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).toString().split("\n")) { const m = /^alias\.(\S+) (.*)$/.exec(line); if (m) table[m[1]] = m[2]; } } catch { /* no aliases or no git */ }
+		cache.set(dir, table);
 	}
-	return null;
+	return cache.get(dir)![name] ?? null;
 }
 
 // Options we act on, per verb. `--prefix` abbreviations git would accept
 // (any unique prefix) are canonicalised against this list, conservatively:
 // a prefix of several listed options maps to the first, which fails closed.
+// Real options that are prefixes of listed ones must be listed too (--unset).
 const LONG: Record<string, string[]> = {
 	push: ["--force", "--force-with-lease", "--force-if-includes", "--delete", "--mirror", "--prune", "--all", "--tags", "--set-upstream"],
 	branch: ["--delete", "--force", "--move", "--copy", "--list", "--all", "--remotes", "--show-current", "--verbose", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--set-upstream-to", "--unset-upstream", "--edit-description", "--track"],
@@ -973,9 +995,9 @@ const LONG: Record<string, string[]> = {
 	switch: ["--force", "--discard-changes", "--force-create", "--create", "--detach", "--track", "--orphan", "--merge"],
 	restore: ["--staged", "--worktree", "--source", "--patch"],
 	clean: ["--force", "--dry-run"],
-	stash: [], tag: ["--delete", "--force"], worktree: ["--force", "--detach"], gc: ["--prune"], reflog: ["--expire"],
-	rm: ["--force", "--cached"], config: ["--unset-all", "--remove-section", "--get", "--get-all", "--get-regexp", "--list"],
-	merge: ["--abort", "--continue", "--quit"], rebase: ["--abort", "--continue", "--skip", "--quit", "--edit-todo", "--show-current-patch"],
+	stash: ["--include-untracked", "--all"], tag: ["--delete", "--force"], worktree: ["--force", "--detach"], gc: ["--prune"], reflog: ["--expire"],
+	rm: ["--force", "--cached"], config: ["--unset", "--unset-all", "--remove-section", "--get", "--get-all", "--get-regexp", "--list"],
+	merge: ["--abort", "--continue", "--quit"], rebase: ["--abort", "--continue", "--skip", "--quit", "--edit-todo", "--show-current-patch", "--onto"],
 	"cherry-pick": ["--abort", "--continue", "--skip", "--quit"], revert: ["--abort", "--continue", "--skip", "--quit"], am: ["--abort", "--continue", "--skip", "--quit", "--show-current-patch"],
 	remote: ["--verbose"], log: ["--output"], diff: ["--output"], show: ["--output"], fetch: [],
 };
@@ -1004,29 +1026,35 @@ const plainPos = (f: Flags) => f.pos.map((p) => p.replace(/^--:/, ""));
 
 // The branch a git command creates or renames to (null if none).
 function createdBranch(g: Git): string | null {
-	const f = flagsOf(g.args, g.verb), { flags, pos, val } = f;
+	const { flags, pos, val } = flagsOf(g.args, g.verb);
 	const track = () => (has(flags, "-t", "--track") && pos[0] ? pos[0].replace(/^[^/]+\//, "") : null);
 	switch (g.verb) {
-		case "switch": for (const o of ["-c", "-C", "--create", "--force-create", "--orphan"]) if (flags.has(o)) return val(o) ?? pos[0] ?? "?"; return track();
-		case "checkout": for (const o of ["-b", "-B", "--orphan"]) if (flags.has(o)) return val(o) ?? pos[0] ?? "?"; return track();
+		case "switch": for (const o of ["-c", "-C", "--create", "--force-create", "--orphan"]) if (flags.has(o)) return val(o) ?? pos[0] ?? null; return track();
+		case "checkout": for (const o of ["-b", "-B", "--orphan"]) if (flags.has(o)) return val(o) ?? pos[0] ?? null; return track();
 		case "branch":
 			if (has(flags, "-d", "-D", "--delete", "-l", "--list", "-a", "-r", "--all", "--remotes", "--show-current", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "-v", "--verbose", "--edit-description", "-u", "--set-upstream-to", "--unset-upstream")) return null;
 			if (has(flags, "-m", "-M", "--move", "-c", "-C", "--copy")) return pos[pos.length - 1] ?? null;
 			return pos[0] ?? null;
+		case "stash": return pos[0] === "branch" ? pos[1] ?? null : null;
 		case "worktree":
 			if (pos[0] !== "add") return null;
-			for (const o of ["-b", "-B"]) if (flags.has(o)) return val(o) ?? "?";
+			for (const o of ["-b", "-B"]) if (flags.has(o)) return val(o) ?? null;
 			return has(flags, "--detach", "-d") || pos.length !== 2 ? null : basename(pos[1]);  // `worktree add PATH`: implicit branch
 		default: return null;
 	}
 }
-// The branch a `switch`/`checkout` moves HEAD to (null if none).
-function switchedTo(g: Git): string | null {
-	if (g.verb !== "switch" && g.verb !== "checkout") return null;
-	const created = createdBranch(g); if (created !== null) return created;
+// Where a git command leaves HEAD afterwards: a branch ("" = detached), or null if unmoved.
+function movesHeadTo(g: Git, repo: Repo | null): string | null {
+	const created = createdBranch(g); if (created !== null && g.verb !== "worktree" && g.verb !== "branch") return created;
 	const { flags, pos } = flagsOf(g.args, g.verb);
-	if (has(flags, "--detach", "-d") || g.args.includes("--")) return "";
-	return pos.length === 1 && pos[0] !== "-" ? pos[0] : null;
+	switch (g.verb) {
+		case "switch": case "checkout":
+			if (has(flags, "--detach", "-d")) return "";
+			if (g.args.includes("--") || has(flags, "--ours", "--theirs", "-p", "--patch") || pos.length !== 1 || pos[0] === "-") return null;  // paths, not a branch
+			return branchExists(repo, pos[0]) || !exists(realPath(pos[0], g.dir)) ? pos[0] : null;
+		case "rebase": return pos.length === 2 ? pos[1] : null;  // `rebase <upstream> <branch>` checks <branch> out
+		default: return null;
+	}
 }
 
 // Irreversible git commands, refused on every branch. Returns what to name.
@@ -1044,12 +1072,11 @@ function destructiveGit(g: Git, repo: Repo | null): string | null {
 		case "fetch":  // a refspec whose destination is a local non-pi/* branch rewrites it
 			for (const p of plain) { const dst = p.split(":")[1]; if (dst && (!dst.startsWith("refs/") || dst.startsWith("refs/heads/")) && !isPi(dst.replace(/^refs\/heads\//, ""))) return `fetch ${p}`; }
 			return null;
-		case "branch":
-			if (has(flags, "-D", "-f", "--force", "-M")) return "branch -D/-f/-M";
-			return null;
+		case "branch": return has(flags, "-D", "-f", "--force", "-M") ? "branch -D/-f/-M" : null;
 		case "reset": return has(flags, "--hard", "--merge") ? "reset --hard" : null;
 		case "checkout": {
-			if (has(flags, "-f", "--force", "-B", "-p", "--patch", "--ours", "--theirs")) return "checkout -f/-B/--patch";
+			if (has(flags, "-f", "--force", "-B", "-p", "--patch")) return "checkout -f/-B/--patch";
+			if (has(flags, "--ours", "--theirs")) return repo?.op ? null : "checkout --ours/--theirs";  // conflict resolution only during a merge/rebase
 			if (g.args.includes("--")) return "checkout -- <path>";
 			if (has(flags, "-b", "--orphan", "-t", "--track", "--detach", "-d")) return null;
 			if (plain.length >= 2) return "checkout <ref> <path>";
@@ -1088,23 +1115,23 @@ function allowedOffBranch(g: Git, repo: Repo): boolean {
 		case "bisect": return true;
 		case "merge": case "rebase": case "cherry-pick": case "revert": case "am":
 			return repo.op !== null && has(flags, "--abort", "--continue", "--skip", "--quit", "--show-current-patch", "--edit-todo");
-		case "switch": case "checkout": { const to = switchedTo(g); return to !== null && isPi(to); }
+		case "switch": case "checkout": { const to = movesHeadTo(g, repo); return to !== null && isPi(to); }
 		default: return !flags.has("--output");
 	}
 }
 
-// ================================================================ rm / mv / find
+// ================================================================ removal
 // Would removing `p` (recursively or not) take a repo, .git, or the tree we work in?
 function lethalPath(p: string, cwd: string, recursive: boolean): boolean {
-	const glob = /[*?[]/.test(p);
+	const glob = hasGlob(p);
 	const target = realPath(glob ? dirname(p) : p, cwd);
 	const repo = repoOf(target);
 	if (glob) {
 		if (!recursive) return false;
 		if (target === homedir() || isRoot(target) || (repo && within(target, repo.gitdir))) return true;
-		const pat = basename(p), re = new RegExp("^" + pat.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".").replace(/\[!/g, "[^") + "$");
+		const pat = basename(p), re = globRe(pat);
 		if (repo?.top === target) return re.test(".git") || pat === "*";             // at the repo top: .git, or everything
-		return within(cwd, target) && re.test(basename(cwd.slice(target.length + 1).split(sep)[0] ?? ""));  // an ancestor: the dir that leads to us
+		return within(cwd, target) && re.test(cwd.slice(target.length + 1).split(sep)[0] ?? "");  // an ancestor: the dir that leads to us
 	}
 	if (basename(target) === ".git") return true;
 	if (recursive && (target === homedir() || isRoot(target))) return true;
@@ -1112,17 +1139,28 @@ function lethalPath(p: string, cwd: string, recursive: boolean): boolean {
 	if (within(target, repo.gitdir)) return !/\.lock$/.test(target);                 // inside .git, except stale locks
 	return recursive && (within(repo.top, target) || within(cwd, target));
 }
-function globMatchesGit(pat: string): boolean {
-	const re = new RegExp("^" + pat.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".").replace(/\[!/g, "[^") + "$");
-	return re.test(".git") || re.test("./.git") || re.test("*/.git");
+// `find <paths> <expression>` that deletes: which paths are at risk? A test that
+// cannot match .git (-name '*.pyc'), placed before the action and not negated,
+// makes it safe; so does pruning .git (-name .git -prune -o ...).
+function findDeletes(args: string[]): { paths: string[]; risky: boolean } | null {
+	const i = args.findIndex((x) => x.startsWith("-") || x === "!" || x === "(");
+	const paths = (i < 0 ? args : args.slice(0, i)).filter((x) => x !== "--"), expr = i < 0 ? [] : args.slice(i);
+	const action = expr.findIndex((x, k) => x === "-delete" || (/^-exec(dir)?$/.test(x) && /^(rm|shred|unlink)$/.test(basename(expr[k + 1] ?? ""))));
+	if (action < 0) return null;
+	const before = expr.slice(0, action);
+	const prunesGit = before.some((x, k) => /^-i?(name|path|wholename)$/.test(x) && /^(\.\/)?\.git$/.test(before[k + 1] ?? "") && before[k + 2] === "-prune");
+	const filters = before.filter((x, k) => /^-i?(name|path|regex|wholename)$/.test(before[k - 1] ?? "") && before[k - 2] !== "!" && before[k - 2] !== "-not" && before[k + 1] !== "-prune");
+	const risky = !prunesGit && (!filters.length || filters.some((f) => { const re = globRe(f); return re.test(".git") || re.test("./.git") || re.test("*/.git"); }));
+	return { paths: paths.length ? paths : ["."], risky };
 }
 
 // ================================================================ reasons
 // Block reasons are the only text the model ever sees from this guard, and
 // only when a call is blocked, so they are kept to one short line.
 const clip = (s: string, n = 60) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
-const offBranch = (r: Repo) => {
+const offBranch = (r: Repo, via?: string) => {
 	const where = r.branch === "" ? "detached HEAD" : `branch '${clip(r.branch)}'`;
+	if (via) return `git guard: after \`${clip(via, 40)}\` the rest of this command would run on ${where}, not a ${PREFIX}* branch; stay on the ${PREFIX}* branch.`;
 	if (r.op) return `git guard: a ${r.op} is in progress on ${where}, not a ${PREFIX}* branch; finish or abort it (git ${r.op} --continue|--abort) first.`;
 	return `git guard: HEAD is on ${where}; work only on a ${PREFIX}* branch. Run \`git switch -c ${PREFIX}<topic>\` (changes come along), then retry.`;
 };
@@ -1130,45 +1168,67 @@ const destructive = (what: string) => `git guard: '${clip(what)}' refused, it wo
 const badName = (n: string) => `git guard: new branches must be named ${PREFIX}<topic>; use \`git switch -c ${PREFIX}${clip(n.replace(/^refs\/heads\//, ""), 40)}\`.`;
 const gitDirWrite = () => `git guard: writing inside .git is refused; use git commands instead.`;
 const unknownTarget = (what: string) => `git guard: cannot tell what '${clip(what, 40)}' refers to ($VAR, $(..) or stdin); use a literal path.`;
+const stdinScript = (sh: string) => `git guard: a script piped into ${sh} cannot be checked; use ${sh} -c '...' or a heredoc.`;
 const tooLong = () => `git guard: too many commands in one call (> ${MAX_CMDS}); split it up.`;
 
 // ================================================================ judging a bash call
 type Verdict = { block: true; reason: string } | undefined;
-const READONLY = new Set(["cat", "ls", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ag", "wc", "diff", "file", "stat", "pwd", "echo", "printf", "true", "false", "test", "[", "which", "type", "du", "df", "tree", "sort", "uniq", "cut", "tr", "awk", "jq", "yq", "md5sum", "sha256sum", "basename", "dirname", "realpath", "readlink", "date", "env", "printenv", "id", "whoami", "hostname", "uname", "sleep", "exit", "return", "popd", "dirs", "shift", "export", "local", "declare", "set", "unset", "read", "wait", "seq", "xxd", "od", "strings", "column", "nl", "tac", "rev", "bat", "fd", "find"]);
-const WRITERS: Record<string, "last" | "all" | "sed" | "dd"> = { cp: "last", mv: "last", ln: "last", install: "last", rsync: "last", tee: "all", touch: "all", mkdir: "all", truncate: "all", chmod: "all", chown: "all", sed: "sed", perl: "sed", dd: "dd", tar: "sed", unzip: "sed", patch: "sed" };
+const READONLY = new Set(["cat", "ls", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ag", "wc", "diff", "file", "stat", "pwd", "echo", "printf", "true", "false", "test", "[", "which", "type", "du", "df", "tree", "sort", "uniq", "cut", "tr", "jq", "yq", "md5sum", "sha256sum", "basename", "dirname", "realpath", "readlink", "date", "env", "printenv", "id", "whoami", "hostname", "uname", "sleep", "exit", "return", "popd", "dirs", "shift", "export", "local", "declare", "set", "unset", "read", "wait", "seq", "xxd", "od", "strings", "column", "nl", "tac", "rev", "bat", "fd", "find"]);
+// Commands that write files: which arguments they write to.
+const WRITERS: Record<string, (f: Flags, plain: string[]) => string[]> = {
+	cp: (_, p) => p.slice(-1), mv: (_, p) => p.slice(-1), ln: (_, p) => p.slice(-1), install: (_, p) => p.slice(-1), rsync: (_, p) => p.slice(-1),
+	tee: (_, p) => p, touch: (_, p) => p, mkdir: (_, p) => p, truncate: (_, p) => p, chmod: (_, p) => p, chown: (_, p) => p,
+	dd: (_, p) => p.filter((a) => a.startsWith("of=")).map((a) => a.slice(3)),
+	tar: (f) => has(f.flags, "-x", "--extract") ? [f.val("-C") ?? "."] : [f.val("-f") ?? f.val("--file") ?? ""].filter(Boolean),
+	unzip: (f) => [f.val("-d") ?? "."], patch: () => ["."],
+	sed: (f, p) => has(f.flags, "-i") || [...f.flags].some((x) => x.startsWith("--in-place")) ? p : [],
+	perl: (f, p) => has(f.flags, "-i") ? p : [],
+};
 
 function judgeBash(cmd: string, cwd0: string): Verdict {
 	const cmds = lex(cmd);
 	if (cmds.length > MAX_CMDS) return { block: true, reason: tooLong() };
 	let cwd = realDir(cwd0, cwd0);
-	const vars: Env = {}, stack: string[] = [], dirs: string[] = [];
-	const switched = new Map<string, string>();  // repo top -> branch a `git switch` in this call moved HEAD to
-	const repoAt = (dir: string): Repo | null => { const r = repoOf(dir); if (r && switched.has(r.top)) return { ...r, branch: switched.get(r.top)!, op: null }; return r; };
+	const vars: Env = {}, stack: string[] = [], dirs: string[] = [], aliases = new Map<string, Env>();
+	const moved = new Map<string, { branch: string; via: string }>();  // repo top (or new worktree path) -> where HEAD was moved in this call
+	const repoAt = (dir: string): [Repo | null, string | undefined] => {
+		for (const [top, m] of moved) if (within(dir, top)) return [{ top, gitdir: join(top, ".git"), ...repoOf(top), branch: m.branch, op: null }, m.via];  // a worktree being added may not exist yet
+		return [repoOf(dir), undefined];
+	};
+	const judgeDir = (dir: string, real?: string): Verdict => {
+		const [repo, via] = repoAt(dir);
+		if (real !== undefined && inGitDir(real, repo)) return { block: true, reason: gitDirWrite() };
+		return onPi(repo) ? undefined : { block: true, reason: offBranch(repo!, via) };
+	};
 	const writeTarget = (w: string): Verdict => {
 		const p = expand(piPath(w), vars, cwd);
 		if (unresolved(p) || unresolved(cwd)) return { block: true, reason: unknownTarget(w) };
-		const real = realPath(p, cwd), repo = repoAt(isDir(real) ? real : dirname(real));
-		if (inGitDir(real, repo)) return { block: true, reason: gitDirWrite() };
-		return onPi(repo) ? undefined : { block: true, reason: offBranch(repo!) };
+		const real = realPath(p, cwd);
+		return judgeDir(isDir(real) ? real : dirname(real), real);
 	};
 	const removal = (name: string, raw: string, recursive: boolean): Verdict => {
 		const p = expand(raw.replace(/^--:/, ""), vars, cwd);
 		if (unresolved(p) || unresolved(cwd) || /\{\}/.test(p)) return recursive ? { block: true, reason: unknownTarget(raw) } : undefined;  // $VAR, xargs {}
 		return lethalPath(p, cwd, recursive) ? { block: true, reason: destructive(`${name} ${raw}`) } : undefined;
 	};
+	const splice = (script: string, n: number): Verdict => { const inner = lex(script); if (cmds.length + inner.length > MAX_CMDS) return { block: true, reason: tooLong() }; cmds.splice(n + 1, 0, ...inner); return undefined; };
 
 	for (let n = 0; n < cmds.length; n++) {
 		if (n >= MAX_CMDS) return { block: true, reason: tooLong() };
-		let { argv: raw, writes } = cmds[n];
+		const simple = cmds[n];
+		let raw = simple.argv;
 		if (raw[0] === "(") { stack.push(cwd); continue; }
 		if (raw[0] === ")") { cwd = stack.pop() ?? cwd; continue; }
 		if (raw[0] === "for" && raw[2] === "in" && raw.length === 4) vars[raw[1]] = expand(raw[3], vars, cwd);  // `for d in X`: one value, known
 		while (raw.length && RESERVED.has(raw[0])) raw = raw.slice(1);  // `then rm ...`, `! git ...`
 		if (/^(export|declare|local|typeset|readonly)$/.test(raw[0] ?? "")) raw = raw.slice(1).filter((a) => !a.startsWith("-"));
-		const { argv, env, script } = unwrap(raw, vars);
-		if (script !== undefined) { const inner = lex(script); if (cmds.length + inner.length > MAX_CMDS) return { block: true, reason: tooLong() }; cmds.splice(n + 1, 0, ...inner); continue; }
+		const { argv, env, script } = unwrap({ ...simple, argv: raw });
+		if (script !== undefined) {
+			if (script === "|") return { block: true, reason: stdinScript(basename(raw.find((a) => SHELLS.test(basename(a))) ?? "sh")) };
+			const v = splice(script, n); if (v) return v; continue;
+		}
 		for (const k in env) if (!argv.length) vars[k] = expand(env[k], vars, cwd);  // `D=../main` alone: remembered
-		for (const w of writes) { const v = writeTarget(w); if (v) return v; }
+		for (const w of simple.writes) { const v = writeTarget(w); if (v) return v; }
 		if (!argv.length) continue;
 		const name = basename(argv[0]);
 		if (name === "cd" || name === "pushd") {
@@ -1176,63 +1236,61 @@ function judgeBash(cmd: string, cwd0: string): Verdict {
 			if (name === "pushd") dirs.push(cwd);
 			if (!args.length) cwd = homedir();
 			else if (args[0] === "-") { /* previous dir: keep */ }
-			else { const d = expand(args[0], vars, cwd); cwd = unresolved(d) || /[*?[]/.test(d) ? UNRESOLVED : realDir(d, cwd); }
+			else { const d = expand(args[0], vars, cwd); cwd = unresolved(d) || hasGlob(d) ? UNRESOLVED : realDir(d, cwd); }
 			continue;
 		}
 		if (name === "popd") { cwd = dirs.pop() ?? cwd; continue; }
-		if (unresolved(cwd) && (name === "git" || name in WRITERS || name === "rm" || name === "mv" || name === "find")) return { block: true, reason: unknownTarget("cd target") };
+		if (unresolved(cwd) && (name === "git" || name in WRITERS || /^(rm|mv|find|shred|unlink|rmdir)$/.test(name))) return { block: true, reason: unknownTarget("cd target") };
 		if (name === "git") {
 			let g = parseGit(argv, cwd, env, vars);
 			if (unresolved(g.dir)) return { block: true, reason: unknownTarget("git -C target") };
-			const repo = (() => { const r = gitRepo(g); return r && switched.has(r.top) ? { ...r, branch: switched.get(r.top)!, op: null } : r; })();
-			const alias = g.verb && !INSPECT.has(g.verb) && !(g.verb in LONG) ? aliasOf(g.verb, repo, g.cliAliases) : null;
+			const [repo, via] = (() => { const r = gitRepo(g); return r ? repoAt(r.top) : [null, undefined] as [Repo | null, string | undefined]; })();
+			const alias = g.verb && !INSPECT.has(g.verb) && !(g.verb in LONG) ? aliasOf(g.verb, g.dir, g.cliAliases, aliases) : null;
 			if (alias !== null) {
-				if (alias.startsWith("!")) { cmds.splice(n + 1, 0, ...lex(alias.slice(1) + " " + g.args.join(" "))); continue; }
-				g = { ...g, ...(() => { const a = lex(alias)[0]?.argv ?? []; return { verb: a[0] ?? "", args: [...a.slice(1), ...g.args] }; })() };
+				if (alias.startsWith("!")) { const v = splice(alias.slice(1) + " " + g.args.join(" "), n); if (v) return v; continue; }
+				const a = lex(alias)[0]?.argv ?? []; g = { ...g, verb: a[0] ?? "", args: [...a.slice(1), ...g.args] };
 			}
 			const bad = destructiveGit(g, repo);
 			if (bad) return { block: true, reason: destructive(`git ${bad}`) };
 			const created = createdBranch(g);
 			if (created !== null && !isPi(created)) return { block: true, reason: badName(created) };
-			if (!onPi(repo) && !allowedOffBranch(g, repo!)) return { block: true, reason: offBranch(repo!) };
-			const to = switchedTo(g); if (to !== null && repo) switched.set(repo.top, to);  // the rest of the call runs on that branch
+			if (!onPi(repo) && !allowedOffBranch(g, repo!)) return { block: true, reason: offBranch(repo!, via) };
+			if (repo) {  // the rest of the call runs where this leaves HEAD
+				const to = movesHeadTo(g, repo); if (to !== null) moved.set(repo.top, { branch: to, via: `git ${g.verb} ${to || "--detach"}` });
+				const { pos } = flagsOf(g.args, g.verb);
+				if (g.verb === "worktree" && pos[0] === "add" && pos[1]) moved.set(realPath(pos[1], g.dir), { branch: created ?? pos[2] ?? "", via: `git worktree add` });
+			}
 			continue;
 		}
-		if (name === "rm" || name === "shred" || name === "unlink" || name === "rmdir" || name === "mv") {
+		if (/^(rm|shred|unlink|rmdir|mv)$/.test(name)) {
 			const { flags, pos } = flagsOf(argv.slice(1));
 			const recursive = name === "mv" || name === "rmdir" || has(flags, "-r", "-R", "--recursive");
 			const targets = name === "mv" ? pos.slice(0, -1) : pos;
-			if (!targets.length && recursive) return { block: true, reason: unknownTarget(`${name} (targets from stdin)`) };  // `… | xargs rm -rf`
+			if (!targets.length) {  // targets from stdin (`find … | xargs rm`): judged by the find's tests, as if it deleted
+				const feed = cmds[n - 1], fd = feed?.argv[0] === "find" ? findDeletes([...feed.argv.slice(1), "-delete"]) : null;
+				if (fd && !fd.risky) continue;
+				if (recursive || fd) return { block: true, reason: unknownTarget(`${name} (targets from stdin)`) };
+			}
 			for (const p of targets) { const v = removal(name, p, recursive); if (v) return v; }
 		}
-		if (name === "find") {  // find <paths> ... -delete | -exec rm ...
-			const a = argv.slice(1), i = a.findIndex((x) => x.startsWith("-"));
-			const paths = (i < 0 ? a : a.slice(0, i)).filter((x) => x !== "--"), expr = i < 0 ? [] : a.slice(i);
-			const deletes = expr.includes("-delete") || /^-exec(dir)?$/.test(expr.find((x, k) => /^-exec(dir)?$/.test(x) && /^(rm|shred|unlink)$/.test(basename(expr[k + 1] ?? ""))) ?? "");
-			if (deletes) {
-				const filters = expr.filter((x, k) => /^-i?(name|path|regex|wholename)$/.test(expr[k - 1] ?? ""));
-				const risky = !filters.length || filters.some(globMatchesGit) || expr.includes("-prune") === false && filters.some((f) => /^\.\*|\.\[|\.\?/.test(f));
-				if (risky) for (const p of paths.length ? paths : ["."]) { const v = removal("find -delete", p, true); if (v) return v; }
-				for (const p of paths.length ? paths : ["."]) { const v = writeTarget(p); if (v) return v; }  // deleting is writing
+		if (name === "find") {
+			const k = argv.findIndex((x) => /^-exec(dir)?$/.test(x));
+			if (k > 0 && SHELLS.test(basename(argv[k + 1] ?? ""))) {  // -exec sh -c '…': the script runs too
+				const end = argv.findIndex((x, j) => j > k && (x === ";" || x === "+"));
+				const sub = unwrap({ argv: argv.slice(k + 1, end < 0 ? undefined : end), writes: [] });
+				if (sub.script) { const v = splice(sub.script, n); if (v) return v; }
 			}
+			const fd = findDeletes(argv.slice(1));
+			if (fd) for (const p of fd.paths) { const v = fd.risky ? removal("find -delete", p, true) : writeTarget(p); if (v) return v; }
 		}
 		if (name in WRITERS) {
-			const mode = WRITERS[name], f = flagsOf(argv.slice(1)), plain = plainPos(f);
-			let targets: string[] = [];
-			if (mode === "last") targets = plain.slice(-1);
-			else if (mode === "all") targets = plain;
-			else if (mode === "dd") targets = argv.filter((a) => a.startsWith("of=")).map((a) => a.slice(3));
-			else if (name === "tar") targets = has(f.flags, "-x", "--extract") ? [f.val("-C") ?? "."] : [f.val("-f") ?? f.val("--file") ?? ""].filter(Boolean);
-			else if (name === "unzip") targets = [f.val("-d") ?? "."];
-			else if (name === "patch") targets = ["."];
-			else if (has(f.flags, "-i") || [...f.flags].some((x) => x.startsWith("--in-place"))) targets = plain.filter((p) => exists(realPath(expand(p, vars, cwd), cwd)));  // sed/perl -i
-			for (const t of targets) { const v = writeTarget(t); if (v) return v; }
-			if (name === "rsync" && has(f.flags, "--delete") && plain.length) { const v = removal("rsync --delete", plain[plain.length - 1], true); if (v) return v; }
+			const f = flagsOf(argv.slice(1)), plain = plainPos(f);
+			for (const t of WRITERS[name](f, plain).filter((t) => !(name === "sed" || name === "perl") || exists(realPath(expand(t, vars, cwd), cwd)))) { const v = writeTarget(t); if (v) return v; }
+			if (name === "rsync" && has(f.flags, "--delete") && plain.length && !f.flags.has("--exclude")) { const v = removal("rsync --delete", plain[plain.length - 1], true); if (v) return v; }
 			continue;
 		}
 		// Anything else runs in the current directory: fine on pi/*, outside a repo, or read-only.
-		const here = unresolved(cwd) ? null : repoAt(cwd);
-		if (!onPi(here) && !READONLY.has(name)) return { block: true, reason: offBranch(here!) };
+		if (!unresolved(cwd) && !READONLY.has(name)) { const v = judgeDir(cwd); if (v) return v; }
 	}
 	return undefined;
 }
@@ -1251,24 +1309,29 @@ function judgeBash(cmd: string, cwd0: string): Verdict {
 const CHECKPOINTS = ACTIVE && process.env.LETS_CODE_GIT_CHECKPOINTS !== "0";
 const CP_DEBOUNCE = Number(process.env.LETS_CODE_GIT_CHECKPOINT_DEBOUNCE_MS ?? 3000);
 const CP_KEEP = Number(process.env.LETS_CODE_GIT_CHECKPOINT_KEEP ?? 200);
-const CP_MAX_FILE = Number(process.env.LETS_CODE_GIT_CHECKPOINT_MAX_FILE_MB ?? 20) * 2 ** 20;  // bigger untracked files are left out
-const CP_SYNC_BUDGET_MS = 2000;  // a repo whose snapshot takes longer than this is only snapshotted in the background
+const CP_MAX_FILE = Number(process.env.LETS_CODE_GIT_CHECKPOINT_MAX_FILE_MB ?? 20) * 2 ** 20;    // bigger untracked files are left out
+const CP_MAX_UNTRACKED = Number(process.env.LETS_CODE_GIT_CHECKPOINT_MAX_UNTRACKED_MB ?? 500) * 2 ** 20;  // above this, only tracked files
+const CP_SYNC_BUDGET_MS = 2000;  // a repo whose warm snapshot takes longer is only snapshotted in the background
 
 const gitEnv = (extra: Env) => ({ ...process.env, GIT_AUTHOR_NAME: "lets-code", GIT_AUTHOR_EMAIL: "lets-code@localhost", GIT_COMMITTER_NAME: "lets-code", GIT_COMMITTER_EMAIL: "lets-code@localhost", ...extra });
 const gitSync = (args: string[], cwd: string, extra: Env = {}) => String(execFileSync("git", args, { cwd, env: gitEnv(extra), stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 2 ** 20, timeout: 60_000 }));
 const gitAsync = (args: string[], cwd: string, extra: Env = {}) => new Promise<string>((res, rej) =>
 	execFile("git", args, { cwd, env: gitEnv(extra), maxBuffer: 64 * 2 ** 20 }, (err, out) => (err ? rej(err) : res(String(out)))));
-
 type Runner = (args: string[], cwd: string, extra?: Env) => string | Promise<string>;
-const cpLastTree = new Map<string, string>(), cpSlow = new Set<string>(), cpTimers = new Map<string, NodeJS.Timeout>();
-let cpRunning = new Map<string, Promise<void>>(), cpAgain = new Set<string>();
+
+const cpLastTree = new Map<string, string>(), cpWarm = new Set<string>(), cpSlow = new Set<string>();
+const cpTimers = new Map<string, NodeJS.Timeout>(), cpRunning = new Map<string, Promise<void>>(), cpAgain = new Set<string>();
+const cpLog = (repo: Repo, e: unknown) => { try { appendFileSync(join(repo.gitdir, "lets-code-checkpoint.log"), `${new Date().toISOString()} ${String((e as Error)?.message ?? e).split("\n")[0]}\n`); } catch { /* ignore */ } };
 
 // One snapshot of `repo`. Works with the sync or the async git runner.
 async function snapshot(repo: Repo, git: Runner): Promise<void> {
 	const top = repo.top, idx = { GIT_INDEX_FILE: join(repo.gitdir, "lets-code-checkpoint.index") };
-	const big = (await git(["ls-files", "-o", "--exclude-standard", "-z"], top)).split("\0").filter(Boolean)
-		.filter((f) => { try { return statSync(join(top, f)).size > CP_MAX_FILE; } catch { return false; } }).map((f) => `:(exclude)${f}`);
-	try { await git(["add", "-A", "--ignore-errors", "--", ".", ...big], top, idx); } catch (e) { cpLog(repo, e); }  // unreadable files: added what could be, exit status non-zero
+	const untracked = (await git(["ls-files", "-o", "--exclude-standard", "-z"], top)).split("\0").filter(Boolean)
+		.map((f) => { try { return { f, size: statSync(join(top, f)).size }; } catch { return { f, size: 0 }; } });
+	const total = untracked.reduce((s, u) => s + (u.size > CP_MAX_FILE ? 0 : u.size), 0);
+	const exclude = total > CP_MAX_UNTRACKED ? untracked.map((u) => `:(exclude)${u.f}`) : untracked.filter((u) => u.size > CP_MAX_FILE).map((u) => `:(exclude)${u.f}`);
+	if (total > CP_MAX_UNTRACKED) cpLog(repo, `untracked files total ${(total / 2 ** 20).toFixed(0)} MB > cap: only tracked files snapshotted`);
+	try { await git(["add", "-A", "--ignore-errors", "--", ".", ...exclude], top, idx); } catch (e) { cpLog(repo, e); }  // unreadable files: what could be added was; exit status non-zero
 	const tree = (await git(["write-tree"], top, idx)).trim();
 	let head: string | null = null, headTree: string | null = null;
 	try { head = (await git(["rev-parse", "-q", "--verify", "HEAD^{commit}"], top)).trim(); headTree = (await git(["rev-parse", "-q", "--verify", "HEAD^{tree}"], top)).trim(); } catch { /* unborn */ }
@@ -1282,31 +1345,31 @@ async function snapshot(repo: Repo, git: Runner): Promise<void> {
 	const refs = (await git(["for-each-ref", "--format=%(refname)", "--sort=refname", ns], top)).split("\n").filter(Boolean);
 	for (const r of refs.slice(0, Math.max(0, refs.length - CP_KEEP))) await git(["update-ref", "-d", r], top);
 }
-const cpLog = (repo: Repo, e: unknown) => { try { appendFileSync(join(repo.gitdir, "lets-code-checkpoint.log"), `${new Date().toISOString()} ${String((e as Error)?.message ?? e).split("\n")[0]}\n`); } catch { /* ignore */ } };
 
-// Before a tool call: keep the state that is about to change. Synchronous, so
-// nothing can overwrite it first; skipped for repos that proved slow.
+// Before a tool call: keep the state that is about to change. Waits for a
+// background snapshot of the same repo, then snapshots synchronously, so no
+// tool can run in between. A repo that proved slow (warm) is skipped.
 async function checkpointNow(dir: string): Promise<void> {
 	const repo = repoOf(dir);
-	if (!repo || !isPi(repo.branch) || cpSlow.has(repo.top) || cpRunning.has(repo.top)) return;
+	if (!repo || !isPi(repo.branch) || cpSlow.has(repo.top)) return;
+	await cpRunning.get(repo.top);
 	const t0 = Date.now();
-	try { await snapshot(repo, gitSync); } catch (e) { cpLog(repo, e); }  // gitSync blocks, so no tool runs in between
-	if (Date.now() - t0 > CP_SYNC_BUDGET_MS) cpSlow.add(repo.top);
+	try { await snapshot(repo, gitSync); } catch (e) { cpLog(repo, e); }
+	if (Date.now() - t0 > CP_SYNC_BUDGET_MS && cpWarm.has(repo.top)) { cpSlow.add(repo.top); cpLog(repo, `snapshot took ${Date.now() - t0} ms: pre-call snapshots off for this session, background ones continue`); }
+	cpWarm.add(repo.top);
 }
 // After a tool call: keep the result, debounced, in the background.
 function checkpointSoon(dir: string): void {
 	const repo = repoOf(dir);
 	if (!repo || !isPi(repo.branch)) return;
-	const top = repo.top;
-	clearTimeout(cpTimers.get(top));
-	const t = setTimeout(() => { cpTimers.delete(top); run(top); }, CP_DEBOUNCE);
-	t.unref?.(); cpTimers.set(top, t);
+	clearTimeout(cpTimers.get(repo.top));
+	const t = setTimeout(() => { cpTimers.delete(repo.top); run(repo.top); }, CP_DEBOUNCE);
+	t.unref?.(); cpTimers.set(repo.top, t);
 }
 function run(top: string): void {
 	if (cpRunning.has(top)) { cpAgain.add(top); return; }
 	const repo = repoOf(top); if (!repo) return;
-	const p = snapshot(repo, gitAsync).catch((e) => cpLog(repo, e)).finally(() => { cpRunning.delete(top); if (cpAgain.delete(top)) run(top); });
-	cpRunning.set(top, p);
+	cpRunning.set(top, snapshot(repo, gitAsync).catch((e) => cpLog(repo, e)).finally(() => { cpRunning.delete(top); if (cpAgain.delete(top)) run(top); }));
 }
 // Session end: run every pending snapshot and wait for all of them.
 async function flushCheckpoints(): Promise<void> {

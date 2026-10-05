@@ -111,6 +111,17 @@ t("no duplicate when nothing changed", refs(pre).length, 2);
 t("blocked call takes no checkpoint", (await tc("bash", { command: "git reset --hard" }, pre))?.block, true);
 t("… still 2", refs(pre).length, 2);
 
+// race: a pre-call snapshot must not be skipped because a background one is in flight
+const rc = repo("pi/race");
+writeFileSync(join(rc, "tracked.txt"), "S1\n");
+await result("write", { path: join(rc, "tracked.txt") }, rc);   // background snapshot of S1 fires after 50 ms
+await sleep(55);                                                 // ... and is now (very likely) running
+writeFileSync(join(rc, "tracked.txt"), "S2\n");                 // the state the next tool call must preserve
+await tc("bash", { command: "ls" }, rc);                         // pre-call snapshot: waits for the in-flight one, then snapshots S2
+await sleep(200);
+const rr = refs(rc).map((r) => git(rc, "show", `${r}:tracked.txt`).trim());
+t("race: both S1 and S2 kept", rr.includes("S1") && rr.includes("S2"), true);
+
 // unreadable file: the rest is still captured, the failure is logged nowhere visible to the model
 const ue = repo("pi/unreadable");
 writeFileSync(join(ue, "secret.bin"), "x"); execFileSync("chmod", ["000", join(ue, "secret.bin")]);

@@ -57,4 +57,22 @@ mkrepo "${work}/off" main
 out="$(GIT_GUARD=false plan "${work}/off")"
 t "GIT_GUARD=false: off, branch untouched" "${out}|$(git -C "${work}/off" branch --show-current)" "off||disabled|main"
 
+
+mkrepo "${work}/detached" main
+git -C "${work}/detached" checkout -q --detach
+echo dirty > "${work}/detached/wip.txt"
+out="$(plan "${work}/detached")"
+t "detached HEAD: fresh pi/* branch" "${out%%|*}|$(git -C "${work}/detached" branch --show-current | cut -c1-3)" "on|pi/"
+t "detached HEAD: dirty file kept" "$(cat "${work}/detached/wip.txt")" dirty
+
+mkrepo "${work}/wtmain" main
+git -C "${work}/wtmain" worktree add -q -b feature "${work}/wt-feature" >/dev/null 2>&1
+out="$(plan "${work}/wt-feature")"
+t "linked worktree on feature: fresh pi/* branch" "${out%%|*}|$(git -C "${work}/wt-feature" branch --show-current | cut -c1-3)" "on|pi/"
+t "linked worktree: main repo still on main" "$(git -C "${work}/wtmain" branch --show-current)" main
+
+mkrepo "${work}/off2" main
+out="$(GIT_GUARD=False plan "${work}/off2")"
+t "GIT_GUARD=False (capitalised): off" "${out}" "off||disabled"
+
 exit "${fail}"

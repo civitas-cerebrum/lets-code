@@ -55,6 +55,7 @@ confirm, then install.
 | `--thinking-level <lvl>` | Startup thinking level: `off`\|`minimal`\|`low`\|`medium`\|`high` (xhigh\|max). Default `medium`. Thinking support itself is **auto-detected at launch** with a minimal test request (pin `REASONING=true`/`false` in the config to override); setup offers a level suggested from your context window. |
 | `--insecure` | Skip TLS verification (self-signed certs) |
 | `--no-mem-guard` | Launch without the [memory guard](#memory-guard) |
+| `--no-git-guard` | Launch without the git guard (see below) |
 | `--verbose` \| `--debug` | Show endpoint probing |
 | `-h` \| `--help` | Help |
 
@@ -156,6 +157,39 @@ not launched by `lets-code`.
 prompt typed in with `send-keys`, leftover memory hogs moved into the
 session, levels relative to the RAM free at test start, and an independent
 safety cap plus watchdog.
+
+## Git guard
+
+Small self-hosted models make mistakes a frontier model wouldn't: a wrong
+`git reset --hard`, an edit that guts a file, a stray `rm`. With `lets-code`,
+all of that happens on a **`pi/*` branch**, never on the line you care about.
+
+- **At launch** (plain shell, zero tokens): if the cwd is a git work tree and
+  HEAD is not on a `pi/*` branch, `lets-code` runs
+  `git switch -c pi/<YYYYMMDD-HHMM>`. Uncommitted changes travel with the
+  switch, so nothing is lost. The launch line shows the branch:
+  `git guard: pi/20261005-2204`.
+- **In the session** a pi hook (`~/.pi/agent/extensions/lets-code-gitguard.ts`)
+  reads `.git/HEAD` before each `edit`, `write` and `bash` call. On a `pi/*`
+  branch every call passes. Off one (the model ran `git switch main`,
+  detached HEAD, a worktree on another branch), edits, writes and non-git
+  commands are blocked; `git switch|checkout|branch|status|stash|log|diff|
+  show|rev-parse|fetch` still work, so the model can get back. New branches
+  must be named `pi/*` too (`git switch -c hotfix` is refused).
+- **Context cost: none while the rule holds.** The guard adds nothing to the
+  system prompt and nothing to tool results. The only text the model ever
+  sees is a one-line reason on a blocked call, e.g.
+  `git guard: HEAD is on branch 'main'; work only on a pi/* branch. Run
+  \`git switch -c pi/<topic>\` (changes come along), then retry.`
+- **Scope:** per repository, decided from the edited file's path (or the
+  cwd for `bash`). Files outside any repo are never blocked. Read-only
+  tools are never blocked.
+- **Off switch:** `--no-git-guard` or `GIT_GUARD=false`. Outside a git repo,
+  or without `git` installed, it is simply off and the launch line says so.
+
+Merging the `pi/*` branch back is yours to do: review `git diff main...HEAD`,
+then merge or cherry-pick. `tests/git-guard.test.mjs` drives the hook against
+throwaway repos (main, `pi/*`, detached HEAD, worktrees, no repo).
 
 ## Cookbook
 

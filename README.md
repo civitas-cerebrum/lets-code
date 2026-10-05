@@ -189,26 +189,42 @@ work irreversibly are refused outright.
   `--`, `-f`, `-B`, `--patch`; `switch -f|--discard-changes|-C`; `restore`
   of working-tree changes (`--staged` alone is fine); `clean -f/-d/-x`
   (dry runs are fine); `stash drop|clear`; `rm -f` (git's); `tag -d`;
-  `update-ref`; `symbolic-ref` writes; `reflog expire`; `gc --prune`;
-  `filter-branch`; `worktree remove -f`; and `rm`/`mv`/`shred` of `.git`,
-  of the repo top or an ancestor, of `~` or `/`, or a glob at the repo top
-  that matches `.git` (`.*`, `.[!.]*`, `.g*`) or everything (`*`). Writes
-  into `.git` by any tool are refused. New branches must be named `pi/*`
-  however they are created (`switch -c/--create/-t`, `checkout
-  -b/--orphan/--track`, `branch <name>`, `branch -m`, `worktree add
-  [-b]`).
+  `fetch` into a local non-`pi/*` branch; `update-ref`; `symbolic-ref`
+  writes; `reflog expire`; `gc --prune`; `filter-branch`; `worktree remove
+  -f`; `submodule deinit -f`; and `rm`/`mv`/`shred`/`unlink`/`find
+  -delete`/`rsync --delete` of `.git`, of the repo top or an ancestor, of
+  `~` or `/`, or a glob that matches `.git` or everything where it would
+  matter (`*`, `.*`, `.[!.]*`, `.??*` at the repo top; `../*`, `~/*`,
+  `/*`). Stale `.git/*.lock` files may be removed. Writes into `.git` by
+  any tool are refused. Git's unique-prefix abbreviations (`--har`,
+  `--forc`) and aliases (`[alias]` in repo/user config, `-c alias.x=…`,
+  `!`-shell aliases) are resolved before the check. New branches must be
+  named `pi/*` however they are created (`switch -c/--create/-t`,
+  `checkout -b/--orphan/--track`, `branch <name>`, `branch -m`, `worktree
+  add [-b]`).
 - **How commands are read:** the hook lexes a `bash` call like a shell:
-  quotes (`g''it` is `git`), `; && || | &`, newlines, `$(…)`, backticks,
-  `( )` and `{ }` groups, heredoc bodies (skipped: they are data, so a commit
-  message or a doc mentioning `reset --hard` is not a command), `#` comments,
-  `sh -c "…"`, `eval`, and `env`/`sudo`/`command`/`timeout`/`xargs`/`VAR=x`
-  prefixes. `cd`, `pushd`, `git -C`, `--git-dir`/`--work-tree` and
-  `GIT_DIR`/`GIT_WORK_TREE` move the directory a command is judged in;
-  redirections (`> file`) and the targets of `cp mv tee sed -i touch mkdir
-  …` are judged by the repo they land in. Paths are `~`-expanded,
-  `@`/`file://`-stripped like pi does, and symlink-resolved. A `cd` into a
-  `$VAR` or `$(…)` the hook cannot resolve makes later relative writes in
-  that call refused (use a literal path); plain commands still run.
+  quotes (`g''it` is `git`, `$'…'`/`$"…"` too), `{a,b}` expansion, `; &&
+  || | & ;;`, newlines, `$(…)`, backticks, `<(…)`, `( )` subshells (a `cd`
+  inside does not leak out) and `{ }` groups, `if/then/for/do/while/case/!`
+  keywords, heredoc bodies (skipped: they are data, so a commit message or
+  a doc mentioning `reset --hard` is not a command; `$(…)` inside an
+  unquoted heredoc does run and is checked), `#` comments, `sh -c "…"`,
+  `bash -lc`, `eval`, and `env`/`sudo`/`command`/`timeout`/`xargs`/`nice`/
+  `VAR=x` prefixes. `cd`, `pushd`/`popd`, `git -C`, `--git-dir`/
+  `--work-tree` and `GIT_DIR`/`GIT_WORK_TREE` move the directory a command
+  is judged in, and a `git switch`/`checkout` moves the **branch** the rest
+  of the call is judged on (`git switch main && echo x > f` is refused).
+  Redirections (`> file`) and the targets of `cp mv tee sed -i touch
+  mkdir chmod tar -x unzip patch …` are judged by the repo they land in.
+  Paths are `~`-expanded, `@`/`file://`-stripped like pi does, and
+  symlink-resolved; `$PWD`, `$HOME`, `$(pwd)` and variables assigned
+  earlier in the same call (`D=../x; … $D`, `for d in x`) are expanded.
+  A path the hook cannot resolve (an unknown `$VAR`, a `$(…)`, an `xargs`
+  `{}`) is refused when it would be written or recursively removed, with a
+  reason asking for a literal path; reading it is fine. In a directory
+  that is on a non-`pi/*` branch, read-only commands (`cat ls grep diff
+  find …`) still run. A call with more than 500 simple commands is refused
+  rather than judged partially.
 - **Context cost: none while the rules hold.** The guard adds nothing to the
   system prompt and nothing to tool results. The only text the model ever
   sees is a one-line reason on a blocked call (under 200 characters), e.g.
@@ -218,15 +234,23 @@ work irreversibly are refused outright.
   push -- <file>`, `git show HEAD:<file> > <file>`, `git revert`).
 - **Checkpoints, against the loss the rules can't stop.** Rule 1 and 2
   stop history from being destroyed, but uncommitted work on the `pi/*`
-  branch would still be lost to the model's own next bad edit. So after
-  each successful `edit`, `write` or `bash` in a `pi/*` repo (debounced
-  3 s, flushed at session end) the working tree is snapshotted: tracked and
-  untracked files, `.gitignore` respected, committed through a **private
-  index file** (`.git/lets-code-checkpoint.index`) and stored under
+  branch would still be lost to the model's own next bad edit. So the
+  working tree is snapshotted **before** each `edit`, `write` or `bash` in
+  a `pi/*` repo (synchronously, so the state about to change, including
+  work you left uncommitted before the session, is kept first) and again
+  shortly after each successful one (debounced 3 s, flushed at session
+  end). Tracked and untracked files, `.gitignore` respected, untracked
+  files over 20 MB left out, committed through a **private index file**
+  (`.git/lets-code-checkpoint.index`) and stored under
   `refs/pi-checkpoints/<branch>/<YYYYMMDD-HHMMSS.mmm>` with HEAD as parent.
-  Your index, HEAD and branches are untouched, `git status` and `git log`
-  look exactly as before, nothing is pushed, and the model sees nothing.
-  Identical trees are not stored twice; the last 200 per branch are kept.
+  Your index, HEAD and branches are untouched; `git status`, `git log`,
+  `git stash list` look exactly as before (`git log --all` and `gitk --all`
+  do show the checkpoint commits); nothing is pushed by `git push` or
+  `--all`; the model sees nothing. Identical trees are not stored twice;
+  the last 200 per branch are kept; unreadable files are skipped and
+  failures are logged to `.git/lets-code-checkpoint.log`, never to pi. A
+  repo whose snapshot takes over 2 s is only snapshotted in the
+  background.
   Recover with plain git:
   ```bash
   git for-each-ref refs/pi-checkpoints/                   # list
@@ -235,12 +259,14 @@ work irreversibly are refused outright.
   git restore --source=refs/pi-checkpoints/pi/x/20261005-231502.117 -- src/a.c
   ```
   Off: `LETS_CODE_GIT_CHECKPOINTS=0`; `LETS_CODE_GIT_CHECKPOINT_KEEP` sets
-  the count. Cost: one `git add -A` into the private index per burst of
-  edits, in the background; zero tokens.
-- **Not covered:** indirection the lexer cannot see (`$V` holding a command,
-  scripts on disk, `find -delete`, `python -c "shutil.rmtree('.git')"`).
-  Read-only tools are never blocked; files outside any repo are never
-  blocked.
+  the count, `LETS_CODE_GIT_CHECKPOINT_MAX_FILE_MB` the size cap. Cost: a
+  `git add -A` into the private index before each tool call (tens of ms
+  on a typical repo, ~200 ms on 30k files) and one more per burst of
+  edits in the background; zero tokens.
+- **Not covered:** indirection the lexer cannot see (`$V` holding a
+  command, scripts on disk, `python -c "shutil.rmtree('.git')"`). What it
+  cannot see it cannot judge; the checkpoints are the backstop. Read-only
+  tools are never blocked; files outside any repo are never blocked.
 - **Off switch:** `--no-git-guard` or `GIT_GUARD=false`. Outside a git repo,
   or without `git` installed, it is simply off and the launch line says so.
 

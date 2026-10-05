@@ -171,46 +171,65 @@ work irreversibly are refused outright.
   Uncommitted changes travel with the switch, so nothing is lost. The launch
   line shows the branch: `git guard: pi/20261005-2204`. A merge, rebase or
   cherry-pick in progress is never switched away from: the guard stays on
-  and pi can only inspect until you finish or abort it.
+  and pi can only inspect, continue or abort until it is done.
 - **Rule 1, in the session:** a pi hook
   (`~/.pi/agent/extensions/lets-code-gitguard.ts`) reads `.git/HEAD` before
-  each `edit`, `write` and `bash` call. On a `pi/*` branch every call passes.
-  Off one (the model ran `git switch main`, detached HEAD, a worktree on
-  another branch), edits and writes are blocked, and a `bash` command runs
-  only if the **whole command** is one plain git inspection
-  (`status|log|diff|show|branch -a|stash list|fetch|…`) or a switch to a
-  `pi/*` branch. `git status; rm -rf src` is not "a git status": any `; &&
-  || | > $( \`` or newline is refused. The repo is decided from the edited
-  file's real path (symlinks and `~` resolved), and for `bash` from the cwd
-  plus any `cd`, `pushd` or `git -C` target in the command.
+  each `edit`, `write` and `bash` call. On a `pi/*` branch every call passes;
+  a rebase, merge, cherry-pick or bisect **started from** a `pi/*` branch
+  counts as that branch, so conflicts can be resolved and `--continue`d. Off
+  one (the model ran `git switch main`, detached HEAD, a worktree on another
+  branch), edits and writes are blocked, and each simple command of a `bash`
+  call must be a plain git inspection (`status|log|diff|show|branch
+  -a|stash list|reflog|show-ref|config --get|fetch|…`), a `--continue` /
+  `--abort` of the operation in progress, or a switch to a `pi/*` branch.
 - **Rule 2, on every branch:** irreversible commands are refused: `git push`
-  with `-f`/`--force`/`--delete`/`+ref`/`src:dst`, `git branch -D/-d/-f/-M`,
-  `git reset --hard|--merge`, `git checkout .`/`-- path`/`-f`, `git restore`
-  of working-tree changes, `git clean -f/-d/-x`, `git stash drop|clear`,
-  `update-ref`, `reflog expire`, `gc --prune`, `filter-branch`, `worktree
-  remove --force`, and `rm -r` of `.git` or of the whole tree (`.`, `*`,
-  `~`, `/`). Global git options (`git -C dir`, `--no-pager`, `-c k=v`) are
-  seen through. New branches must be named `pi/*` however they are created
-  (`switch -c/--create`, `checkout -b/--orphan`, `branch <name>`,
-  `worktree add -b`).
+  with `-f`/`--force`/`--delete`/`--mirror`/`--prune`/`+ref`/`:ref` or a
+  refspec onto a non-`pi/*` branch; `git branch -D/-f/-M` (`-d`, the safe
+  delete, is fine); `reset --hard|--merge`; `checkout` of a path, `.`,
+  `--`, `-f`, `-B`, `--patch`; `switch -f|--discard-changes|-C`; `restore`
+  of working-tree changes (`--staged` alone is fine); `clean -f/-d/-x`
+  (dry runs are fine); `stash drop|clear`; `rm -f` (git's); `tag -d`;
+  `update-ref`; `symbolic-ref` writes; `reflog expire`; `gc --prune`;
+  `filter-branch`; `worktree remove -f`; and `rm`/`mv`/`shred` of `.git`,
+  of the repo top or an ancestor, of `~` or `/`, or a glob at the repo top
+  that matches `.git` (`.*`, `.[!.]*`, `.g*`) or everything (`*`). Writes
+  into `.git` by any tool are refused. New branches must be named `pi/*`
+  however they are created (`switch -c/--create/-t`, `checkout
+  -b/--orphan/--track`, `branch <name>`, `branch -m`, `worktree add
+  [-b]`).
+- **How commands are read:** the hook lexes a `bash` call like a shell:
+  quotes (`g''it` is `git`), `; && || | &`, newlines, `$(…)`, backticks,
+  `( )` and `{ }` groups, heredoc bodies (skipped: they are data, so a commit
+  message or a doc mentioning `reset --hard` is not a command), `#` comments,
+  `sh -c "…"`, `eval`, and `env`/`sudo`/`command`/`timeout`/`xargs`/`VAR=x`
+  prefixes. `cd`, `pushd`, `git -C`, `--git-dir`/`--work-tree` and
+  `GIT_DIR`/`GIT_WORK_TREE` move the directory a command is judged in;
+  redirections (`> file`) and the targets of `cp mv tee sed -i touch mkdir
+  …` are judged by the repo they land in. Paths are `~`-expanded,
+  `@`/`file://`-stripped like pi does, and symlink-resolved. A `cd` into a
+  `$VAR` or `$(…)` the hook cannot resolve makes later relative writes in
+  that call refused (use a literal path); plain commands still run.
 - **Context cost: none while the rules hold.** The guard adds nothing to the
   system prompt and nothing to tool results. The only text the model ever
   sees is a one-line reason on a blocked call (under 200 characters), e.g.
   `git guard: HEAD is on branch 'main'; work only on a pi/* branch. Run
-  \`git switch -c pi/<topic>\` (changes come along), then retry.`
-- **Not covered:** uncommitted work on the `pi/*` branch itself has no
-  checkpoint yet; a model that never commits can still lose edits to its
-  own later edits. Shell indirection (`sh -c`, scripts, aliases) is not
-  parsed. Read-only tools are never blocked; files outside any repo are
-  never blocked.
+  \`git switch -c pi/<topic>\` (changes come along), then retry.` A
+  refused destructive command names reversible alternatives (`git stash
+  push -- <file>`, `git show HEAD:<file> > <file>`, `git revert`).
+- **Not covered:** indirection the lexer cannot see (`$V` holding a command,
+  scripts on disk, `find -delete`, `python -c "shutil.rmtree('.git')"`).
+  Read-only tools are never blocked; files outside any repo are never
+  blocked.
 - **Off switch:** `--no-git-guard` or `GIT_GUARD=false`. Outside a git repo,
   or without `git` installed, it is simply off and the launch line says so.
 
 Merging the `pi/*` branch back is yours to do: review `git diff main...HEAD`,
 then merge or cherry-pick. Tests: `tests/git-guard.test.mjs` drives the hook
-against throwaway repos (~150 cases incl. every bypass above);
-`tests/git-guard-launch.sh` covers the launch side (dirty tree, name
-collision, merge in progress, bare repo, off switch).
+against throwaway repos (~320 cases: every bypass and false positive found
+in two independent reviews, operations in progress, worktrees, lexer edge
+cases, 200 KB inputs); `tests/git-guard-launch.sh` covers the launch side
+(dirty tree, name collision, merge in progress, detached HEAD, linked
+worktree, bare repo, off switch).
 
 ## Cookbook
 

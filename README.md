@@ -162,34 +162,55 @@ safety cap plus watchdog.
 
 Small self-hosted models make mistakes a frontier model wouldn't: a wrong
 `git reset --hard`, an edit that guts a file, a stray `rm`. With `lets-code`,
-all of that happens on a **`pi/*` branch**, never on the line you care about.
+all work happens on a **`pi/*` branch**, and the commands that would destroy
+work irreversibly are refused outright.
 
 - **At launch** (plain shell, zero tokens): if the cwd is a git work tree and
   HEAD is not on a `pi/*` branch, `lets-code` runs
-  `git switch -c pi/<YYYYMMDD-HHMM>`. Uncommitted changes travel with the
-  switch, so nothing is lost. The launch line shows the branch:
-  `git guard: pi/20261005-2204`.
-- **In the session** a pi hook (`~/.pi/agent/extensions/lets-code-gitguard.ts`)
-  reads `.git/HEAD` before each `edit`, `write` and `bash` call. On a `pi/*`
-  branch every call passes. Off one (the model ran `git switch main`,
-  detached HEAD, a worktree on another branch), edits, writes and non-git
-  commands are blocked; `git switch|checkout|branch|status|stash|log|diff|
-  show|rev-parse|fetch` still work, so the model can get back. New branches
-  must be named `pi/*` too (`git switch -c hotfix` is refused).
-- **Context cost: none while the rule holds.** The guard adds nothing to the
+  `git switch -c pi/<YYYYMMDD-HHMM>` (suffixed `-2`, `-3`… if taken).
+  Uncommitted changes travel with the switch, so nothing is lost. The launch
+  line shows the branch: `git guard: pi/20261005-2204`. A merge, rebase or
+  cherry-pick in progress is never switched away from: the guard stays on
+  and pi can only inspect until you finish or abort it.
+- **Rule 1, in the session:** a pi hook
+  (`~/.pi/agent/extensions/lets-code-gitguard.ts`) reads `.git/HEAD` before
+  each `edit`, `write` and `bash` call. On a `pi/*` branch every call passes.
+  Off one (the model ran `git switch main`, detached HEAD, a worktree on
+  another branch), edits and writes are blocked, and a `bash` command runs
+  only if the **whole command** is one plain git inspection
+  (`status|log|diff|show|branch -a|stash list|fetch|…`) or a switch to a
+  `pi/*` branch. `git status; rm -rf src` is not "a git status": any `; &&
+  || | > $( \`` or newline is refused. The repo is decided from the edited
+  file's real path (symlinks and `~` resolved), and for `bash` from the cwd
+  plus any `cd`, `pushd` or `git -C` target in the command.
+- **Rule 2, on every branch:** irreversible commands are refused: `git push`
+  with `-f`/`--force`/`--delete`/`+ref`/`src:dst`, `git branch -D/-d/-f/-M`,
+  `git reset --hard|--merge`, `git checkout .`/`-- path`/`-f`, `git restore`
+  of working-tree changes, `git clean -f/-d/-x`, `git stash drop|clear`,
+  `update-ref`, `reflog expire`, `gc --prune`, `filter-branch`, `worktree
+  remove --force`, and `rm -r` of `.git` or of the whole tree (`.`, `*`,
+  `~`, `/`). Global git options (`git -C dir`, `--no-pager`, `-c k=v`) are
+  seen through. New branches must be named `pi/*` however they are created
+  (`switch -c/--create`, `checkout -b/--orphan`, `branch <name>`,
+  `worktree add -b`).
+- **Context cost: none while the rules hold.** The guard adds nothing to the
   system prompt and nothing to tool results. The only text the model ever
-  sees is a one-line reason on a blocked call, e.g.
+  sees is a one-line reason on a blocked call (under 200 characters), e.g.
   `git guard: HEAD is on branch 'main'; work only on a pi/* branch. Run
   \`git switch -c pi/<topic>\` (changes come along), then retry.`
-- **Scope:** per repository, decided from the edited file's path (or the
-  cwd for `bash`). Files outside any repo are never blocked. Read-only
-  tools are never blocked.
+- **Not covered:** uncommitted work on the `pi/*` branch itself has no
+  checkpoint yet; a model that never commits can still lose edits to its
+  own later edits. Shell indirection (`sh -c`, scripts, aliases) is not
+  parsed. Read-only tools are never blocked; files outside any repo are
+  never blocked.
 - **Off switch:** `--no-git-guard` or `GIT_GUARD=false`. Outside a git repo,
   or without `git` installed, it is simply off and the launch line says so.
 
 Merging the `pi/*` branch back is yours to do: review `git diff main...HEAD`,
-then merge or cherry-pick. `tests/git-guard.test.mjs` drives the hook against
-throwaway repos (main, `pi/*`, detached HEAD, worktrees, no repo).
+then merge or cherry-pick. Tests: `tests/git-guard.test.mjs` drives the hook
+against throwaway repos (~150 cases incl. every bypass above);
+`tests/git-guard-launch.sh` covers the launch side (dirty tree, name
+collision, merge in progress, bare repo, off switch).
 
 ## Cookbook
 

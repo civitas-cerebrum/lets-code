@@ -100,7 +100,15 @@ probe() {  # probe <base-url> -> prints /v1/models JSON on success; PROBE_ERR ex
         28) PROBE_ERR="timed out (host unreachable / wrong IP?)" ;;
         35) PROBE_ERR="TLS handshake failed" ;;
         60) PROBE_ERR="TLS certificate not trusted" ;;
-        22) PROBE_ERR="HTTP error from server (4xx/5xx)" ;;
+        22) local code; code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 ${tls:+$tls} \
+                -H "Authorization: Bearer ${TOKEN:-dummy-key}" "${base}/v1/models" 2>/dev/null)"
+            case "${code}" in
+                401)         PROBE_ERR="HTTP 401: token rejected" ;;
+                403)         PROBE_ERR="HTTP 403: forbidden (proxy doesn't allow this network, or bad token)" ;;
+                404)         PROBE_ERR="HTTP 404: no /v1/models here (wrong base URL/path?)" ;;
+                502|503|504) PROBE_ERR="HTTP ${code}: proxy is up but the model server behind it is down" ;;
+                *)           PROBE_ERR="HTTP error ${code:-4xx/5xx} from server" ;;
+            esac ;;
         *)  PROBE_ERR="curl exit ${rc}" ;;
     esac
     return "${rc}"
@@ -980,7 +988,7 @@ else
     done
     if [ -z "${BASE_URL}" ]; then
         log_error "no endpoint reachable:${FAILS}"
-        log_error "hints: 'DNS' = this machine isn't using your LAN's DNS server; 'timed out' = name resolves to the wrong IP (public instead of LAN?); 'refused' = server/port down."
+        log_error "hints: 'DNS' = this machine isn't using your LAN's DNS server; 'timed out' = name resolves to the wrong IP (public instead of LAN?); 'refused' = server/port down; 'HTTP 502' = start the model server."
         exit 1
     fi
 fi

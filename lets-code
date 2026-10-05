@@ -83,6 +83,41 @@ tls_args_for() {
     esac
 }
 
+# Endpoint normalization. Accepts "192.168.0.114/vllm", "llm.example.com",
+# "http://host:8000/v1", ... A missing scheme is filled in: IP addresses,
+# localhost, bare hostnames and *.local (mDNS) get http:// (no public cert
+# can exist for them); other domain names get https://. A trailing / or /v1
+# is dropped — the probe always hits <base>/v1/models.
+normalize_endpoint() {  # normalize_endpoint <url> -> prints the normalized base URL
+    local u="${1%/}" host
+    u="${u%/v1}"
+    case "${u}" in
+        *://*) ;;
+        *)
+            host="${u%%/*}"
+            case "${host}" in
+                \[*) ;;                               # [::1]:8000 — IPv6 literal
+                *) host="${host%%:*}" ;;              # strip :port
+            esac
+            case "${host}" in
+                \[*|localhost|*.local) u="http://${u}" ;;
+                *[!0-9.]*)                            # not an IPv4 address
+                    case "${host}" in
+                        *.*) u="https://${u}" ;;      # domain name
+                        *)   u="http://${u}" ;;       # bare hostname (no dots)
+                    esac ;;
+                *) u="http://${u}" ;;                 # IPv4 address
+            esac ;;
+    esac
+    printf '%s\n' "${u}"
+}
+
+normalize_endpoints() {  # normalize_endpoints "<url> <url> ..." -> space-separated
+    local out="" e
+    for e in $1; do out="${out:+${out} }$(normalize_endpoint "${e}")"; done
+    printf '%s\n' "${out}"
+}
+
 PROBE_ERR=""
 PROBE_OUT="${TMPDIR:-/tmp}/.lets-code-probe.$$"
 trap 'rm -f "${PROBE_OUT}"' EXIT
@@ -664,13 +699,15 @@ run_setup() {
     # 3. endpoints
     echo ""
     echo "Enter your server base URL(s), most-preferred first (no /v1 suffix)."
+    echo "No scheme? IPs, localhost and *.local get http://, domains get https://."
     echo "Examples:  http://localhost:8000    https://llm.my-lan.example"
     echo "You can list several separated by spaces — the first reachable one wins"
     echo "(useful if the same server has a localhost, LAN, and VPN address)."
     printf "Endpoints [http://localhost:8000]: "
     local endpoints
     read -r endpoints
-    endpoints="${endpoints:-http://localhost:8000}"
+    endpoints="$(normalize_endpoints "${endpoints:-http://localhost:8000}")"
+    echo "Using: ${endpoints}"
 
     # 4. token
     echo ""
@@ -970,16 +1007,17 @@ if [ -n "${CA_PATH}" ] && [ -f "${CA_PATH}" ]; then CA_FOUND="${CA_PATH}"; fi
 
 BASE_URL=""
 MODELS_JSON=""
-# Normalize: accept endpoints with or without a trailing /v1 — the probe
-# always hits <base>/v1/models, and /v1 is re-added for pi below.
+# Normalize (see normalize_endpoint): a missing scheme is filled in and a
+# trailing /v1 dropped — the probe always hits <base>/v1/models, and /v1 is
+# re-added for pi below.
 if [ -n "${URL_OVERRIDE}" ]; then
-    BASE_URL="${URL_OVERRIDE%/}"; BASE_URL="${BASE_URL%/v1}"
+    BASE_URL="$(normalize_endpoint "${URL_OVERRIDE}")"
     probe "${BASE_URL}" > "${PROBE_OUT}" || { log_error "server not reachable at ${BASE_URL} (${PROBE_ERR})"; exit 1; }
     MODELS_JSON="$(cat "${PROBE_OUT}")"
 else
     FAILS=""
     for cand in ${ENDPOINTS}; do
-        cbase="${cand%/}"; cbase="${cbase%/v1}"
+        cbase="$(normalize_endpoint "${cand}")"; cand="${cbase}"
         log_verbose "probing ${cbase} ..."
         if probe "${cbase}" > "${PROBE_OUT}"; then BASE_URL="${cbase}"; MODELS_JSON="$(cat "${PROBE_OUT}")"; break; fi
         FAILS="${FAILS}

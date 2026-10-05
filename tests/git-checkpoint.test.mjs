@@ -85,13 +85,50 @@ await result("write", { path: join(plain, "x.txt") }, plain);
 await sleep(300);
 t("no crash outside a repo", true, true);
 
-// shutdown flushes a pending (debounced) checkpoint
-process.env.LETS_CODE_GIT_CHECKPOINT_DEBOUNCE_MS = "50";
-writeFileSync(join(pi, "new.txt"), "final\n");
+// shutdown flushes a pending (debounced) checkpoint, even one scheduled while another runs
+writeFileSync(join(pi, "new.txt"), "flush-a\n");
+await result("write", { path: join(pi, "new.txt") }, pi);
+await sleep(60);                                          // debounce fired: snapshot in flight
+writeFileSync(join(pi, "new.txt"), "flush-b\n");
 await result("write", { path: join(pi, "new.txt") }, pi);
 await handlers.session_shutdown({ type: "session_shutdown" }, { cwd: pi });
 r = refs(pi);
-t("shutdown flushed the pending checkpoint", git(pi, "show", `${r[r.length - 1]}:new.txt`), "final\n");
+t("shutdown flushed the last state", git(pi, "show", `${r[r.length - 1]}:new.txt`), "flush-b\n");
+
+// before an edit/write/bash: the state about to change is kept (synchronously)
+const pre = repo("pi/pre");
+writeFileSync(join(pre, "tracked.txt"), "USER-WIP\n");
+const tc = (toolName, input, cwd) => handlers.tool_call({ type: "tool_call", toolCallId: "x", toolName, input }, { cwd });
+t("tool_call write allowed", await tc("write", { path: join(pre, "tracked.txt"), content: "MODEL" }, pre), undefined);
+let pr = refs(pre);
+t("pre-edit checkpoint exists before the first write", pr.length, 1);
+t("pre-edit checkpoint holds the user's work", git(pre, "show", `${pr[0]}:tracked.txt`), "USER-WIP\n");
+writeFileSync(join(pre, "tracked.txt"), "MODEL\n");       // what the write tool would have done
+await tc("bash", { command: "ls" }, pre);
+t("pre-bash checkpoint keeps the next state", git(pre, "show", `${refs(pre)[1]}:tracked.txt`), "MODEL\n");
+await tc("bash", { command: "ls" }, pre);
+t("no duplicate when nothing changed", refs(pre).length, 2);
+t("blocked call takes no checkpoint", (await tc("bash", { command: "git reset --hard" }, pre))?.block, true);
+t("… still 2", refs(pre).length, 2);
+
+// unreadable file: the rest is still captured, the failure is logged nowhere visible to the model
+const ue = repo("pi/unreadable");
+writeFileSync(join(ue, "secret.bin"), "x"); execFileSync("chmod", ["000", join(ue, "secret.bin")]);
+writeFileSync(join(ue, "ok.txt"), "ok\n");
+await tc("bash", { command: "ls" }, ue);
+let ur = refs(ue);
+t("checkpoint despite an unreadable file", ur.length, 1);
+t("readable file captured", git(ue, "show", `${ur[0]}:ok.txt`), "ok\n");
+execFileSync("chmod", ["644", join(ue, "secret.bin")]);
+
+// big untracked files are left out
+process.env.LETS_CODE_GIT_CHECKPOINT_MAX_FILE_MB = "0.0001";   // ~100 bytes (read at import; this run uses the default 20 MB)
+const bg = repo("pi/big");
+writeFileSync(join(bg, "small.txt"), "s\n"); writeFileSync(join(bg, "big.bin"), "x".repeat(30 * 2 ** 20));
+await tc("bash", { command: "ls" }, bg);
+let br = refs(bg);
+t("small file captured", git(bg, "show", `${br[0]}:small.txt`), "s\n");
+t("30 MB untracked file left out", (() => { try { git(bg, "show", `${br[0]}:big.bin`); return "captured"; } catch { return "absent"; } })(), "absent");
 
 console.log(`\n${n} checks, ${fail ? "FAILURES" : "all passed"}`);
 rmSync(work, { recursive: true, force: true });

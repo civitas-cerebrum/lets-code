@@ -88,9 +88,14 @@ await check("custom tool on main",                call("my_tool", { x: 1 }, main
 }
 
 console.log("# bash off-branch: only plain inspection / switching");
-await bash("ls -la", main, true);
+await bash("ls -la", main, false);                          // read-only commands may run anywhere
+await bash("cat m.txt", main, false);
 await bash("npm test", main, true);
+await bash("make", main, true);
+await bash("./run.sh", main, true);
 await bash("echo x > a.txt", main, true);
+await bash("sed -i s/a/b/ m.txt", main, true);
+await bash("rm m.txt", main, true);
 await bash("git status", main, false);
 await bash("git status --short", main, false);
 await bash("git log --oneline -5", main, false);
@@ -398,7 +403,8 @@ console.log("# operations in progress");
 	await bash("git rebase --abort", rb, false);
 	await bash("git rebase --continue", rb, false);
 	await bash("git switch -c pi/rescue", rb, false);
-	await bash("ls", rb, true);
+	await bash("ls", rb, false);
+	await bash("make", rb, true);
 	git(rb, "rebase", "--abort");
 	// merge conflict on pi/rb
 	git(rb, "switch", "-q", "pi/rb");
@@ -421,6 +427,179 @@ await check("write on detached HEAD", call("write", { path: join(main, "a.txt"),
 await bash("git switch -c pi/from-detached", main, false);
 await bash("git checkout main", main, true);   // not a pi/* branch
 
+console.log("# round 3: option abbreviations, aliases");
+await bash("git reset --har", pi, true);
+await bash("git reset --ha HEAD~1", pi, true);
+await bash("git checkout --forc pi/other", pi, true);
+await bash("git push --force-w origin pi/test", pi, true);
+await bash("git push --forc", pi, true);
+await bash("git branch --delete --forc x", pi, true);
+await bash("git branch --del pi/old", pi, false);
+await bash("git clean --dry -x", pi, false);
+await bash("git -c alias.nuke='reset --hard' nuke", pi, true);
+await bash("git -c alias.co=checkout co .", pi, true);
+await bash("git -c alias.x='!rm -rf .git' x", pi, true);
+await bash("git -c alias.st=status st", main, false);
+for (const d of [pi, main]) { git(d, "config", "alias.nuke", "reset --hard"); git(d, "config", "alias.co", "checkout"); git(d, "config", "alias.lg", "log --oneline"); }
+await bash("git nuke", pi, true);
+await bash("git co .", pi, true);
+await bash("git co pi/other", pi, false);
+await bash("git lg", pi, false);
+await bash("git lg", main, false);                          // alias to an inspection: fine off-branch
+await bash("git nuke", main, true);
+await bash("git co pi/test", main, false);
+
+console.log("# round 3: lexer");
+await bash("rm -rf $'.git'", pi, true);
+await bash("git $'push' -f", pi, true);
+await bash('git $"push" -f', pi, true);
+await bash("rm -rf ${X:-.git}", pi, true);
+await bash("rm -rf .{git,x}", pi, true);
+await bash("rm -rf {.git,src}", pi, true);
+await bash("rm -rf build/{a,b}", pi, false);
+await bash("if true; then rm -rf .git; fi", pi, true);
+await bash("if true; then\n  rm -rf .git\nfi", pi, true);
+await bash('for d in .git; do rm -rf "$d"; done', pi, true);
+await bash('for d in build dist; do rm -rf "$d"; done', pi, true);   // unknown loop variable: conservative
+await bash('for d in build; do rm -rf "$d"; done', pi, false);
+await bash("while :; do git push -f; break; done", pi, true);
+await bash("! git push -f", pi, true);
+await bash("time git push -f", pi, true);
+await bash("cat <<EOF\n$(rm -rf .git)\nEOF", pi, true);
+await bash("cat <<'EOF'\n$(rm -rf .git)\nEOF", pi, false);
+await bash("cat <<EOF > notes.md\nrm -rf .git is bad\nEOF", pi, false);
+await bash("case x in x) rm -rf .git;; esac", pi, true);
+await bash("case x in x) echo ok;; esac", pi, false);
+await bash("ls; ".repeat(600) + "rm -rf .git", pi, true);
+await bash("ls; ".repeat(600) + "ls", pi, true);                      // fail closed on the cap
+await bash("diff <(git show HEAD:a.txt) a.txt", pi, false);
+await bash("diff <(rm -rf .git) a.txt", pi, true);
+await bash("echo x >| a.txt", pi, false);
+await bash("echo x 10> a.txt", pi, false);
+await bash("echo x &>> a.txt", pi, false);
+await bash("ls |& tee out.txt", pi, false);
+await bash("printf 'a#b'", pi, false);
+await bash("echo 'unterminated", pi, false);
+await bash("rm -rf build\r\nls", pi, false);
+
+console.log("# round 3: wrappers");
+await bash("env -i git push -f", pi, true);
+await bash("sudo -i git push -f", pi, true);
+await bash("sudo -u root -E git push -f", pi, true);
+await bash("bash -lc 'git push -f'", pi, true);
+await bash("bash -xc 'git push -f'", pi, true);
+await bash("timeout --signal=KILL 5s git push -f", pi, true);
+await bash("nice -n 5 git push -f", pi, true);
+await bash("echo .git | xargs rm -rf", pi, true);
+await bash("find . -name x | xargs -n1 rm -rf", pi, true);
+await bash("find . -name x | xargs -0 -I{} rm -rf {}", pi, true);
+await bash("find . -name '*.pyc' | xargs rm -f", pi, false);
+await bash("git ls-files | xargs wc -l", pi, false);
+
+console.log("# round 3: paths and globs");
+await bash("rm -rf ../*", pi, true);
+await bash("rm -rf ../*.log", pi, false);
+await bash("rm -rf /*", pi, true);
+await bash("rm -rf ~/*", pi, true);
+await bash("rm -rf $HOME/*", pi, true);
+await bash("rm -rf .[a-z]*", pi, true);
+await bash("rm -rf .??*", pi, true);
+await bash("rm -rf ./././.git", pi, true);
+await bash("rm -rf $PWD/.git", pi, true);
+await bash('rm -rf "$(pwd)"', pi, true);
+await bash("rm -rf ~/", pi, true);
+await bash("rm -r -- .git", pi, true);
+await bash("mv .git/ x", pi, true);
+await bash("mv -- .git x", pi, true);
+await bash("unlink .git/HEAD", pi, true);
+await bash("truncate -s0 .git/index", pi, true);
+await bash(": > .git/index", pi, true);
+await bash("cat x > .git/HEAD", pi, true);
+await bash("cp x .git/HEAD", pi, true);
+await bash("dd if=/dev/zero of=.git/HEAD", pi, true);
+await bash("ln -sf /tmp/x .git/HEAD", pi, true);
+await bash("chmod -R 000 .git", pi, true);
+await bash("cd .git && rm -rf objects/*", pi, true);
+await bash("cd .git && ls", pi, false);
+await bash("find . -delete", pi, true);
+await bash("find . -type f -delete", pi, true);
+await bash("find . -name '.*' -delete", pi, true);
+await bash("find . -name '*.pyc' -delete", pi, false);
+await bash("find build -delete", pi, false);
+await bash("find . -exec rm -rf {} +", pi, true);
+await bash("find . -name '*.o' -exec rm -f {} +", pi, false);
+await bash("rsync -a --delete /tmp/empty/ ./", pi, true);
+await bash("rsync -a --delete src/ /tmp/backup/", pi, false);
+await bash("rsync -a src/ dst/", pi, false);
+await bash("tar -xf x.tar", pi, false);
+await bash(`tar -xf x.tar -C ../${basename(main)}`, pi, true);
+await bash(`tar -czf ../${basename(main)}/out.tgz src`, pi, true);
+await bash("git fetch . +pi/test:main", pi, true);
+await bash("git fetch origin main:pi/x", pi, false);
+await bash("git fetch origin '+refs/heads/*:refs/remotes/origin/*'", pi, false);
+await bash("git fetch origin main", pi, false);
+await bash("git submodule deinit -f .", pi, true);
+await bash("git submodule update --init", pi, false);
+await bash("rm -f .git/index.lock", pi, false);
+await bash("rm -rf .git/index.lock", pi, false);
+await bash("rm -f .git/refs/heads/pi/x.lock", pi, false);
+await bash("rm -f .git/HEAD", pi, true);
+await bash("rm -rf " + "x".repeat(300), pi, false);
+{
+	const r = await call("bash", { command: "rm -rf .git/" + "x".repeat(300) }, pi);
+	await check("long path: reason clamped", Promise.resolve(r && r.reason.length <= 200 ? undefined : { block: true, reason: "too long" }), false);
+}
+
+console.log("# round 3: branch switch inside one call, ~ and variables");
+await bash("git switch main && echo x > a.txt", pi, true);
+await bash("git checkout main && make install", pi, true);
+await bash("git switch main; git add -A; git commit -m x", pi, true);
+await bash("git switch main && git log", pi, false);
+await bash("git switch pi/other && echo x > a.txt", pi, false);
+await bash("git switch main && git switch pi/test && echo x > a.txt", pi, false);
+await bash("git switch -c pi/fix && echo x > a.txt", main, false);
+await bash("git checkout $(git rev-parse HEAD~1) && echo x > a.txt", pi, true);
+await bash(`D=../${basename(main)}; echo x > $D/a.txt`, pi, true);
+await bash(`D=../${basename(main)}; git -C $D commit -am x`, pi, true);
+await bash(`D=../${basename(main)}\ncd $D && echo x > a.txt`, pi, true);
+await bash(`export D=../${basename(main)}; echo x > $D/a.txt`, pi, true);
+await bash("D=build; echo x > $D/a.txt", pi, false);
+await bash("D=build; rm -rf $D", pi, false);
+await bash("echo x > $OUT/a.txt", pi, true);                          // unknown variable: conservative
+await bash("rm -rf $BUILD_DIR", pi, true);
+await bash("rm -f $BUILD_DIR/x.o", pi, false);
+await bash("echo $HOME", pi, false);
+await check("write with @file:// into main", call("write", { path: "@" + pathToFileURL(join(main, "a.txt")).href, content: "x" }, pi), true);
+{
+	const homeRepo = mkdtempSync(join(homedir(), ".gitguard-test-"));
+	try {
+		git(homeRepo, "init", "-q", "-b", "main");
+		const rel = relative(homedir(), homeRepo);
+		await bash(`cd ~/${rel} && echo x > a.txt`, pi, true);
+		await bash(`git -C ~/${rel} commit -am x`, pi, true);
+		await bash(`cd ~/${rel} && cat a.txt`, pi, false);
+	} finally { rmSync(homeRepo, { recursive: true, force: true }); }
+}
+
+console.log("# round 3: false positives");
+await bash(`git -C ../${basename(main)} show HEAD:m.txt > ref.txt`, pi, false);
+await bash(`cd ../${basename(main)} && cat m.txt`, pi, false);
+await bash(`cd ../${basename(main)} && grep -r x .`, pi, false);
+await bash(`cd ../${basename(main)} && make`, pi, true);
+await bash(`(cd ../${basename(main)} && git log) && echo x > out.txt`, pi, false);
+await bash(`pushd ../${basename(main)}; git log; popd; echo x > out.txt`, pi, false);
+await bash(`pushd ../${basename(main)}; echo x > out.txt`, pi, true);
+await bash("git clean -fd build/", pi, true);                          // by design
+await bash("git stash drop 2>/dev/null; true", pi, true);              // by design
+await bash("npm test && git add -A && git commit -m 'feat: x' && git push -u origin pi/test", pi, false);
+await bash("docker compose up -d && pytest -q", pi, false);
+await bash("cargo build --release 2>&1 | tail -5", pi, false);
+await bash("for f in src/*.py; do sed -i 's/a/b/' \"$f\"; done", pi, false);
+await bash("git rebase main || git rebase --abort", pi, false);
+await bash("git stash && git switch pi/other && git stash pop", pi, false);
+await bash("./run.sh --fast", pi, false);
+await bash("python3 - <<'EOF'\nprint('hi')\nEOF", pi, false);
+
 console.log("# performance");
 {
 	const t0 = Date.now();
@@ -429,9 +608,13 @@ console.log("# performance");
 	const t1 = Date.now();
 	await check(`200 KB command judged in ${t1 - t0} ms (< 500)`, Promise.resolve(t1 - t0 < 500 ? undefined : { block: true, reason: "slow" }), false);
 	const t2 = Date.now();
-	await bash("cd . && ".repeat(5000) + "ls", pi, false);
+	await bash("cd . && ".repeat(400) + "ls", pi, false);
 	const t3 = Date.now();
-	await check(`5000 cd chain judged in ${t3 - t2} ms (< 2000)`, Promise.resolve(t3 - t2 < 2000 ? undefined : { block: true, reason: "slow" }), false);
+	await check(`400 cd chain judged in ${t3 - t2} ms (< 2000)`, Promise.resolve(t3 - t2 < 2000 ? undefined : { block: true, reason: "slow" }), false);
+	const t4 = Date.now();
+	const deep = await call("bash", { command: "$(".repeat(20000) + ")".repeat(20000) }, pi);   // pathological nesting: judged or refused, never hung or thrown
+	const t5 = Date.now();
+	await check(`20000-deep nesting ${deep?.block ? "refused" : "judged"} in ${t5 - t4} ms (< 5000)`, Promise.resolve(t5 - t4 < 5000 ? undefined : { block: true, reason: "slow" }), false);
 }
 
 console.log(`\n${n} cases, ${fail ? "FAILURES" : "all passed"}`);

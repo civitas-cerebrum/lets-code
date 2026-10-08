@@ -110,6 +110,16 @@ your other providers and settings are preserved):
 - `~/.pi/agent/settings.json` → `compaction.enabled: true` (auto-compaction
   explicit, not left to pi's implicit default) and
   `compaction.modelOverrides["lets-code/<model>"].reserveTokens` = output cap.
+  The same write sets `enableInstallTelemetry: false` when the key is absent:
+  pi defaults it to true and pings pi.dev on its first start, lets-code
+  defaults it to off. A value you set yourself (either way) is kept.
+
+Before the first launch lets-code also fetches pi's file-search helpers
+(`fd` and `ripgrep`) into `~/.pi/agent/bin` through pi's own downloader,
+unless they are already on your `PATH` (`fdfind` counts). pi would otherwise
+do this itself the first time the TUI starts, printing "fd not found.
+Downloading..." / "ripgrep not found. Downloading..." into the session. Set
+`PI_OFFLINE=1` to skip the fetch; a failed download is not fatal.
 
 pi auto-compacts once the conversation exceeds `contextWindow - reserveTokens`,
 so the output budget is **reserved by construction**: compaction always fires
@@ -391,6 +401,8 @@ level for one launch. Levels `xhigh`/`max` map to pi's high budget.
 | Garbage thinking text in output | Missing `--reasoning-parser` on the server. |
 | Session dies mid-way on long tasks | Context overflow — confirm the launch line shows the right `context:` value; if your server hides `max_model_len`, pin it with `--context <tok>` (or `CONTEXT=` in the config file). |
 | pi says provider `lets-code` unknown | pi's files were hand-edited while lets-code was running; just re-run `lets-code` — it re-registers on every launch. |
+| `fd not found. Downloading...` / `ripgrep not found. Downloading...` in the first session | pi fetching its file-search helpers itself. lets-code does this before launch (`fetching pi's file-search helpers ...`); if that step was skipped (`PI_OFFLINE`, no network, unknown pi layout) pi retries on its own. Installing `fd`/`ripgrep` with your package manager also ends it. |
+| Install telemetry | Off by default: lets-code writes `enableInstallTelemetry: false` into pi's `settings.json` unless the key already exists. To opt in, set it to `true` there (or `PI_TELEMETRY=1`). |
 | Model can't see images / pi treats it as text-only | pi only sends images to models declared with image input. Image support is auto-detected at launch (check the `image input:` line); the probe needs an OpenAI-dialect endpoint. If it is inconclusive (or you pinned it off), set `VISION=true` in `~/.config/lets-code/config` (or launch with `--vision`) and re-run `lets-code` — the model is re-registered on every launch, and pi re-reads `models.json` when you open `/model`. |
 | Model doesn't think / no thinking blocks although it should | Thinking support is auto-detected at launch; check the `thinking support:` line. If the probe is inconclusive or the model needs a nudge, pin `REASONING=true` in `~/.config/lets-code/config` and re-run `lets-code`. Then set a non-`off` level (`THINKING=` or `--thinking-level`) and open `/thinking` to confirm. |
 

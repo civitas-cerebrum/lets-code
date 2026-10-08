@@ -85,6 +85,8 @@ adapters. **pi is the default and the only v1-implemented harness**;
 | thinking level | `--thinking-level` > config/env `THINKING` > `medium`; suggested at setup = largest published pi budget (1k/2k/8k/16k) fitting ¼ of context AND ½ of output cap (the 4x-cost rule reproduces pi's catalog: 64k→high, 131k just misses xhigh, 256k→xhigh; xhigh/max are never suggested — on the chat-template path pi clamps their budget to high's 16k) | `settings.json → modelThinkingLevels["lets-code/<model>"]` (written only when thinking is registered; stale key removed when unregistered) |
 | token | `--…` n/a; config/env `TOKEN` > `dummy-key` | exported as `LETS_CODE_TOKEN` (never written) |
 | CA | `--insecure` / config/env `CA` + file exists | `NODE_EXTRA_CA_CERTS` (https only) |
+| install telemetry | n/a (pi's own setting; user's explicit value wins) | `settings.json → enableInstallTelemetry = false` only when the key is absent — pi defaults it to true and reports the install to pi.dev on first interactive start |
+| fd / ripgrep | n/a; PATH (`fd`\|`fdfind`, `rg`) or `<agent-dir>/bin` already has them > `PI_OFFLINE` set > fetch | `ensure_pi_tools` runs pi's own `dist/utils/tools-manager.js` (`ensureTool`) via node before the first launch, so the TUI never prints its "not found. Downloading..." notices; never fatal, pi still self-fetches if skipped |
 
 `compat: {supportsDeveloperRole: false, supportsReasoningEffort: false}` is
 written unconditionally: required by local vLLM/SGLang, harmless on
@@ -99,7 +101,8 @@ hang on pi's update check.
    detection with an inline-built PNG, `suggested_thinking_level` —
    context/cap → startup level heuristic)
 3. pi config writer (`pi_write_configs`: python3 JSON upsert, atomic)
-4. harness gate + pi presence/auto-install (`harness_gate`, `ensure_pi`)
+4. harness gate + pi presence/auto-install (`harness_gate`, `ensure_pi`,
+   `ensure_pi_tools` — fd/ripgrep prefetch through pi's own downloader)
 5. onboarding (`run_setup`, `offer_fresh_shell`)
 6. memory guard (`mem_limited_ancestor`, `mem_guard_plan` — scope|process|off
    decision, `mem_guard_exec` — `LETS_CODE_SESSION=1` + `systemd-run --user

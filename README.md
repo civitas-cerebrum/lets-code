@@ -34,12 +34,16 @@ launch, and adds the guard rails a small local model needs.
 ## Quick start
 
 ```bash
+npx @civitas-cerebrum/lets-code setup   # endpoints, token, optional CA; installs pi if missing
+lets-code                               # go
+```
+
+Setup installs the `lets-code` command itself. No npm? Grab the script:
+
+```bash
 mkdir -p ~/.local/bin
 curl -fsSL https://raw.githubusercontent.com/civitas-cerebrum/lets-code/main/lets-code -o ~/.local/bin/lets-code
-chmod +x ~/.local/bin/lets-code
-
-lets-code setup        # endpoints, token, optional CA; installs pi if missing
-lets-code              # go
+chmod +x ~/.local/bin/lets-code && lets-code setup
 ```
 
 Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for you.
@@ -202,9 +206,10 @@ pi's file-search helpers (`fd`, `ripgrep`) are fetched before the first
 start so the first session starts clean. Design notes and the reasoning
 behind each decision are in [DESIGN.md](DESIGN.md).
 
-Tests live in `tests/`: shell tests for the probes and endpoint parsing,
-node tests for the git guard and checkpoints, and a tmux-driven end-to-end
-run for the memory guard.
+`tests/run.sh` runs the suite CI runs on every pull request: shell tests
+for the probes and endpoint parsing, node tests for the git guard and
+checkpoints. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
+the memory guard. Releases are published to npm from GitHub releases.
 
 ## License
 

@@ -31,7 +31,10 @@
 #      it sees images (a tiny solid-red PNG and "what color is this?")
 #   3. registers the endpoint with pi (~/.pi/agent/models.json) and reserves
 #      the output budget in pi's compaction settings (settings.json), so
-#      compaction fires before a response can overflow the server's window
+#      compaction fires before a response can overflow the server's window;
+#      pi's install telemetry is off unless you turned it on yourself, and
+#      pi's file-search helpers (fd, ripgrep) are fetched before the first
+#      start instead of by the TUI mid-session
 #   4. exports LETS_CODE_TOKEN (pi resolves it via $ENV interpolation) and
 #      execs:  pi --provider lets-code --model <id>
 #   5. memory guard (Linux): when the machine runs low on RAM, stops the
@@ -322,6 +325,9 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 #                    .reserveTokens = output cap
 #                    + modelThinkingLevels["lets-code/<model>"] = startup
 #                    thinking level (when thinking is registered)
+#                    + enableInstallTelemetry = false when the key is absent
+#                    (pi defaults it to true and pings pi.dev on first start;
+#                    an explicit true/false already in the file is kept)
 # The token is never written to disk: apiKey points at $LETS_CODE_TOKEN (pi's
 # $ENV interpolation), exported at launch — the secret stays in
 # ~/.config/lets-code/config (mode 600). Writes are atomic (tmp + rename),
@@ -421,6 +427,8 @@ def to_settings(doc):
     compaction["modelOverrides"] = overrides
     compaction["enabled"] = True  # auto-compaction explicit, not pi's implicit default
     doc["compaction"] = compaction
+    # install telemetry off by default; a value the user set stays as is
+    doc.setdefault("enableInstallTelemetry", False)
     if reasoning == "true":
         # pi's per-model startup thinking level (global default is "medium")
         levels = doc.get("modelThinkingLevels")
@@ -1558,6 +1566,43 @@ ensure_pi() {
     return 0
 }
 
+# pi's file-search helpers. pi looks for fd (or Debian's fdfind) and rg on
+# PATH, else under <agent-dir>/bin, and downloads what is missing from
+# GitHub the first time the TUI starts — printing "fd not found.
+# Downloading..." / "ripgrep not found. Downloading..." into the session.
+# Fetch them up front instead, through pi's own downloader (same releases,
+# same bin dir), so the first session starts clean. No-op once present,
+# skipped under PI_OFFLINE, and never fatal: pi still fetches on its own.
+ensure_pi_tools() {
+    [ -z "${PI_OFFLINE:-}" ] || return 0
+    local missing="" bin="${PI_AGENT_DIR}/bin"
+    { [ -x "${bin}/fd" ] || command -v fd >/dev/null 2>&1 || command -v fdfind >/dev/null 2>&1; } || missing="fd"
+    { [ -x "${bin}/rg" ] || command -v rg >/dev/null 2>&1; } || missing="${missing:+${missing} }rg"
+    [ -n "${missing}" ] || return 0
+    command -v node >/dev/null 2>&1 || return 0
+    local pi_bin pkg mod
+    pi_bin="$(node -p 'require("fs").realpathSync(process.argv[1])' "$(command -v pi)" 2>/dev/null)" || pi_bin=""
+    pkg="${pi_bin%/dist/*}"
+    mod="${pkg}/dist/utils/tools-manager.js"
+    if [ -z "${pi_bin}" ] || [ ! -f "${mod}" ]; then
+        log "note: pi will download its file-search helpers (${missing}) on first start."
+        return 0
+    fi
+    log "fetching pi's file-search helpers (${missing}) into ${bin} — first run only ..."
+    # shellcheck disable=SC2016
+    PI_CODING_AGENT_DIR="${PI_AGENT_DIR}" node --input-type=module -e '
+        const [mod, ...tools] = process.argv.slice(1);
+        const { ensureTool } = await import(mod);
+        let ok = true;
+        for (const t of tools) {
+            const p = await ensureTool(t, (s) => { if (s.type === "warning") { console.log("[lets-code] " + s.message); ok = false; } });
+            if (p) console.log("[lets-code] " + (t === "rg" ? "ripgrep" : t) + ": " + p); else ok = false;
+        }
+        process.exit(ok ? 0 : 1);' "${mod}" ${missing} \
+        || log "note: could not fetch ${missing} now — pi retries on its next start (or install them with your package manager)."
+    return 0
+}
+
 # ---------------------------------------------------------------- onboarding
 run_setup() {
     echo ""
@@ -1574,8 +1619,9 @@ run_setup() {
         exit 1
     fi
 
-    # 2. pi harness (confirm, then install)
+    # 2. pi harness (confirm, then install), plus its file-search helpers
     ensure_pi || exit 1
+    ensure_pi_tools
 
     # 3. endpoints
     echo ""
@@ -1916,6 +1962,7 @@ fi
 ensure_pi || exit 1
 command -v curl    >/dev/null || { log_error "curl not found."; exit 1; }
 command -v python3 >/dev/null || { log_error "python3 not found."; exit 1; }
+ensure_pi_tools
 
 CA_FOUND=""
 if [ -n "${CA_PATH}" ] && [ -f "${CA_PATH}" ]; then CA_FOUND="${CA_PATH}"; fi

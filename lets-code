@@ -1883,7 +1883,9 @@ export function classify(cmd: string, role: Role): { decision: Decision; group: 
 			if (res.some((r) => r.test(c) || (r.source.includes("\\|") && r.test(cmd))) || (name === "privileged" && sudo)) { const pd = policy[name] ?? dflt; if (d === null || stricter(pd, d) === pd) { d = pd; g = name; } }
 		}
 		if (d === null) { // no group matched: readonly commands are allowed under a deny-by-default role
-			if (dflt === "deny" && groups.readonly.some((r) => r.test(c)) && !/[>]/.test(c)) { d = policy.readonly ?? "allow"; g = "readonly"; }
+			// a redirection makes a read-only command a write, except to /dev/null or into another descriptor (2>&1)
+			const noWrite = !/[>]/.test(c.replace(/\d?>>?\s*\/dev\/null/g, "").replace(/\d?>&\d/g, ""));
+			if (dflt === "deny" && groups.readonly.some((r) => r.test(c)) && noWrite) { d = policy.readonly ?? "allow"; g = "readonly"; }
 			else { d = dflt; g = "*"; }
 		}
 		if (stricter(d, worst.decision) === d && d !== worst.decision) worst = { decision: d, group: g, command: c };

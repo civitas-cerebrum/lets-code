@@ -69,6 +69,8 @@ const blocked = (r) => r?.block === true;
 	t("plan denies git commit", classify("git status; git commit -m x", plan), { decision: "deny", group: "git-write", command: "git commit -m x" });
 	t("plan denies touch", classify("touch x", plan).decision, "deny");
 	t("plan denies redirection", classify("cat a > b", plan).decision, "deny");
+	t("plan allows /dev/null and 2>&1 redirections", classify("ls -la / 2>/dev/null; git status 2>&1 | head", plan).decision, "allow");
+	t("plan still denies >> to a file", classify("ls >> log.txt", plan).decision, "deny");
 	t("custom group", classify("terraform apply", { bash: { "*": "allow", infra: "deny" }, groups: { infra: ["^terraform\\s+(apply|destroy)"] } }).decision, "deny");
 	t("redirect targets", redirectTargets("echo x > out.txt 2>/dev/null; tee -a log.txt; mkdir -p d; sed -i 's/a/b/' f.c"), ["out.txt", "log.txt", "d", "f.c"]);
 }

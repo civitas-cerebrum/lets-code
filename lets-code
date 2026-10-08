@@ -5,6 +5,11 @@
 # server exposing /v1/models).
 #
 #   lets-code setup              interactive onboarding (start here)
+#   lets-code setup full         onboarding with every optional feature on
+#                                (mandate modes, subagents, sandbox, MCP import)
+#   lets-code setup granular     onboarding that asks about each feature
+#   lets-code mandate init       write a starter .pi/mandate.json (--global:
+#                                ~/.pi/agent/mandate.json)
 #   lets-code [args...]          launch pi (args pass to `pi`, e.g.
 #                                `lets-code -p "hello"` for one-shot print mode)
 #   lets-code --url <base> ...   one-off endpoint override
@@ -22,6 +27,11 @@
 #   lets-code --insecure ...     skip TLS verification (self-signed certs)
 #   lets-code --no-mem-guard     launch without the memory guard
 #   lets-code --no-git-guard     launch without the git guard
+#   lets-code --mandate [<m>]    mandate on, optionally in mode plan | auto |
+#                                ask | yolo | <role> (pi's own --mode is untouched)
+#   lets-code --no-mandate       launch without the mandate (modes) extension
+#   lets-code --subagents | --no-subagents   the subagent tool on/off
+#   lets-code --sandbox | --no-sandbox       the OS sandbox on/off
 #   lets-code --verbose ...      show endpoint probing
 #
 # What it does at launch:
@@ -54,13 +64,26 @@
 # Harness: pi is the default (and only v1) harness; --harness deepseek|codex
 # are roadmap items, not yet available.
 #
+#   8. optional features (off unless setup full/granular or the config
+#      enables them): mandate — a role per session or subagent that says
+#      which tools, paths, command kinds, MCP servers and agents are
+#      allowed, asked about or denied (modes plan/auto/ask/yolo, zero tokens
+#      on allowed calls); subagents — a `subagent` tool that delegates to
+#      agent files in ~/.pi/agent/agents (single / parallel / chain, each
+#      child a pi process through the same provider and guards); sandbox —
+#      bash confined with @anthropic-ai/sandbox-runtime (bubblewrap on
+#      Linux, Seatbelt on macOS); MCP — setup imports an existing .mcp.json
+#      or another client's config into pi's built-in MCP support.
+#
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
 # Env overrides: LETS_CODE_ENDPOINTS (space-separated), LETS_CODE_TOKEN,
 #                LETS_CODE_CA, LETS_CODE_MODEL, LETS_CODE_CONTEXT,
 #                LETS_CODE_OUTPUT_CAP, LETS_CODE_API, LETS_CODE_VISION,
 #                LETS_CODE_THINKING, LETS_CODE_REASONING,
 #                LETS_CODE_MEM_GUARD (true|false), LETS_CODE_GIT_GUARD (true|false),
-#                LETS_CODE_GIT_CHECKPOINTS (1|0)
+#                LETS_CODE_GIT_CHECKPOINTS (1|0),
+#                LETS_CODE_MANDATE (true|false), LETS_CODE_MODE, LETS_CODE_SUBAGENTS,
+#                LETS_CODE_SANDBOX (true|false), LETS_CODE_SUBAGENT_CONCURRENCY (2)
 # Needs: bash >= 3.2 (stock macOS is fine), curl, python3, pi CLI
 # (auto-installed on request).
 
@@ -1603,8 +1626,935 @@ ensure_pi_tools() {
     return 0
 }
 
+# ------------------------------------------------------------- features
+# Optional, off unless setup full/granular or the config turns them on.
+# Each is a pi extension written like the guards: regenerated on launch,
+# inert in sessions not launched by lets-code with the feature on.
+
+# Mandate: a role per session (mode) or per subagent that says which tools,
+# paths, kinds of bash command, MCP servers and agents are allowed, asked
+# about or denied. Built-in roles plan / auto / ask / yolo; more in
+# ~/.pi/agent/mandate.json; a project's .pi/mandate.json may only tighten.
+pi_write_mandate_extension() {
+    local dir="${PI_AGENT_DIR}/extensions" f tmp
+    f="${dir}/lets-code-mandate.ts"
+    mkdir -p "${dir}"
+    tmp="$(mktemp "${dir}/.lets-code-mandate.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (mandate); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code with the mandate on
+// (LETS_CODE_MANDATE_ON=1). A mandate is a named role with a scope: which
+// tools may run, which paths may be read or written, which kinds of bash
+// commands are allowed, asked about or denied, which MCP servers and which
+// subagents may be used. The main session runs under the mode role
+// (LETS_CODE_MODE, default "auto"); a subagent runs under the role its agent
+// file names (LETS_CODE_ROLE). Allowed calls cost nothing: the policy never
+// enters the prompt, and a denied call gets one line under 200 characters.
+//
+// Manifest: ~/.pi/agent/mandate.json (global, full authority) and
+// .pi/mandate.json (project, may only tighten; read when the project is
+// trusted). Built-in roles: plan, auto, ask, yolo.
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { existsSync, readFileSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+
+type Decision = "allow" | "ask" | "deny";
+interface Role {
+	tools?: string[];                       // allowlist of tool names; unset = all
+	read?: string[];                        // path scopes readable; unset = all
+	write?: string[];                       // path scopes writable; default ["."]
+	external?: Decision;                    // a path outside the write (or read) scope
+	bash?: Record<string, Decision>;        // command group -> decision; "*" is the default
+	groups?: Record<string, string[]>;      // extra command groups: name -> regexes
+	mcp?: Decision | string[];              // MCP calls: decision, or allowed server names
+	dispatch?: string[];                    // subagents this role may start; ["*"] all
+	network?: "on" | "off";                 // for the sandbox
+	sandbox?: Record<string, unknown>;      // sandbox overrides (allowWrite, denyRead, ...)
+	prompt?: string;                        // short system prompt section
+	protected?: string[];                   // never written, even when in scope
+	bypass?: boolean;                       // the role does nothing (yolo)
+	label?: string;
+}
+interface Manifest { default?: string; cycle?: string[]; roles: Record<string, Role> }
+
+const ACTIVE = process.env.LETS_CODE_MANDATE_ON === "1";
+const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+const LOG = process.env.LETS_CODE_MANDATE_LOG || join(AGENT_DIR, "lets-code-mandate.log");
+const PROTECTED = [".git/", ".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519"];
+
+// Built-in command groups. A simple command is matched against each group's
+// patterns (first word plus arguments); the strictest decision over the
+// groups it belongs to wins. "readonly" is only consulted by roles that deny
+// "*" (plan): those run read-only commands and nothing else.
+const GROUPS: Record<string, RegExp[]> = {
+	readonly: [
+		/^(cat|head|tail|less|more|wc|stat|file|du|df|echo|printf|true|pwd|ls|tree|grep|rg|egrep|fgrep|find|fd|which|type|env|printenv|uname|whoami|id|date|uptime|realpath|readlink|dirname|basename|sort|uniq|cut|tr|awk|sed|diff|cmp|md5sum|sha256sum|jq|yq|column|nl|xxd|hexdump|strings|test|\[)(\s|$)/,
+		/^git\s+(status|log|diff|show|branch(\s+(-a|-r|-v|--list|--show-current))?|blame|ls-files|rev-parse|remote(\s+-v)?|stash\s+list|describe|tag(\s+-l)?|cat-file|shortlog|reflog)(\s|$)/,
+		/^(npm|pnpm|yarn)\s+(ls|list|view|info|outdated|why|explain)(\s|$)/,
+		/^(pip|pip3)\s+(list|show|freeze)(\s|$)/,
+		/^(node|python3?|ruby|go|cargo|rustc|java|gcc|clang|make|cmake|tsc|deno|bun)\s+(--version|-v|-V|version)(\s|$)/,
+	],
+	"git-write": [/^git\s+(add|commit|push|pull|fetch|merge|rebase|cherry-pick|revert|reset|checkout|switch|restore|stash|tag|rm|mv|clean|am|apply)(\s|$)/],
+	build: [/^(npm|pnpm|yarn|bun)\s+(run|test|t|start|build|exec|x)(\s|$)/, /^(npx|pnpx|bunx)\s/, /^(make|cmake|cargo|go|mvn|gradle|dotnet|tsc|pytest|python3?\s+-m\s+(pytest|unittest)|jest|vitest|mocha|node\s|deno\s|ruby\s|php\s|swift\s)/],
+	"package-install": [/^(npm|pnpm|yarn|bun)\s+(i|install|add|ci|link|uninstall|remove|rm|update|up)(\s|$)/, /^(pip|pip3|pipx|uv|poetry|conda)\s+(install|add|uninstall|remove|sync)(\s|$)/, /^(apt|apt-get|dnf|yum|pacman|apk|zypper|brew|port|snap|flatpak|gem|cargo\s+install|go\s+install|nix-env)(\s|$)/],
+	privileged: [/^(sudo|doas|su|pkexec|runuser|setpriv|chroot)(\s|$)/, /^(systemctl|service|reboot|shutdown|halt|poweroff|mount|umount|modprobe|insmod|iptables|nft|ufw|useradd|usermod|passwd|chown|chgrp)(\s|$)/],
+	destructive: [/^rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\s|$)/, /^(rm|rmdir|shred|unlink)\s+.*(\s|^)(\/|~|\.\.|\*|\.git)(\s|$)/, /^(dd|mkfs|fdisk|parted|wipefs)(\s|$)/, /^git\s+(push\s+.*(-f|--force|--delete|--mirror)|branch\s+-D|reset\s+--hard|clean\s+-[a-zA-Z]*[fxd]|stash\s+(drop|clear))(\s|$)/, /^(truncate|:>|>\s*\/dev\/sd)/, /^(find|fd)\s+.*(-delete|-exec\s+rm)/, /^(chmod|chown)\s+(-R\s+)?(777|000)\s/],
+	"network-exec": [/^(curl|wget|fetch)\b.*\|\s*(sh|bash|zsh|python3?|node|perl)(\s|$)/, /^(sh|bash|zsh)\s+<\(\s*(curl|wget)/, /^(nc|ncat|netcat|telnet|nmap|masscan|socat)(\s|$)/, /^ssh\s/, /^scp\s/, /^rsync\s.*:/],
+};
+const ORDER: Decision[] = ["allow", "ask", "deny"];
+const stricter = (a: Decision, b: Decision) => (ORDER.indexOf(a) >= ORDER.indexOf(b) ? a : b);
+
+const BUILTIN: Manifest = {
+	default: "auto",
+	cycle: ["auto", "ask", "plan", "yolo"],
+	roles: {
+		auto: { label: "auto", external: "allow", bash: { "*": "allow" }, mcp: "allow", dispatch: ["*"], network: "on" },
+		ask: {
+			label: "ask", external: "ask", mcp: "allow", dispatch: ["*"], network: "on",
+			bash: { "*": "allow", privileged: "ask", destructive: "ask", "package-install": "ask", "network-exec": "ask" },
+		},
+		plan: {
+			label: "plan", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "codemode", "subagent", "list_mcp_resources", "read_mcp_resource"],
+			write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: ["*"], network: "off",
+			prompt: "Plan mode: explore the code and run read-only commands only; edits, writes and installs are refused. Finish with a numbered list under the heading \"Plan:\" that another agent could follow, then stop. The user decides when to execute it.",
+		},
+		// read-only without the planning instructions: for scouts and reviewers
+		readonly: { label: "readonly", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "list_mcp_resources", "read_mcp_resource"], write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: [], network: "off" },
+		yolo: { label: "yolo", bypass: true, network: "on", dispatch: ["*"], mcp: "allow" },
+	},
+};
+
+// ---------------------------------------------------------------- manifest
+function readJson(p: string): any | undefined {
+	if (!existsSync(p)) return undefined;
+	try { return JSON.parse(readFileSync(p, "utf8")); } catch (e) { throw new Error(`${p}: ${(e as Error).message}`); }
+}
+function mergeRole(base: Role, over: Role): Role {
+	const out: Role = { ...base, ...over };
+	if (base.bash || over.bash) out.bash = { ...(base.bash ?? {}), ...(over.bash ?? {}) };
+	if (base.groups || over.groups) out.groups = { ...(base.groups ?? {}), ...(over.groups ?? {}) };
+	if (base.sandbox || over.sandbox) out.sandbox = { ...(base.sandbox ?? {}), ...(over.sandbox ?? {}) };
+	return out;
+}
+// The project manifest may only tighten: decisions can move allow -> ask ->
+// deny, lists can shrink, bypass cannot be set, roles cannot be added.
+function tightenRole(global: Role, project: Role, warn: (m: string) => void, name: string): Role {
+	const out: Role = { ...global };
+	const inter = (a: string[] | undefined, b: string[] | undefined) => (a ? a.filter((x) => b!.includes(x) || b!.includes("*")) : b);
+	if (project.tools) out.tools = inter(global.tools, project.tools);
+	if (project.dispatch) out.dispatch = global.dispatch?.includes("*") ? project.dispatch : inter(global.dispatch, project.dispatch);
+	if (project.write) out.write = project.write.filter((w) => !global.write || global.write.some((g) => w === g || w.startsWith(g.replace(/\/?$/, "/"))) );
+	if (project.read) out.read = project.read;
+	if (project.external) out.external = stricter(global.external ?? "allow", project.external);
+	if (project.bash) { out.bash = { ...(global.bash ?? {}) }; for (const [g, d] of Object.entries(project.bash)) out.bash[g] = stricter(global.bash?.[g] ?? global.bash?.["*"] ?? "allow", d); }
+	if (project.groups) out.groups = { ...(global.groups ?? {}), ...project.groups };
+	if (project.mcp !== undefined) {
+		if (typeof project.mcp === "string") out.mcp = typeof global.mcp === "string" ? stricter(global.mcp, project.mcp) : project.mcp === "allow" ? global.mcp : project.mcp;
+		else out.mcp = Array.isArray(global.mcp) ? global.mcp.filter((s) => (project.mcp as string[]).includes(s)) : project.mcp;
+	}
+	if (project.network === "off") out.network = "off";
+	if (project.protected) out.protected = [...(global.protected ?? []), ...project.protected];
+	if (project.prompt) out.prompt = project.prompt;
+	if (project.sandbox) out.sandbox = { ...(global.sandbox ?? {}), ...project.sandbox };
+	if (project.bypass) warn(`mandate: .pi/mandate.json cannot set bypass on role '${name}' (ignored)`);
+	return out;
+}
+export function loadManifest(cwd: string, trusted: boolean, warn: (m: string) => void): Manifest {
+	const m: Manifest = { default: BUILTIN.default, cycle: [...(BUILTIN.cycle ?? [])], roles: {} };
+	for (const [n, r] of Object.entries(BUILTIN.roles)) m.roles[n] = { ...r };
+	const g = readJson(join(AGENT_DIR, "mandate.json"));
+	if (g) {
+		if (typeof g.default === "string") m.default = g.default;
+		if (Array.isArray(g.cycle)) m.cycle = g.cycle.filter((x: unknown) => typeof x === "string");
+		for (const [n, r] of Object.entries((g.roles ?? {}) as Record<string, Role>)) m.roles[n] = m.roles[n] ? mergeRole(m.roles[n], r) : { ...r };
+	}
+	const pPath = join(cwd, ".pi", "mandate.json");
+	if (trusted && existsSync(pPath)) {
+		const p = readJson(pPath);
+		if (p?.default && typeof p.default === "string" && m.roles[p.default]) m.default = p.default;
+		for (const [n, r] of Object.entries((p?.roles ?? {}) as Record<string, Role>)) {
+			if (!m.roles[n]) { warn(`mandate: .pi/mandate.json cannot add role '${n}' (ignored)`); continue; }
+			m.roles[n] = tightenRole(m.roles[n], r, warn, n);
+		}
+	} else if (!trusted && existsSync(pPath)) warn("mandate: .pi/mandate.json ignored (project not trusted)");
+	return m;
+}
+
+// ------------------------------------------------------------------ paths
+function expandHome(p: string): string { return p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p; }
+function globToRe(g: string): RegExp {
+	const esc = g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\u0000/g, ".*");
+	return new RegExp(`^${esc}$`);
+}
+function canonical(p: string, cwd: string): string {
+	let abs = isAbsolute(p) ? p : resolve(cwd, expandHome(p));
+	abs = expandHome(abs);
+	// resolve the deepest existing ancestor so symlinks cannot leave the scope
+	let probe = abs; const rest: string[] = [];
+	while (!existsSync(probe) && dirname(probe) !== probe) { rest.unshift(probe.slice(dirname(probe).length + 1)); probe = dirname(probe); }
+	try { probe = realpathSync(probe); } catch { /* keep */ }
+	return rest.length ? join(probe, ...rest) : probe;
+}
+function inScope(path: string, scopes: string[] | undefined, cwd: string): boolean {
+	if (!scopes) return true;
+	const c = canonical(path, cwd);
+	for (const s of scopes) {
+		if (s === "*" || s === "/") return true;
+		if (/[*?]/.test(s)) { if (globToRe(canonical(s.replace(/[*?].*$/, "") , cwd) + s.slice(s.search(/[*?]/))).test(c) || globToRe(s).test(c)) return true; continue; }
+		const base = canonical(s, cwd);
+		if (c === base || c.startsWith(base.endsWith(sep) ? base : base + sep)) return true;
+	}
+	return false;
+}
+function isProtected(path: string, role: Role, cwd: string): boolean {
+	const c = canonical(path, cwd); const name = c.split(sep).pop() ?? "";
+	for (const p of [...PROTECTED, ...(role.protected ?? [])]) {
+		if (p.endsWith("/")) { if (c.split(sep).includes(p.slice(0, -1))) return true; continue; }
+		if (/[*?]/.test(p)) { if (globToRe(p).test(name)) return true; continue; }
+		if (name === p) return true;
+	}
+	return false;
+}
+
+// ------------------------------------------------------------------- bash
+// A small shell lexer: enough to split a command line into simple commands
+// (respecting quotes, subshells and heredocs), strip env/wrapper prefixes
+// and pull out redirection targets. Indirection it cannot see (a variable
+// holding a command) is judged as what it shows; the sandbox is the backstop.
+export function splitCommands(cmd: string): string[] {
+	const out: string[] = []; let cur = ""; let q: string | null = null; let depth = 0; let i = 0;
+	const heredocs: string[] = [];
+	const push = () => { const t = cur.trim(); if (t) out.push(t); cur = ""; };
+	while (i < cmd.length) {
+		const ch = cmd[i], nx = cmd[i + 1];
+		if (q) { cur += ch; if (ch === "\\" && q === '"' && nx !== undefined) { cur += nx; i += 2; continue; } if (ch === q) q = null; i++; continue; }
+		if (ch === "\\" && nx !== undefined) { cur += ch + nx; i += 2; continue; }
+		if (ch === "'" || ch === '"' || ch === "`") { q = ch === "`" ? "`" : ch; cur += ch; i++; continue; }
+		if (ch === "#" && (cur === "" || /\s$/.test(cur))) { while (i < cmd.length && cmd[i] !== "\n") i++; continue; }
+		if (ch === "<" && nx === "<") { const m = /^<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(cmd.slice(i)); if (m) { heredocs.push(m[2]); cur += m[0]; i += m[0].length; continue; } }
+		if (ch === "(" ) { depth++; cur += ch; i++; continue; }
+		if (ch === ")") { depth = Math.max(0, depth - 1); cur += ch; i++; continue; }
+		if (depth === 0 && (ch === ";" || ch === "|" || ch === "&" || ch === "\n")) {
+			if (ch === "\n" && heredocs.length) { // skip heredoc bodies
+				let rest = cmd.slice(i + 1); let consumed = 0;
+				for (const tag of heredocs) { const re = new RegExp(`(^|\\n)\\t*${tag}(\\n|$)`); const mm = re.exec(rest); if (mm) { consumed += mm.index + mm[0].length; rest = rest.slice(mm.index + mm[0].length); } }
+				heredocs.length = 0; push(); i += 1 + consumed; continue;
+			}
+			push(); if ((ch === "|" || ch === "&") && nx === ch) i++; i++; continue;
+		}
+		cur += ch; i++;
+	}
+	push();
+	// unwrap subshells / groups / shell -c and judge their contents too
+	const expanded: string[] = [];
+	for (const c of out) {
+		const inner = /^\(\s*([\s\S]*)\)\s*$/.exec(c) ?? /^\{\s*([\s\S]*);?\s*\}\s*$/.exec(c);
+		if (inner) { expanded.push(...splitCommands(inner[1])); continue; }
+		const shc = /^(?:(?:env|sudo|doas|nice|nohup|timeout\s+\S+|xargs)\s+)*(?:sh|bash|zsh|dash)\s+(?:-[a-z]*c)\s+(['"])([\s\S]*)\1/.exec(c);
+		if (shc) { expanded.push(c.replace(shc[2], "…"), ...splitCommands(shc[2])); continue; }
+		const sub = [...c.matchAll(/\$\(([^()]*)\)/g)].map((m) => m[1]);
+		expanded.push(c, ...sub.flatMap(splitCommands));
+	}
+	return expanded;
+}
+function stripPrefixes(c: string): string {
+	let s = c.trim(); let changed = true;
+	while (changed) {
+		changed = false;
+		const m = /^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+|env\s+(?:-[a-zA-Z]+\s+)?|nice\s+(?:-n\s*\d+\s+)?|nohup\s+|time\s+|command\s+|exec\s+|builtin\s+|timeout\s+(?:-[a-z]+\s+)*\S+\s+|xargs\s+(?:-[a-zA-Z0-9]+\s*)*)/.exec(s);
+		if (m && m[0].length) { s = s.slice(m[0].length); changed = true; }
+	}
+	return s;
+}
+export function classify(cmd: string, role: Role): { decision: Decision; group: string; command: string } {
+	const groups = { ...GROUPS, ...Object.fromEntries(Object.entries(role.groups ?? {}).map(([k, v]) => [k, v.map((r) => new RegExp(r))])) };
+	const policy = role.bash ?? { "*": "allow" };
+	const dflt: Decision = policy["*"] ?? "allow";
+	let worst: { decision: Decision; group: string; command: string } = { decision: "allow", group: "", command: "" };
+	for (const raw of splitCommands(cmd)) {
+		const c = stripPrefixes(raw);
+		if (!c) continue;
+		const sudo = /^(sudo|doas)\s/.test(raw.trim());
+		let d: Decision | null = null; let g = "";
+		for (const [name, res] of Object.entries(groups)) {
+			if (name === "readonly") continue;
+			// patterns that mention a pipe are matched against the whole call, since pipelines are split
+			if (res.some((r) => r.test(c) || (r.source.includes("\\|") && r.test(cmd))) || (name === "privileged" && sudo)) { const pd = policy[name] ?? dflt; if (d === null || stricter(pd, d) === pd) { d = pd; g = name; } }
+		}
+		if (d === null) { // no group matched: readonly commands are allowed under a deny-by-default role
+			if (dflt === "deny" && groups.readonly.some((r) => r.test(c)) && !/[>]/.test(c)) { d = policy.readonly ?? "allow"; g = "readonly"; }
+			else { d = dflt; g = "*"; }
+		}
+		if (stricter(d, worst.decision) === d && d !== worst.decision) worst = { decision: d, group: g, command: c };
+		if (worst.decision === "deny") break;
+	}
+	return worst;
+}
+export function redirectTargets(cmd: string): string[] {
+	const out: string[] = [];
+	for (const m of cmd.matchAll(/(?:^|[^<>])(?:\d?>>?|&>|>\|)\s*([^\s;&|)]+)/g)) if (!/^&\d/.test(m[1]) && m[1] !== "/dev/null") out.push(m[1].replace(/^['"]|['"]$/g, ""));
+	for (const m of cmd.matchAll(/\b(?:tee|touch|mkdir|cp|mv|install|ln|rsync)\s+(?:-[a-zA-Z]+\s+)*(.*?)(?:$|[;&|])/g)) for (const a of m[1].split(/\s+/)) if (a && !a.startsWith("-")) out.push(a.replace(/^['"]|['"]$/g, ""));
+	for (const m of cmd.matchAll(/\bsed\s+-i\S*\s+(?:-e\s+\S+\s+|'[^']*'\s+|"[^"]*"\s+)+(\S+)/g)) out.push(m[1]);
+	return out.filter((p) => !/[$`]/.test(p));
+}
+
+// ------------------------------------------------------------------- state
+export function roleFor(manifest: Manifest, name: string): Role { return manifest.roles[name] ?? manifest.roles[manifest.default ?? "auto"] ?? BUILTIN.roles.auto; }
+export function mcpDecision(role: Role, tool: string): Decision {
+	const server = tool.split("__")[1] ?? "";
+	if (role.mcp === undefined) return "allow";
+	if (typeof role.mcp === "string") return role.mcp;
+	return role.mcp.includes(server) || role.mcp.includes("*") ? "allow" : "deny";
+}
+export function mayDispatch(role: Role, agent: string): boolean { return !role.dispatch || role.dispatch.includes("*") || role.dispatch.includes(agent); }
+const short = (s: string, n = 190) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+export default function (pi: ExtensionAPI) {
+	if (!ACTIVE) return;
+	const subagentDepth = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
+	let manifest: Manifest = BUILTIN;
+	let roleName = process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "auto";
+	let role: Role = BUILTIN.roles.auto;
+	let allowedForSession = new Set<string>();   // "bash:<group>" | "external" | "mcp:<server>"
+	let cwd = process.cwd();
+	let savedTools: string[] | null = null;
+
+	const log = (event: string, detail: Record<string, unknown>) => {
+		try { mkdirSync(dirname(LOG), { recursive: true }); appendFileSync(LOG, JSON.stringify({ t: Date.now(), role: roleName, event, ...detail }) + "\n"); } catch { /* never fatal */ }
+	};
+	const warn = (ctx: ExtensionContext | undefined, m: string) => { if (ctx?.hasUI) ctx.ui.notify(m, "warning"); log("warn", { m }); };
+
+	function apply(ctx: ExtensionContext | undefined, name: string, announce = true) {
+		if (!manifest.roles[name]) { warn(ctx, `mandate: unknown role '${name}', using '${manifest.default}'`); name = manifest.default ?? "auto"; }
+		const prev = roleName; roleName = name; role = roleFor(manifest, name);
+		// plan-like roles: drop tools outside the allowlist from the active set; restore on exit
+		if (role.tools) {
+			if (!savedTools) savedTools = pi.getActiveTools();
+			const allowed = new Set(role.tools);
+			pi.setActiveTools(pi.getActiveTools().filter((t) => allowed.has(t)));
+		} else if (savedTools) { pi.setActiveTools(savedTools); savedTools = null; }
+		if (ctx?.hasUI) ctx.ui.setStatus("mandate", role.bypass ? "mode: yolo" : `mode: ${role.label ?? name}`);
+		if (announce) { pi.events.emit("lets-code:mode", { role: name, network: role.network ?? "on", bypass: !!role.bypass, sandbox: role.sandbox ?? {} }); if (prev !== name) log("mode", { from: prev, to: name }); }
+	}
+	function reload(ctx: ExtensionContext | undefined) {
+		try { manifest = loadManifest(cwd, ctx?.isProjectTrusted ?? false, (m) => warn(ctx, m)); }
+		catch (e) { // a broken manifest fails closed: built-in roles only, and the strictest mode that still works
+			warn(ctx, `mandate: ${(e as Error).message} — using built-in roles`); manifest = BUILTIN;
+		}
+		apply(ctx, process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || manifest.default || "auto");
+	}
+
+	async function decide(ctx: ExtensionContext, d: Decision, key: string, what: string): Promise<{ block: true; reason: string } | undefined> {
+		if (d === "allow") return undefined;
+		if (d === "deny") { log("deny", { key, what }); return { block: true, reason: short(`mandate(${roleName}): ${what} is not allowed in this mode. Switch with /mode, or ask the user.`) }; }
+		if (allowedForSession.has(key)) return undefined;
+		if (!ctx.hasUI) { log("deny", { key, what, why: "no-ui" }); return { block: true, reason: short(`mandate(${roleName}): ${what} needs approval and no one can be asked in this mode.`) }; }
+		const choice = await ctx.ui.select(`mandate (${roleName}): ${what}\n\nAllow?`, ["Allow once", "Allow for this session", "Deny"]);
+		if (choice === "Allow for this session") allowedForSession.add(key);
+		if (choice === "Allow once" || choice === "Allow for this session") { log("allow", { key, what, choice }); return undefined; }
+		log("deny", { key, what, why: "user" });
+		return { block: true, reason: short(`mandate(${roleName}): the user did not approve: ${what}`) };
+	}
+
+	pi.on("session_start", async (_e, ctx) => { cwd = ctx.cwd; allowedForSession = new Set(); reload(ctx); });
+	pi.on("project_trust", async (_e, ctx) => reload(ctx));
+
+	pi.on("before_agent_start", async (event: any) => {
+		const sections = event?.systemPromptOptions?.sections;
+		if (sections && typeof sections === "object") { if (role.prompt && !role.bypass) sections.lets_code_mandate = role.prompt; else delete sections.lets_code_mandate; }
+		return undefined;
+	});
+
+	pi.on("tool_call", async (event, ctx) => {
+		if (role.bypass) return undefined;
+		const name = event.toolName; const input: any = event.input ?? {};
+		if (role.tools && !role.tools.includes(name) && !name.startsWith("mcp__")) return { block: true, reason: short(`mandate(${roleName}): tool '${name}' is not available in this mode (${role.tools.join(", ")}).`) };
+		if (name.startsWith("mcp__")) return decide(ctx, mcpDecision(role, name), `mcp:${name.split("__")[1]}`, `MCP call ${name}`);
+		if (name === "edit" || name === "write") {
+			const p = String(input.path ?? "");
+			if (isProtected(p, role, ctx.cwd)) { log("deny", { key: "protected", what: p }); return { block: true, reason: short(`mandate(${roleName}): '${p}' is a protected path and is never written.`) }; }
+			if (!inScope(p, role.write ?? ["."], ctx.cwd)) return decide(ctx, role.external ?? "ask", "external", `write outside the project: ${p}`);
+			return undefined;
+		}
+		if (name === "read" || name === "ls" || name === "grep" || name === "find") {
+			const p = String(input.path ?? input.dir ?? ".");
+			if (role.read && !inScope(p, role.read, ctx.cwd)) return decide(ctx, role.external ?? "ask", "external", `read outside the allowed paths: ${p}`);
+			return undefined;
+		}
+		if (name === "bash") {
+			const cmd = String(input.command ?? "");
+			const c = classify(cmd, role);
+			if (c.decision !== "allow") { const r = await decide(ctx, c.decision, `bash:${c.group}`, `${c.group} command: ${short(c.command, 80)}`); if (r) return r; }
+			for (const t of redirectTargets(cmd)) {
+				if (isProtected(t, role, ctx.cwd)) { log("deny", { key: "protected", what: t }); return { block: true, reason: short(`mandate(${roleName}): '${t}' is a protected path and is never written.`) }; }
+				if (!inScope(t, role.write ?? ["."], ctx.cwd)) { const r = await decide(ctx, role.external ?? "ask", "external", `write outside the project: ${t}`); if (r) return r; }
+			}
+			return undefined;
+		}
+		if (name === "subagent") {
+			const agents = [input.agent, ...(input.tasks ?? []).map((t: any) => t?.agent), ...(input.chain ?? []).map((t: any) => t?.agent)].filter(Boolean) as string[];
+			const bad = agents.find((a) => !mayDispatch(role, a));
+			if (bad) { log("deny", { key: "dispatch", what: bad }); return { block: true, reason: short(`mandate(${roleName}): this role may not start the '${bad}' agent (allowed: ${(role.dispatch ?? ["*"]).join(", ")}).`) }; }
+		}
+		return undefined;
+	});
+
+	// --- commands and shortcuts (main session only; a subagent keeps its role)
+	if (subagentDepth > 0 || process.env.LETS_CODE_ROLE) return;
+	const names = () => Object.keys(manifest.roles);
+	pi.registerCommand("mode", {
+		description: "Show or switch the mandate mode: /mode [plan|auto|ask|yolo|<role>]",
+		handler: async (args, ctx) => {
+			const want = (args ?? "").trim();
+			if (!want) { ctx.ui.notify(`mode: ${roleName}  (available: ${names().join(", ")})\nlog: ${LOG}`, "info"); return; }
+			if (!manifest.roles[want]) { ctx.ui.notify(`unknown mode '${want}' — one of ${names().join(", ")}`, "warning"); return; }
+			await leavePlanIfNeeded(ctx, want); apply(ctx, want);
+			ctx.ui.notify(`mode: ${want}`, "info");
+		},
+	});
+	pi.registerCommand("plan", {
+		description: "Toggle plan mode (read-only exploration that ends in a numbered plan)",
+		handler: async (_args, ctx) => { const next = roleName === "plan" ? "auto" : "plan"; await leavePlanIfNeeded(ctx, next); apply(ctx, next); ctx.ui.notify(`mode: ${next}`, "info"); },
+	});
+	pi.registerShortcut("alt+m", {
+		description: "Cycle the mandate mode",
+		handler: async (ctx) => { const cyc = (manifest.cycle ?? []).filter((n) => manifest.roles[n]); const i = cyc.indexOf(roleName); const next = cyc[(i + 1) % cyc.length] ?? "auto"; await leavePlanIfNeeded(ctx, next); apply(ctx, next); ctx.ui.notify(`mode: ${next}`, "info"); },
+	});
+	pi.registerShortcut("ctrl+alt+p", { description: "Toggle plan mode", handler: async (ctx) => { const next = roleName === "plan" ? "auto" : "plan"; await leavePlanIfNeeded(ctx, next); apply(ctx, next); ctx.ui.notify(`mode: ${next}`, "info"); } });
+
+	async function leavePlanIfNeeded(ctx: ExtensionContext, next: string) {
+		if (roleName !== "plan" || next === "plan" || !ctx.hasUI) return;
+		const last = lastAssistantText(ctx);
+		if (!/(^|\n)\s*#*\s*Plan:/i.test(last)) return;
+		const choice = await ctx.ui.select("A plan is on the table. Execute it now?", ["Execute the plan", "Switch mode only"]);
+		if (choice === "Execute the plan") pi.sendUserMessage("Execute the plan you wrote above, step by step. Run the tests after each step and report what changed.", { deliverAs: "followUp" } as any);
+	}
+	function lastAssistantText(ctx: ExtensionContext): string {
+		try {
+			const entries: any[] = (ctx.sessionManager as any).getEntries?.() ?? (ctx.sessionManager as any).getBranch?.() ?? [];
+			for (let i = entries.length - 1; i >= 0; i--) {
+				const m = entries[i]?.message; if (!m || m.role !== "assistant") continue;
+				const c = m.content; if (typeof c === "string") return c;
+				if (Array.isArray(c)) return c.filter((x: any) => x?.type === "text").map((x: any) => x.text).join("\n");
+			}
+		} catch { /* fall through */ }
+		return "";
+	}
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+}
+
+# Subagents: one tool, `subagent`, that runs a named agent file in its own
+# pi process (same provider, same guards, the role its file names).
+pi_write_subagent_extension() {
+    local dir="${PI_AGENT_DIR}/extensions" f tmp
+    f="${dir}/lets-code-subagent.ts"
+    mkdir -p "${dir}"
+    tmp="$(mktemp "${dir}/.lets-code-subagent.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (subagents); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code with subagents on
+// (LETS_CODE_SUBAGENTS_ON=1). One tool, `subagent`, delegates a task to a
+// named agent in its own pi process with a fresh context: single, parallel
+// (concurrency LETS_CODE_SUBAGENT_CONCURRENCY, default 2: one GPU serves
+// every agent) or chained ({previous} carries the prior output). Agents are
+// Markdown files with YAML frontmatter (name, description, tools, thinking,
+// role) in ~/.pi/agent/agents/, and in .pi/agents/ or .agents/agents/ when
+// the project is trusted. Every child goes through lets-code's provider and
+// the same guards; it runs under the mandate role the agent file names.
+// A child cannot start children of its own (LETS_CODE_SUBAGENT_DEPTH).
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+import { Type } from "typebox";
+
+const ACTIVE = process.env.LETS_CODE_SUBAGENTS_ON === "1";
+const DEPTH = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
+const MAX_DEPTH = Number(process.env.LETS_CODE_SUBAGENT_MAX_DEPTH ?? "1") || 1;
+const CONCURRENCY = Math.max(1, Number(process.env.LETS_CODE_SUBAGENT_CONCURRENCY ?? "2") || 2);
+const MAX_PARALLEL = 8;
+const OUTPUT_CAP = 50 * 1024;
+const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+const MODEL = process.env.LETS_CODE_MODEL || "";
+
+export interface AgentDef { name: string; description: string; tools?: string[]; thinking?: string; role?: string; prompt: string; source: "user" | "project"; file: string }
+
+export function parseAgentFile(text: string, file: string, source: "user" | "project"): AgentDef | null {
+	const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
+	const fm: Record<string, string> = {}; let body = text;
+	if (m) { body = m[2]; for (const line of m[1].split(/\r?\n/)) { const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line); if (kv) fm[kv[1]] = kv[2].trim().replace(/^["']|["']$/g, ""); } }
+	const name = (fm.name || file.replace(/^.*\//, "").replace(/\.md$/, "")).trim();
+	if (!/^[A-Za-z0-9][\w.-]*$/.test(name)) return null;
+	const list = (v?: string) => v ? v.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+	return { name, description: fm.description ?? "", tools: list(fm.tools), thinking: fm.thinking, role: fm.role, prompt: body.trim(), source, file };
+}
+export function discoverAgents(cwd: string, trusted: boolean): AgentDef[] {
+	const out = new Map<string, AgentDef>();
+	const scan = (dir: string, source: "user" | "project") => {
+		if (!existsSync(dir)) return;
+		for (const f of readdirSync(dir)) { if (!f.endsWith(".md")) continue; try { const a = parseAgentFile(readFileSync(join(dir, f), "utf8"), join(dir, f), source); if (a && !out.has(a.name)) out.set(a.name, a); } catch { /* skip bad file */ } }
+	};
+	if (trusted) { scan(join(cwd, ".pi", "agents"), "project"); scan(join(cwd, ".agents", "agents"), "project"); }
+	scan(join(AGENT_DIR, "agents"), "user");
+	return [...out.values()];
+}
+
+interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number }
+
+function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSignal | undefined, onProgress?: (line: string) => void): Promise<RunResult> {
+	const args = ["--mode", "json", "-p", "--no-session"];
+	if (MODEL) args.push("--provider", "lets-code", "--model", MODEL);
+	if (agent.thinking) args.push("--thinking", agent.thinking);
+	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
+	const tmp = mkdtempSync(join(tmpdir(), "lets-code-agent-"));
+	const promptFile = join(tmp, "prompt.md");
+	writeFileSync(promptFile, `You are the "${agent.name}" agent. ${agent.description}\n\n${agent.prompt}\n`);
+	args.push("--append-system-prompt", promptFile, `Task: ${task}`);
+	const env = { ...process.env, LETS_CODE_SUBAGENT_DEPTH: String(DEPTH + 1), LETS_CODE_ROLE: agent.role || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "" };
+	if (!env.LETS_CODE_ROLE) delete (env as any).LETS_CODE_ROLE;
+	const r: RunResult = { agent: agent.name, task, text: "", exitCode: 0, stderr: "", turns: 0, input: 0, output: 0 };
+	return new Promise((resolve) => {
+		const child = spawn("pi", args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+		let buf = "";
+		const handle = (line: string) => {
+			if (!line.trim()) return;
+			let ev: any; try { ev = JSON.parse(line); } catch { return; }
+			if (ev.type === "message_end" && ev.message?.role === "assistant") {
+				r.turns++; const u = ev.message.usage; if (u) { r.input += u.input || 0; r.output += u.output || 0; }
+				const c = ev.message.content; const text = typeof c === "string" ? c : Array.isArray(c) ? c.filter((x: any) => x?.type === "text").map((x: any) => x.text).join("\n") : "";
+				if (text.trim()) r.text = text;
+			}
+			if (ev.type === "tool_execution_start" && onProgress) onProgress(`${agent.name}: ${ev.toolName} ${ev.toolName === "bash" ? String(ev.args?.command ?? "").slice(0, 60) : String(ev.args?.path ?? "")}`);
+		};
+		child.stdout.on("data", (d) => { buf += d.toString(); const lines = buf.split("\n"); buf = lines.pop() ?? ""; lines.forEach(handle); });
+		child.stderr.on("data", (d) => { r.stderr += d.toString().slice(0, 4000); });
+		const onAbort = () => { try { child.kill("SIGTERM"); } catch { /* gone */ } };
+		signal?.addEventListener("abort", onAbort, { once: true });
+		child.on("error", (e) => { r.exitCode = 1; r.stderr += `\n${e.message}`; finish(); });
+		child.on("close", (code) => { if (buf) handle(buf); r.exitCode = code ?? 1; finish(); });
+		const finish = () => { signal?.removeEventListener("abort", onAbort); try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ok */ } resolve(r); };
+	});
+}
+function cap(s: string): string { if (Buffer.byteLength(s, "utf8") <= OUTPUT_CAP) return s; let t = s.slice(0, OUTPUT_CAP); while (Buffer.byteLength(t, "utf8") > OUTPUT_CAP) t = t.slice(0, -1); return `${t}\n\n[output truncated at 50 KB]`; }
+function render(r: RunResult): string {
+	const head = `## ${r.agent}${r.step ? ` (step ${r.step})` : ""} — ${r.exitCode === 0 ? "done" : `exit ${r.exitCode}`}, ${r.turns} turn${r.turns === 1 ? "" : "s"}, ↑${r.input} ↓${r.output}`;
+	const body = r.text.trim() || (r.stderr.trim() ? `(no output; stderr: ${r.stderr.trim().slice(-800)})` : "(no output)");
+	return `${head}\n${cap(body)}`;
+}
+async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) => Promise<R>): Promise<R[]> {
+	const out: R[] = new Array(items.length); let next = 0;
+	const worker = async () => { while (next < items.length) { const i = next++; out[i] = await fn(items[i], i); } };
+	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+	return out;
+}
+
+export default function (pi: ExtensionAPI) {
+	if (!ACTIVE || DEPTH >= MAX_DEPTH) return;   // a child at the depth limit gets no tool at all (and pays no tokens for it)
+	const Item = Type.Object({ agent: Type.String({ description: "agent name" }), task: Type.String({ description: "task; in a chain, {previous} is the prior step's output" }) });
+	pi.registerTool({
+		name: "subagent",
+		label: "subagent",
+		description: "Delegate to a named agent with a fresh context: {agent, task} for one; {tasks:[...]} for parallel; {chain:[...]} for sequential with {previous}. Names: see the agents list in the result of a call without arguments.",
+		parameters: Type.Object({
+			agent: Type.Optional(Type.String({ description: "agent name (single)" })),
+			task: Type.Optional(Type.String({ description: "task (single)" })),
+			tasks: Type.Optional(Type.Array(Item, { description: "run in parallel" })),
+			chain: Type.Optional(Type.Array(Item, { description: "run in order" })),
+		}),
+		async execute(_id, params: any, signal, onUpdate, ctx: ExtensionContext) {
+			const agents = discoverAgents(ctx.cwd, ctx.isProjectTrusted);
+			const list = agents.map((a) => `- ${a.name}: ${a.description || "(no description)"}`).join("\n") || "(none: add ~/.pi/agent/agents/<name>.md)";
+			const find = (n: string) => agents.find((a) => a.name === n);
+			const missing = (n: string) => ({ content: [{ type: "text" as const, text: `Unknown agent "${n}". Agents:\n${list}` }], isError: true });
+			const progress = (line: string) => onUpdate?.({ content: [{ type: "text", text: line }] });
+			if (params.tasks?.length) {
+				if (params.tasks.length > MAX_PARALLEL) return { content: [{ type: "text" as const, text: `Too many parallel tasks (${params.tasks.length}); max ${MAX_PARALLEL}.` }], isError: true };
+				for (const t of params.tasks) if (!find(t.agent)) return missing(t.agent);
+				const results = await mapLimit(params.tasks, CONCURRENCY, (t: any) => runAgent(find(t.agent)!, t.task, ctx.cwd, signal, progress));
+				return { content: [{ type: "text" as const, text: results.map(render).join("\n\n") }], isError: results.every((r) => r.exitCode !== 0) };
+			}
+			if (params.chain?.length) {
+				for (const t of params.chain) if (!find(t.agent)) return missing(t.agent);
+				const results: RunResult[] = []; let previous = "";
+				for (const [i, t] of (params.chain as any[]).entries()) {
+					const r = await runAgent(find(t.agent)!, t.task.replace(/\{previous\}/g, previous), ctx.cwd, signal, progress);
+					r.step = i + 1; results.push(r); previous = r.text;
+					if (r.exitCode !== 0 || signal?.aborted) break;
+				}
+				return { content: [{ type: "text" as const, text: results.map(render).join("\n\n") }], isError: results[results.length - 1]?.exitCode !== 0 };
+			}
+			if (!params.agent || !params.task) return { content: [{ type: "text" as const, text: `Give {agent, task}, {tasks:[...]} or {chain:[...]}. Agents:\n${list}` }], isError: !agents.length };
+			const a = find(params.agent); if (!a) return missing(params.agent);
+			const r = await runAgent(a, params.task, ctx.cwd, signal, progress);
+			return { content: [{ type: "text" as const, text: render(r) }], isError: r.exitCode !== 0 };
+		},
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+}
+
+# Three starter agents, written only when the user has none yet.
+write_default_agents() {
+    local dir="${PI_AGENT_DIR}/agents"
+    if [ -d "${dir}" ] && [ -n "$(ls -A "${dir}" 2>/dev/null)" ]; then return 0; fi
+    mkdir -p "${dir}"
+    cat > "${dir}/scout.md" <<'MD'
+---
+name: scout
+description: Fast read-only recon of a codebase; returns the files, line ranges and key code another agent needs
+tools: read, grep, find, ls, bash
+role: readonly
+---
+Investigate quickly and report for an agent that has not seen the files.
+Use grep and find to locate code, read only the sections that matter, note
+how the pieces connect.
+
+Output:
+## Files
+`path` (lines a-b) — what is there
+## Key code
+The types, functions or config that matter, quoted.
+## Start here
+The one file to open first, and why.
+MD
+    cat > "${dir}/worker.md" <<'MD'
+---
+name: worker
+description: General-purpose agent with full tools for a delegated change; isolated context
+---
+Complete the assigned task autonomously. Make the change, run the tests
+that cover it, and fix what fails.
+
+Output:
+## Done
+What changed, in two or three sentences.
+## Files changed
+`path` — what changed
+## Notes
+Anything the main agent must know (open questions, things not done).
+MD
+    cat > "${dir}/reviewer.md" <<'MD'
+---
+name: reviewer
+description: Reviews a change for correctness and missed cases; reports findings, does not edit
+tools: read, grep, find, ls, bash
+role: readonly
+---
+Review the change named in the task: read the diff and the code around it,
+run the existing tests, and look for bugs, missed edge cases and unclear
+behaviour. Do not edit files.
+
+Output: a numbered list of findings, most serious first, each with the
+file and line, what is wrong, and how to fix it. End with "No findings"
+if there are none.
+MD
+    log "subagents: starter agents written to ${dir} (scout, worker, reviewer)"
+}
+
+# Sandbox: bash confined with @anthropic-ai/sandbox-runtime. The runtime is
+# an npm package installed next to the extension (a directory extension);
+# lets-code installs or updates it when missing. Never fatal: without the
+# runtime the extension warns and bash runs as before.
+SANDBOX_RUNTIME_VERSION="0.0.79"
+SB_NOTE=""
+pi_write_sandbox_extension() {
+    local dir="${PI_AGENT_DIR}/extensions/lets-code-sandbox" f tmp have=""
+    mkdir -p "${dir}"
+    f="${dir}/index.ts"
+    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (sandbox); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code with the sandbox on
+// (LETS_CODE_SANDBOX_ON=1). Runs the model's bash commands (and your own
+// `!` commands) inside @anthropic-ai/sandbox-runtime: bubblewrap plus a
+// filtering proxy on Linux, Seatbelt on macOS. Writes are confined to the
+// project and a few scratch paths, secrets are unreadable, and the network
+// is an allowlist of domains. The runtime lives next to this file
+// (lets-code installs it into this directory); without it, bash runs as
+// before and the launch line says so.
+//
+// Config, merged in this order: built-in defaults, ~/.pi/agent/extensions/
+// sandbox.json, <project>/.pi/sandbox.json (the same files pi's own sandbox
+// example reads), then the active mandate role (network on/off and its
+// `sandbox` block). Keys: enabled, network.allowedDomains/deniedDomains,
+// filesystem.denyRead/allowWrite/denyWrite, ignoreViolations,
+// enableWeakerNestedSandbox.
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ACTIVE = process.env.LETS_CODE_SANDBOX_ON === "1";
+const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+export interface SandboxConfig {
+	enabled?: boolean;
+	network?: { allowedDomains?: string[]; deniedDomains?: string[] };
+	filesystem?: { denyRead?: string[]; allowWrite?: string[]; denyWrite?: string[] };
+	ignoreViolations?: Record<string, string[]>;
+	enableWeakerNestedSandbox?: boolean;
+}
+export const DEFAULTS: SandboxConfig = {
+	enabled: true,
+	network: {
+		allowedDomains: ["npmjs.org", "*.npmjs.org", "registry.yarnpkg.com", "pypi.org", "*.pypi.org", "files.pythonhosted.org", "github.com", "*.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "crates.io", "*.crates.io", "proxy.golang.org", "deb.debian.org", "*.ubuntu.com"],
+		deniedDomains: [],
+	},
+	filesystem: {
+		denyRead: ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/lets-code", "~/.pi/agent/auth.json", "~/.pi/agent/mcp-auth.json", "~/.netrc", "~/.docker/config.json", "~/.kube"],
+		allowWrite: [".", "/tmp", "~/.cache", "~/.npm", "~/.pi/agent/sessions"],
+		denyWrite: [".env", ".env.*", "*.pem", "*.key", ".git/hooks"],
+	},
+};
+function readJson(p: string, warn: (m: string) => void): Partial<SandboxConfig> {
+	if (!existsSync(p)) return {};
+	try { return JSON.parse(readFileSync(p, "utf8")); } catch (e) { warn(`sandbox: could not parse ${p}: ${(e as Error).message}`); return {}; }
+}
+export function merge(base: SandboxConfig, over: Partial<SandboxConfig>): SandboxConfig {
+	const out: SandboxConfig = { ...base };
+	if (over.enabled !== undefined) out.enabled = over.enabled;
+	if (over.network) out.network = { ...base.network, ...over.network };
+	if (over.filesystem) out.filesystem = { ...base.filesystem, ...over.filesystem };
+	if (over.ignoreViolations) out.ignoreViolations = over.ignoreViolations;
+	if (over.enableWeakerNestedSandbox !== undefined) out.enableWeakerNestedSandbox = over.enableWeakerNestedSandbox;
+	return out;
+}
+export interface Mode { role?: string; network?: "on" | "off"; bypass?: boolean; sandbox?: Partial<SandboxConfig> & { allowWrite?: string[]; denyRead?: string[]; denyWrite?: string[]; allowedDomains?: string[] } }
+export function loadConfig(cwd: string, mode: Mode | undefined, warn: (m: string) => void): SandboxConfig {
+	let c = merge(DEFAULTS, readJson(join(AGENT_DIR, "extensions", "sandbox.json"), warn));
+	c = merge(c, readJson(join(cwd, ".pi", "sandbox.json"), warn));
+	if (mode) {
+		if (mode.network === "off") c = merge(c, { network: { allowedDomains: [], deniedDomains: c.network?.deniedDomains } });
+		const s = mode.sandbox ?? {};
+		const flat: Partial<SandboxConfig> = {};
+		if (s.allowWrite || s.denyRead || s.denyWrite) flat.filesystem = { ...(s.allowWrite ? { allowWrite: s.allowWrite } : {}), ...(s.denyRead ? { denyRead: s.denyRead } : {}), ...(s.denyWrite ? { denyWrite: s.denyWrite } : {}) };
+		if (s.allowedDomains) flat.network = { allowedDomains: s.allowedDomains };
+		c = merge(merge(c, s), flat);
+		if (mode.bypass) c.enabled = false;
+	}
+	return c;
+}
+
+export default function (pi: ExtensionAPI) {
+	if (!ACTIVE) return;
+	let runtime: any = null;          // the @anthropic-ai/sandbox-runtime module, loaded lazily
+	let piMod: any = null;            // @earendil-works/pi-coding-agent (createBashTool)
+	let enabled = false;
+	let mode: Mode | undefined;
+	let cwd = process.cwd();
+	let localBash: any = null;
+	const warn = (ctx: ExtensionContext | undefined, m: string) => { if (ctx?.hasUI) ctx.ui.notify(m, "warning"); else console.error(`[lets-code] ${m}`); };
+
+	// Sandboxed operations for createBashTool: wrap, then run through bash.
+	function sandboxedOps() {
+		return {
+			async exec(command: string, dir: string, { onData, signal, timeout }: any) {
+				if (!existsSync(dir)) throw new Error(`Working directory does not exist: ${dir}`);
+				const wrapped: string = await runtime.SandboxManager.wrapWithSandbox(command);
+				return new Promise<{ exitCode: number | null }>((resolve, reject) => {
+					const child = spawn("bash", ["-c", wrapped], { cwd: dir, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+					let timedOut = false; let th: NodeJS.Timeout | undefined;
+					const killGroup = () => { if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); } } };
+					if (timeout && timeout > 0) th = setTimeout(() => { timedOut = true; killGroup(); }, timeout * 1000);
+					child.stdout?.on("data", onData); child.stderr?.on("data", onData);
+					child.on("error", (e) => { if (th) clearTimeout(th); reject(e); });
+					signal?.addEventListener("abort", killGroup, { once: true });
+					child.on("close", (code) => { if (th) clearTimeout(th); signal?.removeEventListener("abort", killGroup); if (signal?.aborted) reject(new Error("aborted")); else if (timedOut) reject(new Error(`timeout:${timeout}`)); else resolve({ exitCode: code }); });
+				});
+			},
+		};
+	}
+
+	async function init(ctx: ExtensionContext) {
+		const cfg = loadConfig(cwd, mode, (m) => warn(ctx, m));
+		if (runtime) { try { await runtime.SandboxManager.reset(); } catch { /* ok */ } }
+		if (!cfg.enabled) { enabled = false; if (ctx.hasUI) ctx.ui.setStatus("sandbox", mode?.bypass ? "sandbox: off (yolo)" : "sandbox: off"); return; }
+		if (process.platform !== "linux" && process.platform !== "darwin") { enabled = false; warn(ctx, `sandbox: not supported on ${process.platform}`); return; }
+		try {
+			if (!runtime) runtime = await import(join(HERE, "node_modules", "@anthropic-ai", "sandbox-runtime", "dist", "index.js"));
+			if (!piMod) piMod = await import("@earendil-works/pi-coding-agent");
+			await runtime.SandboxManager.initialize({ network: cfg.network, filesystem: cfg.filesystem, ignoreViolations: cfg.ignoreViolations, enableWeakerNestedSandbox: cfg.enableWeakerNestedSandbox });
+			enabled = true;
+			if (ctx.hasUI) ctx.ui.setStatus("sandbox", `sandbox: ${cfg.network?.allowedDomains?.length ? `${cfg.network.allowedDomains.length} domains` : "no network"}`);
+		} catch (e) {
+			enabled = false;
+			warn(ctx, `sandbox: not active — ${(e as Error).message}. Install: cd ${HERE} && npm install; Linux also needs bubblewrap and socat.`);
+		}
+	}
+
+	pi.events.on("lets-code:mode", (data: unknown) => { mode = data as Mode; void init(lastCtx as ExtensionContext); });
+	let lastCtx: ExtensionContext | undefined;
+
+	// The bash tool is replaced with one whose operations run sandboxed when
+	// the sandbox is up, and plain otherwise. Registered at load so the tool
+	// exists before the first turn; the wrapping decision is made per call.
+	void (async () => {
+		try { piMod = await import("@earendil-works/pi-coding-agent"); localBash = piMod.createBashTool(cwd); } catch { return; }
+		pi.registerTool({
+			...localBash,
+			label: "bash",
+			async execute(id: string, params: any, signal: AbortSignal, onUpdate: any) {
+				if (!enabled) return localBash.execute(id, params, signal, onUpdate);
+				return piMod.createBashTool(cwd, { operations: sandboxedOps() }).execute(id, params, signal, onUpdate);
+			},
+		});
+	})();
+	pi.on("user_bash", () => (enabled ? { operations: sandboxedOps() } : undefined));
+	pi.on("session_start", async (_e, ctx) => { cwd = ctx.cwd; lastCtx = ctx; await init(ctx); });
+	pi.on("session_shutdown", async () => { if (runtime) { try { await runtime.SandboxManager.reset(); } catch { /* ok */ } } });
+	pi.registerCommand("sandbox", {
+		description: "Show the sandbox configuration in effect",
+		handler: async (_a, ctx) => {
+			const c = loadConfig(ctx.cwd, mode, (m) => warn(ctx, m));
+			ctx.ui.notify([`sandbox: ${enabled ? "on" : "off"}${mode?.role ? ` (mode ${mode.role})` : ""}`, `network: ${c.network?.allowedDomains?.join(", ") || "(none)"}`, `deny read: ${c.filesystem?.denyRead?.join(", ")}`, `allow write: ${c.filesystem?.allowWrite?.join(", ")}`, `deny write: ${c.filesystem?.denyWrite?.join(", ")}`].join("\n"), "info");
+		},
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+    printf '{\n  "name": "lets-code-sandbox",\n  "private": true,\n  "type": "module",\n  "dependencies": { "@anthropic-ai/sandbox-runtime": "%s" }\n}\n' "${SANDBOX_RUNTIME_VERSION}" > "${dir}/package.json"
+    [ -f "${dir}/node_modules/@anthropic-ai/sandbox-runtime/package.json" ] && \
+        have="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "${dir}/node_modules/@anthropic-ai/sandbox-runtime/package.json" 2>/dev/null)"
+    if [ "${have}" != "${SANDBOX_RUNTIME_VERSION}" ]; then
+        if command -v npm >/dev/null 2>&1; then
+            log "sandbox: installing @anthropic-ai/sandbox-runtime ${SANDBOX_RUNTIME_VERSION} into ${dir} (first run only) ..."
+            if ! (cd "${dir}" && npm install --ignore-scripts --no-audit --no-fund --loglevel=error >/dev/null 2>&1); then
+                SB_NOTE="runtime install failed; run: cd ${dir} && npm install"
+            fi
+        else
+            SB_NOTE="npm not found; run: cd ${dir} && npm install"
+        fi
+    fi
+    if [ "$(uname)" = "Linux" ]; then
+        local miss=""
+        command -v bwrap >/dev/null 2>&1 || miss="bubblewrap"
+        command -v socat >/dev/null 2>&1 || miss="${miss:+${miss} }socat"
+        [ -z "${miss}" ] || SB_NOTE="${SB_NOTE:+${SB_NOTE}; }needs ${miss} (apt install ${miss})"
+    fi
+}
+
+# MCP: pi has MCP built in (~/.pi/agent/mcp.json, .pi/mcp.json, `pi mcp add`).
+# Setup can import servers from the standard files other clients keep.
+mcp_import() {  # mcp_import <ask: yes|no>
+    local ask="$1" found
+    found="$(python3 - "${PI_AGENT_DIR}" <<'PY'
+import json, os, sys
+home = os.path.expanduser("~")
+cands = [os.path.join(os.getcwd(), ".mcp.json"), os.path.join(home, ".config", "mcp", "mcp.json"),
+         os.path.join(home, ".claude.json"), os.path.join(home, ".cursor", "mcp.json"), os.path.join(home, ".codeium", "windsurf", "mcp_config.json")]
+target = os.path.join(sys.argv[1], "mcp.json")
+try:
+    have = (json.load(open(target)).get("mcpServers") or {}) if os.path.exists(target) else {}
+except Exception:
+    have = {}
+new = {}
+for c in cands:
+    if not os.path.isfile(c):
+        continue
+    try:
+        d = json.load(open(c))
+    except Exception:
+        continue
+    for name, cfg in (d.get("mcpServers") or {}).items():
+        if name in have or name in new or not isinstance(cfg, dict):
+            continue
+        if not (cfg.get("command") or cfg.get("url")):
+            continue
+        new[name] = {k: v for k, v in cfg.items() if k in ("command", "args", "env", "cwd", "url", "headers", "type", "timeout")}
+        new[name]["_from"] = c
+for name, cfg in new.items():
+    print("%s\t%s" % (name, cfg.pop("_from")))
+json.dump(new, open(os.path.join(sys.argv[1], ".mcp-import.json"), "w"))
+PY
+)" || return 0
+    if [ -z "${found}" ]; then
+        log "mcp: no MCP servers found in .mcp.json, ~/.config/mcp/mcp.json, ~/.claude.json or ~/.cursor/mcp.json — add one later with: pi mcp add <name> -- <command>"
+        rm -f "${PI_AGENT_DIR}/.mcp-import.json"; return 0
+    fi
+    echo ""
+    echo "MCP servers found that pi does not have yet:"
+    printf '%s\n' "${found}" | awk -F'\t' '{ printf "  %-24s from %s\n", $1, $2 }'
+    local reply="y"
+    if [ "${ask}" = "yes" ]; then printf "Import them into %s/mcp.json? [Y/n] " "${PI_AGENT_DIR}"; read -r reply; fi
+    case "${reply}" in
+        n|N) rm -f "${PI_AGENT_DIR}/.mcp-import.json"; log "mcp: skipped" ;;
+        *)
+            python3 - "${PI_AGENT_DIR}" <<'PY'
+import json, os, sys
+d = sys.argv[1]; target = os.path.join(d, "mcp.json")
+doc = json.load(open(target)) if os.path.exists(target) else {}
+if not isinstance(doc, dict): doc = {}
+servers = doc.get("mcpServers") if isinstance(doc.get("mcpServers"), dict) else {}
+servers.update(json.load(open(os.path.join(d, ".mcp-import.json"))))
+doc["mcpServers"] = servers
+tmp = target + ".tmp"
+with open(tmp, "w") as f: json.dump(doc, f, indent=2); f.write("\n")
+os.chmod(tmp, 0o600); os.replace(tmp, target)
+os.unlink(os.path.join(d, ".mcp-import.json"))
+PY
+            log "mcp: imported into ${PI_AGENT_DIR}/mcp.json (manage with /mcp in pi, or pi mcp list)" ;;
+    esac
+}
+
+# `lets-code mandate init [--global]`: a starter manifest to edit.
+mandate_init() {
+    local target
+    if [ "${1:-}" = "--global" ]; then
+        target="${PI_AGENT_DIR}/mandate.json"; mkdir -p "${PI_AGENT_DIR}"
+    else
+        target="$(pwd)/.pi/mandate.json"; mkdir -p "$(pwd)/.pi"
+    fi
+    if [ -f "${target}" ]; then log_error "${target} exists — edit it instead."; exit 1; fi
+    if [ "${1:-}" = "--global" ]; then
+        cat > "${target}" <<'JSON'
+{
+  "default": "auto",
+  "cycle": ["auto", "ask", "plan", "yolo"],
+  "roles": {
+    "ask": { "bash": { "privileged": "deny" } },
+    "ci":  { "tools": ["read", "grep", "find", "ls", "bash"],
+             "bash": { "*": "deny", "readonly": "allow", "build": "allow" },
+             "dispatch": [], "network": "off" }
+  }
+}
+JSON
+    else
+        cat > "${target}" <<'JSON'
+{
+  "roles": {
+    "auto": { "protected": ["secrets/", "*.sqlite"] },
+    "ask":  { "bash": { "privileged": "deny" } }
+  }
+}
+JSON
+    fi
+    log "wrote ${target}"
+    echo "Roles: tools (allowlist), read/write (path scopes), external (allow|ask|deny),"
+    echo "bash: {group: allow|ask|deny} with groups readonly, git-write, build,"
+    echo "package-install, privileged, destructive, network-exec or your own under"
+    echo "\"groups\"; mcp (decision or server list); dispatch (agent names); network on|off;"
+    echo "sandbox overrides; prompt; protected; bypass. A project file may only tighten."
+    exit 0
+}
+
 # ---------------------------------------------------------------- onboarding
-run_setup() {
+run_setup() {  # run_setup [full|granular]
+    local profile="${1:-}"
+    case "${profile}" in
+        ""|full|granular) ;;
+        *) log_error "unknown setup profile '${profile}' — use: lets-code setup | setup full | setup granular"; exit 1 ;;
+    esac
     echo ""
     echo "lets-code setup — point the pi harness at your own LLM server."
     echo "Answers are saved to ${CONFIG_FILE} (edit it any time, or re-run setup)."
@@ -1657,6 +2607,26 @@ run_setup() {
         fi ;;
     esac
 
+    # 5b. optional features: off in the default setup, all on with 'full',
+    #     one question each with 'granular'
+    local feat_mandate="false" feat_mode="" feat_subagents="false" feat_sandbox="false" feat_mcp="no"
+    case "${profile}" in
+        full) feat_mandate="true"; feat_subagents="true"; feat_sandbox="true"; feat_mcp="yes" ;;
+        granular)
+            echo ""
+            echo "Optional features (each can be changed later in ${CONFIG_FILE}):"
+            printf "  Mandate modes — plan / auto / ask / yolo per session, roles per subagent? [y/N] "
+            read -r reply; case "${reply}" in y|Y) feat_mandate="true"
+                printf "  Start mode [auto] (plan|auto|ask|yolo): "; read -r feat_mode
+                case "${feat_mode}" in ""|auto) feat_mode="" ;; plan|ask|yolo) ;; *) log_error "mode must be plan|auto|ask|yolo"; exit 1 ;; esac ;; esac
+            printf "  Subagents — a 'subagent' tool that delegates to agent files? [y/N] "
+            read -r reply; case "${reply}" in y|Y) feat_subagents="true" ;; esac
+            printf "  Sandbox — bash confined with bubblewrap/Seatbelt via sandbox-runtime? [y/N] "
+            read -r reply; case "${reply}" in y|Y) feat_sandbox="true" ;; esac
+            printf "  MCP — import servers from .mcp.json and other clients' configs into pi? [y/N] "
+            read -r reply; case "${reply}" in y|Y) feat_mcp="yes" ;; esac ;;
+    esac
+
     # 6. save config (re-emitted after the live probe with the thinking level)
     setup_emit_config() {  # setup_emit_config <thinking-level> [vision-pin]
         {
@@ -1688,6 +2658,15 @@ run_setup() {
             echo "# Git guard: in a git repo, work on a pi/* branch (created at launch);"
             echo "# edits off such a branch are blocked. GIT_GUARD=false disables it."
             echo "GIT_GUARD=\"true\""
+            echo ""
+            echo "# Optional features (off by default; 'lets-code setup full' turns them on)."
+            echo "# MANDATE=true: modes plan/auto/ask/yolo and roles for subagents (MODE sets"
+            echo "# the start mode, empty = auto). SUBAGENTS=true: the subagent tool."
+            echo "# SANDBOX=true: bash confined with sandbox-runtime."
+            echo "MANDATE=\"${feat_mandate}\""
+            echo "MODE=\"${feat_mode}\""
+            echo "SUBAGENTS=\"${feat_subagents}\""
+            echo "SANDBOX=\"${feat_sandbox}\""
         } > "${CONFIG_FILE}"
         chmod 600 "${CONFIG_FILE}"
     }
@@ -1858,6 +2837,17 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
         log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${DEFAULT_OUTPUT_CAP}, vision: ${vision_reg}, thinking: ${reasoning_reg}, level: ${thinking_level})"
     fi
 
+    # 10. optional features chosen above
+    if [ "${feat_sandbox}" = "true" ]; then
+        pi_write_sandbox_extension
+        if [ -n "${SB_NOTE}" ]; then log "sandbox: ${SB_NOTE}"; else log "sandbox: runtime ready (${PI_AGENT_DIR}/extensions/lets-code-sandbox)"; fi
+    fi
+    [ "${feat_subagents}" = "true" ] && write_default_agents
+    [ "${feat_mcp}" = "yes" ] && mcp_import yes
+    if [ "${feat_mandate}" = "true" ]; then
+        log "mandate: modes plan/auto/ask/yolo on (start mode: ${feat_mode:-auto}); /mode and alt+m switch, 'lets-code mandate init' writes a project manifest"
+    fi
+
     echo ""
     echo "All set. Run:  lets-code          (interactive session)"
     echo "          or:  lets-code -p \"hi\"  (one-shot print mode)"
@@ -1883,7 +2873,8 @@ offer_fresh_shell() {
 
 # --------------------------------------------------------------------- main
 # setup is a terminal path: it exits on every branch
-[ "${1:-}" = "setup" ] && { CA_FOUND=""; TOKEN="dummy-key"; run_setup; }
+[ "${1:-}" = "setup" ] && { CA_FOUND=""; TOKEN="dummy-key"; run_setup "${2:-}"; }
+[ "${1:-}" = "mandate" ] && { [ "${2:-}" = "init" ] || { log_error "usage: lets-code mandate init [--global]"; exit 1; }; mandate_init "${3:-}"; }
 
 # load config (defaults, then file, then env overrides)
 ENDPOINTS=""
@@ -1898,6 +2889,10 @@ REASONING=""
 THINKING=""
 MEM_GUARD="true"
 GIT_GUARD="true"
+MANDATE="false"
+MODE=""
+SUBAGENTS="false"
+SANDBOX="false"
 # shellcheck disable=SC1090
 [ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
 ENDPOINTS="${LETS_CODE_ENDPOINTS:-${ENDPOINTS}}"
@@ -1912,6 +2907,10 @@ REASONING="${LETS_CODE_REASONING:-${REASONING}}"
 THINKING="${LETS_CODE_THINKING:-${THINKING}}"
 MEM_GUARD="${LETS_CODE_MEM_GUARD:-${MEM_GUARD}}"
 GIT_GUARD="${LETS_CODE_GIT_GUARD:-${GIT_GUARD}}"
+MANDATE="${LETS_CODE_MANDATE:-${MANDATE}}"
+MODE="${LETS_CODE_MODE:-${MODE}}"
+SUBAGENTS="${LETS_CODE_SUBAGENTS:-${SUBAGENTS}}"
+SANDBOX="${LETS_CODE_SANDBOX:-${SANDBOX}}"
 
 HARNESS="pi"
 URL_OVERRIDE=""
@@ -1946,6 +2945,13 @@ while [ $# -gt 0 ]; do
         --insecure) INSECURE=true; shift ;;
         --no-mem-guard) MEM_GUARD=false; shift ;;
         --no-git-guard) GIT_GUARD=false; shift ;;
+        --mandate)  MANDATE=true
+                    case "${2:-}" in ""|-*) shift ;; *) MODE="$2"; shift 2 ;; esac ;;
+        --no-mandate) MANDATE=false; shift ;;
+        --subagents) SUBAGENTS=true; shift ;;
+        --no-subagents) SUBAGENTS=false; shift ;;
+        --sandbox)  SANDBOX=true; shift ;;
+        --no-sandbox) SANDBOX=false; shift ;;
         --verbose|--debug) VERBOSE=true; shift ;;
         -h|--help)  sed -n "3,$(grep -n '^# (auto-installed on request)\.$' "$0" | cut -d: -f1)p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          PASSTHROUGH+=("$1"); shift ;;
@@ -2133,7 +3139,34 @@ case "${GG_MODE}" in
          GG_DESC="git guard: ${GG_BRANCH:-no pi/* branch yet}" ;;
 esac
 
-log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING}  api: ${API}  ${MG_DESC}  ${GG_DESC}"
+# optional features: mandate (modes/roles), subagents, sandbox
+unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE
+FEAT_DESC=""
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+case "$(lc "${MANDATE}")" in
+    true|yes|1|on)
+        case "${MODE}" in ""|[A-Za-z0-9_.-]*) ;; *) log_error "MODE must be a role name (plan|auto|ask|yolo|<role>), got: ${MODE}"; exit 1 ;; esac
+        pi_write_mandate_extension
+        export LETS_CODE_MANDATE_ON=1
+        if [ -n "${MODE}" ]; then export LETS_CODE_MODE="${MODE}"; else unset LETS_CODE_MODE; fi
+        FEAT_DESC="mandate: ${MODE:-auto}" ;;
+    *) unset LETS_CODE_MODE ;;
+esac
+case "$(lc "${SUBAGENTS}")" in
+    true|yes|1|on)
+        pi_write_subagent_extension
+        write_default_agents
+        export LETS_CODE_SUBAGENTS_ON=1 LETS_CODE_MODEL="${MODEL}"
+        FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }subagents: on" ;;
+esac
+case "$(lc "${SANDBOX}")" in
+    true|yes|1|on)
+        pi_write_sandbox_extension
+        export LETS_CODE_SANDBOX_ON=1
+        FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }sandbox: on${SB_NOTE:+ (${SB_NOTE})}" ;;
+esac
+
+log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING}  api: ${API}  ${MG_DESC}  ${GG_DESC}${FEAT_DESC:+  ${FEAT_DESC}}"
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
     mem_guard_exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
 else

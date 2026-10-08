@@ -2379,25 +2379,36 @@ export default function (pi: ExtensionAPI) {
 		};
 	}
 
-	async function init(ctx: ExtensionContext) {
+	// Inits are serialised: a mode change can arrive while a previous init is
+	// still awaiting the runtime, and two SandboxManager.initialize calls must
+	// not interleave.
+	let chain: Promise<void> = Promise.resolve();
+	function init(ctx: ExtensionContext): Promise<void> { chain = chain.then(() => initNow(ctx)).catch(() => {}); return chain; }
+	async function initNow(ctx: ExtensionContext) {
 		const cfg = loadConfig(cwd, mode, (m) => warn(ctx, m));
 		if (runtime) { try { await runtime.SandboxManager.reset(); } catch { /* ok */ } }
-		if (!cfg.enabled) { enabled = false; if (ctx.hasUI) ctx.ui.setStatus("sandbox", mode?.bypass ? "sandbox: off (yolo)" : "sandbox: off"); return; }
+		if (!cfg.enabled) { enabled = false; if (ctx?.hasUI) ctx.ui.setStatus("sandbox", mode?.bypass ? "sandbox: off (yolo)" : "sandbox: off"); return; }
 		if (process.platform !== "linux" && process.platform !== "darwin") { enabled = false; warn(ctx, `sandbox: not supported on ${process.platform}`); return; }
 		try {
 			if (!runtime) runtime = await import(join(HERE, "node_modules", "@anthropic-ai", "sandbox-runtime", "dist", "index.js"));
 			if (!piMod) piMod = await import("@earendil-works/pi-coding-agent");
-			await runtime.SandboxManager.initialize({ network: cfg.network, filesystem: cfg.filesystem, ignoreViolations: cfg.ignoreViolations, enableWeakerNestedSandbox: cfg.enableWeakerNestedSandbox });
+			// The runtime needs ripgrep; lets-code fetches pi's copy into <agent-dir>/bin, which is not on PATH
+			const rg = join(AGENT_DIR, "bin", "rg");
+			const ripgrep = existsSync(rg) ? { command: rg } : undefined;
+			await runtime.SandboxManager.initialize({ network: cfg.network, filesystem: cfg.filesystem, ignoreViolations: cfg.ignoreViolations, enableWeakerNestedSandbox: cfg.enableWeakerNestedSandbox, ...(ripgrep ? { ripgrep } : {}) });
 			enabled = true;
-			if (ctx.hasUI) ctx.ui.setStatus("sandbox", `sandbox: ${cfg.network?.allowedDomains?.length ? `${cfg.network.allowedDomains.length} domains` : "no network"}`);
+			if (ctx?.hasUI) ctx.ui.setStatus("sandbox", `sandbox: ${cfg.network?.allowedDomains?.length ? `${cfg.network.allowedDomains.length} domains` : "no network"}`);
 		} catch (e) {
 			enabled = false;
 			warn(ctx, `sandbox: not active — ${(e as Error).message}. Install: cd ${HERE} && npm install; Linux also needs bubblewrap and socat.`);
 		}
 	}
 
-	pi.events.on("lets-code:mode", (data: unknown) => { mode = data as Mode; void init(lastCtx as ExtensionContext); });
+	// The mandate announces its mode from its own session_start, which can run
+	// before ours: before a session exists, only remember the mode, and let
+	// session_start initialise with it.
 	let lastCtx: ExtensionContext | undefined;
+	pi.events.on("lets-code:mode", (data: unknown) => { mode = data as Mode; if (lastCtx) void init(lastCtx); });
 
 	// The bash tool is replaced with one whose operations run sandboxed when
 	// the sandbox is up, and plain otherwise. Registered at load so the tool

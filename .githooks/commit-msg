@@ -1,0 +1,13 @@
+#!/bin/sh
+# Strips AI attribution trailers from the commit message before the commit
+# is made. Installed by `npm install` in this repository (core.hooksPath).
+msg="$1"
+if grep -q -i -E '^(Co-Authored-By|Co-authored-by): *Claude|^Claude-Session:|Generated with \[Claude Code\]|^🤖 Generated with' "$msg"; then
+    tmp="$msg.tmp.$$"
+    grep -v -i -E '^(Co-Authored-By|Co-authored-by): *Claude|^Claude-Session:|Generated with \[Claude Code\]|^🤖 Generated with|^https://claude\.ai/code/' "$msg" > "$tmp"
+    # drop trailing blank lines left behind
+    sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp" > "$msg"
+    rm -f "$tmp"
+    echo "commit-msg: removed AI attribution lines from the message" >&2
+fi
+exit 0

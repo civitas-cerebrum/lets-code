@@ -1,20 +1,37 @@
-# lets-code
+<h1 align="center">lets-code</h1>
 
-Run the [pi](https://pi.dev) coding agent against your own LLM server:
-vLLM, SGLang, Ollama, LM Studio, OpenRouter, or anything OpenAI-compatible
-that serves `/v1/models`.
+<p align="center">
+  <b>Point the <a href="https://pi.dev">pi</a> coding agent at the LLM running on your own hardware.</b><br>
+  One bash script. No cloud, no keys, no config spelunking.
+</p>
 
-One bash script. Needs `bash` 3.2+, `curl` and `python3`; `node`/`npm` only
-when it installs pi for you. Linux and macOS.
+<p align="center">
+  <img alt="bash" src="https://img.shields.io/badge/bash-3.2%2B-4EAA25?logo=gnubash&logoColor=white">
+  <img alt="platforms" src="https://img.shields.io/badge/linux%20%7C%20macOS-supported-blue">
+  <img alt="servers" src="https://img.shields.io/badge/vLLM%20%7C%20SGLang%20%7C%20Ollama%20%7C%20LM%20Studio-OpenAI--compatible-orange">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-lightgrey">
+</p>
 
 ```
 $ lets-code
 [lets-code] thinking support: true (startup level: high)
 [lets-code] image input: true
-[lets-code] connecting: http://localhost:8000  model: Qwen/Qwen3-32B  context: 131072  output cap: 32768  ...
+[lets-code] connecting: http://localhost:8000  model: Qwen/Qwen3-32B  context: 131072  output cap: 32768  git guard: pi/20261008-2144
 ```
 
-## Install
+## Why
+
+You have a GPU box serving a model with vLLM, SGLang or Ollama. You want a
+real coding agent on it, not a chat window. pi is that agent, but it has to
+be told about your server: the URL, the model id, the true context window,
+whether the model thinks, whether it sees images. Get one of those wrong and
+you get a silent overflow at hour two, or screenshots that never reach the
+model.
+
+lets-code figures all of that out from the server itself, every time you
+launch, and adds the guard rails a small local model needs.
+
+## Quick start
 
 ```bash
 mkdir -p ~/.local/bin
@@ -22,32 +39,35 @@ curl -fsSL https://raw.githubusercontent.com/civitas-cerebrum/lets-code/main/let
 chmod +x ~/.local/bin/lets-code
 
 lets-code setup        # endpoints, token, optional CA; installs pi if missing
-lets-code              # interactive session
-lets-code -p "hello"   # one-shot; all unknown args pass through to pi
+lets-code              # go
 ```
 
-Setup saves `~/.config/lets-code/config`, puts `lets-code` on your PATH,
-probes the server and registers the model with pi.
+Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for you.
 
-## What a launch does
+## What you get
 
-1. Probes your endpoints in order; the first reachable one wins.
-2. Reads the resident model and its context window from `/v1/models`.
-3. Sends two tiny test requests: one with thinking forced on, one with a
-   64×64 red image. A model that reports reasoning tokens is registered as
-   a thinking model; one that answers "red" is registered with image input.
-4. Writes pi's config (`~/.pi/agent/models.json`, `settings.json`) under the
-   provider id `lets-code`. Your other providers and settings are untouched.
-   The output cap is reserved in pi's compaction settings, so a response
-   can never overflow the server's window.
-5. Starts pi with the memory guard and git guard on.
+| | |
+|---|---|
+| 🔎 **Discovery** | First reachable endpoint wins. Model id and context window come from `/v1/models`. |
+| 🧠 **Thinking probe** | One tiny request with thinking forced on. Reasoning tokens in the reply mean pi gets a thinking model, with per-level budgets vLLM enforces. |
+| 👁 **Vision probe** | One tiny request with a red 64×64 image. "Red" in the reply means pi may send screenshots. Setup asks you if the probe can't tell. |
+| 📏 **Overflow-proof** | The output cap is reserved in pi's compaction settings, so `input + max_tokens` can never exceed the server window. |
+| 🧯 **Memory guard** | When the box runs low on RAM, the session's own runaway process is stopped. Nothing else on the machine is touched. |
+| 🛟 **Git guard** | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
+| 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
 
-The token is never written to disk: pi reads it from `LETS_CODE_TOKEN`.
-pi's install telemetry is set to off unless you set it yourself. pi's
-file-search helpers (`fd`, `ripgrep`) are fetched before the first start,
-so the first session starts without download notices.
+Everything is re-derived at launch, so swapping models on the server needs
+no edits here.
 
-## Flags
+## Daily use
+
+```bash
+lets-code                         # interactive session
+lets-code -p "fix the failing test"   # one-shot; unknown args go to pi
+lets-code --model other-id        # pin something for one launch
+lets-code --thinking-level low    # quieter model
+lets-code --no-git-guard          # you know what you're doing
+```
 
 | Flag | Meaning |
 |---|---|
@@ -57,30 +77,35 @@ so the first session starts without download notices.
 | `--output-cap <tok>` | Max output tokens (default 32768) |
 | `--api <dialect>` | `openai-completions` (default), `openai-responses`, `anthropic-messages`, `google-generative-ai` |
 | `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`) |
-| `--vision` / `--no-vision` | Pin image input on or off instead of probing |
+| `--vision` / `--no-vision` | Pin image input instead of probing |
 | `--insecure` | Skip TLS verification |
 | `--no-mem-guard` / `--no-git-guard` | Launch without a guard |
 | `--verbose` | Show each endpoint probe |
 
-## Config
+<details>
+<summary><b>Config file and environment</b></summary>
 
-`~/.config/lets-code/config` (shell syntax, mode 600). Every key has an
-environment override, `LETS_CODE_<KEY>`, which wins over the file.
+`~/.config/lets-code/config` is shell syntax, mode 600, written by setup.
+Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 
 | Key | Meaning |
 |---|---|
 | `ENDPOINTS` | Space-separated base URLs, most preferred first. IPs, `localhost`, bare hostnames and `*.local` get `http://`, other domains `https://`. |
 | `TOKEN` | API key. Any value works for a server without auth. |
-| `CA_PATH` | Root CA file for an https endpoint with a private CA (exported as `NODE_EXTRA_CA_CERTS`). |
+| `CA_PATH` | Root CA for an https endpoint with a private CA (exported as `NODE_EXTRA_CA_CERTS`). |
 | `MODEL`, `CONTEXT`, `OUTPUT_CAP`, `API` | Pins; empty means discovered or default. |
 | `VISION`, `REASONING` | `true`/`false` pins; empty means probed at launch. |
 | `THINKING` | Startup thinking level. Setup suggests one from the context window. |
 | `MEM_GUARD`, `GIT_GUARD` | `false` turns a guard off. |
 
-Listing several endpoints lets one config work on the server box, on the
-LAN and over a VPN: `http://localhost:8000 https://llm.home.example`.
+Listing several endpoints lets one config follow you around:
+`http://localhost:8000 https://llm.home.example` works on the server box,
+on the LAN and over a VPN.
 
-## Server setup
+</details>
+
+<details>
+<summary><b>Server setup (vLLM, nginx, private TLS)</b></summary>
 
 vLLM needs tool calling and, for thinking models, a reasoning parser:
 
@@ -90,14 +115,17 @@ vllm serve Qwen/Qwen3-32B --max-model-len 131072 \
 ```
 
 Behind nginx, set `proxy_buffering off` so tokens stream. For a private CA
-(for example mkcert), give setup the public root certificate; the winning
-https endpoint must be trusted or launched with `--insecure`.
+(mkcert, step-ca), give setup the public root certificate. The winning
+https endpoint must be trusted, or launched with `--insecure`.
 
 With a reasoning parser, vLLM also enforces the per-level thinking budget
-that pi sends (`thinking_token_budget`), so a model cannot think its way
-through the whole output cap.
+pi sends (`thinking_token_budget`), so a model cannot think its way through
+the whole output cap.
 
-## Memory guard (Linux)
+</details>
+
+<details>
+<summary><b>Memory guard (Linux)</b></summary>
 
 A test with an unbounded search can take all RAM and freeze the machine
 that serves the model. The guard watches free RAM and only ever acts on
@@ -115,7 +143,10 @@ extension (`~/.pi/agent/extensions/lets-code-memguard.ts`) and is inert in
 sessions not started by lets-code. It defers to a machine-wide
 [memguard](https://github.com/civitas-cerebrum/memguard) daemon when one runs.
 
-## Git guard
+</details>
+
+<details>
+<summary><b>Git guard</b></summary>
 
 Small models make the mistakes a reviewer would catch: a wrong
 `reset --hard`, an edit that guts a file, a stray `rm`. So:
@@ -144,7 +175,10 @@ The guard costs no tokens: the model only sees a one-line reason when a
 call is blocked. Merging the `pi/*` branch back is yours. Outside a git
 repo the guard is off. `LETS_CODE_GIT_CHECKPOINTS=0` turns checkpoints off.
 
-## Troubleshooting
+</details>
+
+<details>
+<summary><b>Troubleshooting</b></summary>
 
 | Symptom | Fix |
 |---|---|
@@ -153,17 +187,24 @@ repo the guard is off. `LETS_CODE_GIT_CHECKPOINTS=0` turns checkpoints off.
 | Output arrives all at once | A proxy is buffering. nginx: `proxy_buffering off`. |
 | Tool-call errors in server logs | Start the server with `--enable-auto-tool-choice --tool-call-parser <p>`. |
 | Thinking text in the output | Missing `--reasoning-parser`. |
-| Session dies on long tasks | Wrong context size. Check the `context:` value on the launch line; pin `CONTEXT=` if the server hides `max_model_len`. |
+| Session dies on long tasks | Wrong context size. Check `context:` on the launch line; pin `CONTEXT=` if the server hides `max_model_len`. |
 | Model does not see images, or does not think | Check the `image input:` / `thinking support:` launch lines. Pin `VISION=true` / `REASONING=true` if a probe was inconclusive. |
 | pi says provider `lets-code` is unknown | Re-run `lets-code`; it re-registers on every launch. |
 
-## Tests
+</details>
 
-```bash
-tests/vision-probe.sh         tests/normalize-endpoint.sh   tests/pi-tools.sh
-tests/git-guard.test.mjs      tests/git-checkpoint.test.mjs tests/git-guard-launch.sh
-tests/mem-guard-live.sh       # end to end, needs tmux
-```
+## Under the hood
+
+Each launch probes the endpoints, reads `/v1/models`, runs the thinking and
+vision probes, then writes pi's `models.json` and `settings.json` under the
+provider id `lets-code`. Your other providers and settings are untouched.
+pi's file-search helpers (`fd`, `ripgrep`) are fetched before the first
+start so the first session starts clean. Design notes and the reasoning
+behind each decision are in [DESIGN.md](DESIGN.md).
+
+Tests live in `tests/`: shell tests for the probes and endpoint parsing,
+node tests for the git guard and checkpoints, and a tmux-driven end-to-end
+run for the memory guard.
 
 ## License
 

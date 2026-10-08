@@ -115,7 +115,17 @@ t("… still 2", refs(pre).length, 2);
 const rc = repo("pi/race");
 writeFileSync(join(rc, "tracked.txt"), "S1\n");
 await result("write", { path: join(rc, "tracked.txt") }, rc);   // background snapshot of S1 fires after 50 ms
-await sleep(55);                                                 // ... and is now (very likely) running
+// Wait until that snapshot has read the tree (its `git add -A` holds
+// .git/lets-code-checkpoint.index.lock while it runs) rather than a fixed
+// 55 ms: on a slow machine the add had not finished by then, S2 landed in
+// the background snapshot and the case failed for timing reasons only.
+// The snapshot is still in flight afterwards (write-tree, commit, ref).
+{
+	const lock = join(rc, ".git", "lets-code-checkpoint.index.lock");
+	const until = Date.now() + 2000; let seen = false;
+	while (Date.now() < until) { if (existsSync(lock)) seen = true; else if (seen) break; await sleep(1); }
+	if (!seen) while (Date.now() < until && refs(rc).length === 0) await sleep(5);   // add was too quick to observe: wait for the ref
+}
 writeFileSync(join(rc, "tracked.txt"), "S2\n");                 // the state the next tool call must preserve
 await tc("bash", { command: "ls" }, rc);                         // pre-call snapshot: waits for the in-flight one, then snapshots S2
 await sleep(200);

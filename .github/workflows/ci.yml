@@ -1,0 +1,40 @@
+name: ✅ CI
+
+# Runs the test suite on every pull request and on every push to main:
+# the shell tests (probes, endpoint parsing, helper prefetch, git guard
+# launch side) and the node tests for the pi extensions, on Linux and macOS
+# (the script targets bash 3.2, which macOS ships).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: 🗂️  Checkout
+        uses: actions/checkout@v4
+
+      - name: ⚙️  Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: 🔎  Syntax check (bash 3.2 on macOS)
+        run: bash -n lets-code && bash --version | head -1
+
+      - name: 🧪  Tests
+        run: tests/run.sh

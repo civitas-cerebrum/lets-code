@@ -1,0 +1,30 @@
+{
+  "name": "@civitas-cerebrum/lets-code",
+  "version": "0.1.0",
+  "description": "Run the pi coding agent against the LLM on your own hardware: discovers the model, its context window, thinking and vision, and guards the session.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/civitas-cerebrum/lets-code.git"
+  },
+  "homepage": "https://github.com/civitas-cerebrum/lets-code#readme",
+  "bugs": "https://github.com/civitas-cerebrum/lets-code/issues",
+  "keywords": ["pi", "coding-agent", "vllm", "sglang", "ollama", "self-hosted", "llm"],
+  "bin": {
+    "lets-code": "lets-code"
+  },
+  "files": [
+    "lets-code",
+    "scripts/postinstall.js",
+    ".githooks",
+    "DESIGN.md"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "test": "tests/run.sh"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "os": ["linux", "darwin"]
+}

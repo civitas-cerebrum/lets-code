@@ -1,0 +1,41 @@
+name: 🚀 Publish Package
+
+# Publishes @civitas-cerebrum/lets-code to npm when a GitHub release is
+# published. The release tag (v1.2.3 or 1.2.3) becomes the package version,
+# so package.json never has to be bumped by hand. Needs the NPM_TOKEN
+# repository secret (an npm automation token for the @civitas-cerebrum scope).
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🗂️  Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️  Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+
+      - name: 🧪  Tests
+        run: tests/run.sh
+
+      - name: 🔖  Version from the release tag
+        run: npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
+
+      # No dependencies to install: the package is one bash script.
+      # --ignore-scripts skips the package's own postinstall on the runner.
+      - name: 📦  Publish Package
+        run: npm publish --ignore-scripts --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

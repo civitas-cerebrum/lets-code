@@ -46,7 +46,8 @@ async function check(name, p, wantBlocked) {
 	console.log(`${ok ? "ok  " : "FAIL"}  ${name} -> ${blocked ? "blocked" : "allowed"}${blocked ? `: ${r.reason.slice(0, 60)}…` : ""}`);
 }
 const tag = (cwd) => basename(cwd).replace(/-.*$/, "");
-const bash = (cmd, cwd, want) => check(`bash [${tag(cwd)}] ${JSON.stringify(cmd)}`, call("bash", { command: cmd }, cwd), want);
+// long commands are shortened in the log line: a 200 KB line makes GitHub Actions drop the rest of the step log
+const bash = (cmd, cwd, want) => check(`bash [${tag(cwd)}] ${JSON.stringify(cmd.length > 120 ? `${cmd.slice(0, 117)}…` : cmd)}`, call("bash", { command: cmd }, cwd), want);
 
 const main = repo("main"), pi = repo("pi/test");
 const plain = mkdtempSync(join(work, "plain-"));

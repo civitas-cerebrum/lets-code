@@ -96,6 +96,15 @@ PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"   # pi's config home (ove
 PROVIDER_ID="lets-code"          # fixed provider id we upsert into pi's files
 DEFAULT_CONTEXT=128000
 DEFAULT_OUTPUT_CAP=32768
+# The default output cap never takes more than a quarter of the context
+# window, so a 32k (or smaller) server still leaves room for input. A
+# pinned OUTPUT_CAP / --output-cap is used as given.
+default_output_cap() {  # default_output_cap <context>
+    local ctx="$1" q
+    case "${ctx}" in *[!0-9]*|"") echo "${DEFAULT_OUTPUT_CAP}"; return ;; esac
+    q=$(( ctx / 4 ))
+    if [ "${q}" -lt "${DEFAULT_OUTPUT_CAP}" ]; then echo "${q}"; else echo "${DEFAULT_OUTPUT_CAP}"; fi
+}
 DEFAULT_API="openai-completions"
 DEFAULT_THINKING="medium"
 
@@ -2792,14 +2801,15 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
         probe_thinking "${found}" "${reg_id}"
         local suggested thinking_level reasoning_reg
         reasoning_reg="false"
-        suggested="$(suggested_thinking_level "${reg_len}" "${DEFAULT_OUTPUT_CAP}")"
+        local reg_cap; reg_cap="$(default_output_cap "${reg_len}")"
+        suggested="$(suggested_thinking_level "${reg_len}" "${reg_cap}")"
         case "${THINKING_DETECTED}" in
             true)
                 reasoning_reg="true"
                 echo ""
                 log "thinking: detected on ${reg_id} (probe: minimal request with thinking forced on)"
                 echo "Thinking level for new sessions: off|minimal|low|medium|high (xhigh|max)."
-                echo "Suggested for ${reg_len} context / ${DEFAULT_OUTPUT_CAP} output cap: ${suggested}"
+                echo "Suggested for ${reg_len} context / ${reg_cap} output cap: ${suggested}"
                 printf "Thinking level [%s]: " "${suggested}"
                 read -r thinking_level
                 thinking_level="${thinking_level:-${suggested}}"
@@ -2848,8 +2858,8 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
         # ')' inside "$(...)" and prints a syntax error for it.
         local startup_level
         case "${thinking_level}" in auto*) startup_level="off" ;; *) startup_level="${thinking_level}" ;; esac
-        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}" "${vision_reg}" "${reasoning_reg}" "${startup_level}"
-        log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${DEFAULT_OUTPUT_CAP}, vision: ${vision_reg}, thinking: ${reasoning_reg}, level: ${thinking_level})"
+        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${reg_cap}" "${vision_reg}" "${reasoning_reg}" "${startup_level}"
+        log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${reg_cap}, vision: ${vision_reg}, thinking: ${reasoning_reg}, level: ${thinking_level})"
     fi
 
     # 10. optional features chosen above
@@ -3046,7 +3056,7 @@ CONTEXT="${CONTEXT_OVERRIDE:-${CONTEXT}}"
 [ -n "${CONTEXT}" ] || CONTEXT="${DISCOVERED_LEN}"
 [ -n "${CONTEXT}" ] || CONTEXT="${DEFAULT_CONTEXT}"
 OUTPUT_CAP="${OUTPUT_CAP_OVERRIDE:-${OUTPUT_CAP}}"
-[ -n "${OUTPUT_CAP}" ] || OUTPUT_CAP="${DEFAULT_OUTPUT_CAP}"
+[ -n "${OUTPUT_CAP}" ] || OUTPUT_CAP="$(default_output_cap "${CONTEXT}")"
 API="${API_OVERRIDE:-${API}}"
 [ -n "${API}" ] || API="${DEFAULT_API}"
 VISION="${VISION_OVERRIDE:-${VISION}}"

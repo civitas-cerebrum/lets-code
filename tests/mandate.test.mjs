@@ -54,6 +54,7 @@ const blocked = (r) => r?.block === true;
 	t("split on operators", splitCommands("ls -la && cat x | grep y; echo 'a;b' || true"), ["ls -la", "cat x", "grep y", "echo 'a;b'", "true"]);
 	t("split sees sh -c body", splitCommands(`bash -c "rm -rf .git"`).includes("rm -rf .git"), true);
 	t("split sees $(...)", splitCommands("echo $(sudo id)").includes("sudo id"), true);
+	t("split keeps 2>&1 and &> together", splitCommands("git status 2>&1 | head; make &> log & echo done"), ["git status 2>&1", "head", "make &> log", "echo done"]);
 	t("heredoc body is data", splitCommands("cat <<'EOF'\nrm -rf /\nEOF\nls").includes("rm -rf /"), false);
 	const auto = { bash: { "*": "allow" } };
 	const ask = { bash: { "*": "allow", privileged: "ask", destructive: "ask", "package-install": "ask", "network-exec": "ask" } };

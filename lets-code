@@ -1835,7 +1835,9 @@ export function splitCommands(cmd: string): string[] {
 		if (ch === "<" && nx === "<") { const m = /^<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(cmd.slice(i)); if (m) { heredocs.push(m[2]); cur += m[0]; i += m[0].length; continue; } }
 		if (ch === "(" ) { depth++; cur += ch; i++; continue; }
 		if (ch === ")") { depth = Math.max(0, depth - 1); cur += ch; i++; continue; }
-		if (depth === 0 && (ch === ";" || ch === "|" || ch === "&" || ch === "\n")) {
+		// "&" is an operator only when it is not part of a redirection: 2>&1, <&0, &>file
+		const redirAmp = ch === "&" && (/[<>]$/.test(cur) || nx === ">");
+		if (depth === 0 && !redirAmp && (ch === ";" || ch === "|" || ch === "&" || ch === "\n")) {
 			if (ch === "\n" && heredocs.length) { // skip heredoc bodies
 				let rest = cmd.slice(i + 1); let consumed = 0;
 				for (const tag of heredocs) { const re = new RegExp(`(^|\\n)\\t*${tag}(\\n|$)`); const mm = re.exec(rest); if (mm) { consumed += mm.index + mm[0].length; rest = rest.slice(mm.index + mm[0].length); } }

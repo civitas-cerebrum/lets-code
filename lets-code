@@ -1983,7 +1983,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_provider_request", async (event: any) => {
 		if (!LOG) return undefined;
 		const p = event?.payload ?? {};
-		log("request", { enable_thinking: p?.chat_template_kwargs?.enable_thinking ?? null, reasoning_effort: p?.chat_template_kwargs?.reasoning_effort ?? null, thinking_token_budget: p?.thinking_token_budget ?? null, max_tokens: p?.max_tokens ?? null });
+		const msgs = Array.isArray(p?.messages) ? p.messages : [];
+		const replayed = msgs.filter((m: any) => m && m.role === "assistant" && typeof (m.reasoning ?? m.reasoning_content) === "string" && (m.reasoning ?? m.reasoning_content).length > 0).length;
+		log("request", { enable_thinking: p?.chat_template_kwargs?.enable_thinking ?? null, reasoning_effort: p?.chat_template_kwargs?.reasoning_effort ?? null, thinking_token_budget: p?.thinking_token_budget ?? null, max_tokens: p?.max_tokens ?? null, replayed_thinking: replayed, messages: msgs.length });
 		return undefined;
 	});
 

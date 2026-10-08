@@ -49,10 +49,15 @@ const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
 // "typebox" is provided by the pi host at runtime; point the temp copy at pi's own
 import { symlinkSync } from "node:fs"; import { execFileSync } from "node:child_process";
 {
-	const piRoot = join(execFileSync("npm", ["root", "-g"]).toString().trim(), "@earendil-works", "pi-coding-agent");
-	const tb = [join(piRoot, "node_modules", "typebox"), join(piRoot, "..", "..", "typebox")].find((p) => existsSync(p));
-	mkdirSync(join(agentDir, "extensions", "node_modules"), { recursive: true });
-	symlinkSync(tb, join(agentDir, "extensions", "node_modules", "typebox"));
+	let piRoot = "";
+	try { piRoot = join(execFileSync("npm", ["root", "-g"], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim(), "@earendil-works", "pi-coding-agent"); } catch { /* no npm */ }
+	const tb = piRoot ? [join(piRoot, "node_modules", "typebox"), join(piRoot, "..", "..", "typebox")].find((p) => existsSync(p)) : undefined;
+	const nm = join(agentDir, "extensions", "node_modules", "typebox"); mkdirSync(nm, { recursive: true });
+	if (tb) { rmSync(nm, { recursive: true }); symlinkSync(tb, nm); }
+	else {	// no pi on this machine (CI): the extension only builds a schema with these four, which the fake pi never validates
+		writeFileSync(join(nm, "package.json"), JSON.stringify({ name: "typebox", type: "module", main: "index.js" }));
+		writeFileSync(join(nm, "index.js"), "export const Type = { Object: (p, o) => ({ type: 'object', properties: p, ...o }), String: (o) => ({ type: 'string', ...o }), Array: (i, o) => ({ type: 'array', items: i, ...o }), Optional: (x) => ({ ...x, optional: true }) };\n");
+	}
 }
 let fail = 0, n = 0;
 const t = (name, got, want) => { n++; const ok = JSON.stringify(got) === JSON.stringify(want); if (!ok) { fail = 1; console.log(`FAIL ${name}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); } else console.log(`ok    ${name}`); };

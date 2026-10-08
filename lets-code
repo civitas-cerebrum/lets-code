@@ -1849,7 +1849,12 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
         fi
         setup_emit_config "${thinking_level}" "${vision_pin}"
         log "updated ${CONFIG_FILE} (thinking level: ${thinking_level}, vision: ${vision_pin:-auto})"
-        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}" "${vision_reg}" "${reasoning_reg}" "$(case "${thinking_level}" in auto*) echo off ;; *) echo "${thinking_level}" ;; esac)"
+        # auto[:<level>] starts off (the agent guard raises it). Computed
+        # outside the call: bash 3.2 (macOS) cannot parse a case pattern's
+        # ')' inside "$(...)" and prints a syntax error for it.
+        local startup_level
+        case "${thinking_level}" in auto*) startup_level="off" ;; *) startup_level="${thinking_level}" ;; esac
+        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}" "${vision_reg}" "${reasoning_reg}" "${startup_level}"
         log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${DEFAULT_OUTPUT_CAP}, vision: ${vision_reg}, thinking: ${reasoning_reg}, level: ${thinking_level})"
     fi
 

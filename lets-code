@@ -13,8 +13,8 @@
 #   lets-code --output-cap <tok> max output tokens (default 32768)
 #   lets-code --api <dialect>    openai-completions (default) | openai-responses |
 #                                anthropic-messages | google-generative-ai
-#   lets-code --vision ...       model accepts images (default: off)
-#   lets-code --no-vision ...    force image input off (config has VISION=true)
+#   lets-code --vision ...       model accepts images (default: auto-detected)
+#   lets-code --no-vision ...    force image input off (skips the probe)
 #   lets-code --thinking-level <l> startup thinking level, default: medium
 #                                (auto-detected when the resident model thinks)
 #   lets-code --harness <name>   pi (default; only v1 harness) |
@@ -26,8 +26,9 @@
 #
 # What it does at launch:
 #   1. probes your configured endpoints in order, first reachable wins
-#   2. discovers the resident model, its context window, and whether it
-#      thinks (a minimal test request with thinking forced on)
+#   2. discovers the resident model, its context window, whether it
+#      thinks (a minimal test request with thinking forced on) and whether
+#      it sees images (a tiny solid-red PNG and "what color is this?")
 #   3. registers the endpoint with pi (~/.pi/agent/models.json) and reserves
 #      the output budget in pi's compaction settings (settings.json), so
 #      compaction fires before a response can overflow the server's window
@@ -211,6 +212,83 @@ else:
     esac
 }
 
+# Vision probe: one minimal chat completion carrying a 64x64 solid-red PNG
+# (built inline; no PIL) and the question "what color is this?". A model
+# that answers "red" saw the image. An error whose message talks about
+# images / multimodal input (vLLM 400, llama.cpp 500 without an mmproj) is
+# a text-only model. A 200 whose answer says it cannot see images (servers
+# like Ollama silently drop images for text-only models) is text-only too.
+# Anything else is inconclusive: onboarding then asks, launch defaults to
+# text-only. Cost: one tiny request per launch (only when VISION is unset).
+# Sets VISION_DETECTED: true | false | unknown (inconclusive).
+probe_vision() {  # probe_vision <base-url-without-/v1> <model>
+    local base="$1" model="$2" payload tls out code body
+    payload="$(python3 -c '
+import base64, json, struct, sys, zlib
+w = h = 64
+raw = b"".join(b"\x00" + b"\xff\x00\x00" * w for _ in range(h))
+def chunk(t, d):
+    return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+       + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+print(json.dumps({
+    "model": sys.argv[1],
+    "max_tokens": 200,
+    "temperature": 0,
+    "chat_template_kwargs": {"enable_thinking": False},
+    "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "What color is this image? Reply with one word."},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}},
+    ]}],
+}))' "${model}" 2>/dev/null)" || { VISION_DETECTED="unknown"; return 0; }
+    tls="$(tls_args_for "${base}")"
+    local IFS='|'; # shellcheck disable=SC2086
+    if out="$(curl -s --max-time 60 -w '
+%{http_code}' ${tls:+$tls} -H "Authorization: Bearer ${TOKEN:-dummy-key}" \
+        -H "Content-Type: application/json" -d "${payload}" \
+        "${base}/v1/chat/completions" 2>/dev/null)"; then
+        code="${out##*
+}"; body="${out%
+*}"
+        VISION_DETECTED="$(printf '%s' "${body}" | python3 -c '
+import json, re, sys
+code = sys.argv[1]
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except Exception:
+    d = {}
+if code == "200" and isinstance(d, dict) and d.get("choices"):
+    m = (d["choices"] or [{}])[0].get("message") or {}
+    content = m.get("content") or ""
+    if not isinstance(content, str):  # list-of-parts replies
+        content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+    seen = (content + " " + (m.get("reasoning_content") or m.get("reasoning") or "")).lower()
+    if re.search(r"\bred\b", seen):
+        print("true")
+    elif re.search(r"(can.?t|cannot|unable to|not able to|don.?t have the ability to) (see|view|process|interpret|analy[sz]e|access)|no image|text-only|text-based|only (process|handle|understand) text", seen):
+        print("false")
+    else:
+        print("unknown")
+elif code[:1] in ("4", "5"):
+    # a JSON error that names images/multimodal input: the server refused
+    # the image for this model (vLLM 400, llama.cpp 500 without mmproj)
+    err = d.get("error") if isinstance(d, dict) else None
+    msg = err.get("message", "") if isinstance(err, dict) else (err if isinstance(err, str) else "")
+    if re.search(r"image|vision|multi-?modal|mm_|mmproj", str(msg), re.I):
+        print("false")
+    else:
+        print("unknown")
+else:
+    print("unknown")' "${code}" 2>/dev/null)"
+    else
+        VISION_DETECTED="unknown"
+    fi
+    case "${VISION_DETECTED}" in
+        true|false) ;;
+        *) VISION_DETECTED="unknown" ;;
+    esac
+}
 # Suggested thinking level from context window + output cap. Level costs
 # are pi's published budgets (minimal ~1k / low ~2k / medium ~8k /
 # high ~16k). A level is suggested only when 4x its cost fits the window
@@ -1534,7 +1612,7 @@ run_setup() {
     esac
 
     # 6. save config (re-emitted after the live probe with the thinking level)
-    setup_emit_config() {  # setup_emit_config <thinking-level>
+    setup_emit_config() {  # setup_emit_config <thinking-level> [vision-pin]
         {
             echo "# lets-code configuration (shell syntax). Re-run 'lets-code setup' to regenerate."
             echo "ENDPOINTS=\"${endpoints}\""
@@ -1547,8 +1625,9 @@ run_setup() {
             echo "OUTPUT_CAP=\"\""
             echo "API=\"\""
             echo ""
-            echo "# Set true if your model accepts images (default: false):"
-            echo "VISION=\"\""
+            echo "# Image input pin (empty = auto-detected at launch with a tiny test"
+            echo "# image; setup asks when that probe is inconclusive): true|false"
+            echo "VISION=\"${2:-}\""
             echo ""
             echo "# Thinking support pin (empty = auto-detected at launch): true|false"
             echo "REASONING=\"\""
@@ -1696,10 +1775,36 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
                 esac
                 log "startup thinking level saved as ${thinking_level} in case the resident model changes" ;;
         esac
-        setup_emit_config "${thinking_level}"
-        log "updated ${CONFIG_FILE} (thinking level: ${thinking_level})"
-        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}" "${LETS_CODE_VISION:-false}" "${reasoning_reg}" "${thinking_level}"
-        log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${DEFAULT_OUTPUT_CAP}, vision: ${LETS_CODE_VISION:-false}, thinking: ${reasoning_reg}, level: ${thinking_level})"
+        # probe image support (launch re-detects unless pinned); ask when inconclusive
+        local vision_reg vision_pin
+        vision_reg="false"; vision_pin=""
+        if [ -n "${LETS_CODE_VISION:-}" ]; then
+            vision_pin="${LETS_CODE_VISION}"; vision_reg="${LETS_CODE_VISION}"
+            log "vision: pinned to ${vision_pin} by LETS_CODE_VISION"
+        else
+            probe_vision "${found}" "${reg_id}"
+            case "${VISION_DETECTED}" in
+                true)  vision_reg="true"
+                       log "vision: detected on ${reg_id} (probe: a tiny red image, asked for its color) — images will be sent to it" ;;
+                false) log "vision: not detected on ${reg_id} (the server rejected image input or the model could not see it) — registering as text-only" ;;
+                *)
+                    echo ""
+                    log "vision: probe inconclusive for ${reg_id} (no usable answer about a test image)."
+                    echo "Does ${reg_id} accept images (screenshots, diagrams)? If unsure, say n —"
+                    echo "pi only sends images to models declared with image input."
+                    printf "Model accepts images? [y/N] "
+                    read -r reply
+                    case "${reply}" in
+                        y|Y|yes|YES) vision_pin="true"; vision_reg="true" ;;
+                        *)           vision_pin="false" ;;
+                    esac
+                    log "vision pinned as VISION=${vision_pin} in ${CONFIG_FILE} (clear it to re-probe at launch)" ;;
+            esac
+        fi
+        setup_emit_config "${thinking_level}" "${vision_pin}"
+        log "updated ${CONFIG_FILE} (thinking level: ${thinking_level}, vision: ${vision_pin:-auto})"
+        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}" "${vision_reg}" "${reasoning_reg}" "$(case "${thinking_level}" in auto*) echo off ;; *) echo "${thinking_level}" ;; esac)"
+        log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${DEFAULT_OUTPUT_CAP}, vision: ${vision_reg}, thinking: ${reasoning_reg}, level: ${thinking_level})"
     fi
 
     echo ""
@@ -1872,10 +1977,9 @@ OUTPUT_CAP="${OUTPUT_CAP_OVERRIDE:-${OUTPUT_CAP}}"
 API="${API_OVERRIDE:-${API}}"
 [ -n "${API}" ] || API="${DEFAULT_API}"
 VISION="${VISION_OVERRIDE:-${VISION}}"
-[ -n "${VISION}" ] || VISION="false"
 case "${VISION}" in
-    true|false) ;;
-    *) log_error "vision must be true or false (got: ${VISION}) — set it via --vision / --no-vision, LETS_CODE_VISION, or VISION= in ${CONFIG_FILE} (if present)."; exit 1 ;;
+    ""|true|false) ;;
+    *) log_error "vision must be empty (auto-detect), true, or false (got: ${VISION}) — set it via --vision / --no-vision, LETS_CODE_VISION, or VISION= in ${CONFIG_FILE} (if present)."; exit 1 ;;
 esac
 case "${REASONING}" in
     ""|true|false) ;;
@@ -1927,6 +2031,25 @@ else
     esac
 fi
 log "thinking support: ${REASONING_SUPPORTED} (startup level: ${THINKING})"
+# image input: the VISION pin (--vision/--no-vision, config/env) wins;
+# otherwise one tiny image request auto-detects a vision model
+# (OpenAI-dialect endpoints only). Inconclusive -> text-only, with a hint.
+if [ -z "${VISION}" ]; then
+    VISION="false"
+    case "${API}" in
+        openai-completions|openai-responses)
+            log_verbose "probing image support for ${MODEL} ..."
+            probe_vision "${BASE_URL}" "${MODEL}"
+            case "${VISION_DETECTED}" in
+                true)  VISION="true" ;;
+                false) ;;
+                *)     log "vision probe inconclusive — registering as text-only; pin VISION=true in ${CONFIG_FILE} (if present) or run 'lets-code setup' if ${MODEL} accepts images." ;;
+            esac ;;
+        *)
+            log "vision auto-detection needs an OpenAI-dialect endpoint — registering as text-only (pin VISION=true if ${MODEL} accepts images)." ;;
+    esac
+fi
+log "image input: ${VISION}"
 if [ "${REASONING_SUPPORTED}" = false ] && [ "${THINKING}" != off ]; then
     log "note: thinking level ${THINKING} not applied — model not registered as a thinking model."
 fi

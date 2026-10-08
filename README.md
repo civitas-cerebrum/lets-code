@@ -51,7 +51,7 @@ confirm, then install.
 | `--context <tok>` | Context window (default: discovered from the server) |
 | `--output-cap <tok>` | Max output tokens (default 32768) |
 | `--api <dialect>` | `openai-completions` (default) \| `openai-responses` \| `anthropic-messages` \| `google-generative-ai` |
-| `--vision` \| `--no-vision` | The model accepts image input (off by default). `--vision` registers the model with `input: ["text","image"]` so pi actually sends images (e.g. screenshots) to it; `--no-vision` forces off even if `VISION=true` is set. |
+| `--vision` \| `--no-vision` | Pin image input on or off for one launch. By default image support is **auto-detected at launch** with a tiny test image (a 64×64 red PNG and "what color is this?"); when the model answers "red" it is registered with `input: ["text","image"]` so pi actually sends images (e.g. screenshots) to it. `VISION=true`/`false` in the config pins it permanently; setup asks you when the probe is inconclusive. |
 | `--thinking-level <lvl>` | Startup thinking level: `off`\|`minimal`\|`low`\|`medium`\|`high` (xhigh\|max). Default `medium`. Thinking support itself is **auto-detected at launch** with a minimal test request (pin `REASONING=true`/`false` in the config to override); setup offers a level suggested from your context window. |
 | `--insecure` | Skip TLS verification (self-signed certs) |
 | `--no-mem-guard` | Launch without the [memory guard](#memory-guard) |
@@ -88,8 +88,10 @@ Setup then **registers `lets-code` as a command**:
    currently serving — probes whether it thinks (a minimal test request
    with thinking forced on), offers a **thinking level** whose suggested
    default follows your context window (largest published pi budget —
-   1k/2k/8k/16k — that fits ¼ of the window and ½ of the output cap), and
-   registers the model — thinking included — with pi.
+   1k/2k/8k/16k — that fits ¼ of the window and ½ of the output cap),
+   probes whether it **sees images** (a tiny red test image; if the answer
+   is inconclusive setup asks you and pins `VISION=` in the config), and
+   registers the model — thinking and image input included — with pi.
 
 After setup (and a shell restart if the PATH line was just added), typing
 `lets-code` anywhere just works.
@@ -389,7 +391,7 @@ level for one launch. Levels `xhigh`/`max` map to pi's high budget.
 | Garbage thinking text in output | Missing `--reasoning-parser` on the server. |
 | Session dies mid-way on long tasks | Context overflow — confirm the launch line shows the right `context:` value; if your server hides `max_model_len`, pin it with `--context <tok>` (or `CONTEXT=` in the config file). |
 | pi says provider `lets-code` unknown | pi's files were hand-edited while lets-code was running; just re-run `lets-code` — it re-registers on every launch. |
-| Model can't see images / pi treats it as text-only | pi only sends images to models declared with image input. Set `VISION=true` in `~/.config/lets-code/config` (or launch with `--vision`) and re-run `lets-code` — the model is re-registered on every launch, and pi re-reads `models.json` when you open `/model`. |
+| Model can't see images / pi treats it as text-only | pi only sends images to models declared with image input. Image support is auto-detected at launch (check the `image input:` line); the probe needs an OpenAI-dialect endpoint. If it is inconclusive (or you pinned it off), set `VISION=true` in `~/.config/lets-code/config` (or launch with `--vision`) and re-run `lets-code` — the model is re-registered on every launch, and pi re-reads `models.json` when you open `/model`. |
 | Model doesn't think / no thinking blocks although it should | Thinking support is auto-detected at launch; check the `thinking support:` line. If the probe is inconclusive or the model needs a nudge, pin `REASONING=true` in `~/.config/lets-code/config` and re-run `lets-code`. Then set a non-`off` level (`THINKING=` or `--thinking-level`) and open `/thinking` to confirm. |
 
 ## Roadmap

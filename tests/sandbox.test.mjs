@@ -71,6 +71,21 @@ const warnings = []; const warn = (m) => warnings.push(m);
 	t("/sandbox reports off and the mode", /sandbox: off \(mode ask\)/.test(h.notices[h.notices.length - 1]), true);
 	t("bash tool registered when pi is importable", h.tool() === null || h.tool().name === "bash", true);
 }
+// --- the mandate's mode event can arrive before this extension's session_start (it did, live: pi crashed)
+{
+	const h = await load();
+	let threw = null;
+	try { h.listeners["lets-code:mode"]({ role: "yolo", network: "on", bypass: true }); await new Promise((r) => setTimeout(r, 50)); } catch (e) { threw = e.message; }
+	t("mode before session_start: no crash", threw, null);
+	const ctx = { cwd: work, hasUI: false, ui: { notify() {}, setStatus() { throw new Error("no UI here"); } } };
+	await h.handlers.session_start({ type: "session_start" }, ctx);
+	t("session_start then uses the remembered mode (yolo: off, no UI touched)", (await h.commands.sandbox.handler("", { ...h.ctx(work) }), /sandbox: off \(mode yolo\)/.test(h.notices[h.notices.length - 1])), true);
+	const unhandled = []; const on = (e) => unhandled.push(String(e)); process.on("unhandledRejection", on);
+	h.listeners["lets-code:mode"]({ role: "ask", network: "on" }); h.listeners["lets-code:mode"]({ role: "plan", network: "off" });
+	await new Promise((r) => setTimeout(r, 300)); process.off("unhandledRejection", on);
+	t("back-to-back mode changes: no unhandled rejection", unhandled, []);
+}
+
 // --- inert when off
 { delete process.env.LETS_CODE_SANDBOX_ON; const h = await load(); t("inert when off", Object.keys(h.handlers).length, 0); }
 

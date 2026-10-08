@@ -16,19 +16,26 @@
 #   lets-code --vision ...       model accepts images (default: auto-detected)
 #   lets-code --no-vision ...    force image input off (skips the probe)
 #   lets-code --thinking-level <l> startup thinking level, default: medium
-#                                (auto-detected when the resident model thinks)
+#                                (auto-detected when the resident model thinks);
+#                                auto[:<l>] is dynamic thinking: off, raised to
+#                                the ceiling <l> (default high) in short bursts
+#                                when the output shows pi struggling
 #   lets-code --harness <name>   pi (default; only v1 harness) |
 #                                deepseek | codex (roadmap)
 #   lets-code --insecure ...     skip TLS verification (self-signed certs)
 #   lets-code --no-mem-guard     launch without the memory guard
 #   lets-code --no-git-guard     launch without the git guard
+#   lets-code --no-agent-guard   launch without the agent guard
 #   lets-code --verbose ...      show endpoint probing
 #
 # What it does at launch:
 #   1. probes your configured endpoints in order, first reachable wins
 #   2. discovers the resident model, its context window, whether it
 #      thinks (a minimal test request with thinking forced on) and whether
-#      it sees images (a tiny solid-red PNG and "what color is this?")
+#      it sees images (a tiny solid-red PNG and "what color is this?"); for a
+#      thinking model on vLLM, also whether its chat template has its own
+#      effort control (rendered via /tokenize, no generation), which then
+#      follows pi's thinking level
 #   3. registers the endpoint with pi (~/.pi/agent/models.json) and reserves
 #      the output budget in pi's compaction settings (settings.json), so
 #      compaction fires before a response can overflow the server's window;
@@ -50,6 +57,11 @@
 #      call it snapshots uncommitted work under refs/pi-checkpoints/ (own
 #      index file; HEAD, index and branches untouched). Zero tokens unless
 #      a call is blocked.
+#   7. agent guard: gives bash calls a default timeout, continues a reply
+#      the output limit cut off before any tool call, reminds pi to run its
+#      tests after several untested edits, requires executed checks (not
+#      reasoning) as verification, tells pi once to finish after its own
+#      tests have passed for a while, and runs the auto thinking level. Zero tokens unless a rule acts.
 #
 # Harness: pi is the default (and only v1) harness; --harness deepseek|codex
 # are roadmap items, not yet available.
@@ -60,7 +72,10 @@
 #                LETS_CODE_OUTPUT_CAP, LETS_CODE_API, LETS_CODE_VISION,
 #                LETS_CODE_THINKING, LETS_CODE_REASONING,
 #                LETS_CODE_MEM_GUARD (true|false), LETS_CODE_GIT_GUARD (true|false),
-#                LETS_CODE_GIT_CHECKPOINTS (1|0)
+#                LETS_CODE_GIT_CHECKPOINTS (1|0), LETS_CODE_AGENT_GUARD (true|false),
+#                LETS_CODE_BASH_TIMEOUT (s, default 300), LETS_CODE_WRAP_TURNS (6),
+#                LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
+#                LETS_CODE_BURST_TURNS (3), LETS_CODE_MAX_BURSTS (8), LETS_CODE_THINKING_REPLAY (all|<n>)
 # Needs: bash >= 3.2 (stock macOS is fine), curl, python3, pi CLI
 # (auto-installed on request).
 
@@ -292,6 +307,78 @@ else:
         *) VISION_DETECTED="unknown" ;;
     esac
 }
+
+# Template effort probe. Some chat templates carry their own effort control
+# besides enable_thinking: Qwen3.8's takes reasoning_effort low|medium|xhigh,
+# defaults to xhigh, and puts an instruction in the system prompt ("think
+# carefully, validate key assumptions, consider plausible alternatives"),
+# rejecting any other value with HTTP 400. pi never sets it unless told to, so
+# every thinking level ran under the xhigh instruction and the levels differed
+# only in where the token budget cut the thinking off (2026-10-08).
+# Renders the prompt through vLLM's /tokenize (no generation, milliseconds)
+# without the kwarg and with each candidate value. If some accepted value
+# changes the rendered prompt, the template uses it: each pi level from minimal
+# to high gets the accepted value nearest to it. xhigh/max stay unmapped so pi
+# keeps clamping them to high. Servers without /tokenize: nothing is sent.
+# Sets EFFORT_MAP ("" or JSON like {"low": "low", ...}) and EFFORT_NOTE.
+probe_template_effort() {  # probe_template_effort <base-url-without-/v1> <model> [1 = neutral: map every level to the least-instruction value]
+    EFFORT_MAP=""; EFFORT_NOTE=""
+    local out
+    out="$(LC_BASE="$1" LC_MODEL="$2" LC_TOKEN="${TOKEN:-}" LC_CA="${CA_FOUND:-}" LC_NEUTRAL="${3:-0}" python3 -c '
+import json, os, ssl, urllib.request, urllib.error
+base, model, token, ca = (os.environ[k] for k in ("LC_BASE", "LC_MODEL", "LC_TOKEN", "LC_CA"))
+ctx = None
+if base.startswith("https://"):
+    ctx = ssl.create_default_context(cafile=ca) if ca else ssl._create_unverified_context()
+RANK = {"minimal": 0, "low": 1, "medium": 2, "high": 3, "xhigh": 4, "max": 5}
+class NoTokenize(Exception):
+    pass
+def render(extra):
+    kwargs = {"enable_thinking": True}
+    kwargs.update(extra)
+    body = {"model": model, "add_generation_prompt": True, "chat_template_kwargs": kwargs,
+            "messages": [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]}
+    req = urllib.request.Request(base + "/tokenize", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
+    try:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+            return json.load(r).get("tokens")
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            return None
+        raise NoTokenize("HTTP %d" % e.code)
+    except Exception as e:
+        raise NoTokenize(type(e).__name__)
+try:
+    baseline = render({})
+    if baseline is None:
+        raise NoTokenize("baseline rejected")
+    accepted = {}
+    for v in RANK:
+        t = render({"reasoning_effort": v})
+        if t is not None:
+            accepted[v] = t
+except NoTokenize as e:
+    print("|no /tokenize endpoint (%s): template effort not probed" % e)
+    raise SystemExit
+renders = {json.dumps(t) for t in accepted.values()} | {json.dumps(baseline)}
+if not accepted or len(renders) < 2:
+    print("|template has no effort control")
+    raise SystemExit
+mapping = {}
+neutral = min(accepted, key=lambda v: (len(accepted[v]), RANK[v]))  # the value whose instruction is shortest
+for level in ("minimal", "low", "medium", "high"):
+    mapping[level] = neutral if os.environ.get("LC_NEUTRAL") == "1" else min(accepted, key=lambda v: (abs(RANK[v] - RANK[level]), RANK[v]))
+default = [v for v, t in accepted.items() if t == baseline]
+note = "template effort control: accepts %s%s; pi levels map %s" % (
+    "|".join(accepted), " (default %s)" % "|".join(default) if default else "",
+    ", ".join("%s->%s" % kv for kv in mapping.items()))
+print(json.dumps(mapping) + "|" + note)
+' 2>/dev/null)" || out="|template effort probe failed"
+    EFFORT_MAP="${out%%|*}"
+    EFFORT_NOTE="${out#*|}"
+}
+
 # Suggested thinking level from context window + output cap. Level costs
 # are pi's published budgets (minimal ~1k / low ~2k / medium ~8k /
 # high ~16k). A level is suggested only when 4x its cost fits the window
@@ -332,11 +419,11 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 # $ENV interpolation), exported at launch — the secret stays in
 # ~/.config/lets-code/config (mode 600). Writes are atomic (tmp + rename),
 # every other key in the files is preserved, and a corrupt file fails loudly.
-pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-cap> <vision> <reasoning> <thinking>
-    PI_AGENT_DIR="${PI_AGENT_DIR}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" <<'PY'
+pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-cap> <vision> <reasoning> <thinking> [<effort-map-json>]
+    PI_AGENT_DIR="${PI_AGENT_DIR}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
 import json, os, sys, tempfile
 
-base, api, model, context, cap, vision, reasoning, thinking = sys.argv[1:9]
+base, api, model, context, cap, vision, reasoning, thinking, effort_map = sys.argv[1:10]
 agent_dir = os.environ["PI_AGENT_DIR"]
 ctx = int(context)
 cap = int(cap)
@@ -393,20 +480,25 @@ def to_models(doc):
             "enable_thinking": {"$var": "thinking.enabled"},
             "thinking_budget": {"$var": "thinking.budget", "omitWhenOff": True},
         }
-        # Hard ceiling on thinking tokens. The template budget above is a
-        # SOFT hint the model can overthink past (observed: a 16K hint
-        # spiralled to the server's 32K output cap, starving the answer).
-        # thinking_token_budget is enforced engine-side by vLLM (with a
-        # reasoning parser): the thinking section is force-terminated at the
-        # budget and the response continues. Servers that don't know the
-        # field ignore it (OpenAI-compatible servers allow extra fields),
-        # and with thinking off the budget is inert (no thinking section).
-        # Half the output cap, so a runaway thinker can never starve the
-        # answer; with the default 32K cap this equals pi's default high
-        # thinking budget, so well-behaved models see no change.
-        model_doc["samplingParams"] = {
-            "thinking_token_budget": max(1024, cap // 2),
-        }
+        # Hard per-level ceiling on thinking tokens. The template budget above
+        # is only a hint, and Qwen3's template ignores it entirely (checked
+        # 2026-10-06: identical prompt with and without it). vLLM enforces
+        # thinking_token_budget engine-side (with a reasoning parser): the
+        # thinking section is force-terminated at the budget. pi sends its
+        # budget for the current level in that field when the compat flag is
+        # set (defaults: minimal 1024, low 2048, medium 8192, high 16384;
+        # override with thinkingBudgets in settings.json), clamped to leave
+        # 1024 tokens of answer room. A fixed samplingParams ceiling used to
+        # be here; it gave every level the same 16K budget, so low, medium
+        # and high behaved alike. Servers that don't know the field ignore it.
+        compat["supportsThinkingTokenBudget"] = True
+        # The template's own effort control (see probe_template_effort): pi
+        # substitutes its current level through thinkingLevelMap, so the
+        # model gets the matching instruction instead of the template's
+        # default. Omitted when thinking is off (no thinking section at all).
+        if effort_map:
+            compat["chatTemplateKwargs"]["reasoning_effort"] = {"$var": "thinking.level", "omitWhenOff": True}
+            model_doc["thinkingLevelMap"] = json.loads(effort_map)
     providers["lets-code"] = {
         "baseUrl": base,
         "api": api,
@@ -1503,6 +1595,473 @@ TS
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
 
+# -------------------------------------------------------------- agent guard
+# Rules for failure modes measured in pi sessions against a local thinking
+# model (2026-10 thinking-level benchmark, 48 sessions: 6 tasks x 4 levels x 2):
+#   * bash calls get a default timeout (LETS_CODE_BASH_TIMEOUT, 300 s): pi's
+#     bash tool has none, and two sessions sat 19 and 38 minutes on a script
+#     that never returned;
+#   * a reply the output limit cut off before any tool call is continued
+#     with a nudge to act (up to 3 times): a server-terminated thinking
+#     section can turn into plain-text reasoning that eats the whole output
+#     cap, after which pi stopped with nothing done;
+#   * after pi's own tests have passed for LETS_CODE_WRAP_TURNS turns (6) and
+#     2 minutes, or for LETS_CODE_WRAP_MINUTES (5), pi is told once to finish
+#     if executed tests cover every requirement: sessions that had passed
+#     every hidden test kept polishing for 20+ minutes, one breaking a
+#     working solution;
+#   * verification means execution: a system-prompt section tells pi to check
+#     behaviour and derive test expectations by running code, not by
+#     reasoning about it (benchmark thinking hand-evaluated Python in 58% of
+#     hard-task blocks); finishing with source edits no command has run, or
+#     right after an executed check failed, gets one continuation (up to 2);
+#   * after 3 source edits with no test run in between, pi is told to run its
+#     tests (up to 5 times): a refactor that broke a passing solution went 4
+#     edits and 4 minutes before the next test run;
+#   * dynamic thinking (--thinking-level auto[:<ceiling>]): off, raised to
+#     the ceiling for a burst when a struggle signal fires (the same tests
+#     still failing after 3 runs, more failures after a source edit, 2 failed
+#     edits in a row, 2 syntax errors, an identical call with no file change
+#     in between, 3 tool errors in a row, 40 turns without passing tests).
+#     The burst carries its reason as a one-line goal and ends when that
+#     reason is resolved, after LETS_CODE_BURST_TURNS turns (3), or when pi's
+#     tests pass; a new burst needs a new signal; at most LETS_CODE_MAX_BURSTS
+#     (8) per session. LETS_CODE_THINKING_REPLAY=<n> keeps only the last n
+#     turns' thinking in the context (default: all, as pi does). No signal fired on the easy tasks; every thrashing thinking-off
+#     session tripped one within 1-4 minutes.
+# LETS_CODE_AGENT_GUARD_LOG=<file> appends one JSON line per guard action.
+# Inert unless LETS_CODE_AGENT_GUARD_ON=1. Rewritten when its content changes.
+pi_write_agentguard_extension() {
+    local dir="${PI_AGENT_DIR}/extensions" f tmp
+    f="${dir}/lets-code-agentguard.ts"
+    mkdir -p "${dir}"
+    tmp="$(mktemp "${dir}/.lets-code-agentguard.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (agent guard); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code with the agent guard on
+// (LETS_CODE_AGENT_GUARD_ON=1). Each rule answers a failure seen in pi
+// sessions against a local thinking model (2026-10 thinking-level benchmark):
+//   1. bash calls without a timeout get one (LETS_CODE_BASH_TIMEOUT, default
+//      300 s). pi's bash tool has no default, so a script that never returns
+//      (a self-written fuzzer, a parser stuck in a loop) idled sessions for
+//      19 and 38 minutes. The model can still pass a longer timeout itself.
+//   2. a reply cut off by the output limit before any tool call gets one
+//      continuation that tells the model to act instead of reasoning on. When
+//      the server ends a thinking section at its budget, the model can keep
+//      reasoning in plain text until the output cap: one session spent its
+//      whole 32K budget that way, made no tool call, and stopped with nothing.
+//   3. once the model's own tests have passed for LETS_CODE_WRAP_TURNS turns
+//      (default 6) and at least 2 minutes, or for LETS_CODE_WRAP_MINUTES
+//      minutes (default 5), it is told once to finish if its executed tests
+//      cover every requirement. Thinking sessions that had already passed
+//      every hidden test kept refactoring for another 20+ minutes, and one
+//      broke a passing solution while doing so.
+//   4. dynamic thinking (LETS_CODE_THINKING_AUTO=<ceiling>): the level is a
+//      ceiling, not a setting. Thinking starts off and is raised to the
+//      ceiling only for a short burst when a strong struggle signal fires:
+//      the same tests still failing after 3 runs, more failures after a
+//      source edit (with the tests untouched), 2 failed edits in a row, 2 syntax errors, an identical tool call
+//      with no file change in between, 3 tool errors in a row, or 40 turns
+//      without passing tests. The burst carries the reason as a one-line
+//      goal, ends as soon as that reason is resolved (the edit succeeds, the
+//      failures drop, a file changes...), after LETS_CODE_BURST_TURNS turns
+//      (default 3), or when the model's tests pass, and a new burst needs a
+//      new signal. At most LETS_CODE_MAX_BURSTS bursts per session (default
+//      8). Falling failure counts and single failures never escalate. In the
+//      benchmark these signals never fired on easy tasks, and every thrashing
+//      thinking-off session tripped one within its first 1-5 minutes; the
+//      earlier "stay raised until tests pass" rule turned such sessions into
+//      40-minute polishing runs.
+//   5. after 3 source edits without a test run in between, the model is told
+//      to run its tests. A refactor that broke a passing solution (22/22 to
+//      14/22 hidden tests) went 4 edits and 4 minutes before the next test run.
+//   6. verification means execution. A short system-prompt section tells the
+//      model to run before it reasons (check behaviour by running code, not by
+//      working it out in its head), to derive test expectations by executing
+//      the real thing, to settle spec ambiguities once instead of revisiting
+//      them, and to change files with the edit/write tools rather than
+//      rewriting scripts. If it tries to finish with source edits that no
+//      executed command has seen, or right after an executed check reported
+//      a failure, it gets one continuation asking for a real run (up to 2).
+//   7. optional (LETS_CODE_THINKING_REPLAY=<n>): only the last n assistant
+//      turns keep their thinking in the context sent to the model; older
+//      thinking is dropped. pi replays all of it by default, which was about
+//      40% of the prompt by the end of a high-thinking session, so the model
+//      kept re-reading its own discarded hypotheses every turn.
+// Apart from that prompt section, nothing is added unless a rule acts.
+// LETS_CODE_AGENT_GUARD_LOG=<file> appends one JSON line per guard action.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { appendFileSync } from "node:fs";
+
+const ACTIVE = process.env.LETS_CODE_AGENT_GUARD_ON === "1";
+const AUTO = (process.env.LETS_CODE_THINKING_AUTO ?? "").trim();
+const BASH_TIMEOUT = Math.max(1, Number(process.env.LETS_CODE_BASH_TIMEOUT) || 300);
+const WRAP_TURNS = Math.max(1, Number(process.env.LETS_CODE_WRAP_TURNS) || 6);
+const WRAP_MS = Math.max(1, Number(process.env.LETS_CODE_WRAP_MINUTES) || 5) * 60_000;
+const BURST_TURNS = Math.max(1, Number(process.env.LETS_CODE_BURST_TURNS) || 3);
+const MAX_BURSTS = Math.max(0, Number(process.env.LETS_CODE_MAX_BURSTS ?? 8));
+const REPLAY_RAW = (process.env.LETS_CODE_THINKING_REPLAY ?? "").trim();
+const REPLAY = REPLAY_RAW === "" || REPLAY_RAW === "all" ? Infinity : Math.max(0, Number(REPLAY_RAW) || 0);
+const LOG = process.env.LETS_CODE_AGENT_GUARD_LOG ?? "";
+const MAX_LENGTH_NUDGES = 3;
+const TEST_REMIND_EDITS = 3;
+const MAX_TEST_REMINDERS = 5;
+const WRAP_MIN_MS = 2 * 60_000;
+const MAX_VERIFY_NUDGES = 2;
+const MAX_ACT_NUDGES_PER_BURST = 1;
+// a bash command that executes code, as opposed to reading or listing files
+const EXEC_RE = /(^|[\s;&|(])(python3?|pytest|node|npm|npx|pnpm|yarn|bun|deno|go|cargo|make|ruby|rspec|java|mvn|gradle|dotnet|php|perl|bash|sh|\.\/[\w.\/-]+)(\s|$)/;
+const FAILURE_RE = /\b(FAIL(ED)?|MISMATCH|AssertionError|Traceback \(most recent call last\))\b/;
+const TEST_PATH_RE = /(^|[\/_.-])tests?([\/_.-]|$)/i;
+
+const PROMPT_SECTION = [
+	"Working method (lets-code):",
+	"- Run before you reason. If running code can answer a question in under a minute (what an expression returns, whether a fix works, what a library does), run it first, then think only about what the output means. Never work out program behaviour step by step in your head.",
+	"- Claims that code works must rest on commands you ran in this session.",
+	"- Derive expected values for tests by executing the reference behaviour (for example real Python for Python semantics), not from memory.",
+	"- Decide ambiguities once. When the task is silent on a detail, choose the simplest reading, state it in one line, and move on; do not revisit it unless a test or the task contradicts it.",
+	"- Change files with the edit and write tools, not with scripts that rewrite source or test files.",
+	"- After changing source, rerun the tests. Before finishing, run them once more and read the output: any failure it prints is unresolved.",
+].join("\n");
+const TEST_TEXT =
+	"[lets-code] You have changed the source several times since your last test run. " +
+	"Run your tests now, before making further changes.";
+const LENGTH_TEXT =
+	"[lets-code] Your last reply hit the output limit before making any tool call, so it was cut off. " +
+	"Do not repeat that reasoning. Act now: make the next tool call (for example, write the file).";
+const WRAP_TEXT =
+	"[lets-code] Your own tests have been passing for a while. If every requirement in the original task is covered " +
+	"by a test you have actually run, finish now: reply with a short summary and make no further tool calls. " +
+	"If a requirement is not covered by an executed test, test it first; do not refactor or polish working code.";
+const VERIFY_TEXT =
+	"[lets-code] You are about to finish, but no command has been executed since your last source change. " +
+	"Run the tests and any checks the task requires now, and base your summary on their actual output.";
+const FAILED_CHECK_TEXT =
+	"[lets-code] You are about to finish, but the last command you executed reported a failure. " +
+	"Fix it, or rerun to show it is resolved, before finishing.";
+
+/** Failing-test count reported by a test-like tool output: 0 = all passed, null = not a test run. */
+export function testStatus(txt: string): number | null {
+	if (/Ran \d+ tests?/.test(txt)) {
+		const f = /FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?/.exec(txt);
+		if (f) return Number(f[1] ?? 0) + Number(f[2] ?? 0);
+		if (/(^|\n)OK\b/.test(txt)) return 0;
+	}
+	let m = /(\d+) passed(?:, | and )(\d+) failed/.exec(txt);
+	if (m) return Number(m[2]);
+	m = /(\d+) failed, (\d+) passed/.exec(txt); // pytest summary
+	if (m) return Number(m[1]);
+	if (/=+ (\d+) passed\b[^\n]*=+/.test(txt) && !/failed|error/i.test(txt.slice(-300))) return 0;
+	m = /\bfail(?:ures|ed|s)?\s*[=:]\s*(\d+)/i.exec(txt); // checked=20000 failures=51
+	if (m) return Number(m[1]);
+	m = /(\d+)\/\d+ cases failed|(\d+) differential failures|(\d+) failures?\b(?!\s*[=:])/.exec(txt);
+	if (m) return Number(m[1] ?? m[2] ?? m[3]);
+	const nfail = (txt.match(/(^|\n)(FAIL|MISMATCH)[:\s]/g) ?? []).length;
+	if (nfail) return nfail;
+	if (/ALL (TESTS )?PASS|all tests passed|ALL OK|all checks passed/i.test(txt)) return 0;
+	return null;
+}
+
+/** A struggle signal: why thinking was raised, and the condition that ends the burst. */
+export interface Trigger {
+	why: string;
+	goal: string;
+	resolved: (d: Detector) => boolean;
+}
+
+/** Struggle signals, fed from tool calls, tool results and turn ends. */
+export class Detector {
+	turns = 0;
+	editStreak = 0;
+	errStreak = 0;
+	syntax = 0;
+	repeats = 0;
+	best: number | null = null;
+	noImprove = 0;
+	regression = false;
+	lastFailing: number | null = null;
+	passing = false;
+	passTurn: number | null = null;
+	passAt: number | null = null;
+	totalTurns = 0;
+	mutations = 0;
+	editsSinceTest = 0;
+	seq = 0;
+	lastSourceEdit = 0;
+	lastExec = 0;
+	lastExecFailed = false;
+	lastOkEdit = 0;
+	lastCleanExec = 0;
+	lastOkResult = 0;
+	lastTestEdit = 0;
+	pendingExec = false;
+	recentCalls: { sig: string; mutations: number }[] = [];
+	now: () => number;
+	constructor(now: () => number = () => Date.now()) {
+		this.now = now;
+	}
+	/** Clears the struggle counters; test pass state and edit tracking are kept. */
+	reset(): void {
+		this.turns = this.editStreak = this.errStreak = this.syntax = this.repeats = this.noImprove = 0;
+		this.regression = false;
+		this.recentCalls = [];
+		this.best = null;
+	}
+	toolCall(name: string, input: unknown): void {
+		if (name === "bash") this.pendingExec = EXEC_RE.test(String((input as any)?.command ?? ""));
+		const sig = name + ":" + JSON.stringify(input);
+		// identical call with no file change since: the model is going in circles
+		if (this.recentCalls.some((c) => c.sig === sig && c.mutations === this.mutations)) this.repeats++;
+		this.recentCalls = [...this.recentCalls, { sig, mutations: this.mutations }].slice(-4);
+	}
+	/** Returns the failing-test count when the result was a test run. */
+	toolResult(name: string, isError: boolean, text: string, path = ""): number | null {
+		const failing = name === "bash" ? testStatus(text) : null;
+		this.seq++;
+		// a failing test run or a failing assertion script exits non-zero; that is progress tracking, not a tool error
+		const realError = isError && failing === null && !text.trim().startsWith("(no output)") && !(name === "bash" && /\bAssertionError\b/.test(text));
+		this.errStreak = realError ? this.errStreak + 1 : 0;
+		if (!realError) this.lastOkResult = this.seq;
+		if (name === "edit") this.editStreak = isError ? this.editStreak + 1 : 0;
+		const hasSyntax = /\b(SyntaxError|IndentationError)\b/.test(text);
+		if (hasSyntax) this.syntax++;
+		const editedSource = (name === "edit" || name === "write") && !isError;
+		if (editedSource) {
+			this.mutations++;
+			this.lastOkEdit = this.seq;
+			if (TEST_PATH_RE.test(path)) {
+				this.lastTestEdit = this.seq;
+			} else {
+				this.editsSinceTest++;
+				this.lastSourceEdit = this.seq;
+			}
+		}
+		const executed = name === "bash" && this.pendingExec;
+		if (executed) {
+			this.lastExecFailed = failing !== 0 && (failing !== null || FAILURE_RE.test(text));
+			if (!hasSyntax) this.lastCleanExec = this.seq;
+			this.pendingExec = false;
+		}
+		if (failing !== null) {
+			// more failures than the previous run after a source change, with the tests themselves untouched: a regression
+			// (a test-file edit in between means the suite grew; new failures are then expected, not a signal)
+			this.regression = this.lastFailing !== null && failing > this.lastFailing && this.lastSourceEdit > this.lastExec && this.lastTestEdit < this.lastExec;
+			if (this.best === null || failing < this.best) {
+				this.best = failing;
+				this.noImprove = 0;
+			} else if (failing > 0) {
+				this.noImprove++;
+			}
+			this.lastFailing = failing;
+			if (failing === 0 && !this.passing) {
+				this.passTurn = this.totalTurns;
+				this.passAt = this.now();
+			}
+			if (failing > 0) this.passTurn = this.passAt = null;
+			this.passing = failing === 0;
+			this.editsSinceTest = 0;
+		}
+		if (executed) this.lastExec = this.seq;
+		return failing;
+	}
+	turnEnd(): void {
+		this.turns++;
+		this.totalTurns++;
+	}
+	/** The first strong struggle signal present, with its resolution condition, or null. */
+	trigger(): Trigger | null {
+		if (this.passing) return null;
+		const seq = this.seq;
+		const mutations = this.mutations;
+		if (this.editStreak >= 2) {
+			return { why: "2 failed edits in a row", goal: "Read the exact current text of the region before the next edit, then make one edit that matches it.", resolved: (d) => d.lastOkEdit > seq };
+		}
+		if (this.syntax >= 2) {
+			return { why: "2 syntax errors", goal: "Re-read the broken region and fix the syntax in one edit, then run the file.", resolved: (d) => d.lastCleanExec > seq };
+		}
+		if (this.repeats >= 2) {
+			return { why: "the same tool call repeated with no file change in between", goal: "Repeating that command gives the same result. Change the code or run a different check.", resolved: (d) => d.mutations > mutations };
+		}
+		if (this.regression) {
+			const before = this.best ?? 0;
+			return { why: "more tests fail after the last edit", goal: "Your last edit made more tests fail. Compare with the previous state and fix the regression first.", resolved: (d) => d.lastFailing !== null && d.lastFailing <= before };
+		}
+		if (this.noImprove >= 3) {
+			const stuck = this.best ?? 0;
+			return { why: `${stuck} test(s) still failing after 3 runs`, goal: `Diagnose why ${stuck} test(s) keep failing before editing again; verify the diagnosis by running code.`, resolved: (d) => d.lastFailing !== null && d.lastFailing < stuck };
+		}
+		if (this.errStreak >= 3) {
+			return { why: "3 tool errors in a row", goal: "Read the error text of the last three calls and change approach.", resolved: (d) => d.lastOkResult > seq };
+		}
+		if (this.turns >= 40) {
+			return { why: "40 turns without passing tests", goal: "Step back: list what is still failing and the simplest change that fixes it.", resolved: (d) => d.passing };
+		}
+		return null;
+	}
+	/** True once the model's own tests have passed for `turns` turns and `minMs`, or for `ms` on their own. */
+	passedFor(turns: number, ms = Infinity, minMs = 0): boolean {
+		if (!this.passing || this.passTurn === null || this.passAt === null) return false;
+		const age = this.now() - this.passAt;
+		return (this.totalTurns - this.passTurn >= turns && age >= minMs) || age >= ms;
+	}
+	/** Why finishing now would rest on speculation rather than execution, or null. */
+	unverified(): "no-run" | "failed" | null {
+		if (this.lastSourceEdit > this.lastExec) return "no-run";
+		if (this.lastExec > 0 && this.lastExecFailed) return "failed";
+		return null;
+	}
+}
+
+/** Drops thinking from all but the last `keep` assistant messages. Returns null when nothing changes. */
+export function stripOldThinking(messages: any[], keep: number): any[] | null {
+	if (!Number.isFinite(keep)) return null;
+	const idx = messages.map((m, i) => (m && m.role === "assistant" ? i : -1)).filter((i) => i >= 0);
+	const kept = new Set(keep > 0 ? idx.slice(-keep) : []);
+	let changed = false;
+	const out = messages.map((m, i) => {
+		if (!m || m.role !== "assistant" || kept.has(i) || !Array.isArray(m.content)) return m;
+		const content = m.content.filter((c: any) => !(c && c.type === "thinking"));
+		if (content.length === m.content.length) return m;
+		changed = true;
+		return { ...m, content };
+	});
+	return changed ? out : null;
+}
+
+function textOf(content: unknown): string {
+	if (!Array.isArray(content)) return typeof content === "string" ? content : "";
+	return content.map((c: any) => (c && c.type === "text" ? String(c.text ?? "") : "")).join("");
+}
+
+export default function (pi: ExtensionAPI) {
+	if (!ACTIVE) return;
+	const d = new Detector();
+	let wrapNudged = false;
+	let lengthNudges = 0;
+	let testReminders = 0;
+	let verifyNudges = 0;
+	let burst: { trigger: Trigger; turns: number; actNudges: number; goalPending: boolean } | null = null;
+	let bursts = 0;
+	const msg = (content: string) => ({ type: "custom_message" as const, customType: "lets-code-agent-guard", content, display: true });
+	const log = (event: string, detail: Record<string, unknown> = {}) => {
+		if (!LOG) return;
+		try {
+			appendFileSync(LOG, JSON.stringify({ t: Date.now(), turn: d.totalTurns, level: pi.getThinkingLevel(), event, ...detail }) + "\n");
+		} catch {}
+	};
+	const endBurst = (why: string) => {
+		pi.setThinkingLevel("off");
+		log("deescalate", { why, burstTurns: burst?.turns ?? 0 });
+		burst = null;
+		d.reset();
+	};
+
+	pi.on("session_start", async () => {
+		if (AUTO && pi.getThinkingLevel() !== "off") pi.setThinkingLevel("off");
+		log("start", { auto: AUTO || null, bashTimeout: BASH_TIMEOUT, wrapTurns: WRAP_TURNS, wrapMinutes: WRAP_MS / 60_000, burstTurns: BURST_TURNS, maxBursts: MAX_BURSTS, replay: Number.isFinite(REPLAY) ? REPLAY : "all" });
+	});
+
+	pi.on("before_agent_start", async (event: any) => {
+		const sections = event?.systemPromptOptions?.sections;
+		if (sections && typeof sections === "object") sections.lets_code_verification = PROMPT_SECTION;
+		return undefined;
+	});
+
+	pi.on("context", async (event: any) => {
+		const out = stripOldThinking(event?.messages ?? [], REPLAY);
+		return out ? { messages: out } : undefined;
+	});
+
+	pi.on("agent_before_settle", async () => {
+		const why = d.unverified();
+		if (!why || verifyNudges >= MAX_VERIFY_NUDGES) return undefined;
+		verifyNudges++;
+		log("verify-nudge", { why, n: verifyNudges });
+		return { entries: [msg(why === "no-run" ? VERIFY_TEXT : FAILED_CHECK_TEXT)], continue: true };
+	});
+
+	pi.on("before_provider_request", async (event: any) => {
+		if (!LOG) return undefined;
+		const p = event?.payload ?? {};
+		log("request", { enable_thinking: p?.chat_template_kwargs?.enable_thinking ?? null, reasoning_effort: p?.chat_template_kwargs?.reasoning_effort ?? null, thinking_token_budget: p?.thinking_token_budget ?? null, max_tokens: p?.max_tokens ?? null });
+		return undefined;
+	});
+
+	pi.on("tool_call", async (event: any) => {
+		if (event.parentToolCallId) return undefined;
+		d.toolCall(event.toolName, event.input);
+		if (event.toolName === "bash" && event.input && event.input.timeout == null) {
+			event.input.timeout = BASH_TIMEOUT;
+		}
+		return undefined;
+	});
+
+	pi.on("tool_result", async (event: any) => {
+		if (event.parentToolCallId) return undefined;
+		const text = textOf(event.content);
+		if (event.toolName === "bash" && /timed out/i.test(text)) log("bash-timeout");
+		const failing = d.toolResult(event.toolName, !!event.isError, text, String(event.input?.path ?? ""));
+		if (failing !== null) log("tests", { failing });
+		if (AUTO && !burst && bursts < MAX_BURSTS) {
+			const trigger = d.trigger();
+			if (trigger) {
+				pi.setThinkingLevel(AUTO as any);
+				burst = { trigger, turns: 0, actNudges: 0, goalPending: true };
+				bursts++;
+				log("escalate", { why: trigger.why, to: AUTO, burst: bursts });
+			}
+		}
+		return undefined;
+	});
+
+	pi.on("turn_end", async (event: any) => {
+		d.turnEnd();
+		const m = event.message ?? {};
+		const content = Array.isArray(m.content) ? m.content : [];
+		const madeToolCall = content.some((c: any) => c && c.type === "toolCall");
+		const entries: any[] = [];
+		let cont: boolean | undefined;
+		if (burst) {
+			if (burst.goalPending) {
+				burst.goalPending = false;
+				entries.push(msg(`[lets-code] Thinking raised to ${AUTO} because: ${burst.trigger.why}. ${burst.trigger.goal} Then act with a tool call.`));
+			} else {
+				burst.turns++;
+				if (d.passing) endBurst("tests pass");
+				else if (burst.trigger.resolved(d)) endBurst("resolved: " + burst.trigger.why);
+				else if (burst.turns >= BURST_TURNS) endBurst(`${BURST_TURNS} turns`);
+				else if (!madeToolCall && m.role === "assistant" && m.stopReason === "stop" && burst.actNudges < MAX_ACT_NUDGES_PER_BURST) {
+					burst.actNudges++;
+					log("act-nudge");
+					entries.push(msg(`[lets-code] You were given thinking time for: ${burst.trigger.why}. Act on your conclusion now with a tool call.`));
+					cont = true;
+				}
+			}
+		}
+		if (m.role === "assistant" && m.stopReason === "length" && !madeToolCall && lengthNudges < MAX_LENGTH_NUDGES) {
+			lengthNudges++;
+			log("length-nudge", { n: lengthNudges });
+			entries.push(msg(LENGTH_TEXT));
+			cont = true;
+		} else if (madeToolCall && d.editsSinceTest >= TEST_REMIND_EDITS && testReminders < MAX_TEST_REMINDERS) {
+			testReminders++;
+			d.editsSinceTest = 0;
+			log("test-nudge", { n: testReminders });
+			entries.push(msg(TEST_TEXT));
+		} else if (!wrapNudged && madeToolCall && d.passedFor(WRAP_TURNS, WRAP_MS, WRAP_MIN_MS)) {
+			wrapNudged = true;
+			log("wrap-nudge");
+			entries.push(msg(WRAP_TEXT));
+		}
+		if (!entries.length) return undefined;
+		return cont ? { entries, continue: true } : { entries };
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+}
+
 # ------------------------------------------------------------ harness gating
 # v1 implements exactly one harness (pi). The others are roadmap items and
 # must fail loudly rather than silently fall back or misconfigure.
@@ -1688,6 +2247,10 @@ run_setup() {
             echo "# Git guard: in a git repo, work on a pi/* branch (created at launch);"
             echo "# edits off such a branch are blocked. GIT_GUARD=false disables it."
             echo "GIT_GUARD=\"true\""
+            echo ""
+            echo "# Agent guard: bash timeouts, cut-off reply recovery, a wrap-up hint"
+            echo "# once tests pass, and the auto thinking level. AGENT_GUARD=false disables it."
+            echo "AGENT_GUARD=\"true\""
         } > "${CONFIG_FILE}"
         chmod 600 "${CONFIG_FILE}"
     }
@@ -1804,14 +2367,15 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
                 reasoning_reg="true"
                 echo ""
                 log "thinking: detected on ${reg_id} (probe: minimal request with thinking forced on)"
-                echo "Thinking level for new sessions: off|minimal|low|medium|high (xhigh|max)."
+                echo "Thinking level for new sessions: off|minimal|low|medium|high (xhigh|max),"
+                echo "or auto[:<ceiling>]: dynamic, off except short bursts up to <ceiling> (default high)."
                 echo "Suggested for ${reg_len} context / ${DEFAULT_OUTPUT_CAP} output cap: ${suggested}"
                 printf "Thinking level [%s]: " "${suggested}"
                 read -r thinking_level
                 thinking_level="${thinking_level:-${suggested}}"
                 case "${thinking_level}" in
-                    off|minimal|low|medium|high|xhigh|max) ;;
-                    *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max (got: ${thinking_level})"; exit 1 ;;
+                    off|minimal|low|medium|high|xhigh|max|auto|auto:minimal|auto:low|auto:medium|auto:high|auto:xhigh|auto:max) ;;
+                    *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max|auto[:<level>] (got: ${thinking_level})"; exit 1 ;;
                 esac ;;
             *)
                 thinking_level="${suggested}"
@@ -1849,12 +2413,17 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
         fi
         setup_emit_config "${thinking_level}" "${vision_pin}"
         log "updated ${CONFIG_FILE} (thinking level: ${thinking_level}, vision: ${vision_pin:-auto})"
+        EFFORT_MAP=""
+        if [ "${reasoning_reg}" = true ]; then
+            probe_template_effort "${found}" "${reg_id}"
+            log "${EFFORT_NOTE}"
+        fi
         # auto[:<level>] starts off (the agent guard raises it). Computed
         # outside the call: bash 3.2 (macOS) cannot parse a case pattern's
         # ')' inside "$(...)" and prints a syntax error for it.
         local startup_level
         case "${thinking_level}" in auto*) startup_level="off" ;; *) startup_level="${thinking_level}" ;; esac
-        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}" "${vision_reg}" "${reasoning_reg}" "${startup_level}"
+        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}" "${vision_reg}" "${reasoning_reg}" "${startup_level}" "${EFFORT_MAP}"
         log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${DEFAULT_OUTPUT_CAP}, vision: ${vision_reg}, thinking: ${reasoning_reg}, level: ${thinking_level})"
     fi
 
@@ -1898,6 +2467,8 @@ REASONING=""
 THINKING=""
 MEM_GUARD="true"
 GIT_GUARD="true"
+AGENT_GUARD="true"
+TEMPLATE_EFFORT="auto"
 # shellcheck disable=SC1090
 [ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
 ENDPOINTS="${LETS_CODE_ENDPOINTS:-${ENDPOINTS}}"
@@ -1912,6 +2483,8 @@ REASONING="${LETS_CODE_REASONING:-${REASONING}}"
 THINKING="${LETS_CODE_THINKING:-${THINKING}}"
 MEM_GUARD="${LETS_CODE_MEM_GUARD:-${MEM_GUARD}}"
 GIT_GUARD="${LETS_CODE_GIT_GUARD:-${GIT_GUARD}}"
+AGENT_GUARD="${LETS_CODE_AGENT_GUARD:-${AGENT_GUARD}}"
+TEMPLATE_EFFORT="${LETS_CODE_TEMPLATE_EFFORT:-${TEMPLATE_EFFORT}}"
 
 HARNESS="pi"
 URL_OVERRIDE=""
@@ -1946,6 +2519,7 @@ while [ $# -gt 0 ]; do
         --insecure) INSECURE=true; shift ;;
         --no-mem-guard) MEM_GUARD=false; shift ;;
         --no-git-guard) GIT_GUARD=false; shift ;;
+        --no-agent-guard) AGENT_GUARD=false; shift ;;
         --verbose|--debug) VERBOSE=true; shift ;;
         -h|--help)  sed -n "3,$(grep -n '^# (auto-installed on request)\.$' "$0" | cut -d: -f1)p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          PASSTHROUGH+=("$1"); shift ;;
@@ -2039,9 +2613,21 @@ case "${REASONING}" in
 esac
 THINKING="${THINKING_OVERRIDE:-${THINKING}}"
 [ -n "${THINKING}" ] || THINKING="${DEFAULT_THINKING}"
+# auto[:<ceiling>]: dynamic thinking. Start with thinking off; the agent
+# guard raises it to <ceiling> (default high) for a short burst when a
+# struggle signal fires, and drops it back as soon as the signal is resolved.
+THINKING_AUTO=""
+case "${THINKING}" in
+    auto)   THINKING_AUTO="high"; THINKING="off" ;;
+    auto:*) THINKING_AUTO="${THINKING#auto:}"; THINKING="off"
+            case "${THINKING_AUTO}" in
+                minimal|low|medium|high|xhigh|max) ;;
+                *) log_error "auto thinking needs a level to raise to: auto:minimal|low|medium|high|xhigh|max (got: auto:${THINKING_AUTO})"; exit 1 ;;
+            esac ;;
+esac
 case "${THINKING}" in
     off|minimal|low|medium|high|xhigh|max) ;;
-    *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max (got: ${THINKING}) — set it via --thinking-level, LETS_CODE_THINKING, or THINKING= in ${CONFIG_FILE} (if present)."; exit 1 ;;
+    *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max|auto[:<level>] (got: ${THINKING}) — set it via --thinking-level, LETS_CODE_THINKING, or THINKING= in ${CONFIG_FILE} (if present)."; exit 1 ;;
 esac
 
 case "${CONTEXT}" in
@@ -2105,7 +2691,17 @@ log "image input: ${VISION}"
 if [ "${REASONING_SUPPORTED}" = false ] && [ "${THINKING}" != off ]; then
     log "note: thinking level ${THINKING} not applied — model not registered as a thinking model."
 fi
-pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}" "${VISION}" "${REASONING_SUPPORTED}" "${THINKING}"
+EFFORT_MAP=""
+if [ "${REASONING_SUPPORTED}" = true ] && [ "${API}" = openai-completions ]; then
+    case "$(printf '%s' "${TEMPLATE_EFFORT}" | tr '[:upper:]' '[:lower:]')" in
+        off|false|no|0) log_verbose "template effort: off (TEMPLATE_EFFORT=off)" ;;
+        neutral) probe_template_effort "${BASE_URL}" "${MODEL}" 1
+                 log "${EFFORT_NOTE} (neutral)" ;;
+        *) probe_template_effort "${BASE_URL}" "${MODEL}"
+           log "${EFFORT_NOTE}" ;;
+    esac
+fi
+pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}" "${VISION}" "${REASONING_SUPPORTED}" "${THINKING}" "${EFFORT_MAP}"
 
 export LETS_CODE_TOKEN="${TOKEN}"
 export PI_SKIP_VERSION_CHECK=1
@@ -2133,7 +2729,30 @@ case "${GG_MODE}" in
          GG_DESC="git guard: ${GG_BRANCH:-no pi/* branch yet}" ;;
 esac
 
-log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING}  api: ${API}  ${MG_DESC}  ${GG_DESC}"
+unset LETS_CODE_AGENT_GUARD_ON LETS_CODE_THINKING_AUTO
+THINKING_DESC="${THINKING}"
+case "$(printf '%s' "${AGENT_GUARD}" | tr '[:upper:]' '[:lower:]')" in
+    false|no|0|off)
+        AG_DESC="agent guard is off (disabled)"
+        if [ -n "${THINKING_AUTO}" ]; then
+            log "note: auto thinking needs the agent guard; thinking stays off."
+            THINKING_AUTO=""
+        fi ;;
+    *)
+        export LETS_CODE_AGENT_GUARD_ON=1
+        pi_write_agentguard_extension
+        AG_DESC="agent guard is on" ;;
+esac
+if [ -n "${THINKING_AUTO}" ]; then
+    if [ "${REASONING_SUPPORTED}" = true ]; then
+        export LETS_CODE_THINKING_AUTO="${THINKING_AUTO}"
+        THINKING_DESC="auto (off; bursts to ${THINKING_AUTO} on struggle)"
+    else
+        log "note: auto thinking not applied — model not registered as a thinking model."
+    fi
+fi
+
+log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING_DESC}  api: ${API}  ${MG_DESC}  ${GG_DESC}  ${AG_DESC}"
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
     mem_guard_exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
 else

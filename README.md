@@ -58,6 +58,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 📏 **Overflow-proof** | The output cap is reserved in pi's compaction settings, so `input + max_tokens` can never exceed the server window. |
 | 🧯 **Memory guard** | When the box runs low on RAM, the session's own runaway process is stopped. Nothing else on the machine is touched. |
 | 🛟 **Git guard** | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
+| 🧭 **Agent guard** | Default bash timeout, a nudge to run tests after untested edits, a wrap-up hint once they pass, and thinking that switches on only while the model struggles. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
 
 Everything is re-derived at launch, so swapping models on the server needs
@@ -80,10 +81,10 @@ lets-code --no-git-guard          # you know what you're doing
 | `--context <tok>` | Context window (default: discovered, else 128000) |
 | `--output-cap <tok>` | Max output tokens (default 32768) |
 | `--api <dialect>` | `openai-completions` (default), `openai-responses`, `anthropic-messages`, `google-generative-ai` |
-| `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`) |
+| `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`), or `auto[:<lvl>]`: off until the agent guard sees pi struggle |
 | `--vision` / `--no-vision` | Pin image input instead of probing |
 | `--insecure` | Skip TLS verification |
-| `--no-mem-guard` / `--no-git-guard` | Launch without a guard |
+| `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` | Launch without a guard |
 | `--verbose` | Show each endpoint probe |
 
 <details>
@@ -100,7 +101,8 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MODEL`, `CONTEXT`, `OUTPUT_CAP`, `API` | Pins; empty means discovered or default. |
 | `VISION`, `REASONING` | `true`/`false` pins; empty means probed at launch. |
 | `THINKING` | Startup thinking level. Setup suggests one from the context window. |
-| `MEM_GUARD`, `GIT_GUARD` | `false` turns a guard off. |
+| `MEM_GUARD`, `GIT_GUARD`, `AGENT_GUARD` | `false` turns a guard off. |
+| `TEMPLATE_EFFORT` | `off` skips the chat-template effort probe, `neutral` maps every level to the least-instruction value (see server setup). |
 
 Listing several endpoints lets one config follow you around:
 `http://localhost:8000 https://llm.home.example` works on the server box,
@@ -125,6 +127,15 @@ https endpoint must be trusted, or launched with `--insecure`.
 With a reasoning parser, vLLM also enforces the per-level thinking budget
 pi sends (`thinking_token_budget`), so a model cannot think its way through
 the whole output cap.
+
+Some chat templates carry their own effort control (Qwen3.8 takes
+`reasoning_effort`: `low`, `medium`, `xhigh`, default `xhigh`). At launch
+lets-code renders the prompt through vLLM's `/tokenize` with each candidate
+value; if the template reacts, pi's levels are mapped to the nearest
+accepted value and the launch line shows the mapping. `TEMPLATE_EFFORT=off`
+skips this; `TEMPLATE_EFFORT=neutral` maps every level to the value with the
+least instruction (Qwen3.8: `medium`, which adds none), so levels differ
+only in budget.
 
 </details>
 
@@ -178,6 +189,49 @@ git restore --source=refs/pi-checkpoints/pi/x/20261005-231502.117 -- src/a.c
 The guard costs no tokens: the model only sees a one-line reason when a
 call is blocked. Merging the `pi/*` branch back is yours. Outside a git
 repo the guard is off. `LETS_CODE_GIT_CHECKPOINTS=0` turns checkpoints off.
+
+</details>
+
+<details>
+<summary><b>Agent guard</b></summary>
+
+A pi extension (`~/.pi/agent/extensions/lets-code-agentguard.ts`) with
+rules for failure modes measured in sessions against a local thinking
+model. Apart from a five-line working-method section in the system prompt
+it adds nothing unless a rule acts.
+
+- **Bash timeout.** Calls without a timeout get `LETS_CODE_BASH_TIMEOUT`
+  (300 s); a timeout the model passes is kept.
+- **Cut-off replies.** A reply cut off by the output limit before any tool
+  call is continued with a note to act, up to 3 times per session.
+- **Test reminder.** After 3 source edits with no test run in between, the
+  model is told to run its tests, up to 5 times per session.
+- **Verification.** If pi tries to finish with edits no executed command
+  has seen, or right after a failed check, it gets one continuation asking
+  for a real run, up to 2 times.
+- **Wrap-up.** Once the model's own tests have passed for
+  `LETS_CODE_WRAP_TURNS` turns (6) and 2 minutes, or `LETS_CODE_WRAP_MINUTES`
+  minutes (5), it is told once to finish if every requirement is covered
+  by a test it has run.
+- **Dynamic thinking** (`--thinking-level auto[:<ceiling>]`, default
+  `high`). The level is a ceiling. pi starts with thinking off; a struggle
+  signal (the same tests still failing after 3 runs, more failures after a
+  source edit with the tests untouched, 2 failed edits in a row, 2 syntax
+  errors, an identical tool call with no file change in between, 3 tool
+  errors in a row, 40 turns without passing tests) raises it to the ceiling
+  for a burst that opens with its reason as a one-line goal and ends when
+  that reason is resolved, after `LETS_CODE_BURST_TURNS` turns (3), or when
+  the tests pass. A new burst needs a new signal, at most
+  `LETS_CODE_MAX_BURSTS` (8) per session; a thinking turn without a tool
+  call is told once to act. Replayed over 131 benchmark sessions: no burst
+  on the 36 easy ones, a median of 3 raised turns out of 57 on hard ones.
+- **Thinking replay window** (`LETS_CODE_THINKING_REPLAY=<n>`, default
+  all). pi replays every earlier turn's thinking, about 40% of the prompt by
+  the end of a high-thinking session; with a window only the last n turns
+  keep theirs.
+
+`LETS_CODE_AGENT_GUARD_LOG=<file>` writes one JSON line per guard action.
+`tests/agent-guard.test.mjs` drives the extension with a fake pi.
 
 </details>
 

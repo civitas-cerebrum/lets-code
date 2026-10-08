@@ -36,6 +36,7 @@ bash script; pi is the only harness today, `--harness` exists for others.
 | output cap | `--output-cap` > `OUTPUT_CAP` > 32768 | `maxTokens`, `reserveTokens` |
 | api | `--api` > `API` > `openai-completions` | `api` |
 | thinking | `REASONING` pin > probe: one `chat/completions` with `enable_thinking: true`; reasoning tokens, a reasoning stream or think markers mean yes | `reasoning: true`, `compat.thinkingFormat: chat-template` with `enable_thinking` and `thinking_budget` template variables, `compat.supportsThinkingTokenBudget`; `modelThinkingLevels[lets-code/<model>]` = startup level |
+| template effort | vLLM `/tokenize` renders the prompt with and without each candidate `reasoning_effort` value; a template that reacts gets the mapping (`TEMPLATE_EFFORT=off` skips) | `compat.chatTemplateKwargs.reasoning_effort` as a `thinking.level` template variable, `thinkingLevelMap` from pi's levels to the accepted values |
 | vision | `--vision`/`--no-vision` > `VISION` pin > probe: one `chat/completions` with a 64×64 red PNG and "what color is this?"; "red" means yes, an image/multimodal error or "I cannot see images" means no, else inconclusive (setup asks, launch assumes no) | `input: ["text","image"]` or `["text"]` |
 | telemetry | pi's own `enableInstallTelemetry` | `false` when the key is absent; an explicit value is kept |
 
@@ -96,6 +97,28 @@ defers to a machine-wide memguard daemon when `/run/memguard` exists.
 The guard adds nothing to the prompt or to tool results; a blocked call
 gets a reason under 200 characters that names a reversible alternative.
 
+## Agent guard
+
+A pi extension for failure modes measured in a 48-session benchmark (6
+tasks, 4 thinking levels, 2 runs each) against a local thinking model: a
+bash call that never returns blocked sessions for 19 and 38 minutes; a
+thinking section cut at its budget continued as plain-text reasoning until
+the output cap and the session ended with nothing done; sessions that had
+passed every hidden test refactored for 20+ minutes and one broke a working
+solution; a refactor went 4 edits without a test run; the model's thinking
+hand-evaluated Python in 58 % of hard-task blocks and blamed its own test
+expectations six times as often as its code. Each rule answers one of
+these: default bash timeout, continuation of a cut-off reply, wrap-up hint,
+test reminder, required executed verification, and the auto thinking level
+(off until a struggle signal, back to off when tests pass). Replayed over
+the benchmark, no signal fired on easy tasks and every thinking-off session
+that thrashed on a hard task tripped one within 1 to 4 minutes.
+
+A hard thinking budget was once a fixed `samplingParams` value (half the
+output cap) for every level; Qwen3's template ignores the soft hint, so
+low, medium and high were the same configuration. pi's per-level budget is
+sent instead, via `compat.supportsThinkingTokenBudget`.
+
 ## Script layout
 
 The script is one file, built in order: header and logging; probing
@@ -103,7 +126,8 @@ The script is one file, built in order: header and logging; probing
 the pi config writer (`pi_write_configs`, python3); harness gate, pi
 install and tool prefetch (`ensure_pi`, `ensure_pi_tools`); onboarding
 (`run_setup`); the memory guard (`mem_guard_plan`, `mem_guard_exec`, the
-extension source); the git guard (launch logic and extension source); main.
+extension source); the git guard (launch logic and extension source); the
+agent guard extension source; main.
 
 Portability: bash 3.2 (macOS) has no `pipefail` without a guard, cannot
 parse a `case` pattern inside `$(...)`, and `"${array[@]}"` on an empty

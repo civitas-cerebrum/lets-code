@@ -1,0 +1,266 @@
+#!/usr/bin/env node
+// Unit test for the agent guard extension that lets-code writes
+// (~/.pi/agent/extensions/lets-code-agentguard.ts). Loads it with a fake pi and
+// drives its handlers. Needs Node >= 22.6 (runs the .ts directly: it only
+// imports types from pi).
+//
+//   tests/agent-guard.test.mjs [path/to/lets-code-agentguard.ts]
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, realpathSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+// controllable clock for the time-based rules
+const realNow = Date.now; let fakeNow = null;
+Date.now = () => (fakeNow ?? realNow());
+const advance = (ms) => { fakeNow = (fakeNow ?? realNow()) + ms; };
+
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code-agentguard.ts");
+const work = realpathSync(mkdtempSync(join(tmpdir(), "agentguard-test-")));
+const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
+
+let fail = 0, n = 0;
+function check(name, got, want) {
+	n++;
+	const ok = JSON.stringify(got) === JSON.stringify(want);
+	if (!ok) { fail++; console.log(`FAIL ${name}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); }
+}
+
+// Each load gets its own copy so module-level env reads see that load's env.
+let loads = 0;
+async function load(env) {
+	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_THINKING_REPLAY"]) delete process.env[k];
+	Object.assign(process.env, env);
+	const f = join(work, `agentguard-${loads++}.ts`);
+	writeFileSync(f, src);
+	const mod = await import(pathToFileURL(f).href);
+	const handlers = {};
+	const pi = {
+		level: "medium",
+		on(ev, h) { handlers[ev] = h; return () => {}; },
+		getThinkingLevel() { return this.level; },
+		setThinkingLevel(l) { this.level = l; },
+	};
+	mod.default(pi);
+	return { mod, pi, handlers, emit: (ev, e) => handlers[ev]?.({ type: ev, ...e }, {}) };
+}
+const bash = (h, command, input = {}) => { const e = { toolName: "bash", toolCallId: "x", input: { command, ...input } }; h.emit("tool_call", e); return e.input; };
+const result = (h, toolName, text, isError = false, input = {}) => h.emit("tool_result", { toolName, toolCallId: "x", input, content: [{ type: "text", text }], isError });
+const edit = (h, path, ok = true) => { h.emit("tool_call", { toolName: "edit", toolCallId: "e", input: { path, edits: [{ oldText: "a" + Math.random(), newText: "b" }] } }); return result(h, "edit", ok ? "Successfully replaced 1 block(s)" : "Could not find the exact text", !ok, { path }); };
+const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", name: "bash", arguments: {} }], ...msg }, toolResults: [] });
+
+// --- inert unless switched on
+{
+	const h = await load({});
+	check("inert: no handlers", Object.keys(h.handlers).length, 0);
+}
+
+// --- testStatus parses the formats seen in benchmark sessions
+{
+	const { mod } = await load({});
+	const t = mod.testStatus;
+	check("unittest ok", t("....\n----\nRan 4 tests in 0.01s\n\nOK"), 0);
+	check("unittest failed", t("Ran 21 tests in 0.02s\n\nFAILED (failures=2, errors=11)"), 13);
+	check("unittest errors only", t("Ran 3 tests\n\nFAILED (errors=1)"), 1);
+	check("n passed n failed", t("40 passed, 3 failed"), 3);
+	check("pytest failed", t("=== 2 failed, 10 passed in 0.1s ==="), 2);
+	check("pytest ok", t("============ 12 passed in 0.05s ============"), 0);
+	check("FAIL lines", t("FAIL: a\nok b\nFAIL: c\n"), 2);
+	check("ALL PASS", t("checked 30 cases\nALL PASS"), 0);
+	check("not a test", t("Successfully wrote to calc.py"), null);
+	check("key=value counters", t("ERROR MISMATCH x\nchecked=20000 failures=51 skipped=0"), 51);
+	check("key=value zero", t("checked=20000 failures=0 skipped=0"), 0);
+}
+
+// --- bash timeout: added when missing, model's own value kept
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_BASH_TIMEOUT: "120" });
+	check("timeout added", bash(h, "python3 fuzz.py").timeout, 120);
+	check("timeout kept", bash(h, "make", { timeout: 900 }).timeout, 900);
+	const other = { toolName: "read", toolCallId: "y", input: { path: "a" } };
+	h.emit("tool_call", other);
+	check("read untouched", other.input.timeout, undefined);
+}
+
+// --- cut-off reply without a tool call: continuation, capped at 3
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
+	const cut = { stopReason: "length", content: [{ type: "text", text: "long reasoning..." }] };
+	const r = await turn(h, cut);
+	check("length nudge continues", r?.continue, true);
+	check("length nudge message", r?.entries?.[0]?.type, "custom_message");
+	await turn(h, cut); await turn(h, cut);
+	check("length nudge capped", await turn(h, cut), undefined);
+	check("length with tool call: no nudge", await turn(h, { stopReason: "length" }), undefined);
+}
+
+// --- wrap-up: once, after tests pass for WRAP_TURNS turns; a failure resets the count
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "3" });
+	await result(h, "bash", "Ran 5 tests\n\nFAILED (failures=1)");
+	for (let i = 0; i < 5; i++) check(`no wrap while failing ${i}`, await turn(h), undefined);
+	await result(h, "bash", "Ran 5 tests\n\nOK");
+	check("no wrap at pass+1", await turn(h), undefined);
+	check("no wrap at pass+2", await turn(h), undefined);
+	await result(h, "bash", "Ran 6 tests\n\nFAILED (failures=1)");
+	check("failure resets", await turn(h), undefined);
+	await result(h, "bash", "Ran 6 tests\n\nOK");
+	await turn(h); await turn(h);
+	check("3 passing turns within 2 min: no wrap yet", await turn(h), undefined);
+	advance(2 * 60_000);
+	const r = await turn(h);
+	check("wrap after 3 passing turns and 2 min", r?.entries?.[0]?.content?.includes("finish now"), true);
+	check("wrap does not force a request", r?.continue, undefined);
+	await turn(h);
+	check("wrap only once", await turn(h), undefined);
+}
+
+// --- dynamic thinking: bursts to the ceiling with a goal, end on resolution / turn cap / passing tests
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_BURST_TURNS: "3" });
+	await h.emit("session_start", {});
+	check("auto starts off", h.pi.level, "off");
+	await edit(h, "calc.py", false);
+	check("one failed edit: still off", h.pi.level, "off");
+	await edit(h, "calc.py", false);
+	check("two failed edits: jumps to the ceiling", h.pi.level, "high");
+	const r = await turn(h);
+	check("goal message on the next turn end", /Thinking raised to high because: 2 failed edits in a row/.test(r?.entries?.[0]?.content ?? ""), true);
+	check("goal message does not force a request", r?.continue, undefined);
+	await turn(h);
+	check("unresolved after 1 burst turn: still up", h.pi.level, "high");
+	await edit(h, "calc.py");
+	await turn(h);
+	check("a successful edit resolves the trigger: back to off", h.pi.level, "off");
+	await edit(h, "calc.py", false);
+	check("counters reset after the burst", h.pi.level, "off");
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_BURST_TURNS: "3" });
+	await h.emit("session_start", {});
+	for (const f of [4, 4, 4, 4]) { bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=" + f + ")", true); await edit(h, "calc.py"); }
+	check("same failures 3 runs: escalated", h.pi.level, "high");
+	await turn(h); await turn(h); await turn(h);
+	check("not resolved by 3 turns: still up before the cap", h.pi.level, "high");
+	await turn(h);
+	check("3 burst turns: back to off", h.pi.level, "off");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=4)", true);
+	check("no new signal yet: stays off", h.pi.level, "off");
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=1)", true);
+	await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=5)", true);
+	check("more failures after an edit: regression escalates", h.pi.level, "high");
+	await turn(h);
+	await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=1)", true);
+	await turn(h);
+	check("failures back to the previous best: resolved", h.pi.level, "off");
+	// growth of the suite is not a regression: a test-file edit between the runs
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=1)", true);
+	await edit(h, "test_calc.py"); await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 14 tests\n\nFAILED (failures=6)", true);
+	check("more failures after adding tests: not a regression", h.pi.level, "off");
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	for (let i = 0; i < 3; i++) { bash(h, "python3 - <<'EOF'\nassert f(" + i + ") == 2\nEOF"); await result(h, "bash", "Traceback (most recent call last):\n  File \"<stdin>\", line 1\nAssertionError\n\nCommand exited with code 1", true); }
+	check("3 failing assertion scripts: not tool errors", h.pi.level, "off");
+	for (let i = 0; i < 3; i++) { bash(h, "python3 x" + i + ".py"); await result(h, "bash", "Traceback (most recent call last):\n  ...\nImportError: no module\n\nCommand exited with code 1", true); }
+	check("3 real crashes: escalated", h.pi.level, "high");
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "medium" });
+	await h.emit("session_start", {});
+	for (let i = 0; i < 4; i++) { bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=" + (4 - i) + ")", true); await edit(h, "calc.py"); }
+	check("falling failures never escalate", h.pi.level, "off");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	await edit(h, "calc.py", false); await edit(h, "calc.py", false);
+	check("no escalation while tests pass", h.pi.level, "off");
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_MAX_BURSTS: "1" });
+	await h.emit("session_start", {});
+	await edit(h, "calc.py", false); await edit(h, "calc.py", false);
+	check("burst 1", h.pi.level, "high");
+	await turn(h); await edit(h, "calc.py"); await turn(h);
+	check("burst 1 resolved", h.pi.level, "off");
+	await edit(h, "calc.py", false); await edit(h, "calc.py", false);
+	check("max bursts reached: no burst 2", h.pi.level, "off");
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	await edit(h, "calc.py", false); await edit(h, "calc.py", false);
+	await turn(h);
+	const r = await turn(h, { stopReason: "stop", content: [{ type: "text", text: "I think the fix is..." }] });
+	check("thinking turn with no tool call: act nudge continues", r?.continue, true);
+	check("act nudge names the reason", /Act on your conclusion/.test(r?.entries?.[0]?.content ?? ""), true);
+	check("act nudge once per burst", (await turn(h, { stopReason: "stop", content: [] }))?.continue, undefined);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
+	await h.emit("session_start", {});
+	await edit(h, "calc.py", false); await edit(h, "calc.py", false);
+	check("fixed level untouched without auto", h.pi.level, "medium");
+}
+
+// --- thinking replay window
+{
+	const { mod } = await load({});
+	const strip = mod.stripOldThinking;
+	const a = (i) => ({ role: "assistant", content: [{ type: "thinking", thinking: "t" + i }, { type: "text", text: "a" + i }] });
+	const msgs = [{ role: "user", content: "q" }, a(1), { role: "toolResult", content: [] }, a(2), a(3)];
+	check("replay all: untouched", strip(msgs, Infinity), null);
+	const out = strip(msgs, 1);
+	check("keep 1: older thinking dropped", out[1].content.length === 1 && out[3].content.length === 1 && out[4].content.length === 2, true);
+	check("keep 1: other messages intact", out[0] === msgs[0] && out[2] === msgs[2], true);
+	check("keep 0: all thinking dropped", strip(msgs, 0).every((m) => m.role !== "assistant" || m.content.every((c) => c.type !== "thinking")), true);
+	check("nothing to strip: null", strip([{ role: "user", content: "q" }, { role: "assistant", content: [{ type: "text", text: "a" }] }], 1), null);
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_REPLAY: "2" });
+	const r = await h.emit("context", { messages: msgs });
+	check("context hook applies the window", r?.messages?.[1]?.content?.length, 1);
+	const h2 = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
+	check("default: context untouched", await h2.emit("context", { messages: msgs }), undefined);
+}
+
+// --- verification means execution
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
+	const ev = { systemPromptOptions: { sections: { tools: "x" } } };
+	await h.emit("before_agent_start", ev);
+	const sec = ev.systemPromptOptions.sections.lets_code_verification ?? "";
+	check("prompt section: run before reasoning", /Run before you reason/.test(sec), true);
+	check("prompt section: decide ambiguities once", /Decide ambiguities once/.test(sec), true);
+	check("prompt section: edit tools, not rewriting scripts", /edit and write tools/.test(sec), true);
+	check("other sections kept", ev.systemPromptOptions.sections.tools, "x");
+	check("nothing edited: settles normally", await h.emit("agent_before_settle", {}), undefined);
+	await edit(h, "calc.py");
+	const r = await h.emit("agent_before_settle", {});
+	check("edit then finish: continuation", r?.continue, true);
+	check("asks for a real run", /no command has been executed/.test(r?.entries?.[0]?.content ?? ""), true);
+	bash(h, "cat calc.py"); await result(h, "bash", "def f(): ...");
+	check("reading the file is not execution", (await h.emit("agent_before_settle", {}))?.continue, true);
+	check("capped at 2", await h.emit("agent_before_settle", {}), undefined);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
+	await edit(h, "calc.py");
+	bash(h, "cd /w && python3 test_calc.py"); await result(h, "bash", "Ran 4 tests\n\nOK");
+	check("edit, run, finish: settles", await h.emit("agent_before_settle", {}), undefined);
+	await edit(h, "test_calc.py");
+	check("test-file edit after the run: settles", await h.emit("agent_before_settle", {}), undefined);
+	bash(h, "python3 - <<'EOF'\nimport calc\nEOF"); await result(h, "bash", "Traceback (most recent call last):\n  ...\nAssertionError", true);
+	const r = await h.emit("agent_before_settle", {});
+	check("last executed check failed: continuation", /reported a failure/.test(r?.entries?.[0]?.content ?? ""), true);
+	bash(h, "python3 test_calc.py"); await result(h, "bash", "Ran 4 tests\n\nOK");
+	check("rerun passes: settles", await h.emit("agent_before_settle", {}), undefined);
+}
+
+rmSync(work, { recursive: true, force: true });
+console.log(`${n - fail}/${n} checks passed`);
+process.exit(fail ? 1 : 0);

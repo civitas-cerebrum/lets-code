@@ -1,135 +1,116 @@
-# lets-code — design record
+# Design
 
-Persisted design record for the `lets-code` launcher. Condensed from the
-implementation plan; keep this file updated when decisions change.
-
-## Context
-
-`lets-claude` does one job well: onboard a user, probe a self-hosted LLM
-endpoint, pin the context window so the harness never overflows the server,
-and `exec` the harness. It is vendor-locked to Claude Code. `lets-code` does
-the same job while staying **harness-agnostic**: one CLI, pluggable harness
-adapters. **pi is the default and the only v1-implemented harness**;
-`deepseek`, `claude`, `codex` are `--harness` roadmap items that fail loudly.
+lets-code onboards a user, probes a self-hosted LLM endpoint, registers the
+model with the pi coding agent so the server window can never overflow, and
+starts pi with guards against the mistakes a small model makes. It is one
+bash script; pi is the only harness today, `--harness` exists for others.
 
 ## Invariants
 
-1. **Fixed provider id `lets-code`** — the launcher owns exactly two slices
-   of pi's global state, both keyed by `lets-code`, so it never clobbers the
-   user's own providers or defaults. Re-upserted on every launch (idempotent;
-   JSON makes marker-block parsing unnecessary).
-2. **The token never lands in pi's files** — `apiKey` is the literal
-   `"$LETS_CODE_TOKEN"` (pi's `$ENV` interpolation); the launcher exports it
-   at launch. The secret stays in `~/.config/lets-code/config` (mode 600),
-   exactly like lets-claude.
-3. **Overflow impossible by construction** — instead of lets-claude's manual
-   context partition, pi reserves the output budget natively:
-   `contextWindow` = full discovered length,
-   `compaction.enabled` = true (written explicitly by lets-code, not left to
-   pi's implicit default) +
-   `compaction.modelOverrides["lets-code/<model>"].reserveTokens` = output
-   cap. pi auto-compacts when `contextTokens > contextWindow - reserveTokens`,
-   so compaction always fires before `input + max_tokens` can exceed the
-   server window (vLLM 400s on exactly that, e.g. 2026-08-17 incident:
-   129,793 input + 32,000 requested). Thinking cannot break this invariant:
-   pi's thinking budgets expand `max_tokens` only up to the model's
-   `maxTokens` (= our output cap), the sent `thinking_budget` is clamped to
-   `max_tokens − 1024`, and pi additionally keeps a 4096-token context safety
-   margin beyond the server's own arithmetic. A hard `thinking_token_budget`
-   (half the output cap, sent per request via `samplingParams`) bounds the
-   thinking section engine-side on vLLM as well, so a model that overthinks
-   past the soft `thinking_budget` hint can never eat the response budget
-   (observed 2026-09-25: a 16K hint spiralled to the 32K output cap and the
-   run died with zero visible output; with the hard field the thinking
-   section is force-terminated at the budget and the response continues).
-4. **Deterministic launch, no default hijacking** — `exec pi --provider
-   lets-code --model <id>`; the launcher does not write pi's global
-   `defaultProvider`/`defaultModel`.
-5. **Permissive probe, strict launch** — the probe runs against every
-   fallback endpoint (first reachable wins), so a strict TLS check there
-   would wrongly kill LAN/VPN entries. Trust is enforced for the *winning*
-   https endpoint before launch: refuse (with a CA/`--insecure` hint) only if
-   a plain strict `curl` fails.
-6. **Atomic, fail-loud writes** — pi's files are rewritten tmp+rename; every
-   other key is preserved; a corrupt file fails with a clear message.
-7. **A runaway command can't take the machine down** (memory guard, Linux).
-   A pi extension watches the machine's free RAM. It warns below 20 %,
-   blocks non-cleanup bash below 10 %, and stops this session's largest
-   process below 5 % (graceful ladder) or 2.5 % (immediate SIGKILL). It only
-   ever touches processes this session started: descendants of pi, or
-   members of its `lets-code-<pid>.scope`, which also sets
-   `OOMPolicy=continue`.
+1. **Fixed provider id.** lets-code owns exactly two slices of pi's state,
+   `providers["lets-code"]` in `models.json` and the `lets-code/<model>`
+   entries in `settings.json`. Both are re-upserted on every launch; every
+   other key is preserved. Writes are tmp+rename; a corrupt file fails loudly.
+2. **The token never lands on disk.** `apiKey` is the literal
+   `$LETS_CODE_TOKEN`, which pi resolves from the environment at runtime.
+3. **Overflow is impossible by construction.** `contextWindow` is the full
+   discovered length and `compaction.modelOverrides[…].reserveTokens` is the
+   output cap, so pi compacts before `input + max_tokens` can exceed the
+   window. pi's thinking budget never exceeds `maxTokens`, and vLLM's hard
+   `thinking_token_budget` bounds the thinking section engine-side.
+4. **No default hijacking.** `exec pi --provider lets-code --model <id>`;
+   pi's global default provider and model are not written.
+5. **Permissive probe, strict launch.** Every fallback endpoint is probed
+   with TLS verification off, so a LAN entry with a private cert is not
+   skipped; the winning https endpoint is then checked strictly.
+6. **A runaway command cannot take the machine down**, and **a wrong git
+   command cannot destroy work.** See the guards below.
 
-   There are no memory caps (user decision 2026-09-26). An earlier cap-based
-   design (`MemoryMax` + `ulimit -d`) worked, but it limited sessions even
-   when the machine had RAM to spare. It also taught three things: the
-   default `OOMPolicy=stop` kills the whole session after one OOM kill; swap
-   at a cap livelocks instead of triggering the OOM killer; and a user scope
-   must never be created inside an already memory-limited cgroup, because
-   the scope would escape that cgroup's limits.
+## What is written to pi
 
-   The extension defers to a machine-wide memguard daemon
-   (`civitas-cerebrum/memguard`) when `/run/memguard` exists.
-
-## Flag → pi mapping
-
-| Input | Resolved from | Written to pi |
+| Input | Resolved from | Written |
 |---|---|---|
-| endpoint | `--url` > config/env `ENDPOINTS` (first reachable); trailing `/v1` accepted, normalized | `providers["lets-code"].baseUrl` — `<base>/v1` for openai dialects (pi's OpenAI SDK never appends `/v1` itself), bare base for anthropic/google |
-| model | `--model` > config/env `MODEL` > `/v1/models` discovery > error | `models[0].id`, compaction key |
-| context | `--context` > config/env `CONTEXT` > `max_model_len` > 128000 | `models[0].contextWindow` |
-| output cap | `--output-cap` > config/env `OUTPUT_CAP` > 32768 | `models[0].maxTokens` + `reserveTokens` |
-| api dialect | `--api` > config/env `API` > `openai-completions` | `providers["lets-code"].api` |
-| vision | `--vision` / `--no-vision` > config/env `VISION` pin (true/false) > launch-time probe (one `chat/completions` carrying a 64×64 solid-red PNG as a data URL and "what color is this?", thinking off: "red" in the answer → true; an image/multimodal error from the server, or an answer saying it cannot see images → false; else inconclusive → false, with a hint; setup asks the user and pins `VISION=` when inconclusive) > false | `models[0].input` — `["text","image"]` when true, `["text"]` when false (pi defaults an undeclared model to text-only, so image input must be declared explicitly) |
-| thinking support | config/env `REASONING` pin (true/false) > launch-time probe (minimal `chat/completions` with `enable_thinking: true`; `reasoning_tokens` in usage / reasoning stream / think-markers) > false | `models[0].reasoning: true` + `compat.thinkingFormat: "chat-template"` with `$var` kwargs (`enable_thinking`, `thinking_budget` omitWhenOff) when true; omitted otherwise. Also `models[0].samplingParams.thinking_token_budget = max(1024, cap//2)` — hard ceiling enforced engine-side by vLLM (force-ends the thinking section at the budget); ignored by servers that don't know the field, inert when thinking is off |
-| thinking level | `--thinking-level` > config/env `THINKING` > `medium`; suggested at setup = largest published pi budget (1k/2k/8k/16k) fitting ¼ of context AND ½ of output cap (the 4x-cost rule reproduces pi's catalog: 64k→high, 131k just misses xhigh, 256k→xhigh; xhigh/max are never suggested — on the chat-template path pi clamps their budget to high's 16k) | `settings.json → modelThinkingLevels["lets-code/<model>"]` (written only when thinking is registered; stale key removed when unregistered) |
-| token | `--…` n/a; config/env `TOKEN` > `dummy-key` | exported as `LETS_CODE_TOKEN` (never written) |
-| CA | `--insecure` / config/env `CA` + file exists | `NODE_EXTRA_CA_CERTS` (https only) |
-| install telemetry | n/a (pi's own setting; user's explicit value wins) | `settings.json → enableInstallTelemetry = false` only when the key is absent — pi defaults it to true and reports the install to pi.dev on first interactive start |
-| fd / ripgrep | n/a; PATH (`fd`\|`fdfind`, `rg`) or `<agent-dir>/bin` already has them > `PI_OFFLINE` set > fetch | `ensure_pi_tools` runs pi's own `dist/utils/tools-manager.js` (`ensureTool`) via node before the first launch, so the TUI never prints its "not found. Downloading..." notices; never fatal, pi still self-fetches if skipped |
+| endpoint | `--url` > `ENDPOINTS`, first reachable | `baseUrl`: `<base>/v1` for OpenAI dialects, bare for others |
+| model | `--model` > `MODEL` > `/v1/models` | `models[0].id`, the settings key |
+| context | `--context` > `CONTEXT` > `max_model_len` > 128000 | `contextWindow` |
+| output cap | `--output-cap` > `OUTPUT_CAP` > 32768 | `maxTokens`, `reserveTokens` |
+| api | `--api` > `API` > `openai-completions` | `api` |
+| thinking | `REASONING` pin > probe: one `chat/completions` with `enable_thinking: true`; reasoning tokens, a reasoning stream or think markers mean yes | `reasoning: true`, `compat.thinkingFormat: chat-template` with `enable_thinking` and `thinking_budget` template variables, `compat.supportsThinkingTokenBudget`; `modelThinkingLevels[lets-code/<model>]` = startup level |
+| vision | `--vision`/`--no-vision` > `VISION` pin > probe: one `chat/completions` with a 64×64 red PNG and "what color is this?"; "red" means yes, an image/multimodal error or "I cannot see images" means no, else inconclusive (setup asks, launch assumes no) | `input: ["text","image"]` or `["text"]` |
+| telemetry | pi's own `enableInstallTelemetry` | `false` when the key is absent; an explicit value is kept |
 
 `compat: {supportsDeveloperRole: false, supportsReasoningEffort: false}` is
-written unconditionally: required by local vLLM/SGLang, harmless on
-gateways. `PI_SKIP_VERSION_CHECK=1` is exported so air-gapped LANs don't
-hang on pi's update check.
+always written (needed by vLLM and SGLang, harmless elsewhere).
+`PI_SKIP_VERSION_CHECK=1` is exported so air-gapped networks do not wait on
+pi's update check. `fd` and `ripgrep` are fetched before the first launch
+through pi's own downloader (`dist/utils/tools-manager.js`) so the TUI does
+not print download notices; the step is skipped under `PI_OFFLINE` and
+never fatal.
 
-## Module map (single file, append-only build)
+The suggested thinking level at setup is the largest of pi's published
+budgets (1k, 2k, 8k, 16k) that fits a quarter of the context window and
+half of the output cap.
 
-1. header + globals + logging (the header block doubles as `--help`)
-2. probing (`tls_args_for`, `probe` — curl rc → human diagnostics,
-   `probe_thinking` — reasoning-token detection, `probe_vision` — image-input
-   detection with an inline-built PNG, `suggested_thinking_level` —
-   context/cap → startup level heuristic)
-3. pi config writer (`pi_write_configs`: python3 JSON upsert, atomic)
-4. harness gate + pi presence/auto-install (`harness_gate`, `ensure_pi`,
-   `ensure_pi_tools` — fd/ripgrep prefetch through pi's own downloader)
-5. onboarding (`run_setup`, `offer_fresh_shell`)
-6. memory guard (`mem_limited_ancestor`, `mem_guard_plan` — scope|process|off
-   decision, `mem_guard_exec` — `LETS_CODE_SESSION=1` + `systemd-run --user
-   --scope -p OOMPolicy=continue`, `pi_write_memguard_extension` — the guard itself)
-7. main: arg parse → gate → config load + env overrides → probe → strict-TLS
-   trust check → discovery → budget resolution → `pi_write_configs` →
-   env exports → `mem_guard_plan` → `mem_guard_exec pi`
+## Memory guard
 
-Bash-3.2/portability notes: no `set -o pipefail` unguarded (bash 4+ only —
-guarded idiom); empty `"${PASSTHROUGH[@]}"` under `set -u` handled by the
-if/else `exec` (same pattern as lets-claude); `&&`-chains in case bodies
-replaced by `if` statements where `set -e` could bite.
+A pi extension watches free RAM and acts only on processes this session
+started: descendants of pi, or members of the `lets-code-<pid>.scope`
+systemd user scope the launcher creates. Thresholds: warn at 20 %, block
+non-cleanup bash at 10 %, stop the largest process at 5 % (SIGINT, SIGTERM,
+SIGKILL), kill it at 2.5 %.
 
-## Roadmap harnesses (research for future adapters)
+There are no memory caps. An earlier cap-based design (`MemoryMax`,
+`ulimit -d`) limited sessions even when the machine had RAM to spare, and
+taught three things: the default `OOMPolicy=stop` kills the whole scope
+after one OOM kill (so the scope sets `continue`); swap at a cap livelocks
+instead of triggering the OOM killer; a scope must not be created inside an
+already limited cgroup, because it would escape that limit. The extension
+defers to a machine-wide memguard daemon when `/run/memguard` exists.
 
-- **dsh** — `@deepseek-ai/dsh`, bin `dsh`. Config is YAML
-  (`~/.dsh/settings.yaml`, fail-loud 0600) — an adapter needs marker-block
-  merge or a YAML lib; `apiKeyEnv` is satisfied via process env (env wins
-  over the credentials file). Surfaces `dsh web` / `dsh headless`.
-- **claude** — `@anthropic-ai/claude-code`, bin `claude`. NOTE: lets-claude's
-  README install line `@anthropic-ai/claude-cli` is stale — that package
-  does not exist on npm. Adapter can reuse lets-claude's env-based wiring
-  (ANTHROPIC_* + context partition) with no config-file writes.
-- **codex** — `@openai/codex`, bin `codex`. Config is TOML
-  (`~/.codex/config.toml`) with `model_providers` entries carrying a
-  `base_url`; same provider-id discipline applies.
+## Git guard
 
-## Out of scope for v1
+- **Launch:** a repo whose HEAD is not on a `pi/*` branch gets
+  `git switch -c pi/<timestamp>`. A merge, rebase or cherry-pick in progress
+  is never switched away from.
+- **Hook:** before each edit, write and bash call, `.git/HEAD` is read. Off
+  a `pi/*` branch, edits are blocked and only git inspection, `--continue`
+  and `--abort`, and a switch to a `pi/*` branch pass. On every branch the
+  irreversible commands are refused. The bash call is lexed like a shell:
+  quotes, brace expansion, operators, subshells, heredocs (data, unless fed
+  to a shell), `sh -c`, `eval`, `env`/`sudo`/`xargs` prefixes, `cd`,
+  `git -C`, variables assigned in the same call. A path the lexer cannot
+  resolve is refused when it would be written or removed. Aliases and
+  unique-prefix abbreviations are resolved first. Calls over 500 simple
+  commands are refused rather than judged in part.
+- **Checkpoints:** the working tree is committed through a private index
+  (`.git/lets-code-checkpoint.index`) under
+  `refs/pi-checkpoints/<branch>/<stamp>` before each tool call and,
+  debounced, after it. Identical trees are not stored twice; 200 per branch
+  are kept; untracked files over 20 MB and untracked sets over 500 MB are
+  left out; a repo whose snapshot takes over 2 s is snapshotted in the
+  background only. Failures go to `.git/lets-code-checkpoint.log`, never to
+  the model.
+- **Not covered:** indirection the lexer cannot see, such as a variable
+  holding a command or a script on disk. The checkpoints are the backstop.
 
-dsh/claude/codex adapters, pi extensions, multi-model sessions.
+The guard adds nothing to the prompt or to tool results; a blocked call
+gets a reason under 200 characters that names a reversible alternative.
+
+## Script layout
+
+The script is one file, built in order: header and logging; probing
+(`probe`, `probe_thinking`, `probe_vision`, `suggested_thinking_level`);
+the pi config writer (`pi_write_configs`, python3); harness gate, pi
+install and tool prefetch (`ensure_pi`, `ensure_pi_tools`); onboarding
+(`run_setup`); the memory guard (`mem_guard_plan`, `mem_guard_exec`, the
+extension source); the git guard (launch logic and extension source); main.
+
+Portability: bash 3.2 (macOS) has no `pipefail` without a guard, cannot
+parse a `case` pattern inside `$(...)`, and `"${array[@]}"` on an empty
+array trips `set -u`, so the final `exec` is an if/else.
+
+## Roadmap
+
+`--harness deepseek` (`@deepseek-ai/dsh`, YAML config) and
+`--harness codex` (`@openai/codex`, TOML config with `model_providers`) would
+each own a config slice the way the pi adapter does. Both fail loudly today.

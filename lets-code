@@ -18,7 +18,7 @@
 #   lets-code --thinking-level <l> startup thinking level, default: medium
 #                                (auto-detected when the resident model thinks)
 #   lets-code --harness <name>   pi (default; only v1 harness) |
-#                                deepseek | claude | codex (roadmap)
+#                                deepseek | codex (roadmap)
 #   lets-code --insecure ...     skip TLS verification (self-signed certs)
 #   lets-code --no-mem-guard     launch without the memory guard
 #   lets-code --no-git-guard     launch without the git guard
@@ -51,7 +51,7 @@
 #      index file; HEAD, index and branches untouched). Zero tokens unless
 #      a call is blocked.
 #
-# Harness: pi is the default (and only v1) harness; --harness deepseek|claude|codex
+# Harness: pi is the default (and only v1) harness; --harness deepseek|codex
 # are roadmap items, not yet available.
 #
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
@@ -587,10 +587,10 @@ function procTable(): Map<number, Proc> {
 	return out;
 }
 
-// The agents themselves (pi, its node entry, claude, tmux) are never stopped.
+// The agents themselves (pi, its node entry, tmux) are never stopped.
 function isAgent(argv: string[]): boolean {
 	const base = (argv[0] ?? "").split("/").pop() ?? "";
-	if (/^(pi|claude|tmux)$/.test(base)) return true;
+	if (/^(pi|tmux)$/.test(base)) return true;
 	return /^(node|nodejs)$/.test(base) && /pi-coding-agent\//.test(argv[1] ?? "");
 }
 

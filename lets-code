@@ -76,7 +76,7 @@
 #                LETS_CODE_BASH_TIMEOUT (s, default 300), LETS_CODE_WRAP_TURNS (6),
 #                LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
 #                LETS_CODE_BURST_TURNS (3), LETS_CODE_MAX_BURSTS (8), LETS_CODE_THINKING_REPLAY (all|<n>)
-#                LETS_CODE_FINAL_REVIEW (auto|on|0), LETS_CODE_PLAN_BURST (0|1)
+#                LETS_CODE_FINAL_REVIEW (auto|on|0), LETS_CODE_PLAN_BURST (0|1), LETS_CODE_PLAN_LEVEL (low)
 #                LETS_CODE_OPENROUTER_PROVIDER (pin upstream providers, comma-separated, no fallbacks)
 # Needs: bash >= 3.2 (stock macOS is fine), curl, python3, pi CLI
 # (auto-installed on request).
@@ -1703,15 +1703,24 @@ pi_write_agentguard_extension() {
 //      executed command has seen, or right after an executed check reported
 //      a failure, it gets one continuation asking for a real run (up to 2).
 //   8. final review (LETS_CODE_FINAL_REVIEW=auto|on|0; auto, the default, means
-//      dynamic mode only): when the model is about to finish with its tests
-//      passing, it gets one turn (at the ceiling in dynamic mode) to re-read the
-//      task rule by rule and test any rule no executed test covers. Most hidden-test misses in the benchmark were rules
+//      dynamic mode and only after at least one burst): when the model is about
+//      to finish with its tests passing, it gets one turn (at the ceiling in
+//      dynamic mode) to verify each task rule against an executed test. It is
+//      verification only: a failing new test is checked against the task first,
+//      and no bursts fire after it starts (in round 8 a review-written test with
+//      a wrong expectation made the model "fix" correct code twice). Most hidden-test misses in the benchmark were rules
 //      stated in the task that the model never tested (one rule alone failed in
 //      8 of 19 hard runs, at every thinking level), and mid-debug bursts never
 //      revisit the task statement.
-//   9. optional plan burst (dynamic mode, LETS_CODE_PLAN_BURST=1): thinking at the
-//      ceiling for the first turn(s), until the first source file is written (at
-//      most 2 turns), plus a prompt line asking for a rule-by-rule test plan.
+//   9. optional plan burst (dynamic mode, LETS_CODE_PLAN_BURST=1): thinking at
+//      LETS_CODE_PLAN_LEVEL (default low: a 2k budget and a brief-thinking template
+//      instruction) for the first turn(s), until the first source file is written
+//      (at most 2 turns), plus a prompt line asking for a rule-by-rule test plan.
+//      At the ceiling a single plan turn thought 27-54k chars.
+//  10. dynamic mode also bursts once when half or more of the tests (and at least
+//      5) fail in one of the first two test runs: the draft is broadly wrong, and thinking off
+//      then fixes it one failure at a time (one session took 29 turns to get
+//      there before an unrelated burst triggered the rewrite).
 //      Fixed medium's advantage over dynamic was up-front design: task rules
 //      handled before any test failed, which reactive bursts never revisit.
 //   7. optional (LETS_CODE_THINKING_REPLAY=<n>): only the last n assistant
@@ -1742,6 +1751,8 @@ const MAX_VERIFY_NUDGES = 2;
 const MAX_ACT_NUDGES_PER_BURST = 1;
 const PLAN = (process.env.LETS_CODE_PLAN_BURST ?? "0").trim() === "1";
 const PLAN_MAX_TURNS = 2;
+// the plan turn runs at a bounded level: at the ceiling it thought 27-54k chars (10-15 min on a slow server)
+const PLAN_LEVEL = (process.env.LETS_CODE_PLAN_LEVEL ?? "low").trim();
 const PLAN_SECTION =
 	"Plan first (lets-code): before writing code, list every rule the task states, one line each, with the test " +
 	"you will write for it. Then implement, and make sure each listed rule has an executed test.";
@@ -1776,9 +1787,12 @@ const VERIFY_TEXT =
 	"[lets-code] You are about to finish, but no command has been executed since your last source change. " +
 	"Run the tests and any checks the task requires now, and base your summary on their actual output.";
 const REVIEW_TEXT =
-	"[lets-code] Final review before you finish. Re-read the original task statement and list every rule it states, " +
-	"one line each, with the executed test that covers it. For each rule without such a test, write that test, run it, " +
-	"and fix what fails. Then run the full test suite once more; you may finish only after a green run that comes after this review.";
+	"[lets-code] Final review before you finish. This is a verification step, not a refactor. Re-read the original task " +
+	"statement and list every rule it states, one line each, with the executed test that covers it. For each rule without " +
+	"such a test, write that test and run it. If a new test fails, first check its expected value against the task " +
+	"statement (and real Python where semantics are involved): fix the test if the expectation was wrong, and change source " +
+	"only for a rule the task clearly states. Then run the full test suite once more; you may finish only after a green run " +
+	"that comes after this review.";
 const AFTER_REVIEW_TEXT =
 	"[lets-code] Run the full test suite once more now: finishing needs a green run after the final review.";
 const FAILED_CHECK_TEXT =
@@ -1819,6 +1833,19 @@ function baseStatus(txt: string): number | null {
 	return null;
 }
 
+/** Total test count reported by a test-like output, or null when it cannot be read. */
+export function testTotal(txt: string): number | null {
+	let m = /Ran (\d+) tests?/.exec(txt);
+	if (m) return Number(m[1]);
+	m = /(\d+) passed(?:, | and )(\d+) failed/.exec(txt) ?? /(\d+)[ \t]+pass(?:ed)?,[ \t]*(\d+)[ \t]+fail/i.exec(txt);
+	if (m) return Number(m[1]) + Number(m[2]);
+	m = /(\d+) failed, (\d+) passed/.exec(txt);
+	if (m) return Number(m[1]) + Number(m[2]);
+	m = /(\d+)\/(\d+) (?:cases|tests|checks)? ?(?:passed|ok)/i.exec(txt);
+	if (m) return Number(m[2]);
+	return null;
+}
+
 /** A struggle signal: why thinking was raised, and the condition that ends the burst. */
 export interface Trigger {
 	why: string;
@@ -1851,6 +1878,10 @@ export class Detector {
 	lastCleanExec = 0;
 	lastOkResult = 0;
 	lastTestEdit = 0;
+	testRuns = 0;
+	draftWrong = false;
+	draftChecked = false;
+	lastTotal: number | null = null;
 	pendingExec = false;
 	recentCalls: { sig: string; mutations: number }[] = [];
 	now: () => number;
@@ -1905,6 +1936,17 @@ export class Detector {
 			this.pendingExec = false;
 		}
 		if (failing !== null) {
+			this.testRuns++;
+			const total = testTotal(text);
+			this.lastTotal = total;
+			// the first test runs decide whether the draft is broadly right: half or more failing means a design
+			// problem, which patching one failure at a time (thinking off) fixes slowly
+			if (!this.draftChecked && this.testRuns <= 2 && total !== null && failing >= 5 && failing * 2 >= total) {
+				this.draftWrong = true;
+				this.draftChecked = true;
+			} else if (this.testRuns >= 2) {
+				this.draftChecked = true;
+			}
 			// more failures than the previous run after a source change, with the tests themselves untouched: a regression
 			// (a test-file edit in between means the suite grew; new failures are then expected, not a signal)
 			this.regression = this.lastFailing !== null && failing > this.lastFailing && this.lastSourceEdit > this.lastExec && this.lastTestEdit < this.lastExec;
@@ -1935,6 +1977,15 @@ export class Detector {
 		if (this.passing) return null;
 		const seq = this.seq;
 		const mutations = this.mutations;
+		if (this.draftWrong) {
+			this.draftWrong = false;
+			const failing = this.lastFailing ?? 0, total = this.lastTotal ?? 0;
+			return {
+				why: `${failing} of ${total} tests fail on the first draft`,
+				goal: "That many failures points at the design, not a detail. Re-read the task statement, find what the draft gets wrong at the root, and rewrite that part instead of patching failures one at a time.",
+				resolved: (d) => d.lastFailing !== null && d.lastTotal !== null && d.lastFailing * 4 <= d.lastTotal,
+			};
+		}
 		if (this.editStreak >= 2) {
 			return { why: "2 failed edits in a row", goal: "Read the exact current text of the region before the next edit, then make one edit that matches it.", resolved: (d) => d.lastOkEdit > seq };
 		}
@@ -2035,7 +2086,7 @@ export default function (pi: ExtensionAPI) {
 		if (AUTO && pi.getThinkingLevel() !== "off") pi.setThinkingLevel("off");
 		if (AUTO && PLAN) {
 			planning = true;
-			pi.setThinkingLevel(AUTO as any);
+			pi.setThinkingLevel(PLAN_LEVEL as any);
 		}
 		log("start", { auto: AUTO || null, bashTimeout: BASH_TIMEOUT, wrapTurns: WRAP_TURNS, wrapMinutes: WRAP_MS / 60_000, burstTurns: BURST_TURNS, maxBursts: MAX_BURSTS, replay: Number.isFinite(REPLAY) ? REPLAY : "all" });
 	});
@@ -2056,7 +2107,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_before_settle", async () => {
 		const why = d.unverified();
-		if (!why && !REVIEW_OFF && (AUTO || REVIEW_ALWAYS) && !reviewed && d.passing) {
+		if (!why && !REVIEW_OFF && ((AUTO && bursts > 0) || REVIEW_ALWAYS) && !reviewed && d.passing) {
 			// one review turn: the misses that remain are task rules the model never tested. In dynamic mode
 			// it runs at the ceiling; at a fixed level it runs at that level.
 			reviewed = true;
@@ -2105,7 +2156,8 @@ export default function (pi: ExtensionAPI) {
 		if (event.toolName === "bash" && /timed out/i.test(text)) log("bash-timeout");
 		const failing = d.toolResult(event.toolName, !!event.isError, text, String(event.input?.path ?? ""));
 		if (failing !== null) log("tests", { failing });
-		if (AUTO && !burst && !planning && bursts < MAX_BURSTS) {
+		// no bursts once the review has started: failures in tests the review adds are verification, not struggle
+		if (AUTO && !burst && !planning && !reviewed && bursts < MAX_BURSTS) {
 			const trigger = d.trigger();
 			if (trigger) {
 				pi.setThinkingLevel(AUTO as any);

@@ -225,17 +225,20 @@ it adds nothing unless a rule acts.
   `LETS_CODE_MAX_BURSTS` (8) per session; a thinking turn without a tool
   call is told once to act. Replayed over 131 benchmark sessions: no burst
   on the 36 easy ones, a median of 3 raised turns out of 57 on hard ones.
-- **Final review** (`LETS_CODE_FINAL_REVIEW=auto`: dynamic mode only, the
-  default; `on`: any level; `0`: off). When the model is about to finish
-  with its tests passing, it gets one turn (at the ceiling in dynamic mode)
-  to list every rule the task states with the executed test that covers it,
-  test the uncovered ones, and finish only after a green run that follows
-  the review. Most hidden-test misses in the benchmark were rules stated in
-  the task that the model never tested.
-- **Plan burst** (`LETS_CODE_PLAN_BURST=1`, dynamic mode). Thinking at the
-  ceiling for the first turn(s), until the first source file is written (at
-  most 2 turns), plus a prompt line asking for a rule-by-rule test plan.
-  Fixed medium's quality edge over dynamic came from up-front design.
+- **Final review** (`LETS_CODE_FINAL_REVIEW=auto`: dynamic mode, only after
+  a burst, the default; `on`: any level; `0`: off). When the model is about
+  to finish with its tests passing, it gets one turn (at the ceiling in
+  dynamic mode) to verify each task rule against an executed test. It is
+  verification only: a failing new test is checked against the task before
+  any source change, no bursts fire after it starts, and finishing needs a
+  green run after it.
+- **Draft check** (dynamic mode). When half or more of the tests, and at
+  least 5, fail in one of the first two test runs, one burst asks the model
+  to rethink the design rather than patch failures one at a time.
+- **Plan burst** (`LETS_CODE_PLAN_BURST=1`, dynamic mode). Thinking at
+  `LETS_CODE_PLAN_LEVEL` (default `low`) for the first turn(s), until the
+  first source file is written, plus a prompt line asking for a
+  rule-by-rule test plan. At the ceiling one plan turn thought 27-54k chars.
 - **Thinking replay window** (`LETS_CODE_THINKING_REPLAY=<n>`, default
   all). pi replays every earlier turn's thinking, about 40% of the prompt by
   the end of a high-thinking session; with a window only the last n turns

@@ -1736,6 +1736,11 @@ pi_write_agentguard_extension() {
 //      tests pass (back to BASE if they fail again). Fixed medium wrote the strongest
 //      first drafts but kept thinking through verification; plain dynamic (rest at
 //      off) thought 5-40% as much but needed far more turns to converge.
+//  12. firm stop: if the model keeps calling tools for 6 turns or 4 minutes after the
+//      wrap-up note without changing any source file, it is told once to stop and
+//      summarise. In wave 10 an adaptive session solved its task at 9 minutes, got
+//      the wrap-up at 17, then spent 13 more minutes hand-tracing expected outputs
+//      for one detail (and getting them wrong) without editing anything.
 // Apart from that prompt section, nothing is added unless a rule acts.
 // LETS_CODE_AGENT_GUARD_LOG=<file> appends one JSON line per guard action.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -1796,6 +1801,11 @@ const WRAP_TEXT =
 	"[lets-code] Your own tests have been passing for a while. If every requirement in the original task is covered " +
 	"by a test you have actually run, finish now: reply with a short summary and make no further tool calls. " +
 	"If a requirement is not covered by an executed test, test it first; do not refactor or polish working code.";
+const STOP_TEXT =
+	"[lets-code] Stop now. Your tests pass, and since the wrap-up note you have changed no source code: more " +
+	"re-checking will not change the result. Reply with a short summary of what you built and make no further tool calls.";
+const STOP_AFTER_TURNS = 6;
+const STOP_AFTER_MS = 4 * 60_000;
 const VERIFY_TEXT =
 	"[lets-code] You are about to finish, but no command has been executed since your last source change. " +
 	"Run the tests and any checks the task requires now, and base your summary on their actual output.";
@@ -2070,6 +2080,10 @@ export default function (pi: ExtensionAPI) {
 	if (!ACTIVE) return;
 	const d = new Detector();
 	let wrapNudged = false;
+	let wrapTurn = -1;
+	let wrapAt = 0;
+	let wrapSourceEdit = 0;
+	let stopNudged = false;
 	let lengthNudges = 0;
 	let testReminders = 0;
 	let verifyNudges = 0;
@@ -2233,6 +2247,13 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 		}
+		if (wrapNudged && !stopNudged && madeToolCall && d.lastSourceEdit === wrapSourceEdit &&
+			(d.totalTurns - wrapTurn >= STOP_AFTER_TURNS || Date.now() - wrapAt >= STOP_AFTER_MS)) {
+			// the wrap-up was ignored and nothing has changed in the source since: the rest is re-checking
+			stopNudged = true;
+			log("stop-nudge", { turnsSinceWrap: d.totalTurns - wrapTurn });
+			entries.push(msg(STOP_TEXT));
+		}
 		if (m.role === "assistant" && m.stopReason === "length" && !madeToolCall && lengthNudges < MAX_LENGTH_NUDGES) {
 			lengthNudges++;
 			log("length-nudge", { n: lengthNudges });
@@ -2245,6 +2266,9 @@ export default function (pi: ExtensionAPI) {
 			entries.push(msg(TEST_TEXT));
 		} else if (!wrapNudged && madeToolCall && d.passedFor(WRAP_TURNS, WRAP_MS, WRAP_MIN_MS)) {
 			wrapNudged = true;
+			wrapTurn = d.totalTurns;
+			wrapAt = Date.now();
+			wrapSourceEdit = d.lastSourceEdit;
 			log("wrap-nudge");
 			entries.push(msg(WRAP_TEXT));
 		}

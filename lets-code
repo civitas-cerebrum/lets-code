@@ -15,9 +15,9 @@
 #                                anthropic-messages | google-generative-ai
 #   lets-code --vision ...       model accepts images (default: auto-detected)
 #   lets-code --no-vision ...    force image input off (skips the probe)
-#   lets-code --thinking-level <l> thinking level, default: adaptive (medium until
-#                                pi's own tests pass, then off; bursts to high
-#                                when the output shows struggle)
+#   lets-code --thinking-level <l> thinking level, default: medium (measured best
+#                                default for Qwen3.8-27B); adaptive[:<l>] dials
+#                                medium -> low once tests pass, high on struggle
 #                                (auto-detected when the resident model thinks);
 #                                auto[:<l>] is dynamic thinking: off, raised to
 #                                the ceiling <l> (default high) in short bursts
@@ -93,7 +93,7 @@ PROVIDER_ID="lets-code"          # fixed provider id we upsert into pi's files
 DEFAULT_CONTEXT=128000
 DEFAULT_OUTPUT_CAP=32768
 DEFAULT_API="openai-completions"
-DEFAULT_THINKING="adaptive"
+DEFAULT_THINKING="medium"
 
 VERBOSE=false
 LOG_PREFIX="[lets-code]"

@@ -81,7 +81,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--context <tok>` | Context window (default: discovered, else 128000) |
 | `--output-cap <tok>` | Max output tokens (default 32768) |
 | `--api <dialect>` | `openai-completions` (default), `openai-responses`, `anthropic-messages`, `google-generative-ai` |
-| `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`), or `auto[:<lvl>]`: off until the agent guard sees pi struggle |
+| `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`), `adaptive[:<lvl>]` (medium, low once the tests pass, bursts up on struggle), or `auto[:<lvl>]` (off, bursts up on struggle); see [Choosing a thinking level](#choosing-a-thinking-level) |
 | `--vision` / `--no-vision` | Pin image input instead of probing |
 | `--insecure` | Skip TLS verification |
 | `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` | Launch without a guard |
@@ -213,6 +213,15 @@ it adds nothing unless a rule acts.
   `LETS_CODE_WRAP_TURNS` turns (6) and 2 minutes, or `LETS_CODE_WRAP_MINUTES`
   minutes (5), it is told once to finish if every requirement is covered
   by a test it has run.
+- **Adaptive thinking** (`--thinking-level adaptive[:<ceiling>]`, opt-in).
+  Rests at medium while the task is unsolved, dials down to low once pi's
+  own tests pass and a later turn changes no source, back to medium if they
+  fail again, and bursts to the ceiling (default `high`) on the struggle
+  signals below. Faster and leaner than fixed medium on medium-sized tasks
+  in the benchmark; not yet shown to be faster on hard ones.
+- **Firm stop.** If pi keeps calling tools for 6 turns or 4 minutes after
+  the wrap-up note without changing any source file, it is told once to
+  stop and summarise.
 - **Dynamic thinking** (`--thinking-level auto[:<ceiling>]`, default
   `high`). The level is a ceiling. pi starts with thinking off; a struggle
   signal (the same tests still failing after 3 runs, more failures after a
@@ -244,8 +253,34 @@ it adds nothing unless a rule acts.
   the end of a high-thinking session; with a window only the last n turns
   keep theirs.
 
+Test results are read from the usual runners (unittest, pytest, "N passed,
+M failed" summaries) and from runs of a test file that print no summary:
+exit 0 plus "pass" is green, an `AssertionError` is red.
+
 `LETS_CODE_AGENT_GUARD_LOG=<file>` writes one JSON line per guard action.
 `tests/agent-guard.test.mjs` drives the extension with a fake pi.
+
+</details>
+
+<details>
+<summary><b>Choosing a thinking level</b></summary>
+
+Measured October 2026 with pi against Qwen3.8-27B (local vLLM, and the same
+model on OpenRouter), on six Python tasks from easy to hard, scored by
+hidden tests the agent never sees (11 rounds, about 190 sessions):
+
+| Level | Verdict |
+|---|---|
+| `off` | Fastest on easy and medium tasks, equally correct there; on hard tasks it thrashes (100-170 turns) and usually ends a test or two short. |
+| `medium` (default) | The quality bar: strongest first drafts, fully correct on the hard task 2 of 2 times on OpenRouter at 18-19 minutes, and stops on its own. |
+| `high` | Worst: rambles, times out, scores lowest. For Qwen3.8 it also brings the template's "consider plausible alternatives" instruction (see server setup). |
+| `adaptive` | Same correctness on medium-sized tasks at about 60% of medium's time and half its thinking; on the hard task slower than medium in the runs so far. |
+| `auto` | About 80% less thinking than medium, but slower and slightly less correct: starting from off, the first draft is weaker and repairing it takes many cheap turns. |
+
+The fixes that helped at every level are on by default: per-level hard
+thinking budgets, the template effort mapping, bash timeouts, cut-off reply
+recovery, execution-based verification, and the wrap-up note. Raw data and
+the harness live outside this repo.
 
 </details>
 
@@ -275,8 +310,9 @@ start so the first session starts clean. Design notes and the reasoning
 behind each decision are in [DESIGN.md](DESIGN.md).
 
 `tests/run.sh` runs the suite CI runs on every pull request: shell tests
-for the probes and endpoint parsing, node tests for the git guard and
-checkpoints. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
+for the probes, endpoint parsing, the chat-template effort probe and the
+OpenRouter config, node tests for the git guard, checkpoints and agent
+guard. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
 the memory guard. Releases are published to npm from GitHub releases.
 
 ## License

@@ -650,6 +650,8 @@ mem_guard_plan() {  # sets MG_MODE (scope|process|off) and MG_NOTE
 }
 
 mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
+    # exec replaces the shell, so the EXIT trap never runs: drop the probe file now
+    rm -f "${PROBE_OUT:-}"
     if [ "${MG_MODE}" != off ]; then export LETS_CODE_SESSION=1; fi
     if [ "${MG_MODE}" = scope ]; then
         exec systemd-run --user --scope --quiet --collect --unit="lets-code-$$" \

@@ -225,6 +225,11 @@ it adds nothing unless a rule acts.
   `LETS_CODE_MAX_BURSTS` (8) per session; a thinking turn without a tool
   call is told once to act. Replayed over 131 benchmark sessions: no burst
   on the 36 easy ones, a median of 3 raised turns out of 57 on hard ones.
+- **Final review** (dynamic mode; `LETS_CODE_FINAL_REVIEW=0` disables).
+  When the model is about to finish with its tests passing, it gets one
+  thinking turn at the ceiling to re-read the task rule by rule and test any
+  rule no executed test covers. Most hidden-test misses in the benchmark
+  were rules stated in the task that the model never tested.
 - **Thinking replay window** (`LETS_CODE_THINKING_REPLAY=<n>`, default
   all). pi replays every earlier turn's thinking, about 40% of the prompt by
   the end of a high-thinking session; with a window only the last n turns

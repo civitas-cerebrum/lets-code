@@ -1660,7 +1660,8 @@ pi_write_agentguard_extension() {
 //      ceiling, not a setting. Thinking starts off and is raised to the
 //      ceiling only for a short burst when a strong struggle signal fires:
 //      the same tests still failing after 3 runs, more failures after a
-//      source edit (with the tests untouched), 2 failed edits in a row, 2 syntax errors, an identical tool call
+//      source edit (with the tests untouched), 2 failed edits in a row, 2 syntax
+//      errors in real files (a broken heredoc script does not count), an identical tool call
 //      with no file change in between, 3 tool errors in a row, or 40 turns
 //      without passing tests. The burst carries the reason as a one-line
 //      goal, ends as soon as that reason is resolved (the edit succeeds, the
@@ -1683,6 +1684,13 @@ pi_write_agentguard_extension() {
 //      rewriting scripts. If it tries to finish with source edits that no
 //      executed command has seen, or right after an executed check reported
 //      a failure, it gets one continuation asking for a real run (up to 2).
+//   8. final review (dynamic mode, LETS_CODE_FINAL_REVIEW=0 disables): when the
+//      model is about to finish with its tests passing, it gets one thinking turn
+//      at the ceiling to re-read the task rule by rule and test any rule no
+//      executed test covers. Most hidden-test misses in the benchmark were rules
+//      stated in the task that the model never tested (one rule alone failed in
+//      8 of 19 hard runs, at every thinking level), and mid-debug bursts never
+//      revisit the task statement.
 //   7. optional (LETS_CODE_THINKING_REPLAY=<n>): only the last n assistant
 //      turns keep their thinking in the context sent to the model; older
 //      thinking is dropped. pi replays all of it by default, which was about
@@ -1709,6 +1717,7 @@ const MAX_TEST_REMINDERS = 5;
 const WRAP_MIN_MS = 2 * 60_000;
 const MAX_VERIFY_NUDGES = 2;
 const MAX_ACT_NUDGES_PER_BURST = 1;
+const REVIEW = (process.env.LETS_CODE_FINAL_REVIEW ?? "1") !== "0";
 // a bash command that executes code, as opposed to reading or listing files
 const EXEC_RE = /(^|[\s;&|(])(python3?|pytest|node|npm|npx|pnpm|yarn|bun|deno|go|cargo|make|ruby|rspec|java|mvn|gradle|dotnet|php|perl|bash|sh|\.\/[\w.\/-]+)(\s|$)/;
 const FAILURE_RE = /\b(FAIL(ED)?|MISMATCH|AssertionError|Traceback \(most recent call last\))\b/;
@@ -1736,6 +1745,10 @@ const WRAP_TEXT =
 const VERIFY_TEXT =
 	"[lets-code] You are about to finish, but no command has been executed since your last source change. " +
 	"Run the tests and any checks the task requires now, and base your summary on their actual output.";
+const REVIEW_TEXT =
+	"[lets-code] Final review before you finish. Re-read the original task statement rule by rule. For each rule, " +
+	"name the executed test that covers it. If any rule is not covered by a test you actually ran, write and run that " +
+	"test now and fix what fails. If every rule is covered, reply with a short summary and no tool calls.";
 const FAILED_CHECK_TEXT =
 	"[lets-code] You are about to finish, but the last command you executed reported a failure. " +
 	"Fix it, or rerun to show it is resolved, before finishing.";
@@ -1819,12 +1832,15 @@ export class Detector {
 		const failing = name === "bash" ? testStatus(text) : null;
 		this.seq++;
 		// a failing test run or a failing assertion script exits non-zero; that is progress tracking, not a tool error
-		const realError = isError && failing === null && !text.trim().startsWith("(no output)") && !(name === "bash" && /\bAssertionError\b/.test(text));
+		const scriptSlip = name === "bash" && /File "<(stdin|string)>"/.test(text) && /\b(SyntaxError|IndentationError)\b/.test(text);
+		const realError = isError && failing === null && !scriptSlip && !text.trim().startsWith("(no output)") && !(name === "bash" && /\bAssertionError\b/.test(text));
 		this.errStreak = realError ? this.errStreak + 1 : 0;
 		if (!realError) this.lastOkResult = this.seq;
 		if (name === "edit") this.editStreak = isError ? this.editStreak + 1 : 0;
 		const hasSyntax = /\b(SyntaxError|IndentationError)\b/.test(text);
-		if (hasSyntax) this.syntax++;
+		// a broken throwaway script (heredoc or -c: File "<stdin>" / "<string>") is a quoting slip, not a
+		// struggle with the code; only syntax errors in real files count toward the signal
+		if (hasSyntax && !/File "<(stdin|string)>"/.test(text)) this.syntax++;
 		const editedSource = (name === "edit" || name === "write") && !isError;
 		if (editedSource) {
 			this.mutations++;
@@ -1942,6 +1958,8 @@ export default function (pi: ExtensionAPI) {
 	let verifyNudges = 0;
 	let burst: { trigger: Trigger; turns: number; actNudges: number; goalPending: boolean } | null = null;
 	let bursts = 0;
+	let reviewed = false;
+	let reviewing = false;
 	const msg = (content: string) => ({ type: "custom_message" as const, customType: "lets-code-agent-guard", content, display: true });
 	const log = (event: string, detail: Record<string, unknown> = {}) => {
 		if (!LOG) return;
@@ -1974,6 +1992,15 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_before_settle", async () => {
 		const why = d.unverified();
+		if (!why && AUTO && REVIEW && !reviewed && d.passing) {
+			// one review burst at the ceiling: the misses that remain are task rules the model never tested
+			reviewed = true;
+			reviewing = true;
+			if (burst) endBurst("final review");
+			pi.setThinkingLevel(AUTO as any);
+			log("review-burst", { to: AUTO });
+			return { entries: [msg(REVIEW_TEXT)], continue: true };
+		}
 		if (!why || verifyNudges >= MAX_VERIFY_NUDGES) return undefined;
 		verifyNudges++;
 		log("verify-nudge", { why, n: verifyNudges });
@@ -2018,6 +2045,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("turn_end", async (event: any) => {
 		d.turnEnd();
+		if (reviewing) {
+			// the review turn has been taken; back to off for whatever testing it triggers
+			reviewing = false;
+			pi.setThinkingLevel("off");
+			log("review-done");
+		}
 		const m = event.message ?? {};
 		const content = Array.isArray(m.content) ? m.content : [];
 		const madeToolCall = content.some((c: any) => c && c.type === "toolCall");

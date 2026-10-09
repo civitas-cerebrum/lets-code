@@ -225,11 +225,17 @@ it adds nothing unless a rule acts.
   `LETS_CODE_MAX_BURSTS` (8) per session; a thinking turn without a tool
   call is told once to act. Replayed over 131 benchmark sessions: no burst
   on the 36 easy ones, a median of 3 raised turns out of 57 on hard ones.
-- **Final review** (dynamic mode; `LETS_CODE_FINAL_REVIEW=0` disables).
-  When the model is about to finish with its tests passing, it gets one
-  thinking turn at the ceiling to re-read the task rule by rule and test any
-  rule no executed test covers. Most hidden-test misses in the benchmark
-  were rules stated in the task that the model never tested.
+- **Final review** (`LETS_CODE_FINAL_REVIEW=auto`: dynamic mode only, the
+  default; `on`: any level; `0`: off). When the model is about to finish
+  with its tests passing, it gets one turn (at the ceiling in dynamic mode)
+  to list every rule the task states with the executed test that covers it,
+  test the uncovered ones, and finish only after a green run that follows
+  the review. Most hidden-test misses in the benchmark were rules stated in
+  the task that the model never tested.
+- **Plan burst** (`LETS_CODE_PLAN_BURST=1`, dynamic mode). Thinking at the
+  ceiling for the first turn(s), until the first source file is written (at
+  most 2 turns), plus a prompt line asking for a rule-by-rule test plan.
+  Fixed medium's quality edge over dynamic came from up-front design.
 - **Thinking replay window** (`LETS_CODE_THINKING_REPLAY=<n>`, default
   all). pi replays every earlier turn's thinking, about 40% of the prompt by
   the end of a high-thinking session; with a window only the last n turns

@@ -76,6 +76,7 @@
 #                LETS_CODE_BASH_TIMEOUT (s, default 300), LETS_CODE_WRAP_TURNS (6),
 #                LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
 #                LETS_CODE_BURST_TURNS (3), LETS_CODE_MAX_BURSTS (8), LETS_CODE_THINKING_REPLAY (all|<n>)
+#                LETS_CODE_FINAL_REVIEW (auto|on|0), LETS_CODE_PLAN_BURST (0|1)
 # Needs: bash >= 3.2 (stock macOS is fine), curl, python3, pi CLI
 # (auto-installed on request).
 
@@ -1664,7 +1665,9 @@ pi_write_agentguard_extension() {
 //      errors in real files (a broken heredoc script does not count), an identical tool call
 //      with no file change in between, 3 tool errors in a row, or 40 turns
 //      without passing tests. The burst carries the reason as a one-line
-//      goal, ends as soon as that reason is resolved (the edit succeeds, the
+//      goal plus "state a hypothesis, then confirm it by running code" (bursts
+//      under the neutral template instruction used ~1k chars of their budget),
+//      ends as soon as that reason is resolved (the edit succeeds, the
 //      failures drop, a file changes...), after LETS_CODE_BURST_TURNS turns
 //      (default 3), or when the model's tests pass, and a new burst needs a
 //      new signal. At most LETS_CODE_MAX_BURSTS bursts per session (default
@@ -1684,13 +1687,18 @@ pi_write_agentguard_extension() {
 //      rewriting scripts. If it tries to finish with source edits that no
 //      executed command has seen, or right after an executed check reported
 //      a failure, it gets one continuation asking for a real run (up to 2).
-//   8. final review (dynamic mode, LETS_CODE_FINAL_REVIEW=0 disables): when the
-//      model is about to finish with its tests passing, it gets one thinking turn
-//      at the ceiling to re-read the task rule by rule and test any rule no
-//      executed test covers. Most hidden-test misses in the benchmark were rules
+//   8. final review (LETS_CODE_FINAL_REVIEW=auto|on|0; auto, the default, means
+//      dynamic mode only): when the model is about to finish with its tests
+//      passing, it gets one turn (at the ceiling in dynamic mode) to re-read the
+//      task rule by rule and test any rule no executed test covers. Most hidden-test misses in the benchmark were rules
 //      stated in the task that the model never tested (one rule alone failed in
 //      8 of 19 hard runs, at every thinking level), and mid-debug bursts never
 //      revisit the task statement.
+//   9. optional plan burst (dynamic mode, LETS_CODE_PLAN_BURST=1): thinking at the
+//      ceiling for the first turn(s), until the first source file is written (at
+//      most 2 turns), plus a prompt line asking for a rule-by-rule test plan.
+//      Fixed medium's advantage over dynamic was up-front design: task rules
+//      handled before any test failed, which reactive bursts never revisit.
 //   7. optional (LETS_CODE_THINKING_REPLAY=<n>): only the last n assistant
 //      turns keep their thinking in the context sent to the model; older
 //      thinking is dropped. pi replays all of it by default, which was about
@@ -1717,7 +1725,14 @@ const MAX_TEST_REMINDERS = 5;
 const WRAP_MIN_MS = 2 * 60_000;
 const MAX_VERIFY_NUDGES = 2;
 const MAX_ACT_NUDGES_PER_BURST = 1;
-const REVIEW = (process.env.LETS_CODE_FINAL_REVIEW ?? "1") !== "0";
+const PLAN = (process.env.LETS_CODE_PLAN_BURST ?? "0").trim() === "1";
+const PLAN_MAX_TURNS = 2;
+const PLAN_SECTION =
+	"Plan first (lets-code): before writing code, list every rule the task states, one line each, with the test " +
+	"you will write for it. Then implement, and make sure each listed rule has an executed test.";
+const REVIEW_MODE = (process.env.LETS_CODE_FINAL_REVIEW ?? "auto").trim().toLowerCase();
+const REVIEW_OFF = ["0", "off", "false", "no"].includes(REVIEW_MODE);
+const REVIEW_ALWAYS = ["on", "1", "true", "yes", "always"].includes(REVIEW_MODE);
 // a bash command that executes code, as opposed to reading or listing files
 const EXEC_RE = /(^|[\s;&|(])(python3?|pytest|node|npm|npx|pnpm|yarn|bun|deno|go|cargo|make|ruby|rspec|java|mvn|gradle|dotnet|php|perl|bash|sh|\.\/[\w.\/-]+)(\s|$)/;
 const FAILURE_RE = /\b(FAIL(ED)?|MISMATCH|AssertionError|Traceback \(most recent call last\))\b/;
@@ -1746,15 +1761,29 @@ const VERIFY_TEXT =
 	"[lets-code] You are about to finish, but no command has been executed since your last source change. " +
 	"Run the tests and any checks the task requires now, and base your summary on their actual output.";
 const REVIEW_TEXT =
-	"[lets-code] Final review before you finish. Re-read the original task statement rule by rule. For each rule, " +
-	"name the executed test that covers it. If any rule is not covered by a test you actually ran, write and run that " +
-	"test now and fix what fails. If every rule is covered, reply with a short summary and no tool calls.";
+	"[lets-code] Final review before you finish. Re-read the original task statement and list every rule it states, " +
+	"one line each, with the executed test that covers it. For each rule without such a test, write that test, run it, " +
+	"and fix what fails. Then run the full test suite once more; you may finish only after a green run that comes after this review.";
+const AFTER_REVIEW_TEXT =
+	"[lets-code] Run the full test suite once more now: finishing needs a green run after the final review.";
 const FAILED_CHECK_TEXT =
 	"[lets-code] You are about to finish, but the last command you executed reported a failure. " +
 	"Fix it, or rerun to show it is resolved, before finishing.";
 
-/** Failing-test count reported by a test-like tool output: 0 = all passed, null = not a test run. */
+/** Failing-test count reported by a test-like tool output: 0 = all passed, null = not a test run.
+ * Several summaries can appear in one output ("130 pass, 1 fail" then "error tests: 0 failures");
+ * the largest failure count wins, so one green sub-summary never hides a failure. */
 export function testStatus(txt: string): number | null {
+	const counts: number[] = [];
+	for (const m of txt.matchAll(/(\d+)[ \t]+(?:tests?[ \t]+)?(?:failed|failures?|fail|errors?)\b(?![ \t]*[=:])/gi)) counts.push(Number(m[1]));
+	for (const m of txt.matchAll(/\b(?:fail(?:ures|ed|s)?|errors?)\s*[=:]\s*(\d+)/gi)) counts.push(Number(m[1]));
+	const base = baseStatus(txt);
+	if (base === null && !counts.length) return null;
+	if (base === null && !/\bpass(?:ed|es)?\b|\bOK\b|\bok\b/.test(txt)) return null;
+	return Math.max(base ?? 0, ...counts);
+}
+
+function baseStatus(txt: string): number | null {
 	if (/Ran \d+ tests?/.test(txt)) {
 		const f = /FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?/.exec(txt);
 		if (f) return Number(f[1] ?? 0) + Number(f[2] ?? 0);
@@ -1833,14 +1862,16 @@ export class Detector {
 		this.seq++;
 		// a failing test run or a failing assertion script exits non-zero; that is progress tracking, not a tool error
 		const scriptSlip = name === "bash" && /File "<(stdin|string)>"/.test(text) && /\b(SyntaxError|IndentationError)\b/.test(text);
-		const realError = isError && failing === null && !scriptSlip && !text.trim().startsWith("(no output)") && !(name === "bash" && /\bAssertionError\b/.test(text));
+		const testFileEdit = (name === "edit" || name === "write") && TEST_PATH_RE.test(path);
+		const realError = isError && failing === null && !scriptSlip && !testFileEdit && !text.trim().startsWith("(no output)") && !(name === "bash" && /\bAssertionError\b/.test(text));
 		this.errStreak = realError ? this.errStreak + 1 : 0;
 		if (!realError) this.lastOkResult = this.seq;
-		if (name === "edit") this.editStreak = isError ? this.editStreak + 1 : 0;
+		if (name === "edit" && !TEST_PATH_RE.test(path)) this.editStreak = isError ? this.editStreak + 1 : 0;
 		const hasSyntax = /\b(SyntaxError|IndentationError)\b/.test(text);
 		// a broken throwaway script (heredoc or -c: File "<stdin>" / "<string>") is a quoting slip, not a
 		// struggle with the code; only syntax errors in real files count toward the signal
-		if (hasSyntax && !/File "<(stdin|string)>"/.test(text)) this.syntax++;
+		const syntaxFile = /File "([^"]+)", line \d+[^\n]*\n(?:[^\n]*\n){0,3}?\s*(?:SyntaxError|IndentationError)/.exec(text)?.[1] ?? "";
+		if (hasSyntax && !/^<(stdin|string)>$/.test(syntaxFile) && !/File "<(stdin|string)>"/.test(text) && !TEST_PATH_RE.test(syntaxFile)) this.syntax++;
 		const editedSource = (name === "edit" || name === "write") && !isError;
 		if (editedSource) {
 			this.mutations++;
@@ -1944,6 +1975,11 @@ export function stripOldThinking(messages: any[], keep: number): any[] | null {
 	return changed ? out : null;
 }
 
+function content0(event: any): any[] {
+	const c = event?.message?.content;
+	return Array.isArray(c) ? c : [];
+}
+
 function textOf(content: unknown): string {
 	if (!Array.isArray(content)) return typeof content === "string" ? content : "";
 	return content.map((c: any) => (c && c.type === "text" ? String(c.text ?? "") : "")).join("");
@@ -1960,6 +1996,10 @@ export default function (pi: ExtensionAPI) {
 	let bursts = 0;
 	let reviewed = false;
 	let reviewing = false;
+	let reviewSeq = -1;
+	let afterReviewNudged = false;
+	let planning = false;
+	let planTurns = 0;
 	const msg = (content: string) => ({ type: "custom_message" as const, customType: "lets-code-agent-guard", content, display: true });
 	const log = (event: string, detail: Record<string, unknown> = {}) => {
 		if (!LOG) return;
@@ -1976,12 +2016,19 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async () => {
 		if (AUTO && pi.getThinkingLevel() !== "off") pi.setThinkingLevel("off");
+		if (AUTO && PLAN) {
+			planning = true;
+			pi.setThinkingLevel(AUTO as any);
+		}
 		log("start", { auto: AUTO || null, bashTimeout: BASH_TIMEOUT, wrapTurns: WRAP_TURNS, wrapMinutes: WRAP_MS / 60_000, burstTurns: BURST_TURNS, maxBursts: MAX_BURSTS, replay: Number.isFinite(REPLAY) ? REPLAY : "all" });
 	});
 
 	pi.on("before_agent_start", async (event: any) => {
 		const sections = event?.systemPromptOptions?.sections;
-		if (sections && typeof sections === "object") sections.lets_code_verification = PROMPT_SECTION;
+		if (sections && typeof sections === "object") {
+			sections.lets_code_verification = PROMPT_SECTION;
+			if (PLAN) sections.lets_code_plan = PLAN_SECTION;
+		}
 		return undefined;
 	});
 
@@ -1992,14 +2039,24 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_before_settle", async () => {
 		const why = d.unverified();
-		if (!why && AUTO && REVIEW && !reviewed && d.passing) {
-			// one review burst at the ceiling: the misses that remain are task rules the model never tested
+		if (!why && !REVIEW_OFF && (AUTO || REVIEW_ALWAYS) && !reviewed && d.passing) {
+			// one review turn: the misses that remain are task rules the model never tested. In dynamic mode
+			// it runs at the ceiling; at a fixed level it runs at that level.
 			reviewed = true;
-			reviewing = true;
-			if (burst) endBurst("final review");
-			pi.setThinkingLevel(AUTO as any);
-			log("review-burst", { to: AUTO });
+			reviewSeq = d.seq;
+			if (AUTO) {
+				reviewing = true;
+				if (burst) endBurst("final review");
+				pi.setThinkingLevel(AUTO as any);
+			}
+			log("review-burst", { to: AUTO || pi.getThinkingLevel() });
 			return { entries: [msg(REVIEW_TEXT)], continue: true };
+		}
+		if (!why && reviewed && !afterReviewNudged && !(d.lastExec > reviewSeq && d.passing)) {
+			// the review may have added tests; finishing needs a green run after it
+			afterReviewNudged = true;
+			log("after-review-nudge");
+			return { entries: [msg(AFTER_REVIEW_TEXT)], continue: true };
 		}
 		if (!why || verifyNudges >= MAX_VERIFY_NUDGES) return undefined;
 		verifyNudges++;
@@ -2031,7 +2088,7 @@ export default function (pi: ExtensionAPI) {
 		if (event.toolName === "bash" && /timed out/i.test(text)) log("bash-timeout");
 		const failing = d.toolResult(event.toolName, !!event.isError, text, String(event.input?.path ?? ""));
 		if (failing !== null) log("tests", { failing });
-		if (AUTO && !burst && bursts < MAX_BURSTS) {
+		if (AUTO && !burst && !planning && bursts < MAX_BURSTS) {
 			const trigger = d.trigger();
 			if (trigger) {
 				pi.setThinkingLevel(AUTO as any);
@@ -2045,6 +2102,15 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("turn_end", async (event: any) => {
 		d.turnEnd();
+		if (planning) {
+			planTurns++;
+			const wroteSource = content0(event).some((c: any) => c && c.type === "toolCall" && (c.name === "write" || c.name === "edit") && !TEST_PATH_RE.test(String(c.arguments?.path ?? "")));
+			if (wroteSource || planTurns >= PLAN_MAX_TURNS) {
+				planning = false;
+				if (!burst) pi.setThinkingLevel("off");
+				log("plan-done", { planTurns });
+			}
+		}
 		if (reviewing) {
 			// the review turn has been taken; back to off for whatever testing it triggers
 			reviewing = false;
@@ -2059,7 +2125,9 @@ export default function (pi: ExtensionAPI) {
 		if (burst) {
 			if (burst.goalPending) {
 				burst.goalPending = false;
-				entries.push(msg(`[lets-code] Thinking raised to ${AUTO} because: ${burst.trigger.why}. ${burst.trigger.goal} Then act with a tool call.`));
+				entries.push(msg(`[lets-code] Thinking raised to ${AUTO} because: ${burst.trigger.why}. ${burst.trigger.goal} ` +
+					"Use this thinking turn to reason it through: state your best hypothesis for the cause and what would confirm it, " +
+					"then confirm it by running code before you edit. Act with a tool call."));
 			} else {
 				burst.turns++;
 				if (d.passing) endBurst("tests pass");

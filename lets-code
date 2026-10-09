@@ -15,7 +15,9 @@
 #                                anthropic-messages | google-generative-ai
 #   lets-code --vision ...       model accepts images (default: auto-detected)
 #   lets-code --no-vision ...    force image input off (skips the probe)
-#   lets-code --thinking-level <l> startup thinking level, default: medium
+#   lets-code --thinking-level <l> thinking level, default: adaptive (medium until
+#                                pi's own tests pass, then off; bursts to high
+#                                when the output shows struggle)
 #                                (auto-detected when the resident model thinks);
 #                                auto[:<l>] is dynamic thinking: off, raised to
 #                                the ceiling <l> (default high) in short bursts
@@ -91,7 +93,7 @@ PROVIDER_ID="lets-code"          # fixed provider id we upsert into pi's files
 DEFAULT_CONTEXT=128000
 DEFAULT_OUTPUT_CAP=32768
 DEFAULT_API="openai-completions"
-DEFAULT_THINKING="medium"
+DEFAULT_THINKING="adaptive"
 
 VERBOSE=false
 LOG_PREFIX="[lets-code]"
@@ -1728,6 +1730,12 @@ pi_write_agentguard_extension() {
 //      thinking is dropped. pi replays all of it by default, which was about
 //      40% of the prompt by the end of a high-thinking session, so the model
 //      kept re-reading its own discarded hypotheses every turn.
+//  11. adaptive thinking (LETS_CODE_THINKING_BASE / LETS_CODE_THINKING_DOWN, set by
+//      lets-code's default `adaptive` level to medium / off): outside bursts the level
+//      rests at BASE while the task is unsolved and dials DOWN once the model's own
+//      tests pass (back to BASE if they fail again). Fixed medium wrote the strongest
+//      first drafts but kept thinking through verification; plain dynamic (rest at
+//      off) thought 5-40% as much but needed far more turns to converge.
 // Apart from that prompt section, nothing is added unless a rule acts.
 // LETS_CODE_AGENT_GUARD_LOG=<file> appends one JSON line per guard action.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -1735,6 +1743,11 @@ import { appendFileSync } from "node:fs";
 
 const ACTIVE = process.env.LETS_CODE_AGENT_GUARD_ON === "1";
 const AUTO = (process.env.LETS_CODE_THINKING_AUTO ?? "").trim();
+// adaptive thinking: the level to rest at while the task is unsolved (BASE) and once the model's own
+// tests pass (DOWN). Plain dynamic mode rests at off throughout; adaptive (lets-code's default) rests at
+// medium until the tests pass, then dials down to off, and bursts up to AUTO when it struggles.
+const BASE = (process.env.LETS_CODE_THINKING_BASE ?? "off").trim() || "off";
+const DOWN = (process.env.LETS_CODE_THINKING_DOWN ?? "off").trim() || "off";
 const BASH_TIMEOUT = Math.max(1, Number(process.env.LETS_CODE_BASH_TIMEOUT) || 300);
 const WRAP_TURNS = Math.max(1, Number(process.env.LETS_CODE_WRAP_TURNS) || 6);
 const WRAP_MS = Math.max(1, Number(process.env.LETS_CODE_WRAP_MINUTES) || 5) * 60_000;
@@ -2075,20 +2088,22 @@ export default function (pi: ExtensionAPI) {
 			appendFileSync(LOG, JSON.stringify({ t: Date.now(), turn: d.totalTurns, level: pi.getThinkingLevel(), event, ...detail }) + "\n");
 		} catch {}
 	};
+	// the level outside bursts, plans and reviews: down once the model's own tests pass, base otherwise
+	const restLevel = () => (d.passing ? DOWN : BASE);
 	const endBurst = (why: string) => {
-		pi.setThinkingLevel("off");
+		pi.setThinkingLevel(restLevel() as any);
 		log("deescalate", { why, burstTurns: burst?.turns ?? 0 });
 		burst = null;
 		d.reset();
 	};
 
 	pi.on("session_start", async () => {
-		if (AUTO && pi.getThinkingLevel() !== "off") pi.setThinkingLevel("off");
+		if (AUTO && pi.getThinkingLevel() !== BASE) pi.setThinkingLevel(BASE as any);
 		if (AUTO && PLAN) {
 			planning = true;
 			pi.setThinkingLevel(PLAN_LEVEL as any);
 		}
-		log("start", { auto: AUTO || null, bashTimeout: BASH_TIMEOUT, wrapTurns: WRAP_TURNS, wrapMinutes: WRAP_MS / 60_000, burstTurns: BURST_TURNS, maxBursts: MAX_BURSTS, replay: Number.isFinite(REPLAY) ? REPLAY : "all" });
+		log("start", { auto: AUTO || null, base: BASE, down: DOWN, bashTimeout: BASH_TIMEOUT, wrapTurns: WRAP_TURNS, wrapMinutes: WRAP_MS / 60_000, burstTurns: BURST_TURNS, maxBursts: MAX_BURSTS, replay: Number.isFinite(REPLAY) ? REPLAY : "all" });
 	});
 
 	pi.on("before_agent_start", async (event: any) => {
@@ -2156,6 +2171,14 @@ export default function (pi: ExtensionAPI) {
 		if (event.toolName === "bash" && /timed out/i.test(text)) log("bash-timeout");
 		const failing = d.toolResult(event.toolName, !!event.isError, text, String(event.input?.path ?? ""));
 		if (failing !== null) log("tests", { failing });
+		// dial between base and down as the model's own tests go red or green (adaptive mode)
+		if (AUTO && failing !== null && !burst && !planning && !reviewing && BASE !== DOWN) {
+			const want = restLevel();
+			if (pi.getThinkingLevel() !== want) {
+				pi.setThinkingLevel(want as any);
+				log("dial", { to: want, why: failing === 0 ? "tests pass" : `${failing} failing` });
+			}
+		}
 		// no bursts once the review has started: failures in tests the review adds are verification, not struggle
 		if (AUTO && !burst && !planning && !reviewed && bursts < MAX_BURSTS) {
 			const trigger = d.trigger();
@@ -2176,14 +2199,14 @@ export default function (pi: ExtensionAPI) {
 			const wroteSource = content0(event).some((c: any) => c && c.type === "toolCall" && (c.name === "write" || c.name === "edit") && !TEST_PATH_RE.test(String(c.arguments?.path ?? "")));
 			if (wroteSource || planTurns >= PLAN_MAX_TURNS) {
 				planning = false;
-				if (!burst) pi.setThinkingLevel("off");
+				if (!burst) pi.setThinkingLevel(restLevel() as any);
 				log("plan-done", { planTurns });
 			}
 		}
 		if (reviewing) {
-			// the review turn has been taken; back to off for whatever testing it triggers
+			// the review turn has been taken; back to rest for whatever testing it triggers
 			reviewing = false;
-			pi.setThinkingLevel("off");
+			pi.setThinkingLevel(restLevel() as any);
 			log("review-done");
 		}
 		const m = event.message ?? {};
@@ -2546,7 +2569,7 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
                 read -r thinking_level
                 thinking_level="${thinking_level:-${suggested}}"
                 case "${thinking_level}" in
-                    off|minimal|low|medium|high|xhigh|max|auto|auto:minimal|auto:low|auto:medium|auto:high|auto:xhigh|auto:max) ;;
+                    off|minimal|low|medium|high|xhigh|max|adaptive|adaptive:low|adaptive:medium|adaptive:high|adaptive:xhigh|adaptive:max|auto|auto:minimal|auto:low|auto:medium|auto:high|auto:xhigh|auto:max) ;;
                     *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max|auto[:<level>] (got: ${thinking_level})"; exit 1 ;;
                 esac ;;
             *)
@@ -2594,7 +2617,7 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
         # outside the call: bash 3.2 (macOS) cannot parse a case pattern's
         # ')' inside "$(...)" and prints a syntax error for it.
         local startup_level
-        case "${thinking_level}" in auto*) startup_level="off" ;; *) startup_level="${thinking_level}" ;; esac
+        case "${thinking_level}" in auto*) startup_level="off" ;; adaptive*) startup_level="medium" ;; *) startup_level="${thinking_level}" ;; esac
         pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${DEFAULT_OUTPUT_CAP}" "${vision_reg}" "${reasoning_reg}" "${startup_level}" "${EFFORT_MAP}"
         log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${DEFAULT_OUTPUT_CAP}, vision: ${vision_reg}, thinking: ${reasoning_reg}, level: ${thinking_level})"
     fi
@@ -2788,8 +2811,16 @@ THINKING="${THINKING_OVERRIDE:-${THINKING}}"
 # auto[:<ceiling>]: dynamic thinking. Start with thinking off; the agent
 # guard raises it to <ceiling> (default high) for a short burst when a
 # struggle signal fires, and drops it back as soon as the signal is resolved.
-THINKING_AUTO=""
+# adaptive[:<ceiling>] (the default): medium while the task is unsolved, off once
+# pi's own tests pass, bursts to <ceiling> (default high) on struggle signals.
+THINKING_AUTO=""; THINKING_BASE=""
 case "${THINKING}" in
+    adaptive)   THINKING_AUTO="high"; THINKING_BASE="medium"; THINKING="medium" ;;
+    adaptive:*) THINKING_AUTO="${THINKING#adaptive:}"; THINKING_BASE="medium"; THINKING="medium"
+                case "${THINKING_AUTO}" in
+                    low|medium|high|xhigh|max) ;;
+                    *) log_error "adaptive thinking needs a ceiling: adaptive:low|medium|high|xhigh|max (got: adaptive:${THINKING_AUTO})"; exit 1 ;;
+                esac ;;
     auto)   THINKING_AUTO="high"; THINKING="off" ;;
     auto:*) THINKING_AUTO="${THINKING#auto:}"; THINKING="off"
             case "${THINKING_AUTO}" in
@@ -2799,7 +2830,7 @@ case "${THINKING}" in
 esac
 case "${THINKING}" in
     off|minimal|low|medium|high|xhigh|max) ;;
-    *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max|auto[:<level>] (got: ${THINKING}) — set it via --thinking-level, LETS_CODE_THINKING, or THINKING= in ${CONFIG_FILE} (if present)."; exit 1 ;;
+    *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max|adaptive[:<ceiling>]|auto[:<level>] (got: ${THINKING}) — set it via --thinking-level, LETS_CODE_THINKING, or THINKING= in ${CONFIG_FILE} (if present)."; exit 1 ;;
 esac
 
 case "${CONTEXT}" in
@@ -2901,13 +2932,13 @@ case "${GG_MODE}" in
          GG_DESC="git guard: ${GG_BRANCH:-no pi/* branch yet}" ;;
 esac
 
-unset LETS_CODE_AGENT_GUARD_ON LETS_CODE_THINKING_AUTO
+unset LETS_CODE_AGENT_GUARD_ON LETS_CODE_THINKING_AUTO LETS_CODE_THINKING_BASE LETS_CODE_THINKING_DOWN
 THINKING_DESC="${THINKING}"
 case "$(printf '%s' "${AGENT_GUARD}" | tr '[:upper:]' '[:lower:]')" in
     false|no|0|off)
         AG_DESC="agent guard is off (disabled)"
         if [ -n "${THINKING_AUTO}" ]; then
-            log "note: auto thinking needs the agent guard; thinking stays off."
+            log "note: ${THINKING_BASE:+adaptive}${THINKING_BASE:-auto} thinking needs the agent guard; thinking stays at ${THINKING}."
             THINKING_AUTO=""
         fi ;;
     *)
@@ -2918,9 +2949,14 @@ esac
 if [ -n "${THINKING_AUTO}" ]; then
     if [ "${REASONING_SUPPORTED}" = true ]; then
         export LETS_CODE_THINKING_AUTO="${THINKING_AUTO}"
-        THINKING_DESC="auto (off; bursts to ${THINKING_AUTO} on struggle)"
+        if [ -n "${THINKING_BASE}" ]; then
+            export LETS_CODE_THINKING_BASE="${THINKING_BASE}" LETS_CODE_THINKING_DOWN="off"
+            THINKING_DESC="adaptive (${THINKING_BASE}; off once tests pass; bursts to ${THINKING_AUTO} on struggle)"
+        else
+            THINKING_DESC="auto (off; bursts to ${THINKING_AUTO} on struggle)"
+        fi
     else
-        log "note: auto thinking not applied — model not registered as a thinking model."
+        log "note: ${THINKING_BASE:+adaptive}${THINKING_BASE:-auto} thinking not applied — model not registered as a thinking model."
     fi
 fi
 

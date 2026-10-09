@@ -29,7 +29,7 @@ function check(name, got, want) {
 // Each load gets its own copy so module-level env reads see that load's env.
 let loads = 0;
 async function load(env) {
-	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_THINKING_REPLAY", "LETS_CODE_FINAL_REVIEW", "LETS_CODE_PLAN_BURST", "LETS_CODE_PLAN_LEVEL"]) delete process.env[k];
+	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_THINKING_REPLAY", "LETS_CODE_FINAL_REVIEW", "LETS_CODE_PLAN_BURST", "LETS_CODE_PLAN_LEVEL", "LETS_CODE_THINKING_BASE", "LETS_CODE_THINKING_DOWN"]) delete process.env[k];
 	Object.assign(process.env, env);
 	const f = join(work, `agentguard-${loads++}.ts`);
 	writeFileSync(f, src);
@@ -384,6 +384,42 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	await edit(h, "test_rules.py");
 	for (let i = 0; i < 4; i++) { bash(h, "python3 t.py"); await result(h, "bash", "Ran 14 tests\n\nFAILED (failures=3)", true); await edit(h, "calc.py"); }
 	check("after the review starts: no bursts", h.pi.level, "off");
+}
+
+// --- v9: adaptive thinking, resting at medium until the tests pass, off after, bursts to high
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium", LETS_CODE_THINKING_DOWN: "off" });
+	await h.emit("session_start", {});
+	check("adaptive: starts at base medium", h.pi.level, "medium");
+	await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	check("adaptive: own tests pass -> dial down to off", h.pi.level, "off");
+	await edit(h, "test_calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 12 tests\n\nFAILED (failures=1)", true);
+	check("adaptive: a new test fails -> back to medium", h.pi.level, "medium");
+	const hr = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium" });
+	await hr.emit("session_start", {});
+	bash(hr, "python3 t.py"); await result(hr, "bash", "Ran 9 tests\n\nOK");
+	await edit(hr, "calc.py");
+	bash(hr, "python3 t.py"); await result(hr, "bash", "Ran 9 tests\n\nFAILED (failures=2)", true);
+	check("adaptive: green then a source edit breaks it -> regression burst to high", hr.pi.level, "high");
+	await edit(h, "calc.py", false); await edit(h, "calc.py", false);
+	check("adaptive: struggle -> burst to high", h.pi.level, "high");
+	await turn(h); await edit(h, "calc.py"); await turn(h);
+	check("adaptive: burst resolved while failing -> back to medium, not off", h.pi.level, "medium");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	check("adaptive: green -> off", h.pi.level, "off");
+	await h.emit("agent_before_settle", {});
+	check("adaptive: review after a burst runs at the ceiling", h.pi.level, "high");
+	await turn(h);
+	check("adaptive: after the review -> rest level (off, tests green)", h.pi.level, "off");
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium" });
+	await h.emit("session_start", {});
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
+	check("adaptive, easy task: first run green -> off at once", h.pi.level, "off");
+	check("adaptive, easy task: no review without a burst", await h.emit("agent_before_settle", {}), undefined);
 }
 
 // --- verification means execution

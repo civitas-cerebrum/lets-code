@@ -456,6 +456,34 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("4 minutes after the wrap-up without a source change: firm stop", st2?.entries?.some((e) => /Stop now/.test(e.content)), true);
 }
 
+// --- v11: test detection for unusual output, 40-turn signal needs a recognised run
+{
+	const { mod } = await load({});
+	check("all inline tests passed", mod.testStatus("checking...\nall inline tests passed"), 0);
+	check("All 189 test assertions pass", mod.testStatus("All 189 test assertions pass"), 0);
+	check("all checks passed, 0 failures is still green", mod.testStatus("all 30 checks passed, failures=0"), 0);
+	check("all tests passed but 2 failed is not green", mod.testStatus("all tests passed except: 2 failed"), 2);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium" });
+	await h.emit("session_start", {});
+	bash(h, "cd /w && python3 test_jpath.py"); await result(h, "bash", "ran the suite\nlooks good: pass");
+	check("test file exits 0 with 'pass': green, dial down", h.pi.level, "off");
+	bash(h, "python3 test_jpath.py"); await result(h, "bash", "Traceback (most recent call last):\n  File \"test_jpath.py\", line 9\nAssertionError\n\nCommand exited with code 1", true);
+	check("test file ends in AssertionError: red, back to medium", h.pi.level, "medium");
+	bash(h, "python3 - <<'EOF'\nassert 1\nEOF"); await result(h, "bash", "pass");
+	check("ad-hoc heredoc is not a test run", h.pi.level, "medium");
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	for (let i = 0; i < 41; i++) await turn(h);
+	await result(h, "read", "file contents");
+	check("40 turns with no recognised test run: no burst", h.pi.level, "off");
+	bash(h, "python3 test_x.py"); await result(h, "bash", "Ran 4 tests\n\nFAILED (failures=1)", true);
+	check("after a recognised failing run, the 40-turn signal applies", h.pi.level, "high");
+}
+
 // --- verification means execution
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });

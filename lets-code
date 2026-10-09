@@ -1736,6 +1736,11 @@ pi_write_agentguard_extension() {
 //      tests pass (back to BASE if they fail again). Fixed medium wrote the strongest
 //      first drafts but kept thinking through verification; plain dynamic (rest at
 //      off) thought 5-40% as much but needed far more turns to converge.
+//  13. test detection also reads runs of a test file that print no known summary:
+//      exit 0 plus "pass" is green, an AssertionError is red; "40 turns without
+//      passing tests" waits for at least one recognised test run. In wave 10b the
+//      guard saw no test result in two sessions ("all inline tests passed"), so
+//      adaptive never dialed down and raised a false 40-turn burst.
 //  12. firm stop: if the model keeps calling tools for 6 turns or 4 minutes after the
 //      wrap-up note without changing any source file, it is told once to stop and
 //      summarise. In wave 10 an adaptive session solved its task at 9 minutes, got
@@ -1781,6 +1786,8 @@ const REVIEW_ALWAYS = ["on", "1", "true", "yes", "always"].includes(REVIEW_MODE)
 const EXEC_RE = /(^|[\s;&|(])(python3?|pytest|node|npm|npx|pnpm|yarn|bun|deno|go|cargo|make|ruby|rspec|java|mvn|gradle|dotnet|php|perl|bash|sh|\.\/[\w.\/-]+)(\s|$)/;
 const FAILURE_RE = /\b(FAIL(ED)?|MISMATCH|AssertionError|Traceback \(most recent call last\))\b/;
 const TEST_PATH_RE = /(^|[\/_.-])tests?([\/_.-]|$)/i;
+// a bash command that runs a test file or test runner (not an ad-hoc heredoc check)
+const TEST_RUN_RE = /(\bpytest\b|-m\s+(unittest|pytest)\b|\b[\w\/.-]*test[\w.-]*\.py\b)/i;
 
 const PROMPT_SECTION = [
 	"Working method (lets-code):",
@@ -1853,6 +1860,8 @@ function baseStatus(txt: string): number | null {
 	const nfail = (txt.match(/(^|\n)(FAIL|MISMATCH)[:\s]/g) ?? []).length;
 	if (nfail) return nfail;
 	if (/ALL (TESTS )?PASS|all tests passed|ALL OK|all checks passed/i.test(txt)) return 0;
+	// "all inline tests passed", "All 189 test assertions pass", "all 30 checks passed"
+	if (/\ball\b[\w ,-]{0,40}?\b(tests?|checks?|assertions?|cases?)\b[\w ]{0,15}?\bpass(ed|es)?\b/i.test(txt) && !/\bfail(ed|ures?)?\b(?![ \t]*[=:][ \t]*0)/i.test(txt)) return 0;
 	return null;
 }
 
@@ -1906,6 +1915,7 @@ export class Detector {
 	draftChecked = false;
 	lastTotal: number | null = null;
 	pendingExec = false;
+	lastCommand = "";
 	recentCalls: { sig: string; mutations: number }[] = [];
 	now: () => number;
 	constructor(now: () => number = () => Date.now()) {
@@ -1919,7 +1929,10 @@ export class Detector {
 		this.best = null;
 	}
 	toolCall(name: string, input: unknown): void {
-		if (name === "bash") this.pendingExec = EXEC_RE.test(String((input as any)?.command ?? ""));
+		if (name === "bash") {
+			this.lastCommand = String((input as any)?.command ?? "");
+			this.pendingExec = EXEC_RE.test(this.lastCommand);
+		}
 		const sig = name + ":" + JSON.stringify(input);
 		// identical call with no file change since: the model is going in circles
 		if (this.recentCalls.some((c) => c.sig === sig && c.mutations === this.mutations)) this.repeats++;
@@ -1927,7 +1940,13 @@ export class Detector {
 	}
 	/** Returns the failing-test count when the result was a test run. */
 	toolResult(name: string, isError: boolean, text: string, path = ""): number | null {
-		const failing = name === "bash" ? testStatus(text) : null;
+		let failing = name === "bash" ? testStatus(text) : null;
+		// a run of a test file with no recognisable summary: its exit status and output decide
+		// (seen in benchmark wave 10: "all inline tests passed", or a bare AssertionError traceback)
+		if (failing === null && name === "bash" && TEST_RUN_RE.test(this.lastCommand)) {
+			if (!isError && /\bpass(ed|es)?\b|\bOK\b/i.test(text) && !/\bFAIL|\bError\b/.test(text)) failing = 0;
+			else if (isError && /\bAssertionError\b/.test(text)) failing = 1;
+		}
 		this.seq++;
 		// a failing test run or a failing assertion script exits non-zero; that is progress tracking, not a tool error
 		const scriptSlip = name === "bash" && /File "<(stdin|string)>"/.test(text) && /\b(SyntaxError|IndentationError)\b/.test(text);
@@ -2031,7 +2050,7 @@ export class Detector {
 		if (this.errStreak >= 3) {
 			return { why: "3 tool errors in a row", goal: "Read the error text of the last three calls and change approach.", resolved: (d) => d.lastOkResult > seq };
 		}
-		if (this.turns >= 40) {
+		if (this.turns >= 40 && this.testRuns > 0) {
 			return { why: "40 turns without passing tests", goal: "Step back: list what is still failing and the simplest change that fixes it.", resolved: (d) => d.passing };
 		}
 		return null;

@@ -1949,7 +1949,9 @@ export class Detector {
 			return { why: "more tests fail after the last edit", goal: "Your last edit made more tests fail. Compare with the previous state and fix the regression first.", resolved: (d) => d.lastFailing !== null && d.lastFailing <= before };
 		}
 		if (this.noImprove >= 3) {
-			const stuck = this.best ?? 0;
+			// the count that keeps recurring is the latest one; best may be 0 from an earlier green run,
+			// which would make "fewer than best" unreachable and pin the burst to its turn cap
+			const stuck = this.lastFailing ?? this.best ?? 0;
 			return { why: `${stuck} test(s) still failing after 3 runs`, goal: `Diagnose why ${stuck} test(s) keep failing before editing again; verify the diagnosis by running code.`, resolved: (d) => d.lastFailing !== null && d.lastFailing < stuck };
 		}
 		if (this.errStreak >= 3) {

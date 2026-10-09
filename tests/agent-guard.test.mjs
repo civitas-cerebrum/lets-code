@@ -312,6 +312,21 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("syntax errors in test files: no burst", h.pi.level, "off");
 }
 
+// --- stuck-tests burst after an earlier green run must still be resolvable
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	await edit(h, "test_calc.py");
+	for (let i = 0; i < 4; i++) { bash(h, "python3 t.py"); await result(h, "bash", "Ran 12 tests\n\nFAILED (failures=2)", true); await edit(h, "calc.py"); }
+	check("stuck after an earlier green run: escalated", h.pi.level, "high");
+	const r = await turn(h);
+	check("goal names the real failing count", /2 test\(s\) still failing/.test(r?.entries?.[0]?.content ?? ""), true);
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 12 tests\n\nFAILED (failures=1)", true);
+	await turn(h);
+	check("fewer failures resolves it", h.pi.level, "off");
+}
+
 // --- verification means execution
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });

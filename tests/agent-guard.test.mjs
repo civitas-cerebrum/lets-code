@@ -29,7 +29,7 @@ function check(name, got, want) {
 // Each load gets its own copy so module-level env reads see that load's env.
 let loads = 0;
 async function load(env) {
-	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_THINKING_REPLAY", "LETS_CODE_FINAL_REVIEW", "LETS_CODE_PLAN_BURST"]) delete process.env[k];
+	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_THINKING_REPLAY", "LETS_CODE_FINAL_REVIEW", "LETS_CODE_PLAN_BURST", "LETS_CODE_PLAN_LEVEL"]) delete process.env[k];
 	Object.assign(process.env, env);
 	const f = join(work, `agentguard-${loads++}.ts`);
 	writeFileSync(f, src);
@@ -232,16 +232,22 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("default: context untouched", await h2.emit("context", { messages: msgs }), undefined);
 }
 
-// --- v6: final review burst, heredoc syntax errors ignored
+// --- v6/v8: final review (after a struggle), heredoc syntax errors ignored
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
 	await h.emit("session_start", {});
+	await edit(h, "calc.py", false); await edit(h, "calc.py", false);
+	check("struggle before the review: burst", h.pi.level, "high");
+	await turn(h);
 	await edit(h, "calc.py");
+	await turn(h);
+	check("burst resolved", h.pi.level, "off");
 	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
 	const r = await h.emit("agent_before_settle", {});
 	check("passing and verified at settle: review burst continues", r?.continue, true);
 	check("review raises thinking to the ceiling", h.pi.level, "high");
 	check("review asks for every rule with its executed test", /list every rule it states.*executed test that covers it/.test(r?.entries?.[0]?.content ?? ""), true);
+	check("review is verification only", /verification step, not a refactor.*check its expected value against the task/.test(r?.entries?.[0]?.content ?? ""), true);
 	await turn(h);
 	check("after the review turn: back to off", h.pi.level, "off");
 	const r2 = await h.emit("agent_before_settle", {});
@@ -286,12 +292,12 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_PLAN_BURST: "1" });
 	await h.emit("session_start", {});
-	check("plan burst: starts at the ceiling", h.pi.level, "high");
+	check("plan burst: starts at the bounded plan level", h.pi.level, "low");
 	const ev = { systemPromptOptions: { sections: {} } };
 	await h.emit("before_agent_start", ev);
 	check("plan burst: plan section added", /list every rule the task states/.test(ev.systemPromptOptions.sections.lets_code_plan ?? ""), true);
 	await turn(h, { content: [{ type: "toolCall", name: "read", arguments: { path: "spec.md" } }] });
-	check("plan burst: still up while reading", h.pi.level, "high");
+	check("plan burst: still on while reading", h.pi.level, "low");
 	await turn(h, { content: [{ type: "toolCall", name: "write", arguments: { path: "calc.py" } }] });
 	check("plan burst: off once source is written", h.pi.level, "off");
 	const h2 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_PLAN_BURST: "1" });
@@ -325,6 +331,59 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	bash(h, "python3 t.py"); await result(h, "bash", "Ran 12 tests\n\nFAILED (failures=1)", true);
 	await turn(h);
 	check("fewer failures resolves it", h.pi.level, "off");
+}
+
+// --- v8: early "draft broadly wrong" burst, review only after a struggle, no bursts after the review
+{
+	const { mod } = await load({});
+	check("total: unittest", mod.testTotal("Ran 12 tests in 0.1s\n\nFAILED (failures=7)"), 12);
+	check("total: n passed, m failed", mod.testTotal("5 passed, 7 failed"), 12);
+	check("total: pass/fail words", mod.testTotal("value tests: 130 pass, 1 fail"), 131);
+	check("total: unknown", mod.testTotal("FAIL: a\nFAIL: b"), null);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=6)", true);
+	check("first run with most tests failing: burst", h.pi.level, "high");
+	const hs = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await hs.emit("session_start", {});
+	bash(hs, "python3 t.py"); await result(hs, "bash", "Ran 6 tests\n\nFAILED (failures=4)", true);
+	check("small suite, 4 of 6 failing: no draft burst", hs.pi.level, "off");
+	const r = await turn(h);
+	check("draft goal says rethink the design", /6 of 10 tests fail on the first draft.*rewrite that part/.test(r?.entries?.[0]?.content ?? ""), true);
+	await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=2)", true);
+	await turn(h);
+	check("down to a quarter failing: resolved", h.pi.level, "off");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=8)", true);
+	check("draft burst fires once per session (no edit in between: no regression either)", h.pi.level, "off");
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=2)", true);
+	await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=7)", true);
+	check("a late jump to most failing is a regression, not a draft burst", h.pi.level, "high");
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 4 tests\n\nOK");
+	check("smooth session: no review", await h.emit("agent_before_settle", {}), undefined);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	await edit(h, "calc.py", false); await edit(h, "calc.py", false); await turn(h); await edit(h, "calc.py"); await turn(h);
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	await h.emit("agent_before_settle", {}); await turn(h);
+	await edit(h, "test_rules.py");
+	for (let i = 0; i < 4; i++) { bash(h, "python3 t.py"); await result(h, "bash", "Ran 14 tests\n\nFAILED (failures=3)", true); await edit(h, "calc.py"); }
+	check("after the review starts: no bursts", h.pi.level, "off");
 }
 
 // --- verification means execution

@@ -422,6 +422,40 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("adaptive, easy task: no review without a burst", await h.emit("agent_before_settle", {}), undefined);
 }
 
+// --- v10: firm stop after an ignored wrap-up
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2" });
+	await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
+	advance(3 * 60_000);
+	let w = null;
+	for (let i = 0; i < 5 && !w; i++) { const r = await turn(h); if (r?.entries?.some((e) => /finish now/.test(e.content))) w = r; }
+	check("wrap-up fires", !!w, true);
+	for (let i = 0; i < 5; i++) check(`no stop yet ${i}`, (await turn(h))?.entries?.some((e) => /Stop now/.test(e.content)) ?? false, false);
+	const st = await turn(h);
+	check("6 turns after the wrap-up without a source change: firm stop", st?.entries?.some((e) => /Stop now/.test(e.content)), true);
+	check("firm stop only once", (await turn(h))?.entries?.some((e) => /Stop now/.test(e.content)) ?? false, false);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2" });
+	await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
+	advance(3 * 60_000);
+	await turn(h); await turn(h); await turn(h);
+	await edit(h, "calc.py");
+	let stopped = false;
+	for (let i = 0; i < 6; i++) { const r = await turn(h); if (r?.entries?.some((e) => /Stop now/.test(e.content))) stopped = true; }
+	check("a source change after the wrap-up: no firm stop", stopped, false);
+	const h2 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2" });
+	await edit(h2, "calc.py");
+	bash(h2, "python3 t.py"); await result(h2, "bash", "Ran 5 tests\n\nOK");
+	advance(3 * 60_000);
+	await turn(h2); await turn(h2); await turn(h2);
+	advance(4 * 60_000);
+	const st2 = await turn(h2);
+	check("4 minutes after the wrap-up without a source change: firm stop", st2?.entries?.some((e) => /Stop now/.test(e.content)), true);
+}
+
 // --- verification means execution
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });

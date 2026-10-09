@@ -1779,6 +1779,9 @@ pi_write_agentguard_extension() {
 //      passing tests" waits for at least one recognised test run. In wave 10b the
 //      guard saw no test result in two sessions ("all inline tests passed"), so
 //      adaptive never dialed down and raised a false 40-turn burst.
+//  15. the firm stop never fires while the last executed command failed (incl. a syntax
+//      or indentation error): in wave 12 it told a model to stop right after its
+//      sed edit broke the file, and the session ended at 0/23 from 20/23.
 //  12. firm stop: if the model keeps calling tools for 6 turns or 4 minutes after the
 //      wrap-up note without changing any source file, it is told once to stop and
 //      summarise. In wave 10 an adaptive session solved its task at 9 minutes, got
@@ -1822,7 +1825,7 @@ const REVIEW_OFF = ["0", "off", "false", "no"].includes(REVIEW_MODE);
 const REVIEW_ALWAYS = ["on", "1", "true", "yes", "always"].includes(REVIEW_MODE);
 // a bash command that executes code, as opposed to reading or listing files
 const EXEC_RE = /(^|[\s;&|(])(python3?|pytest|node|npm|npx|pnpm|yarn|bun|deno|go|cargo|make|ruby|rspec|java|mvn|gradle|dotnet|php|perl|bash|sh|\.\/[\w.\/-]+)(\s|$)/;
-const FAILURE_RE = /\b(FAIL(ED)?|MISMATCH|AssertionError|Traceback \(most recent call last\))\b/;
+const FAILURE_RE = /\b(FAIL(ED)?|MISMATCH|AssertionError|SyntaxError|IndentationError|Traceback \(most recent call last\))\b/;
 const TEST_PATH_RE = /(^|[\/_.-])tests?([\/_.-]|$)/i;
 // a bash command that runs a test file or test runner (not an ad-hoc heredoc check)
 const TEST_RUN_RE = /(\bpytest\b|-m\s+(unittest|pytest)\b|\b[\w\/.-]*test[\w.-]*\.py\b)/i;
@@ -2326,7 +2329,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 		}
-		if (wrapNudged && !stopNudged && madeToolCall && d.lastSourceEdit === wrapSourceEdit &&
+		if (wrapNudged && !stopNudged && madeToolCall && d.lastSourceEdit === wrapSourceEdit && !d.lastExecFailed &&
 			(d.totalTurns - wrapTurn >= STOP_AFTER_TURNS || Date.now() - wrapAt >= STOP_AFTER_MS)) {
 			// the wrap-up was ignored and nothing has changed in the source since: the rest is re-checking
 			stopNudged = true;

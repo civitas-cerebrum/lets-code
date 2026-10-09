@@ -509,6 +509,21 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("settled again: low", h.pi.level, "low");
 }
 
+// --- v13: no firm stop right after a failed command
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2" });
+	await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
+	advance(3 * 60_000);
+	for (let i = 0; i < 4; i++) await turn(h);
+	bash(h, "python3 -c 'import calc'"); await result(h, "bash", '  File "/w/calc.py", line 218\n    return False\nIndentationError: unindent does not match\n\nCommand exited with code 1', true);
+	let stopped = false;
+	for (let i = 0; i < 8; i++) { const r = await turn(h); if (r?.entries?.some((e) => /Stop now/.test(e.content))) stopped = true; }
+	check("last command failed (IndentationError): no firm stop", stopped, false);
+	const st = await h.emit("agent_before_settle", {});
+	check("finishing right after the failure: failed-check continuation", /reported a failure/.test(st?.entries?.[0]?.content ?? ""), true);
+}
+
 // --- verification means execution
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });

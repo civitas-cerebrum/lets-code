@@ -470,7 +470,15 @@ def to_models(doc):
         # so image support must be declared explicitly for images to pass
         "input": ["text", "image"] if vision == "true" else ["text"],
     }
-    if reasoning == "true":
+    openrouter = "openrouter.ai" in base
+    if reasoning == "true" and openrouter:
+        # OpenRouter normalises thinking across providers with its own request
+        # field, reasoning: {effort}; pi sends it per request (effort "none" when
+        # thinking is off) in its openrouter mode. Chat-template kwargs and
+        # thinking_token_budget are vLLM/SGLang features and are not set here.
+        model_doc["reasoning"] = True
+        compat["thinkingFormat"] = "openrouter"
+    elif reasoning == "true":
         # pi only offers thinking levels for models that declare reasoning.
         # The chat-template kwargs map pi's level onto the server's chat
         # template variables (vLLM/SGLang pass chat_template_kwargs through;

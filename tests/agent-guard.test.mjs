@@ -393,7 +393,9 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("adaptive: starts at base medium", h.pi.level, "medium");
 	await edit(h, "calc.py");
 	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
-	check("adaptive: own tests pass -> dial down to off", h.pi.level, "off");
+	check("adaptive: first green run -> still medium until the work settles", h.pi.level, "medium");
+	await turn(h);
+	check("adaptive: a turn without source edits after green -> dial down to off", h.pi.level, "off");
 	await edit(h, "test_calc.py");
 	bash(h, "python3 t.py"); await result(h, "bash", "Ran 12 tests\n\nFAILED (failures=1)", true);
 	check("adaptive: a new test fails -> back to medium", h.pi.level, "medium");
@@ -408,7 +410,8 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	await turn(h); await edit(h, "calc.py"); await turn(h);
 	check("adaptive: burst resolved while failing -> back to medium, not off", h.pi.level, "medium");
 	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
-	check("adaptive: green -> off", h.pi.level, "off");
+	await turn(h);
+	check("adaptive: green and settled -> off", h.pi.level, "off");
 	await h.emit("agent_before_settle", {});
 	check("adaptive: review after a burst runs at the ceiling", h.pi.level, "high");
 	await turn(h);
@@ -418,7 +421,8 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium" });
 	await h.emit("session_start", {});
 	bash(h, "python3 t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
-	check("adaptive, easy task: first run green -> off at once", h.pi.level, "off");
+	await turn(h);
+	check("adaptive, easy task: green then a settled turn -> off", h.pi.level, "off");
 	check("adaptive, easy task: no review without a burst", await h.emit("agent_before_settle", {}), undefined);
 }
 
@@ -468,6 +472,7 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium" });
 	await h.emit("session_start", {});
 	bash(h, "cd /w && python3 test_jpath.py"); await result(h, "bash", "ran the suite\nlooks good: pass");
+	await turn(h);
 	check("test file exits 0 with 'pass': green, dial down", h.pi.level, "off");
 	bash(h, "python3 test_jpath.py"); await result(h, "bash", "Traceback (most recent call last):\n  File \"test_jpath.py\", line 9\nAssertionError\n\nCommand exited with code 1", true);
 	check("test file ends in AssertionError: red, back to medium", h.pi.level, "medium");
@@ -482,6 +487,26 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("40 turns with no recognised test run: no burst", h.pi.level, "off");
 	bash(h, "python3 test_x.py"); await result(h, "bash", "Ran 4 tests\n\nFAILED (failures=1)", true);
 	check("after a recognised failing run, the 40-turn signal applies", h.pi.level, "high");
+}
+
+// --- v12: dial down only once the work has settled after green; low as the adaptive down level
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium", LETS_CODE_THINKING_DOWN: "low" });
+	await h.emit("session_start", {});
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	await edit(h, "calc.py");
+	await turn(h);
+	check("green, then still editing source: stays medium", h.pi.level, "medium");
+	await turn(h);
+	check("next turn without source edits: dial down to low", h.pi.level, "low");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	await edit(h, "test_calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 11 tests\n\nFAILED (failures=1)", true);
+	check("red again: straight back to medium", h.pi.level, "medium");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	check("green again: re-armed, not yet down", h.pi.level, "medium");
+	await turn(h);
+	check("settled again: low", h.pi.level, "low");
 }
 
 // --- verification means execution

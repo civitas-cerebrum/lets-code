@@ -33,6 +33,7 @@
 #   lets-code --no-mem-guard     launch without the memory guard
 #   lets-code --no-git-guard     launch without the git guard
 #   lets-code --no-agent-guard   launch without the agent guard
+#   lets-code --no-session-tag   send no session tag with model requests
 #   lets-code --mandate [<m>]    mandate on, optionally in mode plan | auto |
 #                                ask | yolo | <role> (pi's own --mode is untouched)
 #   lets-code --no-mandate       launch without the mandate (modes) extension
@@ -74,6 +75,10 @@
 #      tests after several untested edits, requires executed checks (not
 #      reasoning) as verification, tells pi once to finish after its own
 #      tests have passed for a while, and runs the auto thinking level. Zero tokens unless a rule acts.
+#   9. session tag: every model request carries X-Lets-Code-Session:
+#      <host>:<project>:<random> (subagents add /sub<depth>.<pid>), also
+#      appended to the User-Agent, so a proxy's access log can tell
+#      sessions apart without reading any request content.
 #
 # Harness: pi is the default (and only v1) harness; --harness deepseek|codex
 # are roadmap items, not yet available.
@@ -98,7 +103,7 @@
 #                LETS_CODE_GIT_CHECKPOINTS (1|0),
 #                LETS_CODE_MANDATE (true|false), LETS_CODE_MODE, LETS_CODE_SUBAGENTS,
 #                LETS_CODE_SANDBOX (true|false), LETS_CODE_SUBAGENT_CONCURRENCY (2)
-#                LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
+#                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
 #                LETS_CODE_WRAP_TURNS (6), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
 #                LETS_CODE_BURST_TURNS (3), LETS_CODE_MAX_BURSTS (8), LETS_CODE_THINKING_REPLAY (all|<n>)
 #                LETS_CODE_FINAL_REVIEW (auto|on|0), LETS_CODE_PLAN_BURST (0|1), LETS_CODE_PLAN_LEVEL (low)
@@ -658,6 +663,58 @@ mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
             -p OOMPolicy=continue -- "$@"
     fi
     exec "$@"
+}
+
+# The pi extension that tags each model request with the session it came from
+# (LETS_CODE_SESSION_ID, set by lets-code at launch), so a proxy's access log
+# can tell concurrent sessions apart. Inert without it. Rewritten when its
+# content changes.
+pi_write_sessiontag_extension() {
+    local dir="${PI_AGENT_DIR}/extensions" f tmp
+    f="${dir}/lets-code-sessiontag.ts"
+    mkdir -p "${dir}"
+    tmp="$(mktemp "${dir}/.lets-code-sessiontag.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (session tag); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code with the session tag on
+// (LETS_CODE_SESSION_ID set). Every model request gets
+//   X-Lets-Code-Session: <host>:<project>:<random>[/sub<depth>.<pid>]
+// and the same tag appended to pi's User-Agent ("pi (...) lets-code/<tag>"),
+// which proxies log by default. A subagent (a child pi with
+// LETS_CODE_SUBAGENT_DEPTH > 0) adds its depth and pid so its calls are told
+// apart from the parent's. Only headers change; nothing reaches the model.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { arch, platform, release } from "node:os";
+
+const clean = (s: string) => s.replace(/[^A-Za-z0-9._:\/-]/g, "").slice(0, 96);
+
+export function sessionTag(env: Record<string, string | undefined> = process.env, pid = process.pid): string {
+	const base = clean(env.LETS_CODE_SESSION_ID ?? "");
+	if (!base) return "";
+	const depth = Number(env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
+	return depth > 0 ? clean(`${base}/sub${depth}.${pid}`) : base;
+}
+
+// pi's own default User-Agent; a provider that sets none gets this one.
+const PI_UA = `pi (${platform()} ${release()}; ${arch()})`;
+
+export function tagHeaders(headers: Record<string, string | null | undefined>, tag: string): void {
+	if (!tag) return;
+	headers["X-Lets-Code-Session"] = tag;
+	const key = Object.keys(headers).find((k) => k.toLowerCase() === "user-agent");
+	const ua = (key ? headers[key] : null) || PI_UA;
+	if (key && key !== "User-Agent") delete headers[key];
+	headers["User-Agent"] = ua.includes(" lets-code/") ? ua : `${ua} lets-code/${tag}`;
+}
+
+export default function (pi: ExtensionAPI) {
+	const tag = sessionTag();
+	if (!tag) return;
+	pi.on("before_provider_headers", (event) => { tagHeaders(event.headers as Record<string, string | null | undefined>, tag); });
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
 
 # The pi extension that IS the guard. Inert unless LETS_CODE_SESSION=1 (set by
@@ -3752,6 +3809,7 @@ THINKING=""
 MEM_GUARD="true"
 GIT_GUARD="true"
 AGENT_GUARD="true"
+SESSION_TAG="true"
 TEMPLATE_EFFORT="auto"
 MANDATE="false"
 MODE=""
@@ -3772,6 +3830,7 @@ THINKING="${LETS_CODE_THINKING:-${THINKING}}"
 MEM_GUARD="${LETS_CODE_MEM_GUARD:-${MEM_GUARD}}"
 GIT_GUARD="${LETS_CODE_GIT_GUARD:-${GIT_GUARD}}"
 AGENT_GUARD="${LETS_CODE_AGENT_GUARD:-${AGENT_GUARD}}"
+SESSION_TAG="${LETS_CODE_SESSION_TAG:-${SESSION_TAG}}"
 TEMPLATE_EFFORT="${LETS_CODE_TEMPLATE_EFFORT:-${TEMPLATE_EFFORT}}"
 MANDATE="${LETS_CODE_MANDATE:-${MANDATE}}"
 MODE="${LETS_CODE_MODE:-${MODE}}"
@@ -3812,6 +3871,7 @@ while [ $# -gt 0 ]; do
         --no-mem-guard) MEM_GUARD=false; shift ;;
         --no-git-guard) GIT_GUARD=false; shift ;;
         --no-agent-guard) AGENT_GUARD=false; shift ;;
+        --no-session-tag) SESSION_TAG=false; shift ;;
         --mandate)  MANDATE=true
                     case "${2:-}" in ""|-*) shift ;; *) MODE="$2"; shift 2 ;; esac ;;
         --no-mandate) MANDATE=false; shift ;;
@@ -4064,6 +4124,22 @@ if [ -n "${THINKING_AUTO}" ]; then
     fi
 fi
 
+# session tag: one id per launch, sent as a request header (see the extension)
+unset LETS_CODE_SESSION_ID
+SESSION_DESC=""
+case "$(printf '%s' "${SESSION_TAG}" | tr '[:upper:]' '[:lower:]')" in
+    false|no|0|off) ;;
+    *)
+        st_host="$(hostname 2>/dev/null || uname -n)"; st_host="${st_host%%.*}"
+        st_rand="$(od -An -N3 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+        [ -n "${st_rand}" ] || st_rand="$$"
+        LETS_CODE_SESSION_ID="$(printf '%s:%s:%s' "${st_host}" "$(basename "${PWD}")" "${st_rand}" \
+            | LC_ALL=C tr -c 'A-Za-z0-9._:-' '_' | cut -c1-80)"
+        export LETS_CODE_SESSION_ID
+        pi_write_sessiontag_extension
+        SESSION_DESC="session tag: ${LETS_CODE_SESSION_ID}" ;;
+esac
+
 # optional features: mandate (modes/roles), subagents, sandbox
 unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE
 FEAT_DESC=""
@@ -4091,7 +4167,7 @@ case "$(lc "${SANDBOX}")" in
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }sandbox: on${SB_NOTE:+ (${SB_NOTE})}" ;;
 esac
 
-log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING_DESC}  api: ${API}  ${MG_DESC}  ${GG_DESC}  ${AG_DESC}${FEAT_DESC:+  ${FEAT_DESC}}"
+log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING_DESC}  api: ${API}  ${MG_DESC}  ${GG_DESC}  ${AG_DESC}${FEAT_DESC:+  ${FEAT_DESC}}${SESSION_DESC:+  ${SESSION_DESC}}"
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
     mem_guard_exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
 else

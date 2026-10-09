@@ -31,7 +31,7 @@ mkdir -p "${agent}/extensions"
 python3 - "${root}/lets-code" > "${agent}/writers.sh" <<'PYX'
 import sys
 s = open(sys.argv[1]).read()
-for name in ("pi_write_gitguard_extension", "pi_write_memguard_extension", "pi_write_agentguard_extension", "pi_write_mandate_extension", "pi_write_subagent_extension", "pi_write_sandbox_extension"):
+for name in ("pi_write_gitguard_extension", "pi_write_memguard_extension", "pi_write_agentguard_extension", "pi_write_mandate_extension", "pi_write_subagent_extension", "pi_write_sandbox_extension", "pi_write_sessiontag_extension"):
     i = s.find("\n%s() {" % name)
     if i < 0:
         continue
@@ -46,7 +46,7 @@ PYX
     npm() { return 1; }     # the sandbox writer would install its runtime; not here
     SANDBOX_RUNTIME_VERSION="test"; SB_NOTE=""
     . "${agent}/writers.sh"
-    for f in pi_write_gitguard_extension pi_write_memguard_extension pi_write_agentguard_extension pi_write_mandate_extension pi_write_subagent_extension pi_write_sandbox_extension; do
+    for f in pi_write_gitguard_extension pi_write_memguard_extension pi_write_agentguard_extension pi_write_mandate_extension pi_write_subagent_extension pi_write_sandbox_extension pi_write_sessiontag_extension; do
         if declare -F "${f}" >/dev/null; then "${f}"; fi
     done
 ) || { echo "could not extract the extensions from lets-code"; exit 1; }
@@ -60,6 +60,7 @@ for t in "${here}"/*.test.mjs; do
         mandate*)                   ext="${agent}/extensions/lets-code-mandate.ts" ;;
         subagent*)                  ext="${agent}/extensions/lets-code-subagent.ts" ;;
         sandbox*)                   ext="${agent}/extensions/lets-code-sandbox/index.ts" ;;
+        session-tag*)               ext="${agent}/extensions/lets-code-sessiontag.ts" ;;
         *)                          ext="" ;;
     esac
     if [ -n "${ext}" ] && [ ! -f "${ext}" ]; then echo "=== $(basename "${t}"): skipped (no ${ext##*/} in this build)"; continue; fi

@@ -118,6 +118,52 @@ A hard thinking budget was once a fixed `samplingParams` value (half the
 output cap) for every level; Qwen3's template ignores the soft hint, so
 low, medium and high were the same configuration. pi's per-level budget is
 sent instead, via `compat.supportsThinkingTokenBudget`.
+## Optional features
+
+Off unless `lets-code setup full` / `granular` or the config turns them on,
+so the default setup behaves exactly as before. Each is a pi extension
+written like the guards, inert without its `LETS_CODE_*_ON` variable.
+
+**Mandate.** A role per session (the mode) or per subagent (`LETS_CODE_ROLE`
+from the agent file). Decisions are made in `tool_call`: tool allowlist,
+path scopes (symlink-resolved), bash command groups over a small shell lexer
+(operators, quotes, `sh -c`, `$(...)`, heredoc bodies as data, env/wrapper
+prefixes, redirection targets), MCP by server name, dispatch rights for the
+`subagent` tool. `ask` prompts through `ctx.ui.select` (once / session /
+deny) and blocks without a UI; denies are one line under 200 characters and
+go to a JSONL log. The design is kernel-mandate's manifest idea made cheap
+for pi: no role tags in prompts (the role travels in the environment of the
+child process lets-code spawns), no multi-paragraph denials, and no second
+enforcement layer; the sandbox is the binding boundary. Precedence: built-in
+roles, then `~/.pi/agent/mandate.json` (may add roles, change defaults),
+then `.pi/mandate.json` (tighten only: intersect lists, move allow → ask →
+deny, never bypass; read once the project is trusted). A broken manifest
+fails closed to the built-in roles. Mode changes are announced on
+`pi.events` (`lets-code:mode`) for the sandbox.
+
+**Subagents.** One `subagent` tool (single / parallel / chain), modelled on
+pi's example but with a short schema (the community packages measured 6k
+to 8k tokens per turn). Agent files: Markdown + YAML frontmatter in
+`~/.pi/agent/agents`, `.pi/agents`, `.agents/agents`. A child is `pi --mode
+json -p --no-session --provider lets-code --model <id> [--thinking]
+[--tools] --append-system-prompt <file> "Task: ..."` with
+`LETS_CODE_SUBAGENT_DEPTH` and `LETS_CODE_ROLE` in its environment, parsed
+from `message_end` events; concurrency 2 by default (one GPU); depth 1 (a
+child registers no tool, so it pays nothing for it); 50 KB output cap.
+
+**Sandbox.** The example extension's shape: `createBashTool(cwd,
+{operations})` with commands wrapped by `SandboxManager.wrapWithSandbox`,
+`user_bash` too. The runtime is a directory extension with its own
+`package.json`; lets-code pins the version and runs `npm install` when the
+installed one differs. Config merge: defaults, `~/.pi/agent/extensions/
+sandbox.json`, `.pi/sandbox.json`, then the active role (`network: off`
+empties the allowlist, `sandbox` overrides, `bypass` disables). Runtime and
+pi are imported lazily so the extension loads, warns and leaves bash alone
+when they are missing.
+
+**MCP.** Nothing to build: pi's `builtin:mcp` reads `~/.pi/agent/mcp.json`
+and `.pi/mcp.json`. Setup imports `mcpServers` entries from the standard
+files of other clients without overwriting names pi already has.
 
 ## Script layout
 
@@ -127,7 +173,10 @@ the pi config writer (`pi_write_configs`, python3); harness gate, pi
 install and tool prefetch (`ensure_pi`, `ensure_pi_tools`); onboarding
 (`run_setup`); the memory guard (`mem_guard_plan`, `mem_guard_exec`, the
 extension source); the git guard (launch logic and extension source); the
-agent guard extension source; main.
+agent guard extension source; the
+optional features (`pi_write_mandate_extension`,
+`pi_write_subagent_extension`, `write_default_agents`,
+`pi_write_sandbox_extension`, `mcp_import`, `mandate_init`); main.
 
 Portability: bash 3.2 (macOS) has no `pipefail` without a guard, cannot
 parse a `case` pattern inside `$(...)`, and `"${array[@]}"` on an empty

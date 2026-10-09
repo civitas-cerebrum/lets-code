@@ -29,7 +29,7 @@ function check(name, got, want) {
 // Each load gets its own copy so module-level env reads see that load's env.
 let loads = 0;
 async function load(env) {
-	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_THINKING_REPLAY"]) delete process.env[k];
+	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_THINKING_REPLAY", "LETS_CODE_FINAL_REVIEW"]) delete process.env[k];
 	Object.assign(process.env, env);
 	const f = join(work, `agentguard-${loads++}.ts`);
 	writeFileSync(f, src);
@@ -226,6 +226,46 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("context hook applies the window", r?.messages?.[1]?.content?.length, 1);
 	const h2 = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
 	check("default: context untouched", await h2.emit("context", { messages: msgs }), undefined);
+}
+
+// --- v6: final review burst, heredoc syntax errors ignored
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	const r = await h.emit("agent_before_settle", {});
+	check("passing and verified at settle: review burst continues", r?.continue, true);
+	check("review raises thinking to the ceiling", h.pi.level, "high");
+	check("review asks to re-read the task", /Re-read the original task statement rule by rule/.test(r?.entries?.[0]?.content ?? ""), true);
+	await turn(h);
+	check("after the review turn: back to off", h.pi.level, "off");
+	check("review only once", await h.emit("agent_before_settle", {}), undefined);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	await edit(h, "calc.py");
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=2)", true);
+	const r = await h.emit("agent_before_settle", {});
+	check("tests failing at settle: no review, failed-check nudge instead", /reported a failure/.test(r?.entries?.[0]?.content ?? ""), true);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
+	await edit(h, "calc.py"); bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	check("fixed level: no review burst", await h.emit("agent_before_settle", {}), undefined);
+	const h2 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_FINAL_REVIEW: "0" });
+	await edit(h2, "calc.py"); bash(h2, "python3 t.py"); await result(h2, "bash", "Ran 9 tests\n\nOK");
+	check("review disabled: settles", await h2.emit("agent_before_settle", {}), undefined);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	for (let i = 0; i < 3; i++) { bash(h, "python3 - <<'EOF'\nx(" + i + "\nEOF"); await result(h, "bash", '  File "<stdin>", line 1\n    x(\n     ^\nSyntaxError: unexpected EOF\n\nCommand exited with code 1', true); }
+	check("heredoc syntax errors: no burst", h.pi.level, "off");
+	await result(h, "bash", '  File "/w/calc.py", line 9\nSyntaxError: invalid syntax', true);
+	await result(h, "bash", '  File "/w/calc.py", line 12\nIndentationError: unexpected indent', true);
+	check("2 syntax errors in a real file: burst", h.pi.level, "high");
 }
 
 // --- verification means execution

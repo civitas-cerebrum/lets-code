@@ -29,7 +29,7 @@ function check(name, got, want) {
 // Each load gets its own copy so module-level env reads see that load's env.
 let loads = 0;
 async function load(env) {
-	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_THINKING_REPLAY", "LETS_CODE_FINAL_REVIEW"]) delete process.env[k];
+	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_THINKING_REPLAY", "LETS_CODE_FINAL_REVIEW", "LETS_CODE_PLAN_BURST"]) delete process.env[k];
 	Object.assign(process.env, env);
 	const f = join(work, `agentguard-${loads++}.ts`);
 	writeFileSync(f, src);
@@ -68,6 +68,9 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("FAIL lines", t("FAIL: a\nok b\nFAIL: c\n"), 2);
 	check("ALL PASS", t("checked 30 cases\nALL PASS"), 0);
 	check("not a test", t("Successfully wrote to calc.py"), null);
+	check("mixed summaries: the failure wins", t("value tests: 130 pass, 1 fail\nerror tests: 0 failures"), 1);
+	check("unittest line counts are not failures", t("Ran 9 tests in 0.1s\n\nFAILED (failures=4)"), 4);
+	check("no pass marker and no count: not a test", t("Traceback ...\nValueError: bad"), null);
 	check("key=value counters", t("ERROR MISMATCH x\nchecked=20000 failures=51 skipped=0"), 51);
 	check("key=value zero", t("checked=20000 failures=0 skipped=0"), 0);
 }
@@ -126,6 +129,7 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("two failed edits: jumps to the ceiling", h.pi.level, "high");
 	const r = await turn(h);
 	check("goal message on the next turn end", /Thinking raised to high because: 2 failed edits in a row/.test(r?.entries?.[0]?.content ?? ""), true);
+	check("goal message asks for a hypothesis confirmed by running code", /state your best hypothesis.*confirm it by running code/.test(r?.entries?.[0]?.content ?? ""), true);
 	check("goal message does not force a request", r?.continue, undefined);
 	await turn(h);
 	check("unresolved after 1 burst turn: still up", h.pi.level, "high");
@@ -237,10 +241,13 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	const r = await h.emit("agent_before_settle", {});
 	check("passing and verified at settle: review burst continues", r?.continue, true);
 	check("review raises thinking to the ceiling", h.pi.level, "high");
-	check("review asks to re-read the task", /Re-read the original task statement rule by rule/.test(r?.entries?.[0]?.content ?? ""), true);
+	check("review asks for every rule with its executed test", /list every rule it states.*executed test that covers it/.test(r?.entries?.[0]?.content ?? ""), true);
 	await turn(h);
 	check("after the review turn: back to off", h.pi.level, "off");
-	check("review only once", await h.emit("agent_before_settle", {}), undefined);
+	const r2 = await h.emit("agent_before_settle", {});
+	check("finishing after the review without a run: green-run nudge", /green run after the final review/.test(r2?.entries?.[0]?.content ?? ""), true);
+	bash(h, "python3 t.py"); await result(h, "bash", "Ran 12 tests\n\nOK");
+	check("green run after the review: settles, review only once", await h.emit("agent_before_settle", {}), undefined);
 }
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
@@ -253,7 +260,14 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
 	await edit(h, "calc.py"); bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
-	check("fixed level: no review burst", await h.emit("agent_before_settle", {}), undefined);
+	check("fixed level, review auto: no review", await h.emit("agent_before_settle", {}), undefined);
+	const h3 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_FINAL_REVIEW: "on" });
+	await edit(h3, "calc.py"); bash(h3, "python3 t.py"); await result(h3, "bash", "Ran 9 tests\n\nOK");
+	const r3 = await h3.emit("agent_before_settle", {});
+	check("fixed level, review on: review continues", r3?.continue, true);
+	check("fixed level, review on: level unchanged", h3.pi.level, "medium");
+	bash(h3, "python3 t.py"); await result(h3, "bash", "Ran 9 tests\n\nOK");
+	check("fixed level, review on: once", await h3.emit("agent_before_settle", {}), undefined);
 	const h2 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_FINAL_REVIEW: "0" });
 	await edit(h2, "calc.py"); bash(h2, "python3 t.py"); await result(h2, "bash", "Ran 9 tests\n\nOK");
 	check("review disabled: settles", await h2.emit("agent_before_settle", {}), undefined);
@@ -266,6 +280,36 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	await result(h, "bash", '  File "/w/calc.py", line 9\nSyntaxError: invalid syntax', true);
 	await result(h, "bash", '  File "/w/calc.py", line 12\nIndentationError: unexpected indent', true);
 	check("2 syntax errors in a real file: burst", h.pi.level, "high");
+}
+
+// --- v7: plan burst, test-file noise
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_PLAN_BURST: "1" });
+	await h.emit("session_start", {});
+	check("plan burst: starts at the ceiling", h.pi.level, "high");
+	const ev = { systemPromptOptions: { sections: {} } };
+	await h.emit("before_agent_start", ev);
+	check("plan burst: plan section added", /list every rule the task states/.test(ev.systemPromptOptions.sections.lets_code_plan ?? ""), true);
+	await turn(h, { content: [{ type: "toolCall", name: "read", arguments: { path: "spec.md" } }] });
+	check("plan burst: still up while reading", h.pi.level, "high");
+	await turn(h, { content: [{ type: "toolCall", name: "write", arguments: { path: "calc.py" } }] });
+	check("plan burst: off once source is written", h.pi.level, "off");
+	const h2 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_PLAN_BURST: "1" });
+	await h2.emit("session_start", {});
+	await turn(h2); await turn(h2);
+	check("plan burst: off after 2 turns at most", h2.pi.level, "off");
+	const h3 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h3.emit("session_start", {});
+	check("no plan burst by default", h3.pi.level, "off");
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
+	await h.emit("session_start", {});
+	await edit(h, "test_calc.py", false); await edit(h, "test_calc.py", false); await edit(h, "tests/test_x.py", false);
+	check("failed edits to test files: no burst", h.pi.level, "off");
+	await result(h, "bash", '  File "/w/test_calc.py", line 41\n    ("$[ \'store\' ].book[ 0 ]", [books[0]]]),\n                                        ^\nSyntaxError: closing parenthesis', true);
+	await result(h, "bash", '  File "/w/test3.py", line 9\nSyntaxError: invalid syntax', true);
+	check("syntax errors in test files: no burst", h.pi.level, "off");
 }
 
 // --- verification means execution

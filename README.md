@@ -93,6 +93,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--vision` / `--no-vision` | Pin image input instead of probing |
 | `--insecure` | Skip TLS verification |
 | `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` | Launch without a guard |
+| `--no-session-tag` | Send no session tag with model requests |
 | `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `yolo` or a role of yours |
 | `--subagents` / `--no-subagents` | The `subagent` tool |
 | `--sandbox` / `--no-sandbox` | The OS sandbox for bash |
@@ -373,6 +374,20 @@ limited to package registries and GitHub. Configure in
 as pi's sandbox example), or per mode through a role's `network` and
 `sandbox` keys. `/sandbox` shows what is in effect. Without the runtime or
 its system packages, bash runs as before and the launch line says so.
+
+</details>
+
+<details>
+<summary><b>Session tag</b></summary>
+
+Each launch picks an id, `<host>:<project>:<random>` (shown on the launch
+line), and every model request carries it as `X-Lets-Code-Session` and at the
+end of the User-Agent (`pi (...) lets-code/<id>`). Subagents add
+`/sub<depth>.<pid>`. A proxy in front of the model server can then tell
+concurrent sessions apart without reading request content: nginx's default
+`combined` log already records the User-Agent, or log the header itself with
+`$http_x_lets_code_session` in a `log_format`. Only headers change; nothing
+reaches the model. Off with `--no-session-tag` or `LETS_CODE_SESSION_TAG=false`.
 
 </details>
 

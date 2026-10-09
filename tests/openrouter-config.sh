@@ -16,4 +16,8 @@ PI_AGENT_DIR="$d/vllm" pi_write_configs http://192.168.0.114/vllm/v1 openai-comp
 m="$d/vllm/models.json"
 check "vllm: chat-template mode kept" "$(python3 -c "import json;print(json.load(open('$m'))['providers']['lets-code']['compat'].get('thinkingFormat'))")" chat-template
 check "vllm: effort variable kept" "$(python3 -c "import json;print('reasoning_effort' in json.load(open('$m'))['providers']['lets-code']['compat']['chatTemplateKwargs'])")" True
+LETS_CODE_OPENROUTER_PROVIDER=Alibaba PI_AGENT_DIR="$d/pin" pi_write_configs https://openrouter.ai/api/v1 openai-completions qwen/qwen3.8-27b 196608 32768 false true off
+m="$d/pin/models.json"
+check "openrouter: provider pinned without fallbacks" "$(python3 -c "import json;print(json.load(open('$m'))['providers']['lets-code']['compat'].get('openRouterRouting'))")" "{'order': ['Alibaba'], 'allow_fallbacks': False}"
+check "openrouter: no pin by default" "$(python3 -c "import json;print('openRouterRouting' in json.load(open('$d/or/models.json'))['providers']['lets-code']['compat'])")" False
 exit "$fail"

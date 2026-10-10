@@ -1831,6 +1831,9 @@ pi_write_agentguard_extension() {
 //      run, and (lets-code default) to low rather than off: in wave 11 visible
 //      tests went green 2-7 minutes before the last hidden fixes, and at off the
 //      model finished despite its own check printing a wrong sort order.
+//  15. only runs of the tests count (a test runner, or a file named like a test):
+//      failure counts printed by the model's own probe or fuzz scripts change no level
+//      and fire no signal; in wave 13 a fuzzer's "fails: 16" raised a false burst.
 //  13. test detection also reads runs of a test file that print no known summary:
 //      exit 0 plus "pass" is green, an AssertionError is red; "40 turns without
 //      passing tests" waits for at least one recognised test run. In wave 10b the
@@ -1885,7 +1888,8 @@ const EXEC_RE = /(^|[\s;&|(])(python3?|pytest|node|npm|npx|pnpm|yarn|bun|deno|go
 const FAILURE_RE = /\b(FAIL(ED)?|MISMATCH|AssertionError|SyntaxError|IndentationError|Traceback \(most recent call last\))\b/;
 const TEST_PATH_RE = /(^|[\/_.-])tests?([\/_.-]|$)/i;
 // a bash command that runs a test file or test runner (not an ad-hoc heredoc check)
-const TEST_RUN_RE = /(\bpytest\b|-m\s+(unittest|pytest)\b|\b[\w\/.-]*test[\w.-]*\.py\b)/i;
+// what counts as running the tests: a test runner, or a file named like a test
+export const TEST_RUN_RE = /(\bpytest\b|-m\s+(unittest|pytest)\b|\b[\w\/.-]*test[\w.-]*\.(py|[cm]?[jt]s|go|rb|sh)\b|\b(npm|yarn|pnpm|bun|deno|go|cargo|dotnet|mvn|gradle|mix|swift)\s+(run\s+)?test\b|\bmake\s+(test|check)\b|\b(jest|vitest|mocha|rspec|tox|nox|ctest|phpunit)\b|\bnode\s+--test\b|\b[\w\/.-]*\.(test|spec)\.[cm]?[jt]sx?\b)/i;
 
 const PROMPT_SECTION = [
 	"Working method (lets-code):",
@@ -2038,10 +2042,13 @@ export class Detector {
 	}
 	/** Returns the failing-test count when the result was a test run. */
 	toolResult(name: string, isError: boolean, text: string, path = ""): number | null {
-		let failing = name === "bash" ? testStatus(text) : null;
+		// only a run of the tests counts: "fails: 16" from the model's own probe or fuzz script is
+		// exploration, and counting it raised false struggle bursts (benchmark wave 13)
+		const testRun = name === "bash" && TEST_RUN_RE.test(this.lastCommand);
+		let failing = testRun ? testStatus(text) : null;
 		// a run of a test file with no recognisable summary: its exit status and output decide
 		// (seen in benchmark wave 10: "all inline tests passed", or a bare AssertionError traceback)
-		if (failing === null && name === "bash" && TEST_RUN_RE.test(this.lastCommand)) {
+		if (failing === null && testRun) {
 			if (!isError && /\bpass(ed|es)?\b|\bOK\b/i.test(text) && !/\bFAIL|\bError\b/.test(text)) failing = 0;
 			else if (isError && /\bAssertionError\b/.test(text)) failing = 1;
 		}

@@ -100,14 +100,14 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 // --- wrap-up: once, after tests pass for WRAP_TURNS turns; a failure resets the count
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "3" });
-	await result(h, "bash", "Ran 5 tests\n\nFAILED (failures=1)");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nFAILED (failures=1)");
 	for (let i = 0; i < 5; i++) check(`no wrap while failing ${i}`, await turn(h), undefined);
-	await result(h, "bash", "Ran 5 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
 	check("no wrap at pass+1", await turn(h), undefined);
 	check("no wrap at pass+2", await turn(h), undefined);
-	await result(h, "bash", "Ran 6 tests\n\nFAILED (failures=1)");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 6 tests\n\nFAILED (failures=1)");
 	check("failure resets", await turn(h), undefined);
-	await result(h, "bash", "Ran 6 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 6 tests\n\nOK");
 	await turn(h); await turn(h);
 	check("3 passing turns within 2 min: no wrap yet", await turn(h), undefined);
 	advance(2 * 60_000);
@@ -142,31 +142,31 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_BURST_TURNS: "3" });
 	await h.emit("session_start", {});
-	for (const f of [4, 4, 4, 4]) { bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=" + f + ")", true); await edit(h, "calc.py"); }
+	for (const f of [4, 4, 4, 4]) { bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=" + f + ")", true); await edit(h, "calc.py"); }
 	check("same failures 3 runs: escalated", h.pi.level, "high");
 	await turn(h); await turn(h); await turn(h);
 	check("not resolved by 3 turns: still up before the cap", h.pi.level, "high");
 	await turn(h);
 	check("3 burst turns: back to off", h.pi.level, "off");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=4)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=4)", true);
 	check("no new signal yet: stays off", h.pi.level, "off");
 }
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
 	await h.emit("session_start", {});
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=1)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=1)", true);
 	await edit(h, "calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=5)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=5)", true);
 	check("more failures after an edit: regression escalates", h.pi.level, "high");
 	await turn(h);
 	await edit(h, "calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=1)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=1)", true);
 	await turn(h);
 	check("failures back to the previous best: resolved", h.pi.level, "off");
 	// growth of the suite is not a regression: a test-file edit between the runs
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=1)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=1)", true);
 	await edit(h, "test_calc.py"); await edit(h, "calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 14 tests\n\nFAILED (failures=6)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 14 tests\n\nFAILED (failures=6)", true);
 	check("more failures after adding tests: not a regression", h.pi.level, "off");
 }
 {
@@ -180,9 +180,9 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "medium" });
 	await h.emit("session_start", {});
-	for (let i = 0; i < 4; i++) { bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=" + (4 - i) + ")", true); await edit(h, "calc.py"); }
+	for (let i = 0; i < 4; i++) { bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=" + (4 - i) + ")", true); await edit(h, "calc.py"); }
 	check("falling failures never escalate", h.pi.level, "off");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
 	await edit(h, "calc.py", false); await edit(h, "calc.py", false);
 	check("no escalation while tests pass", h.pi.level, "off");
 }
@@ -242,7 +242,7 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	await edit(h, "calc.py");
 	await turn(h);
 	check("burst resolved", h.pi.level, "off");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
 	const r = await h.emit("agent_before_settle", {});
 	check("passing and verified at settle: review burst continues", r?.continue, true);
 	check("review raises thinking to the ceiling", h.pi.level, "high");
@@ -252,30 +252,30 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("after the review turn: back to off", h.pi.level, "off");
 	const r2 = await h.emit("agent_before_settle", {});
 	check("finishing after the review without a run: green-run nudge", /green run after the final review/.test(r2?.entries?.[0]?.content ?? ""), true);
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 12 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 12 tests\n\nOK");
 	check("green run after the review: settles, review only once", await h.emit("agent_before_settle", {}), undefined);
 }
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
 	await h.emit("session_start", {});
 	await edit(h, "calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=2)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=2)", true);
 	const r = await h.emit("agent_before_settle", {});
 	check("tests failing at settle: no review, failed-check nudge instead", /reported a failure/.test(r?.entries?.[0]?.content ?? ""), true);
 }
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
-	await edit(h, "calc.py"); bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	await edit(h, "calc.py"); bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
 	check("fixed level, review auto: no review", await h.emit("agent_before_settle", {}), undefined);
 	const h3 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_FINAL_REVIEW: "on" });
-	await edit(h3, "calc.py"); bash(h3, "python3 t.py"); await result(h3, "bash", "Ran 9 tests\n\nOK");
+	await edit(h3, "calc.py"); bash(h3, "python3 test_t.py"); await result(h3, "bash", "Ran 9 tests\n\nOK");
 	const r3 = await h3.emit("agent_before_settle", {});
 	check("fixed level, review on: review continues", r3?.continue, true);
 	check("fixed level, review on: level unchanged", h3.pi.level, "medium");
-	bash(h3, "python3 t.py"); await result(h3, "bash", "Ran 9 tests\n\nOK");
+	bash(h3, "python3 test_t.py"); await result(h3, "bash", "Ran 9 tests\n\nOK");
 	check("fixed level, review on: once", await h3.emit("agent_before_settle", {}), undefined);
 	const h2 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_FINAL_REVIEW: "0" });
-	await edit(h2, "calc.py"); bash(h2, "python3 t.py"); await result(h2, "bash", "Ran 9 tests\n\nOK");
+	await edit(h2, "calc.py"); bash(h2, "python3 test_t.py"); await result(h2, "bash", "Ran 9 tests\n\nOK");
 	check("review disabled: settles", await h2.emit("agent_before_settle", {}), undefined);
 }
 {
@@ -322,13 +322,13 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
 	await h.emit("session_start", {});
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
 	await edit(h, "test_calc.py");
-	for (let i = 0; i < 4; i++) { bash(h, "python3 t.py"); await result(h, "bash", "Ran 12 tests\n\nFAILED (failures=2)", true); await edit(h, "calc.py"); }
+	for (let i = 0; i < 4; i++) { bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 12 tests\n\nFAILED (failures=2)", true); await edit(h, "calc.py"); }
 	check("stuck after an earlier green run: escalated", h.pi.level, "high");
 	const r = await turn(h);
 	check("goal names the real failing count", /2 test\(s\) still failing/.test(r?.entries?.[0]?.content ?? ""), true);
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 12 tests\n\nFAILED (failures=1)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 12 tests\n\nFAILED (failures=1)", true);
 	await turn(h);
 	check("fewer failures resolves it", h.pi.level, "off");
 }
@@ -345,44 +345,44 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
 	await h.emit("session_start", {});
 	await edit(h, "calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=6)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=6)", true);
 	check("first run with most tests failing: burst", h.pi.level, "high");
 	const hs = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
 	await hs.emit("session_start", {});
-	bash(hs, "python3 t.py"); await result(hs, "bash", "Ran 6 tests\n\nFAILED (failures=4)", true);
+	bash(hs, "python3 test_t.py"); await result(hs, "bash", "Ran 6 tests\n\nFAILED (failures=4)", true);
 	check("small suite, 4 of 6 failing: no draft burst", hs.pi.level, "off");
 	const r = await turn(h);
 	check("draft goal says rethink the design", /6 of 10 tests fail on the first draft.*rewrite that part/.test(r?.entries?.[0]?.content ?? ""), true);
 	await edit(h, "calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=2)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=2)", true);
 	await turn(h);
 	check("down to a quarter failing: resolved", h.pi.level, "off");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=8)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=8)", true);
 	check("draft burst fires once per session (no edit in between: no regression either)", h.pi.level, "off");
 }
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
 	await h.emit("session_start", {});
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=2)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=2)", true);
 	await edit(h, "calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=7)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 10 tests\n\nFAILED (failures=7)", true);
 	check("a late jump to most failing is a regression, not a draft burst", h.pi.level, "high");
 }
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
 	await h.emit("session_start", {});
 	await edit(h, "calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 4 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 4 tests\n\nOK");
 	check("smooth session: no review", await h.emit("agent_before_settle", {}), undefined);
 }
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high" });
 	await h.emit("session_start", {});
 	await edit(h, "calc.py", false); await edit(h, "calc.py", false); await turn(h); await edit(h, "calc.py"); await turn(h);
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
 	await h.emit("agent_before_settle", {}); await turn(h);
 	await edit(h, "test_rules.py");
-	for (let i = 0; i < 4; i++) { bash(h, "python3 t.py"); await result(h, "bash", "Ran 14 tests\n\nFAILED (failures=3)", true); await edit(h, "calc.py"); }
+	for (let i = 0; i < 4; i++) { bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 14 tests\n\nFAILED (failures=3)", true); await edit(h, "calc.py"); }
 	check("after the review starts: no bursts", h.pi.level, "off");
 }
 
@@ -392,24 +392,24 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	await h.emit("session_start", {});
 	check("adaptive: starts at base medium", h.pi.level, "medium");
 	await edit(h, "calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
 	check("adaptive: first green run -> still medium until the work settles", h.pi.level, "medium");
 	await turn(h);
 	check("adaptive: a turn without source edits after green -> dial down to off", h.pi.level, "off");
 	await edit(h, "test_calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 12 tests\n\nFAILED (failures=1)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 12 tests\n\nFAILED (failures=1)", true);
 	check("adaptive: a new test fails -> back to medium", h.pi.level, "medium");
 	const hr = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium" });
 	await hr.emit("session_start", {});
-	bash(hr, "python3 t.py"); await result(hr, "bash", "Ran 9 tests\n\nOK");
+	bash(hr, "python3 test_t.py"); await result(hr, "bash", "Ran 9 tests\n\nOK");
 	await edit(hr, "calc.py");
-	bash(hr, "python3 t.py"); await result(hr, "bash", "Ran 9 tests\n\nFAILED (failures=2)", true);
+	bash(hr, "python3 test_t.py"); await result(hr, "bash", "Ran 9 tests\n\nFAILED (failures=2)", true);
 	check("adaptive: green then a source edit breaks it -> regression burst to high", hr.pi.level, "high");
 	await edit(h, "calc.py", false); await edit(h, "calc.py", false);
 	check("adaptive: struggle -> burst to high", h.pi.level, "high");
 	await turn(h); await edit(h, "calc.py"); await turn(h);
 	check("adaptive: burst resolved while failing -> back to medium, not off", h.pi.level, "medium");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
 	await turn(h);
 	check("adaptive: green and settled -> off", h.pi.level, "off");
 	await h.emit("agent_before_settle", {});
@@ -420,7 +420,7 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium" });
 	await h.emit("session_start", {});
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
 	await turn(h);
 	check("adaptive, easy task: green then a settled turn -> off", h.pi.level, "off");
 	check("adaptive, easy task: no review without a burst", await h.emit("agent_before_settle", {}), undefined);
@@ -430,7 +430,7 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2" });
 	await edit(h, "calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
 	advance(3 * 60_000);
 	let w = null;
 	for (let i = 0; i < 5 && !w; i++) { const r = await turn(h); if (r?.entries?.some((e) => /finish now/.test(e.content))) w = r; }
@@ -443,7 +443,7 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2" });
 	await edit(h, "calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
 	advance(3 * 60_000);
 	await turn(h); await turn(h); await turn(h);
 	await edit(h, "calc.py");
@@ -452,7 +452,7 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("a source change after the wrap-up: no firm stop", stopped, false);
 	const h2 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2" });
 	await edit(h2, "calc.py");
-	bash(h2, "python3 t.py"); await result(h2, "bash", "Ran 5 tests\n\nOK");
+	bash(h2, "python3 test_t.py"); await result(h2, "bash", "Ran 5 tests\n\nOK");
 	advance(3 * 60_000);
 	await turn(h2); await turn(h2); await turn(h2);
 	advance(4 * 60_000);
@@ -493,17 +493,17 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium", LETS_CODE_THINKING_DOWN: "low" });
 	await h.emit("session_start", {});
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
 	await edit(h, "calc.py");
 	await turn(h);
 	check("green, then still editing source: stays medium", h.pi.level, "medium");
 	await turn(h);
 	check("next turn without source edits: dial down to low", h.pi.level, "low");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
 	await edit(h, "test_calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 11 tests\n\nFAILED (failures=1)", true);
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 11 tests\n\nFAILED (failures=1)", true);
 	check("red again: straight back to medium", h.pi.level, "medium");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
 	check("green again: re-armed, not yet down", h.pi.level, "medium");
 	await turn(h);
 	check("settled again: low", h.pi.level, "low");
@@ -513,7 +513,7 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2" });
 	await edit(h, "calc.py");
-	bash(h, "python3 t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
 	advance(3 * 60_000);
 	for (let i = 0; i < 4; i++) await turn(h);
 	bash(h, "python3 -c 'import calc'"); await result(h, "bash", '  File "/w/calc.py", line 218\n    return False\nIndentationError: unindent does not match\n\nCommand exited with code 1', true);
@@ -555,6 +555,28 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("last executed check failed: continuation", /reported a failure/.test(r?.entries?.[0]?.content ?? ""), true);
 	bash(h, "python3 test_calc.py"); await result(h, "bash", "Ran 4 tests\n\nOK");
 	check("rerun passes: settles", await h.emit("agent_before_settle", {}), undefined);
+}
+
+// --- v14: only test runs count; probe/fuzz output changes nothing
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium", LETS_CODE_THINKING_DOWN: "low" });
+	await edit(h, "calc.py"); bash(h, "python3 test_calc.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	await turn(h); await turn(h);
+	check("v14: green and settled -> low", h.pi.level, "low");
+	bash(h, "python3 fuzz_diff.py"); await result(h, "bash", "done, fails: 16");
+	await turn(h);
+	check("v14: fuzz 'fails: 16' after green: no escalation, stays low", h.pi.level, "low");
+	bash(h, "python3 probe.py"); await result(h, "bash", "FAIL: x\nFAIL: y\nFAIL: z");
+	await turn(h);
+	check("v14: probe FAIL lines: stays low", h.pi.level, "low");
+	bash(h, "cd w && python3 -m pytest -q | tail -3"); await result(h, "bash", "2 failed, 7 passed in 0.1s", true);
+	await turn(h);
+	check("v14: a real test run still counts (back to medium)", h.pi.level !== "low", true);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
+	for (const c of ["npm test", "npm run test", "go test ./...", "cargo test", "make check", "npx vitest run", "node --test", "bun test", "python3 tests/test_api.py", "node calc.test.mjs", "bash test.sh"])
+		check(`v14: test command recognised: ${c}`, h.mod.TEST_RUN_RE.test(c), true);
 }
 
 rmSync(work, { recursive: true, force: true });

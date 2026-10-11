@@ -81,6 +81,7 @@ lets-code                         # interactive session
 lets-code -p "fix the failing test"   # one-shot; unknown args go to pi
 lets-code --model other-id        # pin something for one launch
 lets-code --openrouter            # a saved preset (see Presets below)
+lets-code update                  # latest release from npm (--snapshot: latest main)
 lets-code --thinking-level low    # quieter model
 lets-code --no-git-guard          # you know what you're doing
 ```
@@ -128,6 +129,24 @@ config key can be added to a preset to override it. Environment variables and
 flags still win. Each preset registers with pi as its own provider,
 `lets-code-<name>`, so two sessions on different presets never rewrite each
 other's backend. Names can't shadow a lets-code or pi option.
+
+</details>
+
+<details>
+<summary><b>Updating</b></summary>
+
+```bash
+lets-code update             # the latest release published to npm
+lets-code update --snapshot  # the latest commit on main
+lets-code --version          # what you have: a release, main-<commit>, or dev
+```
+
+An npm install is updated with `npm install -g`. A copied script (what
+setup installs into `~/.local/bin` or `/usr/local/bin`) is replaced in place:
+the release tarball is checked against the registry's sha512, a snapshot is
+pinned to the commit it was read at, and the download must parse as bash
+before it replaces the old file. A git checkout is left to `git pull`.
+Extensions and themes are rewritten on the next launch.
 
 </details>
 

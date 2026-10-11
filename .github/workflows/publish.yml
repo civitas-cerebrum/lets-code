@@ -31,7 +31,11 @@ jobs:
         run: tests/run.sh
 
       - name: 🔖  Version from the release tag
-        run: npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
+        run: |
+          npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
+          # `lets-code --version` and `lets-code update` read this line
+          sed -i 's/^LETS_CODE_VERSION=.*/LETS_CODE_VERSION="'"${GITHUB_REF_NAME#v}"'"/' lets-code
+          grep -q '^LETS_CODE_VERSION="'"${GITHUB_REF_NAME#v}"'"$' lets-code
 
       # No dependencies to install: the package is one bash script.
       # --ignore-scripts skips the package's own postinstall on the runner.

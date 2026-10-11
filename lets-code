@@ -456,6 +456,9 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 #                    + enableInstallTelemetry = false when the key is absent
 #                    (pi defaults it to true and pings pi.dev on first start;
 #                    an explicit true/false already in the file is kept)
+#                    + theme = "lets-code-pastel" when the key is absent
+#                    (a theme the user picked, "system" included, is kept)
+#   themes/lets-code-{soft,pastel,chalk}.json -> see pi_write_themes
 # The token is never written to disk: apiKey points at $LETS_CODE_TOKEN (pi's
 # $ENV interpolation), exported at launch — the secret stays in
 # ~/.config/lets-code/config (mode 600). Writes are atomic (tmp + rename),
@@ -576,6 +579,10 @@ def to_settings(doc):
     doc["compaction"] = compaction
     # install telemetry off by default; a value the user set stays as is
     doc.setdefault("enableInstallTelemetry", False)
+    # a fixed palette looks the same in every terminal, tmux and over ssh;
+    # pi's "system" theme follows whatever the terminal reports, or falls
+    # back to bare ANSI colors when it reports nothing in time
+    doc.setdefault("theme", "lets-code-pastel")
     if reasoning == "true":
         # pi's per-model startup thinking level (global default is "medium")
         levels = doc.get("modelThinkingLevels")
@@ -596,6 +603,268 @@ def to_settings(doc):
 upsert(os.path.join(agent_dir, "models.json"), to_models)
 upsert(os.path.join(agent_dir, "settings.json"), to_settings)
 PY
+}
+
+# ------------------------------------------------------------------ themes
+# Pastel versions of pi's built-in dark theme: the same hue for every role,
+# with saturation lowered and lightness raised a step further each time
+# (soft, pastel, chalk). Panel backgrounds keep their depth with calmer tints;
+# text and muted greys are pi's own, so contrast holds. Selected through the
+# "theme" setting (default lets-code-pastel, see pi_write_configs) or /settings.
+# Rewritten when their content changes; pi hot-reloads the active one.
+pi_write_themes() {
+    local dir="${PI_AGENT_DIR}/themes" name tmp
+    mkdir -p "${dir}"
+    for name in soft pastel chalk; do
+        tmp="$(mktemp "${dir}/.lets-code-${name}.XXXXXX")"
+        case "${name}" in
+            soft) cat > "${tmp}" <<'JSON'
+{
+	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"name": "lets-code-soft",
+	"appearance": "dark",
+	"vars": {
+		"text": "okhsl(234 3% 89%)",
+		"muted": "okhsl(229 6% 67%)",
+		"violet": "okhsl(295 42% 73%)",
+		"blue": "okhsl(232 46% 73%)",
+		"green": "okhsl(159 50% 73%)",
+		"red": "okhsl(20 61% 73%)",
+		"yellow": "okhsl(83 75% 73%)",
+		"blueBg": "okhsl(233 33% 24%)"
+	},
+	"colors": {
+		"accent": "violet",
+		"border": "okhsl(231 48% 71%)",
+		"borderAccent": "okhsl(295 45% 70%)",
+		"borderMuted": "okhsl(229 8% 53%)",
+		"success": "green",
+		"error": "red",
+		"warning": "yellow",
+		"muted": "muted",
+		"dim": "okhsl(229 8% 56%)",
+		"text": "text",
+		"thinkingText": "okhsl(226 7% 65%)",
+		"selectedBg": "blueBg",
+		"scrollbarTrack": "okhsl(237 6% 33%)",
+		"scrollbarThumb": "okhsl(232 7% 65%)",
+		"searchMatchBg": "okhsl(53 41% 24%)",
+		"searchMatchText": "muted",
+		"userMessageBg": "blueBg",
+		"userMessageText": "text",
+		"customMessageBg": "okhsl(295 34% 24%)",
+		"customMessageText": "muted",
+		"customMessageLabel": "violet",
+		"toolPendingBg": "okhsl(229 4% 24%)",
+		"toolSuccessBg": "okhsl(158 37% 25%)",
+		"toolErrorBg": "okhsl(19 43% 25%)",
+		"toolTitle": "text",
+		"toolOutput": "muted",
+		"mdHeading": "yellow",
+		"mdLink": "blue",
+		"mdLinkUrl": "muted",
+		"mdCode": "violet",
+		"mdCodeBlock": "green",
+		"mdCodeBlockBorder": "muted",
+		"mdQuote": "muted",
+		"mdQuoteBorder": "muted",
+		"mdHr": "muted",
+		"mdListBullet": "violet",
+		"toolDiffAdded": "green",
+		"toolDiffRemoved": "red",
+		"toolDiffContext": "muted",
+		"syntaxComment": "muted",
+		"syntaxKeyword": "blue",
+		"syntaxFunction": "yellow",
+		"syntaxVariable": "okhsl(202 49% 73%)",
+		"syntaxString": "okhsl(52 57% 73%)",
+		"syntaxNumber": "green",
+		"syntaxType": "violet",
+		"syntaxOperator": "muted",
+		"syntaxPunctuation": "muted",
+		"thinkingOff": "okhsl(229 8% 49%)",
+		"thinkingMinimal": "okhsl(232 17% 61%)",
+		"thinkingLow": "okhsl(232 38% 62%)",
+		"thinkingMedium": "okhsl(263 50% 64%)",
+		"thinkingHigh": "okhsl(295 62% 66%)",
+		"thinkingXhigh": "okhsl(337 69% 68%)",
+		"thinkingMax": "okhsl(20 84% 70%)",
+		"bashMode": "okhsl(159 54% 71%)"
+	},
+	"export": {
+		"pageBg": "okhsl(262 11% 16%)",
+		"cardBg": "okhsl(264 10% 19%)",
+		"infoBg": "okhsl(53 41% 24%)"
+	}
+}
+JSON
+            ;;
+            pastel) cat > "${tmp}" <<'JSON'
+{
+	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"name": "lets-code-pastel",
+	"appearance": "dark",
+	"vars": {
+		"text": "okhsl(234 3% 89%)",
+		"muted": "okhsl(229 6% 67%)",
+		"violet": "okhsl(295 36% 78%)",
+		"blue": "okhsl(232 39% 78%)",
+		"green": "okhsl(159 42% 78%)",
+		"red": "okhsl(20 52% 78%)",
+		"yellow": "okhsl(83 63% 78%)",
+		"blueBg": "okhsl(233 27% 24%)"
+	},
+	"colors": {
+		"accent": "violet",
+		"border": "okhsl(231 41% 77%)",
+		"borderAccent": "okhsl(295 38% 76%)",
+		"borderMuted": "okhsl(229 8% 53%)",
+		"success": "green",
+		"error": "red",
+		"warning": "yellow",
+		"muted": "muted",
+		"dim": "okhsl(229 8% 56%)",
+		"text": "text",
+		"thinkingText": "okhsl(226 7% 65%)",
+		"selectedBg": "blueBg",
+		"scrollbarTrack": "okhsl(237 5% 33%)",
+		"scrollbarThumb": "okhsl(232 7% 65%)",
+		"searchMatchBg": "okhsl(53 33% 24%)",
+		"searchMatchText": "muted",
+		"userMessageBg": "blueBg",
+		"userMessageText": "text",
+		"customMessageBg": "okhsl(295 27% 24%)",
+		"customMessageText": "muted",
+		"customMessageLabel": "violet",
+		"toolPendingBg": "okhsl(229 3% 24%)",
+		"toolSuccessBg": "okhsl(158 30% 25%)",
+		"toolErrorBg": "okhsl(19 35% 25%)",
+		"toolTitle": "text",
+		"toolOutput": "muted",
+		"mdHeading": "yellow",
+		"mdLink": "blue",
+		"mdLinkUrl": "muted",
+		"mdCode": "violet",
+		"mdCodeBlock": "green",
+		"mdCodeBlockBorder": "muted",
+		"mdQuote": "muted",
+		"mdQuoteBorder": "muted",
+		"mdHr": "muted",
+		"mdListBullet": "violet",
+		"toolDiffAdded": "green",
+		"toolDiffRemoved": "red",
+		"toolDiffContext": "muted",
+		"syntaxComment": "muted",
+		"syntaxKeyword": "blue",
+		"syntaxFunction": "yellow",
+		"syntaxVariable": "okhsl(202 42% 78%)",
+		"syntaxString": "okhsl(52 48% 78%)",
+		"syntaxNumber": "green",
+		"syntaxType": "violet",
+		"syntaxOperator": "muted",
+		"syntaxPunctuation": "muted",
+		"thinkingOff": "okhsl(229 8% 49%)",
+		"thinkingMinimal": "okhsl(232 14% 68%)",
+		"thinkingLow": "okhsl(232 32% 70%)",
+		"thinkingMedium": "okhsl(263 42% 71%)",
+		"thinkingHigh": "okhsl(295 53% 73%)",
+		"thinkingXhigh": "okhsl(337 58% 74%)",
+		"thinkingMax": "okhsl(20 71% 76%)",
+		"bashMode": "okhsl(159 46% 77%)"
+	},
+	"export": {
+		"pageBg": "okhsl(262 9% 16%)",
+		"cardBg": "okhsl(264 8% 19%)",
+		"infoBg": "okhsl(53 33% 24%)"
+	}
+}
+JSON
+            ;;
+            chalk) cat > "${tmp}" <<'JSON'
+{
+	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"name": "lets-code-chalk",
+	"appearance": "dark",
+	"vars": {
+		"text": "okhsl(234 3% 89%)",
+		"muted": "okhsl(229 6% 67%)",
+		"violet": "okhsl(295 28% 84%)",
+		"blue": "okhsl(232 30% 84%)",
+		"green": "okhsl(159 32% 84%)",
+		"red": "okhsl(20 40% 84%)",
+		"yellow": "okhsl(83 48% 84%)",
+		"blueBg": "okhsl(233 20% 24%)"
+	},
+	"colors": {
+		"accent": "violet",
+		"border": "okhsl(231 31% 82%)",
+		"borderAccent": "okhsl(295 29% 82%)",
+		"borderMuted": "okhsl(229 8% 53%)",
+		"success": "green",
+		"error": "red",
+		"warning": "yellow",
+		"muted": "muted",
+		"dim": "okhsl(229 8% 56%)",
+		"text": "text",
+		"thinkingText": "okhsl(226 7% 65%)",
+		"selectedBg": "blueBg",
+		"scrollbarTrack": "okhsl(237 4% 33%)",
+		"scrollbarThumb": "okhsl(232 7% 65%)",
+		"searchMatchBg": "okhsl(53 26% 24%)",
+		"searchMatchText": "muted",
+		"userMessageBg": "blueBg",
+		"userMessageText": "text",
+		"customMessageBg": "okhsl(295 21% 24%)",
+		"customMessageText": "muted",
+		"customMessageLabel": "violet",
+		"toolPendingBg": "okhsl(229 2% 24%)",
+		"toolSuccessBg": "okhsl(158 23% 25%)",
+		"toolErrorBg": "okhsl(19 27% 25%)",
+		"toolTitle": "text",
+		"toolOutput": "muted",
+		"mdHeading": "yellow",
+		"mdLink": "blue",
+		"mdLinkUrl": "muted",
+		"mdCode": "violet",
+		"mdCodeBlock": "green",
+		"mdCodeBlockBorder": "muted",
+		"mdQuote": "muted",
+		"mdQuoteBorder": "muted",
+		"mdHr": "muted",
+		"mdListBullet": "violet",
+		"toolDiffAdded": "green",
+		"toolDiffRemoved": "red",
+		"toolDiffContext": "muted",
+		"syntaxComment": "muted",
+		"syntaxKeyword": "blue",
+		"syntaxFunction": "yellow",
+		"syntaxVariable": "okhsl(202 32% 84%)",
+		"syntaxString": "okhsl(52 37% 84%)",
+		"syntaxNumber": "green",
+		"syntaxType": "violet",
+		"syntaxOperator": "muted",
+		"syntaxPunctuation": "muted",
+		"thinkingOff": "okhsl(229 8% 49%)",
+		"thinkingMinimal": "okhsl(232 11% 76%)",
+		"thinkingLow": "okhsl(232 25% 77%)",
+		"thinkingMedium": "okhsl(263 32% 78%)",
+		"thinkingHigh": "okhsl(295 40% 80%)",
+		"thinkingXhigh": "okhsl(337 45% 80%)",
+		"thinkingMax": "okhsl(20 54% 82%)",
+		"bashMode": "okhsl(159 35% 82%)"
+	},
+	"export": {
+		"pageBg": "okhsl(262 7% 16%)",
+		"cardBg": "okhsl(264 6% 19%)",
+		"infoBg": "okhsl(53 26% 24%)"
+	}
+}
+JSON
+            ;;
+        esac
+        chmod 644 "${tmp}"
+        if cmp -s "${tmp}" "${dir}/lets-code-${name}.json"; then rm -f "${tmp}"; else mv "${tmp}" "${dir}/lets-code-${name}.json"; fi
+    done
 }
 
 # ------------------------------------------------------------- memory guard
@@ -4076,6 +4345,7 @@ if [ "${REASONING_SUPPORTED}" = true ] && [ "${API}" = openai-completions ]; the
     esac
 fi
 pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}" "${VISION}" "${REASONING_SUPPORTED}" "${THINKING}" "${EFFORT_MAP}"
+pi_write_themes
 
 export LETS_CODE_TOKEN="${TOKEN}"
 export PI_SKIP_VERSION_CHECK=1

@@ -95,19 +95,20 @@ try {
 	await x.cmd("");
 	t("/metrics: still lets-code's footer", [typeof x.st.footer, x.st.setFooterCalls], ["object", 1]);
 	t("full: directory, branch, model, level", x.foot()[0], `~/github/app (main)${" ".repeat(200 - 19 - 20)}qwen3.8-27b • medium`);
-	t("full: cache, first token, output", x.foot()[1], "↑222k ↓25k · cache 198k (89%) · 83.5 tok/s · TTFT 0.3s · 1.0k out · 22.0%/262k (auto)");
+	t("full: session line", x.foot()[1], "↑222k ↓25k · 22.0%/262k (auto) · cache 198k (89%)");
+	t("full: moment line", x.foot()[2], "83.5 tok/s · TTFT 0.3s · 1.0k out");
 	clock = 70000; x.ev("before_provider_request");
 	clock = 71200; step();
-	t("full: waiting", x.foot()[1], "↑222k ↓25k · cache 198k (89%) · ⠙ 83.5 tok/s · TTFT 1.2s… · 22.0%/262k (auto)");
+	t("full: waiting", x.foot()[2], "⠙ 83.5 tok/s · TTFT 1.2s…");
 	clock = 71300; x.delta("thinking_delta", "y".repeat(400));
 	clock = 72300; step();
-	t("full: streaming, live output", x.foot()[1], "↑222k ↓25k · cache 198k (89%) · ⠹ 84.2 tok/s · TTFT 1.3s · 100 out · 22.0%/262k (auto)");
+	t("full: streaming, live output", x.foot().slice(1), ["↑222k ↓25k · 22.0%/262k (auto) · cache 198k (89%)", "⠹ 84.2 tok/s · TTFT 1.3s · 100 out"]);
 	x.ev("agent_end");
-	t("interrupt: spinner stopped, last finished response back", [timers.length, x.foot()[1]], [0, "↑222k ↓25k · cache 198k (89%) · 83.5 tok/s · TTFT 0.3s · 1.0k out · 22.0%/262k (auto)"]);
+	t("interrupt: spinner stopped, last finished response back", [timers.length, x.foot()[2]], [0, "83.5 tok/s · TTFT 0.3s · 1.0k out"]);
 	await x.cmd("");
 	t("/metrics again: minimal", x.foot(), ["↑222k ↓25k · 83.5 tok/s · 22.0%/262k (auto)"]);
 	await x.cmd("on");
-	t("/metrics on: full", x.foot().length, 2);
+	t("/metrics on: full, three lines", x.foot().length, 3);
 	await x.cmd("off");
 	t("/metrics off: minimal", x.foot().length, 1);
 	await x.cmd("loud");
@@ -118,14 +119,14 @@ try {
 	x = await load({ LETS_CODE_METRICS_ON: "1" }, { providers: 2, branch: null, level: "off" });
 	x.ev("session_start");
 	x.st.entries.push(usage(500, 0, 300, 0.0123));
-	t("full from the start", x.foot().length, 2);
+	t("full from the start: three lines, speed placeholder", [x.foot().length, x.foot()[2]], [3, "– tok/s"]);
 	t("full: no branch on the left", x.foot()[0].startsWith("~/github/app "), true);
 	t("full: provider with several, thinking off, on the right", x.foot()[0].endsWith(" (lets-code) qwen3.8-27b • thinking off") && x.mod.width(x.foot()[0]) === 200, true);
 	x.respond({ at: 0, ttft: 100, gen: 1000, output: 0, text: "x".repeat(160) });
-	t("full: cost; output estimated (~)", x.foot()[1], "↑500 ↓300 · $0.012 · 40.0 tok/s · TTFT 0.1s · ~40 out · 22.0%/262k (auto)");
+	t("full: cost; output estimated (~)", x.foot().slice(1), ["↑500 ↓300 · 22.0%/262k (auto) · $0.012", "40.0 tok/s · TTFT 0.1s · ~40 out"]);
 	clock = 5000; x.ev("before_provider_request");
 	clock = 6000; x.ev("message_end", { message: { role: "assistant", usage: { output: 0 } } });
-	t("full: nothing streamed", x.foot()[1], "↑500 ↓300 · $0.012 · 40.0 tok/s · TTFT 1.0s · ~0 out · 22.0%/262k (auto)");
+	t("full: nothing streamed", x.foot()[2], "40.0 tok/s · TTFT 1.0s · ~0 out");
 
 	// learned characters per token: 90 tokens for 320 characters
 	x = await load({ LETS_CODE_METRICS_ON: "1" });
@@ -134,7 +135,7 @@ try {
 	clock = 10000; x.ev("before_provider_request");
 	clock = 10500; x.delta("text_delta", "y".repeat(320));
 	clock = 12500; step();
-	t("live estimate uses the learned ratio", x.foot()[1], "↓90 · ⠙ 45.0 tok/s · TTFT 0.5s · 90 out · 22.0%/262k (auto)");
+	t("live estimate uses the learned ratio", x.foot().slice(1), ["↓90 · 22.0%/262k (auto)", "⠙ 45.0 tok/s · TTFT 0.5s · 90 out"]);
 	x.ev("agent_end");
 
 	// numbers held for a second while streaming, the glyph keeps moving
@@ -150,15 +151,15 @@ try {
 	t("hold: after a second, numbers move", x.foot(), ["↓1.0k · ⠸ 476.2 tok/s · 22.0%/262k (auto)"]);
 	x.ev("agent_end");
 
-	// narrow terminals: wrap between parts first; drop cost, cache, output, TTFT only past two lines
+	// full size: two fixed lines; a line too wide loses detail: cache shortens, then cost, cache drop; output, then TTFT drop
 	const S0 = { sent: 4_700_000, received: 65_000, cached: 3_700_000, written: 0, hit: 0, cost: 1.5, tps: 53, glyph: "⠼", firstMs: 43200, out: 5, percent: 41, window: 262144, auto: true };
 	const L = (w) => x.mod.statsLines(S0, true, undefined, w);
-	t("wide: one line", L(100), ["↑4.7M ↓65k · cache 3.7M (0%) · $1.500 · ⠼ 53.0 tok/s · TTFT 43.2s · 5 out · 41.0%/262k (auto)"]);
-	t("narrower: two lines, broken between parts", L(60), ["↑4.7M ↓65k · cache 3.7M (0%) · $1.500 · ⠼ 53.0 tok/s", "TTFT 43.2s · 5 out · 41.0%/262k (auto)"]);
-	t("every line fits", L(60).every((l) => [...l].length <= 60), true);
-	t("too narrow for two: cost, then cache drop", L(40), ["↑4.7M ↓65k · ⠼ 53.0 tok/s · TTFT 43.2s", "5 out · 41.0%/262k (auto)"]);
-	t("very narrow: output drops too", L(30), ["↑4.7M ↓65k · ⠼ 53.0 tok/s", "TTFT 43.2s · 41.0%/262k (auto)"]);
-	t("narrowest: context and speed stay", L(20).filter((l) => /tok\/s|262k/.test(l)).length >= 2, true);
+	t("wide: session and moment", L(100), ["↑4.7M ↓65k · 41.0%/262k (auto) · cache 3.7M (0%) · $1.500", "⠼ 53.0 tok/s · TTFT 43.2s · 5 out"]);
+	t("narrower: cache shortens to its hit rate first", L(52), ["↑4.7M ↓65k · 41.0%/262k (auto) · cache 0% · $1.500", "⠼ 53.0 tok/s · TTFT 43.2s · 5 out"]);
+	t("always two lines", [L(100).length, L(52).length, L(20).length], [2, 2, 2]);
+	t("then the cost drops", L(45), ["↑4.7M ↓65k · 41.0%/262k (auto) · cache 0%", "⠼ 53.0 tok/s · TTFT 43.2s · 5 out"]);
+	t("very narrow: cache and output drop", L(30), ["↑4.7M ↓65k · 41.0%/262k (auto)", "⠼ 53.0 tok/s · TTFT 43.2s"]);
+	t("narrowest: context and speed stay", L(20).join(" | "), "↑4.7M ↓65k · 41.0%/262k (auto) | ⠼ 53.0 tok/s");
 	t("statsLine stays one line", x.mod.statsLine(S0, false), "↑4.7M ↓65k · ⠼ 53.0 tok/s · 41.0%/262k (auto)");
 
 	// colors: context warning/error, everything else dim; other statuses

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # The pastel themes lets-code writes into ~/.pi/agent/themes: each is valid
 # JSON, named after its file, defines every color role of pi's dark theme
-# (when pi is installed), and an unchanged theme is not rewritten.
+# (when pi is installed), stays loadable by pi before 1.0 (hex colors or
+# variable names only, no keys that release's schema rejects), and an
+# unchanged theme is not rewritten.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 agent="$(mktemp -d "${TMPDIR:-/tmp}/lets-code-themes.XXXXXX")"
@@ -34,7 +36,13 @@ want = set(json.load(open(dark))["colors"]) if dark else None
 for n in names:
     t = json.load(open(os.path.join(d, n)))
     assert t["name"] + ".json" == n, n
-    assert t["appearance"] == "dark", n
+    # pi before 1.0: top-level keys limited, colors #RRGGBB / a var / 0-255 / ""
+    assert set(t) <= {"$schema", "name", "vars", "colors", "export"}, (n, set(t))
+    for sec in ("vars", "colors", "export"):
+        for k, v in t.get(sec, {}).items():
+            ok = (isinstance(v, int) and 0 <= v <= 255) or v == "" or v in t.get("vars", {}) \
+                or (isinstance(v, str) and len(v) == 7 and v[0] == "#" and all(c in "0123456789abcdefABCDEF" for c in v[1:]))
+            assert ok, (n, sec, k, v)
     if want is not None:
         assert set(t["colors"]) == want, (n, want ^ set(t["colors"]))
 print("themes ok" + ("" if want is not None else " (pi not installed: role check skipped)"))

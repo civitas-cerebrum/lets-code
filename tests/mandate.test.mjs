@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Unit test for the mandate extension that lets-code writes
-// (~/.pi/agent/extensions/lets-code-mandate.ts). Loads it with a fake pi and
+// (~/.pi/agent/extensions/mandate/index.ts). Loads it with a fake pi and
 // drives tool_call against throwaway directories. Needs Node >= 22.6.
 //
 //   tests/mandate.test.mjs [path/to/lets-code-mandate.ts]
@@ -9,7 +9,7 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code-mandate.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/mandate/index.ts");
 const work = realpathSync(mkdtempSync(join(tmpdir(), "mandate-test-")));
 const agentDir = join(work, "agent"); mkdirSync(join(agentDir, "extensions"), { recursive: true });
 process.env.PI_CODING_AGENT_DIR = agentDir;

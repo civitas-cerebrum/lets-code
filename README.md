@@ -173,7 +173,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `SUBAGENTS` | On by default; `false` turns the `subagent` tool off. |
 | `SANDBOX` | `true` turns the feature on. |
 | `REA` | `true` adds the reverse-engineering skill, `manual` makes it `/skill:reverse-engineering` only. |
-| `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with cache reads and hit rate, cost, and the latest response's time to first token and output tokens (`… · 198k cached (86% hit) · 161.7 tok/s · 1.0s first token · 2673 out · …`). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi. tok/s counts from each response's first streamed token, so prompt processing is not in it. |
+| `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with cache reads and hit rate, cost, and the latest response's time to first token and output tokens (`… · cache 198k (86%) · 161.7 tok/s · TTFT 1.0s · 2.7k out · …`; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi. tok/s counts from each response's first streamed token, so prompt processing is not in it. |
 
 Listing several endpoints lets one config follow you around:
 `http://localhost:8000 https://llm.home.example` works on the server box,
@@ -225,7 +225,7 @@ processes this session started:
 | under 2.5 % | the largest process is killed at once |
 
 Nothing is capped; pi is told what was stopped and why. The guard is a pi
-extension (`~/.pi/agent/extensions/lets-code-memguard.ts`) and is inert in
+extension (`~/.pi/agent/extensions/memory-guard/`) and is inert in
 sessions not started by lets-code. It defers to a machine-wide
 [memguard](https://github.com/civitas-cerebrum/memguard) daemon when one runs.
 
@@ -266,7 +266,7 @@ repo the guard is off. `LETS_CODE_GIT_CHECKPOINTS=0` turns checkpoints off.
 <details>
 <summary><b>Agent guard</b></summary>
 
-A pi extension (`~/.pi/agent/extensions/lets-code-agentguard.ts`) with
+A pi extension (`~/.pi/agent/extensions/agent-guard/`) with
 rules for failure modes measured in sessions against a local thinking
 model. Apart from a five-line working-method section in the system prompt
 it adds nothing unless a rule acts.

@@ -81,12 +81,12 @@ try {
 	t("minimal: one line: sent (cached included), received, speed, context", x.foot(), ["↑222k ↓25k · 41.8 tok/s · 22.0%/262k (auto)"]);
 	t("no status line of its own", x.status.size, 0);
 	clock = 60000; x.ev("before_provider_request");
-	t("minimal: spinner while waiting", x.foot(), ["↑222k ↓25k · · 41.8 tok/s · 22.0%/262k (auto)"]);
+	t("minimal: spinner while waiting", x.foot(), ["↑222k ↓25k · ⠋ 41.8 tok/s · 22.0%/262k (auto)"]);
 	const r0 = x.st.renders;
 	clock = 60300; x.delta("text_delta", "x".repeat(4000));
 	clock = 62300; step();
 	t("a frame redraws the footer", x.st.renders > r0, true);
-	t("minimal: streaming, received counting up", x.foot(), ["↑222k ↓26k · ✢ 83.5 tok/s · 22.0%/262k (auto)"]);
+	t("minimal: streaming, received counting up", x.foot(), ["↑222k ↓26k · ⠙ 83.5 tok/s · 22.0%/262k (auto)"]);
 	x.ev("message_end", { message: { role: "assistant", usage: { output: 1000 } } });
 	t("minimal: settles without a glyph", x.foot(), ["↑222k ↓25k · 83.5 tok/s · 22.0%/262k (auto)"]);
 	t("interval cleared", timers.length, 0);
@@ -98,10 +98,10 @@ try {
 	t("full: cache, first token, output", x.foot()[1], "↑222k ↓25k · cache 198k (89%) · 83.5 tok/s · TTFT 0.3s · 1.0k out · 22.0%/262k (auto)");
 	clock = 70000; x.ev("before_provider_request");
 	clock = 71200; step();
-	t("full: waiting", x.foot()[1], "↑222k ↓25k · cache 198k (89%) · ✢ 83.5 tok/s · TTFT 1.2s… · 22.0%/262k (auto)");
+	t("full: waiting", x.foot()[1], "↑222k ↓25k · cache 198k (89%) · ⠙ 83.5 tok/s · TTFT 1.2s… · 22.0%/262k (auto)");
 	clock = 71300; x.delta("thinking_delta", "y".repeat(400));
 	clock = 72300; step();
-	t("full: streaming, live output", x.foot()[1], "↑222k ↓25k · cache 198k (89%) · ✣ 84.2 tok/s · TTFT 1.3s · 100 out · 22.0%/262k (auto)");
+	t("full: streaming, live output", x.foot()[1], "↑222k ↓25k · cache 198k (89%) · ⠹ 84.2 tok/s · TTFT 1.3s · 100 out · 22.0%/262k (auto)");
 	x.ev("agent_end");
 	t("interrupt: spinner stopped, last finished response back", [timers.length, x.foot()[1]], [0, "↑222k ↓25k · cache 198k (89%) · 83.5 tok/s · TTFT 0.3s · 1.0k out · 22.0%/262k (auto)"]);
 	await x.cmd("");
@@ -134,7 +134,7 @@ try {
 	clock = 10000; x.ev("before_provider_request");
 	clock = 10500; x.delta("text_delta", "y".repeat(320));
 	clock = 12500; step();
-	t("live estimate uses the learned ratio", x.foot()[1], "↓90 · ✢ 45.0 tok/s · TTFT 0.5s · 90 out · 22.0%/262k (auto)");
+	t("live estimate uses the learned ratio", x.foot()[1], "↓90 · ⠙ 45.0 tok/s · TTFT 0.5s · 90 out · 22.0%/262k (auto)");
 	x.ev("agent_end");
 
 	// numbers held for a second while streaming, the glyph keeps moving
@@ -143,23 +143,23 @@ try {
 	clock = 0; x.ev("before_provider_request");
 	clock = 100; x.delta("text_delta", "x".repeat(4000));
 	clock = 1100; step();
-	t("hold: fresh numbers", x.foot(), ["↓1.0k · ✢ 1000.0 tok/s · 22.0%/262k (auto)"]);
+	t("hold: fresh numbers", x.foot(), ["↓1.0k · ⠙ 1000.0 tok/s · 22.0%/262k (auto)"]);
 	clock = 1600; step();
-	t("hold: within a second, numbers wait, glyph moves", x.foot(), ["↓1.0k · ✣ 1000.0 tok/s · 22.0%/262k (auto)"]);
+	t("hold: within a second, numbers wait, glyph moves", x.foot(), ["↓1.0k · ⠹ 1000.0 tok/s · 22.0%/262k (auto)"]);
 	clock = 2200; step();
-	t("hold: after a second, numbers move", x.foot(), ["↓1.0k · ✶ 476.2 tok/s · 22.0%/262k (auto)"]);
+	t("hold: after a second, numbers move", x.foot(), ["↓1.0k · ⠸ 476.2 tok/s · 22.0%/262k (auto)"]);
 	x.ev("agent_end");
 
 	// narrow terminals: wrap between parts first; drop cost, cache, output, TTFT only past two lines
-	const S0 = { sent: 4_700_000, received: 65_000, cached: 3_700_000, written: 0, hit: 0, cost: 1.5, tps: 53, glyph: "✻", firstMs: 43200, out: 5, percent: 41, window: 262144, auto: true };
+	const S0 = { sent: 4_700_000, received: 65_000, cached: 3_700_000, written: 0, hit: 0, cost: 1.5, tps: 53, glyph: "⠼", firstMs: 43200, out: 5, percent: 41, window: 262144, auto: true };
 	const L = (w) => x.mod.statsLines(S0, true, undefined, w);
-	t("wide: one line", L(100), ["↑4.7M ↓65k · cache 3.7M (0%) · $1.500 · ✻ 53.0 tok/s · TTFT 43.2s · 5 out · 41.0%/262k (auto)"]);
-	t("narrower: two lines, broken between parts", L(60), ["↑4.7M ↓65k · cache 3.7M (0%) · $1.500 · ✻ 53.0 tok/s", "TTFT 43.2s · 5 out · 41.0%/262k (auto)"]);
+	t("wide: one line", L(100), ["↑4.7M ↓65k · cache 3.7M (0%) · $1.500 · ⠼ 53.0 tok/s · TTFT 43.2s · 5 out · 41.0%/262k (auto)"]);
+	t("narrower: two lines, broken between parts", L(60), ["↑4.7M ↓65k · cache 3.7M (0%) · $1.500 · ⠼ 53.0 tok/s", "TTFT 43.2s · 5 out · 41.0%/262k (auto)"]);
 	t("every line fits", L(60).every((l) => [...l].length <= 60), true);
-	t("too narrow for two: cost, then cache drop", L(40), ["↑4.7M ↓65k · ✻ 53.0 tok/s · TTFT 43.2s", "5 out · 41.0%/262k (auto)"]);
-	t("very narrow: output drops too", L(30), ["↑4.7M ↓65k · ✻ 53.0 tok/s", "TTFT 43.2s · 41.0%/262k (auto)"]);
+	t("too narrow for two: cost, then cache drop", L(40), ["↑4.7M ↓65k · ⠼ 53.0 tok/s · TTFT 43.2s", "5 out · 41.0%/262k (auto)"]);
+	t("very narrow: output drops too", L(30), ["↑4.7M ↓65k · ⠼ 53.0 tok/s", "TTFT 43.2s · 41.0%/262k (auto)"]);
 	t("narrowest: context and speed stay", L(20).filter((l) => /tok\/s|262k/.test(l)).length >= 2, true);
-	t("statsLine stays one line", x.mod.statsLine(S0, false), "↑4.7M ↓65k · ✻ 53.0 tok/s · 41.0%/262k (auto)");
+	t("statsLine stays one line", x.mod.statsLine(S0, false), "↑4.7M ↓65k · ⠼ 53.0 tok/s · 41.0%/262k (auto)");
 
 	// colors: context warning/error, everything else dim; other statuses
 	const th = { fg: (c, s) => `<${c}>${s}</${c}>` };

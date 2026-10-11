@@ -8,6 +8,11 @@
 #   lets-code setup full         onboarding with every optional feature on
 #                                (mandate modes, subagents, sandbox, MCP import)
 #   lets-code setup granular     onboarding that asks about each feature
+#   lets-code setup preset [<name>]  onboarding for another backend (server,
+#                                token, model) saved as a named preset (asks
+#                                the name when not given); launch it with
+#                                `lets-code --<name>` or `--preset <name>`
+#   lets-code presets            list saved presets
 #   lets-code mandate init       write a starter .pi/mandate.json (--global:
 #                                ~/.pi/agent/mandate.json)
 #   lets-code [args...]          launch pi (args pass to `pi`, e.g.
@@ -95,6 +100,8 @@
 #      or another client's config into pi's built-in MCP support.
 #
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
+# Presets: ~/.config/lets-code/presets/<name>   (`lets-code setup --preset <name>`)
+#          same keys as the config, applied on top of it; `--<name>` picks one
 # Env overrides: LETS_CODE_ENDPOINTS (space-separated), LETS_CODE_TOKEN,
 #                LETS_CODE_CA, LETS_CODE_MODEL, LETS_CODE_CONTEXT,
 #                LETS_CODE_OUTPUT_CAP, LETS_CODE_API, LETS_CODE_VISION,
@@ -116,8 +123,10 @@ set -eu
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lets-code"
 CONFIG_FILE="${CONFIG_DIR}/config"
+SETUP_FILE="${CONFIG_FILE}"          # where setup saves (a preset file under setup --preset)
 PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"   # pi's config home (overridable)
-PROVIDER_ID="lets-code"          # fixed provider id we upsert into pi's files
+PRESET_DIR="${CONFIG_DIR}/presets"
+PROVIDER_ID="lets-code"          # provider id we upsert into pi's files (lets-code-<preset> for a preset)
 DEFAULT_CONTEXT=128000
 DEFAULT_OUTPUT_CAP=32768
 # The default output cap never takes more than a quarter of the context
@@ -441,8 +450,9 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 
 # ---------------------------------------------------------- pi config writes
 # pi keeps its state under ~/.pi/agent (override: $PI_CODING_AGENT_DIR).
-# lets-code owns exactly two slices, both keyed by the fixed provider id
-# 'lets-code', so it never clobbers the user's own providers or defaults:
+# lets-code owns exactly two slices, both keyed by its provider id ('lets-code',
+# or 'lets-code-<name>' for a preset, so sessions on different presets never
+# rewrite each other's backend), and never clobbers the user's own providers:
 #   models.json   -> providers["lets-code"]
 #                    (endpoint, api dialect, model, contextWindow, maxTokens,
 #                     input types: ["text","image"] when vision is enabled,
@@ -464,10 +474,11 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 # ~/.config/lets-code/config (mode 600). Writes are atomic (tmp + rename),
 # every other key in the files is preserved, and a corrupt file fails loudly.
 pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-cap> <vision> <reasoning> <thinking> [<effort-map-json>]
-    PI_AGENT_DIR="${PI_AGENT_DIR}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
+    PI_AGENT_DIR="${PI_AGENT_DIR}" LC_PROVIDER="${PROVIDER_ID:-lets-code}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
 import json, os, sys, tempfile
 
 base, api, model, context, cap, vision, reasoning, thinking, effort_map = sys.argv[1:10]
+provider = os.environ.get("LC_PROVIDER") or "lets-code"
 agent_dir = os.environ["PI_AGENT_DIR"]
 ctx = int(context)
 cap = int(cap)
@@ -557,7 +568,7 @@ def to_models(doc):
         # (2026-10-09: for qwen3.8-27b, effort "none" was clean on one provider
         # and still reasoned at length in the answer on another).
         compat["openRouterRouting"] = {"order": [p.strip() for p in os.environ["LETS_CODE_OPENROUTER_PROVIDER"].split(",") if p.strip()], "allow_fallbacks": False}
-    providers["lets-code"] = {
+    providers[provider] = {
         "baseUrl": base,
         "api": api,
         "apiKey": "$LETS_CODE_TOKEN",
@@ -573,7 +584,7 @@ def to_settings(doc):
     overrides = compaction.get("modelOverrides")
     if not isinstance(overrides, dict):
         overrides = {}
-    overrides["lets-code/" + model] = {"reserveTokens": cap}
+    overrides[provider + "/" + model] = {"reserveTokens": cap}
     compaction["modelOverrides"] = overrides
     compaction["enabled"] = True  # auto-compaction explicit, not pi's implicit default
     doc["compaction"] = compaction
@@ -588,13 +599,13 @@ def to_settings(doc):
         levels = doc.get("modelThinkingLevels")
         if not isinstance(levels, dict):
             levels = {}
-        levels["lets-code/" + model] = thinking
+        levels[provider + "/" + model] = thinking
         doc["modelThinkingLevels"] = levels
-    elif "lets-code/" + model in (doc.get("modelThinkingLevels") or {}):
+    elif provider + "/" + model in (doc.get("modelThinkingLevels") or {}):
         # thinking unregistered — drop our stale level so it cannot surprise
         # a later /model rebind; other providers' entries are untouched
         levels = dict(doc["modelThinkingLevels"])
-        del levels["lets-code/" + model]
+        del levels[provider + "/" + model]
         if levels:
             doc["modelThinkingLevels"] = levels
         else:
@@ -3282,7 +3293,7 @@ interface RunResult { agent: string; task: string; text: string; exitCode: numbe
 
 function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSignal | undefined, onProgress?: (line: string) => void): Promise<RunResult> {
 	const args = ["--mode", "json", "-p", "--no-session"];
-	if (MODEL) args.push("--provider", "lets-code", "--model", MODEL);
+	if (MODEL) args.push("--provider", process.env.LETS_CODE_PROVIDER || "lets-code", "--model", MODEL);
 	if (agent.thinking) args.push("--thinking", agent.thinking);
 	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
 	const tmp = mkdtempSync(join(tmpdir(), "lets-code-agent-"));
@@ -3734,11 +3745,74 @@ JSON
 }
 
 # ---------------------------------------------------------------- onboarding
+# Setup's live check of one model: probes thinking (asks for a startup level
+# when it thinks) and image input (asks when the probe cannot tell). Results
+# in SD_THINKING, SD_REASONING, SD_CAP, SD_VISION_REG, SD_VISION_PIN; pins it
+# mentions are saved to ${SETUP_FILE} (the config, or the preset being set up).
+setup_detect() {  # setup_detect <base> <model> <context>
+    local found="$1" reg_id="$2" reg_len="$3" suggested thinking_level reasoning_reg reg_cap vision_reg vision_pin reply
+    # probe thinking support (launch re-detects; this informs onboarding)
+    probe_thinking "${found}" "${reg_id}"
+    reasoning_reg="false"
+    reg_cap="$(default_output_cap "${reg_len}")"
+    suggested="$(suggested_thinking_level "${reg_len}" "${reg_cap}")"
+    case "${THINKING_DETECTED}" in
+        true)
+            reasoning_reg="true"
+            echo ""
+            log "thinking: detected on ${reg_id} (probe: minimal request with thinking forced on)"
+            echo "Thinking level for new sessions: off|minimal|low|medium|high (xhigh|max), or"
+            echo "adaptive[:<ceiling>] (medium, low once tests pass, bursts up) or auto[:<ceiling>] (off, bursts up)."
+            echo "Suggested for ${reg_len} context / ${reg_cap} output cap: ${suggested}"
+            printf "Thinking level [%s]: " "${suggested}"
+            read -r thinking_level
+            thinking_level="${thinking_level:-${suggested}}"
+            case "${thinking_level}" in
+                off|minimal|low|medium|high|xhigh|max|adaptive|adaptive:low|adaptive:medium|adaptive:high|adaptive:xhigh|adaptive:max|auto|auto:minimal|auto:low|auto:medium|auto:high|auto:xhigh|auto:max) ;;
+                *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max|auto[:<level>] (got: ${thinking_level})"; exit 1 ;;
+            esac ;;
+        *)
+            thinking_level="${suggested}"
+            case "${THINKING_DETECTED}" in
+                false) log "thinking: not detected on ${reg_id} — registering without thinking" ;;
+                *)     log "thinking: probe inconclusive for ${reg_id} — registering without thinking (pin REASONING=true in ${SETUP_FILE} if it supports it)" ;;
+            esac
+            log "startup thinking level saved as ${thinking_level} in case the resident model changes" ;;
+    esac
+    # probe image support (launch re-detects unless pinned); ask when inconclusive
+    vision_reg="false"; vision_pin=""
+    if [ -n "${LETS_CODE_VISION:-}" ]; then
+        vision_pin="${LETS_CODE_VISION}"; vision_reg="${LETS_CODE_VISION}"
+        log "vision: pinned to ${vision_pin} by LETS_CODE_VISION"
+    else
+        probe_vision "${found}" "${reg_id}"
+        case "${VISION_DETECTED}" in
+            true)  vision_reg="true"
+                   log "vision: detected on ${reg_id} (probe: a tiny red image, asked for its color) — images will be sent to it" ;;
+            false) log "vision: not detected on ${reg_id} (the server rejected image input or the model could not see it) — registering as text-only" ;;
+            *)
+                echo ""
+                log "vision: probe inconclusive for ${reg_id} (no usable answer about a test image)."
+                echo "Does ${reg_id} accept images (screenshots, diagrams)? If unsure, say n —"
+                echo "pi only sends images to models declared with image input."
+                printf "Model accepts images? [y/N] "
+                read -r reply
+                case "${reply}" in
+                    y|Y|yes|YES) vision_pin="true"; vision_reg="true" ;;
+                    *)           vision_pin="false" ;;
+                esac
+                log "vision pinned as VISION=${vision_pin} in ${SETUP_FILE} (clear it to re-probe at launch)" ;;
+        esac
+    fi
+    SD_THINKING="${thinking_level}"; SD_REASONING="${reasoning_reg}"; SD_CAP="${reg_cap}"
+    SD_VISION_REG="${vision_reg}"; SD_VISION_PIN="${vision_pin}"
+}
+
 run_setup() {  # run_setup [full|granular]
     local profile="${1:-}"
     case "${profile}" in
         ""|full|granular) ;;
-        *) log_error "unknown setup profile '${profile}' — use: lets-code setup | setup full | setup granular"; exit 1 ;;
+        *) log_error "unknown setup profile '${profile}' — use: lets-code setup | setup full | setup granular | setup preset [<name>]"; exit 1 ;;
     esac
     echo ""
     echo "lets-code setup — point the pi harness at your own LLM server."
@@ -3961,61 +4035,9 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
         case "${reg_len}" in
             *[!0-9]*|"") reg_len="${DEFAULT_CONTEXT}" ;;
         esac
-        # probe thinking support (launch re-detects; this informs onboarding)
-        probe_thinking "${found}" "${reg_id}"
-        local suggested thinking_level reasoning_reg
-        reasoning_reg="false"
-        local reg_cap; reg_cap="$(default_output_cap "${reg_len}")"
-        suggested="$(suggested_thinking_level "${reg_len}" "${reg_cap}")"
-        case "${THINKING_DETECTED}" in
-            true)
-                reasoning_reg="true"
-                echo ""
-                log "thinking: detected on ${reg_id} (probe: minimal request with thinking forced on)"
-                echo "Thinking level for new sessions: off|minimal|low|medium|high (xhigh|max), or"
-                echo "adaptive[:<ceiling>] (medium, low once tests pass, bursts up) or auto[:<ceiling>] (off, bursts up)."
-                echo "Suggested for ${reg_len} context / ${reg_cap} output cap: ${suggested}"
-                printf "Thinking level [%s]: " "${suggested}"
-                read -r thinking_level
-                thinking_level="${thinking_level:-${suggested}}"
-                case "${thinking_level}" in
-                    off|minimal|low|medium|high|xhigh|max|adaptive|adaptive:low|adaptive:medium|adaptive:high|adaptive:xhigh|adaptive:max|auto|auto:minimal|auto:low|auto:medium|auto:high|auto:xhigh|auto:max) ;;
-                    *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max|auto[:<level>] (got: ${thinking_level})"; exit 1 ;;
-                esac ;;
-            *)
-                thinking_level="${suggested}"
-                case "${THINKING_DETECTED}" in
-                    false) log "thinking: not detected on ${reg_id} — registering without thinking" ;;
-                    *)     log "thinking: probe inconclusive for ${reg_id} — registering without thinking (pin REASONING=true in ${CONFIG_FILE} if it supports it)" ;;
-                esac
-                log "startup thinking level saved as ${thinking_level} in case the resident model changes" ;;
-        esac
-        # probe image support (launch re-detects unless pinned); ask when inconclusive
-        local vision_reg vision_pin
-        vision_reg="false"; vision_pin=""
-        if [ -n "${LETS_CODE_VISION:-}" ]; then
-            vision_pin="${LETS_CODE_VISION}"; vision_reg="${LETS_CODE_VISION}"
-            log "vision: pinned to ${vision_pin} by LETS_CODE_VISION"
-        else
-            probe_vision "${found}" "${reg_id}"
-            case "${VISION_DETECTED}" in
-                true)  vision_reg="true"
-                       log "vision: detected on ${reg_id} (probe: a tiny red image, asked for its color) — images will be sent to it" ;;
-                false) log "vision: not detected on ${reg_id} (the server rejected image input or the model could not see it) — registering as text-only" ;;
-                *)
-                    echo ""
-                    log "vision: probe inconclusive for ${reg_id} (no usable answer about a test image)."
-                    echo "Does ${reg_id} accept images (screenshots, diagrams)? If unsure, say n —"
-                    echo "pi only sends images to models declared with image input."
-                    printf "Model accepts images? [y/N] "
-                    read -r reply
-                    case "${reply}" in
-                        y|Y|yes|YES) vision_pin="true"; vision_reg="true" ;;
-                        *)           vision_pin="false" ;;
-                    esac
-                    log "vision pinned as VISION=${vision_pin} in ${CONFIG_FILE} (clear it to re-probe at launch)" ;;
-            esac
-        fi
+        setup_detect "${found}" "${reg_id}" "${reg_len}"
+        local thinking_level="${SD_THINKING}" reasoning_reg="${SD_REASONING}" reg_cap="${SD_CAP}"
+        local vision_reg="${SD_VISION_REG}" vision_pin="${SD_VISION_PIN}"
         setup_emit_config "${thinking_level}" "${vision_pin}"
         log "updated ${CONFIG_FILE} (thinking level: ${thinking_level}, vision: ${vision_pin:-auto})"
         EFFORT_MAP=""
@@ -4066,12 +4088,238 @@ offer_fresh_shell() {
     fi
 }
 
+# The /v1/models entry for a model: the pinned one when the server lists it
+# (a gateway like OpenRouter lists hundreds), else the first. Prints
+# <id>|<context>|<listed: 1|0>; context is vLLM's max_model_len or the
+# context_length gateways report, empty when neither is there.
+model_entry() {  # model_entry <pinned-model-or-empty>  (models JSON on stdin)
+    python3 -c '
+import json, sys
+want = sys.argv[1]
+data = json.load(sys.stdin).get("data") or [{}]
+d = next((m for m in data if m.get("id") == want), None) if want else None
+listed = "0" if want and d is None else "1"
+d = d or data[0]
+print("%s|%s|%s" % (d.get("id", ""), d.get("max_model_len") or d.get("context_length") or "", listed))' "$1" 2>/dev/null
+}
+
+# ------------------------------------------------------------------ presets
+# A preset is another backend saved under a name: a file in PRESET_DIR with
+# the config's backend keys (ENDPOINTS, TOKEN, MODEL, ...), sourced on top of
+# the config when the launch names it (--<name> or --preset <name>). Guards
+# and features still come from the config. Each preset registers with pi as
+# its own provider (lets-code-<name>), so two sessions on different presets
+# never rewrite each other's backend.
+# Names that would shadow a lets-code option; pi's own options are checked
+# against `pi --help` at setup.
+PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard no-session-tag mandate no-mandate subagents no-subagents sandbox no-sandbox verbose debug help preset"
+preset_name_ok() {  # preset_name_ok <name> -> 0 when usable as --<name>
+    case "$1" in ""|[!a-z0-9]*|*[!a-z0-9_-]*) return 1 ;; esac
+    case " ${PRESET_RESERVED} " in *" $1 "*) return 1 ;; esac
+    return 0
+}
+preset_names() {  # space-separated names of the saved presets
+    local f out=""
+    for f in "${PRESET_DIR}"/*; do
+        [ -f "${f}" ] || continue
+        preset_name_ok "$(basename "${f}")" && out="${out:+${out} }$(basename "${f}")"
+    done
+    printf '%s' "${out}"
+}
+
+list_presets() {
+    local n
+    if [ -z "$(preset_names)" ]; then
+        echo "No presets yet. Add one with:  lets-code setup --preset <name>"
+        exit 0
+    fi
+    echo "Presets (${PRESET_DIR}):"
+    for n in $(preset_names); do
+        # shellcheck disable=SC1090
+        ( ENDPOINTS=""; MODEL=""; . "${PRESET_DIR}/${n}"
+          printf '  lets-code --%-16s %s%s\n' "${n}" "${ENDPOINTS}" "${MODEL:+   model: ${MODEL}}" )
+    done
+    exit 0
+}
+
+# Interactive onboarding for a preset: its name (asked when not given), then
+# endpoints, token, CA, model and the same live check as the main setup,
+# saved to PRESET_DIR/<name> (mode 600). Terminal: always exits.
+run_preset_setup() {  # run_preset_setup [<name>]
+    local name="$1" file endpoints token ca="" model reply why
+    command -v curl    >/dev/null || { log_error "curl not found."; exit 1; }
+    command -v python3 >/dev/null || { log_error "python3 not found."; exit 1; }
+    echo ""
+    echo "lets-code setup --preset — save another backend (server, token, model)"
+    echo "under a name, launched with  lets-code --<name>. Guards and optional"
+    echo "features still come from ${CONFIG_FILE}."
+    # the name: from the command line, else asked (again until usable)
+    while :; do
+        if [ -z "${name}" ]; then
+            [ -n "$(preset_names)" ] && echo "Saved presets: $(preset_names)"
+            printf "Preset name (e.g. openrouter, qwen): "
+            read -r name || { echo ""; log_error "no preset name given."; exit 1; }
+        fi
+        why=""
+        if [ -z "${name}" ]; then why="a name is needed"
+        elif ! preset_name_ok "${name}"; then
+            case " ${PRESET_RESERVED} " in
+                *" ${name} "*) why="--${name} is already a lets-code option" ;;
+                *)             why="names start with a-z or 0-9 and use only a-z, 0-9, - and _" ;;
+            esac
+        elif command -v pi >/dev/null 2>&1 && pi --help 2>/dev/null | grep -qE -- "(^|[[:space:],])--${name}([[:space:],=]|\$)"; then
+            why="--${name} is a pi option, so lets-code passes it on to pi"
+        fi
+        [ -n "${why}" ] || break
+        log_error "can't use '${name}': ${why} — pick another name."
+        [ -t 0 ] || exit 1
+        name=""
+    done
+    file="${PRESET_DIR}/${name}"
+    SETUP_FILE="${file}"
+    echo "Saving to ${file}; launch it with:  lets-code --${name}"
+    if [ -f "${file}" ]; then
+        printf "A preset named '%s' exists. Replace it? [y/N] " "${name}"
+        read -r reply
+        case "${reply}" in y|Y|yes|YES) ;; *) echo "Kept the existing preset."; exit 0 ;; esac
+    fi
+
+    # pi harness, as in the main onboarding (no-op once installed)
+    ensure_pi || exit 1
+    ensure_pi_tools
+    echo ""
+    echo "Server base URL(s), most-preferred first (no /v1 suffix), e.g."
+    echo "  http://localhost:8000    https://openrouter.ai/api"
+    printf "Endpoints [http://localhost:8000]: "
+    read -r endpoints
+    endpoints="$(normalize_endpoints "${endpoints:-http://localhost:8000}")"
+    echo "Using: ${endpoints}"
+    echo ""
+    printf "API token [dummy-key]: "
+    read -r token
+    token="${token:-dummy-key}"
+    case " ${endpoints}" in *" https://"*)
+        echo ""
+        printf "Path to a private root CA .pem (empty for a public certificate): "
+        read -r ca
+        if [ -n "${ca}" ] && [ ! -f "${ca}" ]; then log_error "no file at ${ca} — saving anyway; fix it in ${file} later."; fi ;;
+    esac
+    echo ""
+    echo "Model id. Empty = whatever the server lists first (fine for a vLLM box"
+    echo "serving one model); a gateway like OpenRouter needs one, e.g. qwen/qwen3.8-27b."
+    printf "Model []: "
+    read -r model
+
+    preset_emit() {  # preset_emit <thinking-level> <vision-pin> <reasoning-pin>
+        mkdir -p "${PRESET_DIR}"
+        local tmp; tmp="$(mktemp "${PRESET_DIR}/.${name}.XXXXXX")"
+        {
+            echo "# lets-code preset '${name}' (shell syntax): launch with  lets-code --${name}"
+            echo "# Applied on top of ${CONFIG_FILE}; any config key may be set here."
+            echo "# Re-run 'lets-code setup --preset ${name}' to regenerate."
+            echo "ENDPOINTS=\"${endpoints}\""
+            echo "TOKEN=\"${token}\""
+            echo "CA_PATH=\"${ca}\""
+            echo "MODEL=\"${model}\""
+            echo ""
+            echo "# Pins (empty = discovered or probed at launch):"
+            echo "CONTEXT=\"\""
+            echo "OUTPUT_CAP=\"\""
+            echo "API=\"\""
+            echo "VISION=\"${2:-}\""
+            echo "REASONING=\"${3:-}\""
+            echo "THINKING=\"${1:-}\""
+        } > "${tmp}"
+        chmod 600 "${tmp}"
+        mv "${tmp}" "${file}"
+    }
+    preset_emit "" "" ""
+    echo ""
+    log "saved ${file}"
+
+    echo ""
+    printf "Probe the server now? [Y/n] "
+    read -r reply
+    case "${reply}" in
+        n|N) echo "Preset saved. Run:  lets-code --${name}"; exit 0 ;;
+    esac
+    TOKEN="${token}"; CA_FOUND=""; [ -f "${ca}" ] && CA_FOUND="${ca}"
+    local found="" cand entry reg_id reg_len
+    for cand in ${endpoints}; do
+        if probe "${cand%/}" > "${PROBE_OUT}"; then found="${cand%/}"; MODELS_JSON="$(cat "${PROBE_OUT}")"; break; fi
+        echo "  ${cand}: ${PROBE_ERR}"
+    done
+    if [ -z "${found}" ]; then
+        log_error "no endpoint reachable right now — preset saved; check the server and try 'lets-code --${name} --verbose'."
+        exit 1
+    fi
+    log "reachable: ${found}"
+    entry="$(printf '%s' "${MODELS_JSON}" | model_entry "${model}")" || entry=""
+    reg_id="${model:-${entry%%|*}}"
+    reg_len="${entry#*|}"; reg_len="${reg_len%%|*}"
+    case "${entry##*|}" in
+        0) log "note: ${found} does not list ${model}; check the id (launch will fail if the server does not serve it)."; reg_len="" ;;
+    esac
+    case "${reg_len}" in *[!0-9]*|"") reg_len="${DEFAULT_CONTEXT}" ;; esac
+    if [ -z "${reg_id}" ]; then
+        log "could not find a model id in /v1/models — the preset is saved without a live check."
+        exit 0
+    fi
+    log "model: ${reg_id} | context: ${reg_len}"
+    setup_detect "${found}" "${reg_id}" "${reg_len}"
+    # a detected thinking model is pinned, so launch skips the probe request
+    local reasoning_pin=""
+    [ "${SD_REASONING}" = true ] && reasoning_pin="true"
+    preset_emit "${SD_THINKING}" "${SD_VISION_PIN}" "${reasoning_pin}"
+    log "updated ${file} (thinking level: ${SD_THINKING}, vision: ${SD_VISION_PIN:-auto})"
+    echo ""
+    echo "All set. Run:  lets-code --${name}"
+    exit 0
+}
+
 # --------------------------------------------------------------------- main
 # setup is a terminal path: it exits on every branch
-[ "${1:-}" = "setup" ] && { CA_FOUND=""; TOKEN="dummy-key"; run_setup "${2:-}"; }
+if [ "${1:-}" = "setup" ]; then
+    CA_FOUND=""; TOKEN="dummy-key"
+    case "${2:-}" in
+        preset|--preset) run_preset_setup "${3:-}" ;;
+        --preset=*) run_preset_setup "${2#--preset=}" ;;
+    esac
+    run_setup "${2:-}"
+fi
+[ "${1:-}" = "presets" ] && list_presets
 [ "${1:-}" = "mandate" ] && { [ "${2:-}" = "init" ] || { log_error "usage: lets-code mandate init [--global]"; exit 1; }; mandate_init "${3:-}"; }
 
-# load config (defaults, then file, then env overrides)
+# preset: --<name> (a saved preset's name) or --preset <name>. Taken out of
+# the arguments here, before anything else reads them; everything else is
+# left for the option parser below. Arguments after `--` are never presets.
+PRESET=""
+ARGS=()
+while [ $# -gt 0 ]; do
+    want=""
+    case "$1" in
+        --)         ARGS+=("$@"); break ;;
+        --preset)   [ -n "${2:-}" ] || { log_error "--preset requires a name (saved: $(preset_names))."; exit 1; }
+                    want="$2"; shift 2 ;;
+        --preset=*) want="${1#--preset=}"; shift ;;
+        --?*)       if preset_name_ok "${1#--}" && [ -f "${PRESET_DIR}/${1#--}" ]; then want="${1#--}"; else ARGS+=("$1"); fi
+                    shift ;;
+        *)          ARGS+=("$1"); shift ;;
+    esac
+    [ -n "${want}" ] || continue
+    if ! preset_name_ok "${want}" || [ ! -f "${PRESET_DIR}/${want}" ]; then
+        log_error "no preset named '${want}' (saved: $(preset_names | sed 's/^$/none/')) — add it with: lets-code setup --preset ${want}"
+        exit 1
+    fi
+    if [ -n "${PRESET}" ] && [ "${PRESET}" != "${want}" ]; then
+        log_error "one preset per launch (got --${PRESET} and --${want})."
+        exit 1
+    fi
+    PRESET="${want}"
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+
+# load config (defaults, then file, then preset, then env overrides)
 ENDPOINTS=""
 TOKEN="dummy-key"
 CA_PATH=""
@@ -4093,6 +4341,12 @@ SUBAGENTS="false"
 SANDBOX="false"
 # shellcheck disable=SC1090
 [ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
+if [ -n "${PRESET}" ]; then
+    CONFIG_FILE="${PRESET_DIR}/${PRESET}"    # pins named in messages below go here
+    # shellcheck disable=SC1090
+    . "${CONFIG_FILE}"
+    PROVIDER_ID="lets-code-${PRESET}"
+fi
 ENDPOINTS="${LETS_CODE_ENDPOINTS:-${ENDPOINTS}}"
 TOKEN="${LETS_CODE_TOKEN:-${TOKEN}}"
 CA_PATH="${LETS_CODE_CA:-${CA_PATH}}"
@@ -4219,14 +4473,16 @@ case "${BASE_URL}" in
         fi ;;
 esac
 
-DISCOVERED="$(printf '%s' "${MODELS_JSON}" | python3 -c '
-import json, sys
-d = (json.load(sys.stdin).get("data") or [{}])[0]
-print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null)" || DISCOVERED=""
-DISCOVERED_ID="${DISCOVERED%%|*}"
-DISCOVERED_LEN="${DISCOVERED##*|}"
-
 MODEL="${MODEL_OVERRIDE:-${MODEL}}"
+# a pinned model's own context when the server lists it (a gateway lists
+# hundreds); else the first entry's, as for a box serving one model
+DISCOVERED="$(printf '%s' "${MODELS_JSON}" | model_entry "${MODEL}")" || DISCOVERED=""
+DISCOVERED_ID="${DISCOVERED%%|*}"
+DISCOVERED_LEN="${DISCOVERED#*|}"; DISCOVERED_LEN="${DISCOVERED_LEN%%|*}"
+if [ "${DISCOVERED##*|}" = 0 ]; then
+    DISCOVERED_LEN="$(printf '%s' "${MODELS_JSON}" | model_entry "")" || DISCOVERED_LEN=""
+    DISCOVERED_LEN="${DISCOVERED_LEN#*|}"; DISCOVERED_LEN="${DISCOVERED_LEN%%|*}"
+fi
 [ -n "${MODEL}" ] || MODEL="${DISCOVERED_ID}"
 [ -n "${MODEL}" ] || { log_error "could not discover a model from ${BASE_URL}/v1/models and no --model given."; exit 1; }
 
@@ -4348,6 +4604,7 @@ pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_C
 pi_write_themes
 
 export LETS_CODE_TOKEN="${TOKEN}"
+export LETS_CODE_PROVIDER="${PROVIDER_ID}"
 export PI_SKIP_VERSION_CHECK=1
 case "${BASE_URL}" in
     https://*)
@@ -4444,7 +4701,7 @@ case "$(lc "${SANDBOX}")" in
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }sandbox: on${SB_NOTE:+ (${SB_NOTE})}" ;;
 esac
 
-log "connecting: ${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING_DESC}  api: ${API}  ${MG_DESC}  ${GG_DESC}  ${AG_DESC}${FEAT_DESC:+  ${FEAT_DESC}}${SESSION_DESC:+  ${SESSION_DESC}}"
+log "connecting: ${PRESET:+preset ${PRESET}  }${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING_DESC}  api: ${API}  ${MG_DESC}  ${GG_DESC}  ${AG_DESC}${FEAT_DESC:+  ${FEAT_DESC}}${SESSION_DESC:+  ${SESSION_DESC}}"
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
     mem_guard_exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
 else

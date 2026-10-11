@@ -14,9 +14,8 @@
 
 ```
 $ lets-code
-[lets-code] thinking support: true (startup level: high)
-[lets-code] image input: true
-[lets-code] connecting: http://localhost:8000  model: Qwen/Qwen3-32B  context: 131072  output cap: 32768  git guard: pi/20261008-2144
+✦ lets-code Qwen/Qwen3-32B @ localhost:8000
+  128k context · thinking high · sees images · guards: memory, agent, git on pi/20261008-2144 · let's code.
 ```
 
 ## Why
@@ -102,7 +101,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `yolo` or a role of yours |
 | `--subagents` / `--no-subagents` | The `subagent` tool |
 | `--sandbox` / `--no-sandbox` | The OS sandbox for bash |
-| `--verbose` | Show each endpoint probe |
+| `--verbose` | Show each probe and the full launch detail (API, output cap, guards, session tag) |
 
 <details>
 <summary><b>Presets</b></summary>
@@ -466,7 +465,7 @@ roles see every MCP call and can allow, ask or deny per server.
 | Tool-call errors in server logs | Start the server with `--enable-auto-tool-choice --tool-call-parser <p>`. |
 | Thinking text in the output | Missing `--reasoning-parser`. |
 | Session dies on long tasks | Wrong context size. Check `context:` on the launch line; pin `CONTEXT=` if the server hides `max_model_len`. |
-| Model does not see images, or does not think | Check the `image input:` / `thinking support:` launch lines. Pin `VISION=true` / `REASONING=true` if a probe was inconclusive. |
+| Model does not see images, or does not think | The launch banner says `sees images` and `thinking <level>` when they are on (`--verbose` shows each probe). Pin `VISION=true` / `REASONING=true` if a probe was inconclusive. |
 | pi says provider `lets-code` is unknown | Re-run `lets-code`; it re-registers on every launch. |
 | `sandbox: not active` on the launch line | Install `bubblewrap` and `socat` (Linux), or run the `npm install` the message names. |
 | A call was refused with `mandate(...)` | The current mode forbids it. `/mode auto` lifts the rails for the session, or tighten/loosen the role in `~/.pi/agent/mandate.json`. |

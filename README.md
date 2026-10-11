@@ -100,7 +100,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--insecure` | Skip TLS verification |
 | `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` / `--no-grounding` | Launch without a guard |
 | `--no-session-tag` | Send no session tag with model requests |
-| `--metrics` / `--no-metrics` | Tokens/s and time to first token in pi's footer after each response (default off; `/metrics` toggles it inside pi) |
+| `--metrics` / `--no-metrics` | Start with the full footer instead of the minimal one (`/metrics` switches inside pi) |
 | `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `yolo` or a role of yours |
 | `--subagents` / `--no-subagents` | The `subagent` tool |
 | `--sandbox` / `--no-sandbox` | The OS sandbox for bash |
@@ -171,7 +171,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS`, `SANDBOX` | `true` turns the feature on. A config without `SUBAGENTS` gets a one-line launch tip. |
 | `REA` | `true` adds the reverse-engineering skill, `manual` makes it `/skill:reverse-engineering` only. |
-| `METRICS` | `true` shows metrics in pi's footer, live while a response streams (`✶ 163.0 tok/s avg · 1.0s first token · 1204 out`) and exact once it is done (`✦ 161.9 tok/s avg · …`). tok/s avg is the session's generation speed, counted from each response's first streamed token; first token is mostly prompt processing; out is the response's output tokens. `/metrics` (or `/metrics on\|off`) toggles it inside pi. |
+| `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with cache reads and hit rate, cost, and the latest response's time to first token and output tokens (`… · 198k cached (86% hit) · 161.7 tok/s · 1.0s first token · 2673 out · …`). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi. tok/s counts from each response's first streamed token, so prompt processing is not in it. |
 
 Listing several endpoints lets one config follow you around:
 `http://localhost:8000 https://llm.home.example` works on the server box,

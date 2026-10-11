@@ -38,7 +38,7 @@ lets-code                               # go
 ```
 
 `setup` keeps to the essentials. `setup full` also turns on the optional
-features below (modes, subagents, sandbox, MCP import); `setup granular`
+features below (modes, subagents, sandbox, MCP import, REA); `setup granular`
 asks about each one.
 
 Setup installs the `lets-code` command itself. No npm? Grab the script:
@@ -66,6 +66,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🐝 **Subagents** (optional) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
+| 🔬 **REA** (optional) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: a one-line skill hands the question to a separate pi that has REA's 170 tools, so they never enter your session. Zero tokens in `manual` mode. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **Pastel themes** | `lets-code-soft`, `lets-code-pastel` and `lets-code-chalk`: softer takes on pi's dark theme that look the same in every terminal, in tmux and over ssh. Pastel is the default unless you already picked a theme; switch in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -167,6 +168,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `TEMPLATE_EFFORT` | `off` skips the chat-template effort probe, `neutral` maps every level to the least-instruction value (see server setup). |
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS`, `SANDBOX` | `true` turns the feature on. |
+| `REA` | `true` adds the reverse-engineering skill, `manual` makes it `/skill:reverse-engineering` only. |
 
 Listing several endpoints lets one config follow you around:
 `http://localhost:8000 https://llm.home.example` works on the server box,
@@ -451,6 +453,41 @@ codemode so their schemas stay out of the context. `lets-code setup full`
 or `granular` imports servers it finds in `.mcp.json`,
 `~/.config/mcp/mcp.json`, `~/.claude.json` or `~/.cursor/mcp.json`. Mandate
 roles see every MCP call and can allow, ask or deny per server.
+
+</details>
+
+<details>
+<summary><b>REA (reverse engineering)</b></summary>
+
+[REA](https://github.com/morluto/rea) inspects shipped software: native
+binaries (with Ghidra, IDA or Hopper), Electron and JavaScript apps, .NET,
+APKs, firmware and websites. It is one MCP server with about 170 tools,
+roughly 65k tokens of schemas even in its compact profile, too much to keep
+next to a local model's context. So lets-code never registers it in your
+session:
+
+```bash
+lets-code --rea            # or REA=true in the config, or setup full
+lets-code --rea manual     # only when you type /skill:reverse-engineering
+```
+
+Your session gets one skill, `reverse-engineering`: its name and a
+one-sentence description are all that sit in the context (nothing with
+`manual`). When a question depends on a built artifact, pi loads the skill
+and runs `~/.pi/agent/rea/run "<task>"`, a fresh `pi -p` with its own agent
+dir, `~/.pi/agent/rea/agent`. That dir links your models, auth, settings and
+extensions, so the child uses the same server and guards, but its `mcp.json`
+holds only REA, and REA's own skill loads there. The child works through
+REA's tools in codemode and returns a short Answer / Evidence / Unknowns
+report; nothing else reaches your session.
+
+REA is pinned (`REA_VERSION` in the script) and installed with npm into
+`~/.pi/agent/rea/runtime` on first use, about 160 MB. Native analysis needs
+an engine: add `GHIDRA_INSTALL_DIR` (or REA's IDA/Hopper variables) to the
+`env` of the `rea` entry in `~/.pi/agent/rea/agent/mcp.json`; lets-code
+keeps that env when it rewrites the file. The REA server runs outside the
+bash sandbox with your user's rights, and mandate modes that deny MCP
+(`plan`, `readonly`) deny it in the child too.
 
 </details>
 

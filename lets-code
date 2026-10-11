@@ -6,7 +6,8 @@
 #
 #   lets-code setup              interactive onboarding (start here)
 #   lets-code setup full         onboarding with every optional feature on
-#                                (mandate modes, subagents, sandbox, MCP import)
+#                                (mandate modes, subagents, sandbox, MCP import,
+#                                REA reverse engineering)
 #   lets-code setup granular     onboarding that asks about each feature
 #   lets-code setup preset [<name>]  onboarding for another backend (server,
 #                                token, model) saved as a named preset (asks
@@ -48,6 +49,8 @@
 #   lets-code --no-mandate       launch without the mandate (modes) extension
 #   lets-code --subagents | --no-subagents   the subagent tool on/off
 #   lets-code --sandbox | --no-sandbox       the OS sandbox on/off
+#   lets-code --rea [manual] | --no-rea      REA reverse engineering on demand
+#                                (manual: only via /skill:reverse-engineering)
 #   lets-code --verbose ...      show endpoint probing
 #
 # What it does at launch:
@@ -101,7 +104,9 @@
 #      child a pi process through the same provider and guards); sandbox —
 #      bash confined with @anthropic-ai/sandbox-runtime (bubblewrap on
 #      Linux, Seatbelt on macOS); MCP — setup imports an existing .mcp.json
-#      or another client's config into pi's built-in MCP support.
+#      or another client's config into pi's built-in MCP support; REA — a
+#      reverse-engineering skill (one line of context) that runs REA's MCP
+#      server in a separate pi, so its tools never enter this session.
 #
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
 # Presets: ~/.config/lets-code/presets/<name>   (`lets-code setup --preset <name>`)
@@ -114,6 +119,7 @@
 #                LETS_CODE_GIT_CHECKPOINTS (1|0),
 #                LETS_CODE_MANDATE (true|false), LETS_CODE_MODE, LETS_CODE_SUBAGENTS,
 #                LETS_CODE_SANDBOX (true|false), LETS_CODE_SUBAGENT_CONCURRENCY (2)
+#                LETS_CODE_REA (true|manual|false)
 #                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
 #                LETS_CODE_WRAP_TURNS (6), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
 #                LETS_CODE_BURST_TURNS (3), LETS_CODE_MAX_BURSTS (8), LETS_CODE_THINKING_REPLAY (all|<n>)
@@ -3710,6 +3716,140 @@ PY
     esac
 }
 
+# REA (https://github.com/morluto/rea): reverse engineering on demand. REA is
+# one MCP server with ~170 tools (~65k tokens of input schemas even in its
+# compact profile), so it is never registered in the main session. The main
+# session gets one skill line (none with REA=manual); the skill runs
+# ${REA_DIR}/run, a fresh pi whose own agent dir registers REA, so its tools,
+# its own skill and the raw evidence stay in that child and only the report
+# comes back. The child agent dir links everything of ~/.pi/agent (models,
+# auth, settings, extensions, so the same provider and guards apply) except
+# mcp.json and skills. REA is pinned and installed like the sandbox runtime.
+REA_VERSION="6.4.0"
+REA_DIR="${PI_AGENT_DIR}/rea"
+pi_write_rea() {  # pi_write_rea <on|manual>; sets REA_NOTE (empty = ready)
+    local invoke="$1" rt="${REA_DIR}/runtime" agent="${REA_DIR}/agent" have="" e name
+    REA_NOTE=""
+    mkdir -p "${rt}" "${agent}" "${REA_DIR}/skill/reverse-engineering"
+
+    # 1. the pinned REA package (first run, or when REA_VERSION changes)
+    printf '{\n  "name": "lets-code-rea",\n  "private": true,\n  "dependencies": { "rea-agents": "%s" }\n}\n' "${REA_VERSION}" > "${rt}/package.json"
+    [ -f "${rt}/node_modules/rea-agents/package.json" ] && \
+        have="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "${rt}/node_modules/rea-agents/package.json" 2>/dev/null)"
+    if [ "${have}" != "${REA_VERSION}" ]; then
+        if command -v npm >/dev/null 2>&1; then
+            log "rea: installing rea-agents ${REA_VERSION} into ${rt} (first run only, ~160 MB) ..."
+            if ! (cd "${rt}" && npm install --omit=dev --no-audit --no-fund --loglevel=error >/dev/null 2>&1); then
+                REA_NOTE="install failed; run: cd ${rt} && npm install"; return 0
+            fi
+        else
+            REA_NOTE="npm not found; run: cd ${rt} && npm install"; return 0
+        fi
+    fi
+
+    # 2. the child's agent dir: links to the main one, minus MCP and skills
+    for e in "${PI_AGENT_DIR}"/* "${PI_AGENT_DIR}"/.[!.]*; do
+        [ -e "${e}" ] || continue
+        name="$(basename "${e}")"
+        case "${name}" in mcp.json|mcp-auth.json|skills|sessions|rea) continue ;; esac
+        if [ -e "${agent}/${name}" ] && [ ! -L "${agent}/${name}" ]; then rm -rf "${agent:?}/${name}"; fi
+        ln -sfn "${e}" "${agent}/${name}"
+    done
+    for e in "${agent}"/* "${agent}"/.[!.]*; do   # links whose target is gone
+        if [ -L "${e}" ] && [ ! -e "${e}" ]; then rm -f "${e}"; fi
+    done
+    # REA registered alone, compact schemas; env keys the user added to the
+    # entry (GHIDRA_INSTALL_DIR, REA_IDA_MCP_CONFIG, ...) and other servers
+    # added to this file are kept.
+    python3 - "${agent}/mcp.json" "${rt}/node_modules/rea-agents/scripts/rea.mjs" <<'PY' || REA_NOTE="could not write ${agent}/mcp.json"
+import json, os, sys
+target, entry = sys.argv[1], sys.argv[2]
+try:
+    doc = json.load(open(target))
+    if not isinstance(doc, dict): doc = {}
+except Exception:
+    doc = {}
+servers = doc.get("mcpServers") if isinstance(doc.get("mcpServers"), dict) else {}
+old = servers.get("rea") if isinstance(servers.get("rea"), dict) else {}
+env = old.get("env") if isinstance(old.get("env"), dict) else {}
+env.setdefault("REA_MCP_INPUT_SCHEMA_PROFILE", "compact")
+servers["rea"] = {"type": "stdio", "command": "node", "args": [entry, "mcp"], "env": env,
+                  "description": "REA: reverse engineering of binaries, apps, packages, firmware and websites"}
+doc["mcpServers"] = servers
+tmp = target + ".tmp"
+with open(tmp, "w") as f: json.dump(doc, f, indent=2); f.write("\n")
+os.chmod(tmp, 0o600); os.replace(tmp, target)
+PY
+
+    # 3. the runner and the child's standing instructions
+    cat > "${REA_DIR}/prompt.md" <<'MD'
+You are the reverse-engineering agent of a lets-code session. Another agent
+gave you one task and will see only your final message.
+
+REA is connected as the MCP server `rea`. Its tools are reached through
+codemode: `await describeNamespace("rea")` lists them and the server's
+instructions, `await searchTools("<what>", { namespace: "rea" })` finds one,
+and `tools.mcp__rea__<name>({...})` calls it. Read the
+reverse-engineer-anything skill before the first REA call. REA is why you
+were started: base findings on REA results, and use plain reads or runs only
+to confirm them or where REA has no tool for the target. Reduce large
+results inside the script; write bulky evidence to files and cite the paths.
+
+Final message, for an agent that has not seen any of it:
+## Answer
+What the target does, in direct terms.
+## Evidence
+Files, functions, addresses, modules or requests that show it, with the
+REA tool that produced each.
+## Unknowns
+What could not be established and why (missing engine, obfuscation, ...).
+MD
+    cat > "${REA_DIR}/run" <<'SH'
+#!/usr/bin/env bash
+# Written by lets-code (REA); regenerated on launch, edits are overwritten.
+# run "<task>": one reverse-engineering task in a fresh pi with REA's MCP
+# server and skill; prints its final report (50 KB cap).
+set -u
+here="$(cd "$(dirname "$0")" && pwd)"
+[ $# -gt 0 ] || { echo "usage: ${here}/run \"<task>\"" >&2; exit 2; }
+: "${LETS_CODE_REA_PROVIDER:?not set; launch pi through lets-code with REA on}"
+: "${LETS_CODE_REA_MODEL:?not set; launch pi through lets-code with REA on}"
+log="$(mktemp "${TMPDIR:-/tmp}/lets-code-rea.XXXXXX")"
+out="$(PI_CODING_AGENT_DIR="${here}/agent" LETS_CODE_SUBAGENT_DEPTH=$(( ${LETS_CODE_SUBAGENT_DEPTH:-0} + 1 )) \
+    pi -p --no-session --provider "${LETS_CODE_REA_PROVIDER}" --model "${LETS_CODE_REA_MODEL}" \
+    --skill "${here}/runtime/node_modules/rea-agents/skills/reverse-engineer-anything" \
+    --append-system-prompt "${here}/prompt.md" "Task: $*" </dev/null 2>"${log}")"
+rc=$?
+printf '%s\n' "${out}" | head -c 51200
+if [ ${rc} -ne 0 ] || [ -z "${out}" ]; then
+    echo "[rea] child pi exited ${rc}; stderr tail (full log: ${log}):"; tail -n 20 "${log}"
+    exit $(( rc == 0 ? 1 : rc ))
+fi
+rm -f "${log}"
+SH
+    chmod 755 "${REA_DIR}/run"
+
+    # 4. the one line the main session pays for (none when manual)
+    {
+        echo "---"
+        echo "name: reverse-engineering"
+        echo "description: Reverse engineer shipped software with REA (binaries, Electron/JS apps, .NET, APKs, firmware, websites) when a question depends on a built artifact rather than source. Runs in an isolated agent."
+        [ "${invoke}" = "manual" ] && echo "disable-model-invocation: true"
+        echo "---"
+        echo ""
+        echo "Hand the whole question to the isolated REA agent with one bash call,"
+        echo "timeout 3600 (analysis can take many minutes):"
+        echo ""
+        echo "    ${REA_DIR}/run \"<task>\""
+        echo ""
+        echo "The task must stand alone: absolute path or URL of the target, what to"
+        echo "find out, and what the answer is for. The agent does not see this"
+        echo "conversation. It replies with Answer / Evidence / Unknowns; use that, and"
+        echo "run it again with a narrower task to dig further. Do not call REA or"
+        echo "npx rea-agents yourself."
+    } > "${REA_DIR}/skill/reverse-engineering/SKILL.md"
+}
+
 # `lets-code mandate init [--global]`: a starter manifest to edit.
 mandate_init() {
     local target
@@ -3875,9 +4015,9 @@ run_setup() {  # run_setup [full|granular]
 
     # 5b. optional features: off in the default setup, all on with 'full',
     #     one question each with 'granular'
-    local feat_mandate="false" feat_mode="" feat_subagents="false" feat_sandbox="false" feat_mcp="no"
+    local feat_mandate="false" feat_mode="" feat_subagents="false" feat_sandbox="false" feat_mcp="no" feat_rea="false"
     case "${profile}" in
-        full) feat_mandate="true"; feat_subagents="true"; feat_sandbox="true"; feat_mcp="yes" ;;
+        full) feat_mandate="true"; feat_subagents="true"; feat_sandbox="true"; feat_mcp="yes"; feat_rea="true" ;;
         granular)
             echo ""
             echo "Optional features (each can be changed later in ${CONFIG_FILE}):"
@@ -3890,7 +4030,9 @@ run_setup() {  # run_setup [full|granular]
             printf "  Sandbox — bash confined with bubblewrap/Seatbelt via sandbox-runtime? [y/N] "
             read -r reply; case "${reply}" in y|Y) feat_sandbox="true" ;; esac
             printf "  MCP — import servers from .mcp.json and other clients' configs into pi? [y/N] "
-            read -r reply; case "${reply}" in y|Y) feat_mcp="yes" ;; esac ;;
+            read -r reply; case "${reply}" in y|Y) feat_mcp="yes" ;; esac
+            printf "  REA — reverse engineering on demand, run in a separate agent (~160 MB)? [y/N/manual] "
+            read -r reply; case "${reply}" in y|Y) feat_rea="true" ;; m|manual) feat_rea="manual" ;; esac ;;
     esac
 
     # 6. save config (re-emitted after the live probe with the thinking level)
@@ -3932,10 +4074,13 @@ run_setup() {  # run_setup [full|granular]
             echo "# MANDATE=true: modes plan/auto/ask/yolo and roles for subagents (MODE sets"
             echo "# the start mode, empty = auto). SUBAGENTS=true: the subagent tool."
             echo "# SANDBOX=true: bash confined with sandbox-runtime."
+            echo "# REA=true: a reverse-engineering skill that runs REA in a separate pi"
+            echo "# (manual: only through /skill:reverse-engineering, zero context)."
             echo "MANDATE=\"${feat_mandate}\""
             echo "MODE=\"${feat_mode}\""
             echo "SUBAGENTS=\"${feat_subagents}\""
             echo "SANDBOX=\"${feat_sandbox}\""
+            echo "REA=\"${feat_rea}\""
         } > "${CONFIG_FILE}"
         chmod 600 "${CONFIG_FILE}"
     }
@@ -4068,6 +4213,10 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
     fi
     [ "${feat_subagents}" = "true" ] && write_default_agents
     [ "${feat_mcp}" = "yes" ] && mcp_import yes
+    if [ "${feat_rea}" != "false" ]; then
+        if [ "${feat_rea}" = "manual" ]; then pi_write_rea manual; else pi_write_rea on; fi
+        log "rea: ${REA_NOTE:-ready (${REA_DIR}); native binaries also need Ghidra, IDA or Hopper, see its docs}"
+    fi
     if [ "${feat_mandate}" = "true" ]; then
         log "mandate: modes plan/auto/ask/yolo on (start mode: ${feat_mode:-auto}); /mode and alt+m switch, 'lets-code mandate init' writes a project manifest"
     fi
@@ -4475,6 +4624,7 @@ MANDATE="false"
 MODE=""
 SUBAGENTS="false"
 SANDBOX="false"
+REA="false"
 # shellcheck disable=SC1090
 [ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
 if [ -n "${PRESET}" ]; then
@@ -4502,6 +4652,7 @@ MANDATE="${LETS_CODE_MANDATE:-${MANDATE}}"
 MODE="${LETS_CODE_MODE:-${MODE}}"
 SUBAGENTS="${LETS_CODE_SUBAGENTS:-${SUBAGENTS}}"
 SANDBOX="${LETS_CODE_SANDBOX:-${SANDBOX}}"
+REA="${LETS_CODE_REA:-${REA}}"
 
 HARNESS="pi"
 URL_OVERRIDE=""
@@ -4545,6 +4696,9 @@ while [ $# -gt 0 ]; do
         --no-subagents) SUBAGENTS=false; shift ;;
         --sandbox)  SANDBOX=true; shift ;;
         --no-sandbox) SANDBOX=false; shift ;;
+        --rea)      REA=true
+                    case "${2:-}" in manual) REA=manual; shift 2 ;; *) shift ;; esac ;;
+        --no-rea)   REA=false; shift ;;
         --verbose|--debug) VERBOSE=true; shift ;;
         -h|--help)  sed -n "3,$(grep -n '^# (auto-installed on request)\.$' "$0" | cut -d: -f1)p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          PASSTHROUGH+=("$1"); shift ;;
@@ -4810,8 +4964,8 @@ case "$(printf '%s' "${SESSION_TAG}" | tr '[:upper:]' '[:lower:]')" in
         SESSION_DESC="session tag: ${LETS_CODE_SESSION_ID}" ;;
 esac
 
-# optional features: mandate (modes/roles), subagents, sandbox
-unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE
+# optional features: mandate (modes/roles), subagents, sandbox, REA
+unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL
 FEAT_DESC=""
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 case "$(lc "${MANDATE}")" in
@@ -4835,6 +4989,21 @@ case "$(lc "${SANDBOX}")" in
         pi_write_sandbox_extension
         export LETS_CODE_SANDBOX_ON=1
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }sandbox: on${SB_NOTE:+ (${SB_NOTE})}" ;;
+esac
+# REA: the skill reaches pi by --skill, so a pi started without lets-code
+# (or with REA off) does not carry it
+case "$(lc "${REA}")" in
+    true|yes|1|on|manual)
+        rea_invoke=on; [ "$(lc "${REA}")" = manual ] && rea_invoke=manual
+        pi_write_rea "${rea_invoke}"
+        if [ -z "${REA_NOTE}" ]; then
+            export LETS_CODE_REA_PROVIDER="${PROVIDER_ID}" LETS_CODE_REA_MODEL="${MODEL}"
+            if [ ${#PASSTHROUGH[@]} -eq 0 ]; then PASSTHROUGH=(--skill "${REA_DIR}/skill/reverse-engineering")
+            else PASSTHROUGH=(--skill "${REA_DIR}/skill/reverse-engineering" "${PASSTHROUGH[@]}"); fi
+            FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }rea: ${rea_invoke}"
+        else
+            FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }rea: off (${REA_NOTE})"
+        fi ;;
 esac
 
 # The launch banner: what is running where, in two lines on a terminal

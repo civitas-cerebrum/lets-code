@@ -912,7 +912,7 @@ pi_write_metrics_extension() {
 //     ↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)
 //   full (/metrics, METRICS=true or --metrics):
 //     ~/github/app (main)                              qwen3.8-27b • medium
-//     ↑222k ↓25k · cache 86% · 161.7 tok/s · TTFT 1.0s · 2.7k out · 22.0%/262k (auto)
+//     ↑222k ↓25k · 22.0%/262k (auto) · 161.7 tok/s · TTFT 1.0s · 2.7k out · cache 86%
 // ↑ every prompt token sent, cached ones included; ↓ every token received,
 // counting up while a response streams; tok/s the session's generation
 // speed, from each response's first streamed token to its end (prompt
@@ -975,18 +975,21 @@ export interface Stats {
 // lines are not enough, parts drop in this order: cost, cache, output, TTFT.
 // The token counts, the speed and the context always stay.
 export function statsLines(s: Stats, full: boolean, color: Color = plain, w = Infinity): string[] {
-	type Seg = { text: string; drop: number; ctx?: boolean };
-	const segs: Seg[] = [];
+	type Seg = { text: string; drop: number; ctx?: boolean; cache?: boolean };
+	const pct = s.percent === null || s.percent === undefined ? "?" : `${s.percent.toFixed(1)}%`;
+	const ctx: Seg = { text: `${pct}/${compact(s.window)}${s.auto ? " (auto)" : ""}`, drop: 0, ctx: true };
 	const io = [s.sent ? `↑${compact(s.sent)}` : "", s.received ? `↓${compact(s.received)}` : ""].filter(Boolean).join(" ");
+	const segs: Seg[] = [];
 	if (io) segs.push({ text: io, drop: 0 });
-	// the latest request's cache hit rate (cached prompt tokens / all prompt tokens)
-	if (full && (s.cached || s.written) && s.hit !== undefined) segs.push({ text: `cache ${Math.round(s.hit)}%`, drop: 3 });
+	if (full) segs.push(ctx);                    // the full size: context second, cache last
 	if (full && s.cost > 0) segs.push({ text: `$${s.cost.toFixed(3)}`, drop: 4 });
 	if (s.tps !== undefined || s.glyph) segs.push({ text: `${s.glyph ? s.glyph + " " : ""}${s.tps !== undefined ? s.tps.toFixed(1) + " tok/s" : "…"}`, drop: 0 });
 	if (full && s.firstMs !== undefined) segs.push({ text: `TTFT ${(s.firstMs / 1000).toFixed(1)}s${s.waiting ? "…" : ""}`, drop: 1 });
 	if (full && s.out !== undefined) segs.push({ text: `${s.estimated ? "~" : ""}${compact(s.out)} out`, drop: 2 });
-	const pct = s.percent === null || s.percent === undefined ? "?" : `${s.percent.toFixed(1)}%`;
-	segs.push({ text: `${pct}/${compact(s.window)}${s.auto ? " (auto)" : ""}`, drop: 0, ctx: true });
+	// the latest request's cache hit rate; on a second line, with the session's cached tokens
+	const hit = full && (s.cached || s.written) && s.hit !== undefined ? Math.round(s.hit) : undefined;
+	if (hit !== undefined) segs.push({ text: `cache ${hit}%`, drop: 3, cache: true });
+	if (!full) segs.push(ctx);
 	const len = (x: Seg) => [...x.text].length;
 	// greedy: fill a line, start the next at a part boundary
 	const wrap = (xs: Seg[]): Seg[][] => {
@@ -1002,6 +1005,13 @@ export function statsLines(s: Stats, full: boolean, color: Color = plain, w = In
 	};
 	let keep = segs, rows = wrap(keep);
 	for (let level = 4; level >= 1 && rows.length > 2; level--) { keep = keep.filter((x) => x.drop !== level); rows = wrap(keep); }
+	// spilled onto a second line: the cache part there has room for the amount
+	const c = keep.find((x) => x.cache);
+	if (c && rows.length === 2 && rows[1].includes(c) && s.cached) {
+		const long = keep.map((x) => (x === c ? { ...x, text: `cache ${compact(s.cached)} (${hit}%)` } : x));
+		const longRows = wrap(long);
+		if (longRows.length === 2) rows = longRows;
+	}
 	const v = s.percent ?? 0;
 	const paint = (x: Seg) => (x.ctx ? (v > 90 ? color("error", x.text) : v > 70 ? color("warning", x.text) : color("dim", x.text)) : color("dim", x.text));
 	return rows.map((row) => row.map(paint).join(color("dim", " · ")));

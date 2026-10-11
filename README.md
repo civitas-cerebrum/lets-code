@@ -14,7 +14,7 @@
 
 ```
 $ lets-code
-✦ lets-code Qwen/Qwen3-32B (auto ✓) @ localhost:8000
+✦ lets-code Qwen/Qwen3-32B (auto) @ localhost:8000
   128k context · thinking high · vision · 4 guards · 7 extensions
   let's code.
 ```
@@ -75,9 +75,8 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 
 Everything is re-derived at launch, so swapping models on the server needs
 no edits here.
-The banner says how the model was chosen and whether the server lists it:
-`(auto ✓)` discovered, `(pinned ✓)` pinned and served, `(pinned ✗ not served)`
-pinned but missing from the server's `/v1/models`, with a warning.
+A model discovered from the server shows as `(auto)` in the banner; a pinned
+model the server does not list gets a warning at launch.
 
 ## Daily use
 

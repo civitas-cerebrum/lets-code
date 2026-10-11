@@ -912,7 +912,8 @@ pi_write_metrics_extension() {
 //     ↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)
 //   full (/metrics, METRICS=true or --metrics):
 //     ~/github/app (main)                              qwen3.8-27b • medium
-//     ↑222k ↓25k · 22.0%/262k (auto) · 161.7 tok/s · TTFT 1.0s · 2.7k out · cache 86%
+//     ↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012
+//     ⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out
 // ↑ every prompt token sent, cached ones included; ↓ every token received,
 // counting up while a response streams; tok/s the session's generation
 // speed, from each response's first streamed token to its end (prompt
@@ -969,52 +970,43 @@ export interface Stats {
 	percent?: number | null; window: number; auto: boolean;
 }
 
-// the stats line; full adds cache, cost, first token and output
-// the stats line(s); full adds cache, cost, TTFT and output. Given a width,
-// a line that does not fit breaks between parts onto a second line; when two
-// lines are not enough, parts drop in this order: cost, cache, output, TTFT.
-// The token counts, the speed and the context always stay.
+// The stats. Minimal: one line (token counts, speed, context), wrapped
+// between parts when the terminal is narrow. Full: always two lines, so the
+// footer's height never changes mid-session: the session (token counts,
+// context, cache, cost) and the speed (tok/s, TTFT, output). A line too
+// wide for the terminal loses detail in order: the session line shortens
+// the cache to its hit rate, then drops the cost, then the cache; the speed
+// line drops the output, then TTFT. Token counts, context and speed stay.
 export function statsLines(s: Stats, full: boolean, color: Color = plain, w = Infinity): string[] {
-	type Seg = { text: string; drop: number; ctx?: boolean; cache?: boolean };
 	const pct = s.percent === null || s.percent === undefined ? "?" : `${s.percent.toFixed(1)}%`;
-	const ctx: Seg = { text: `${pct}/${compact(s.window)}${s.auto ? " (auto)" : ""}`, drop: 0, ctx: true };
-	const io = [s.sent ? `↑${compact(s.sent)}` : "", s.received ? `↓${compact(s.received)}` : ""].filter(Boolean).join(" ");
-	const segs: Seg[] = [];
-	if (io) segs.push({ text: io, drop: 0 });
-	if (full) segs.push(ctx);                    // the full size: context second, cache last
-	if (full && s.cost > 0) segs.push({ text: `$${s.cost.toFixed(3)}`, drop: 4 });
-	if (s.tps !== undefined || s.glyph) segs.push({ text: `${s.glyph ? s.glyph + " " : ""}${s.tps !== undefined ? s.tps.toFixed(1) + " tok/s" : "…"}`, drop: 0 });
-	if (full && s.firstMs !== undefined) segs.push({ text: `TTFT ${(s.firstMs / 1000).toFixed(1)}s${s.waiting ? "…" : ""}`, drop: 1 });
-	if (full && s.out !== undefined) segs.push({ text: `${s.estimated ? "~" : ""}${compact(s.out)} out`, drop: 2 });
-	// the latest request's cache hit rate; on a second line, with the session's cached tokens
-	const hit = full && (s.cached || s.written) && s.hit !== undefined ? Math.round(s.hit) : undefined;
-	if (hit !== undefined) segs.push({ text: `cache ${hit}%`, drop: 3, cache: true });
-	if (!full) segs.push(ctx);
-	const len = (x: Seg) => [...x.text].length;
-	// greedy: fill a line, start the next at a part boundary
-	const wrap = (xs: Seg[]): Seg[][] => {
-		const rows: Seg[][] = [[]];
-		let used = 0;
-		for (const x of xs) {
-			const row = rows[rows.length - 1];
-			const need = (row.length ? 3 : 0) + len(x);
-			if (row.length && used + need > w) { rows.push([x]); used = len(x); }
-			else { row.push(x); used += need; }
-		}
-		return rows;
-	};
-	let keep = segs, rows = wrap(keep);
-	for (let level = 4; level >= 1 && rows.length > 2; level--) { keep = keep.filter((x) => x.drop !== level); rows = wrap(keep); }
-	// spilled onto a second line: the cache part there has room for the amount
-	const c = keep.find((x) => x.cache);
-	if (c && rows.length === 2 && rows[1].includes(c) && s.cached) {
-		const long = keep.map((x) => (x === c ? { ...x, text: `cache ${compact(s.cached)} (${hit}%)` } : x));
-		const longRows = wrap(long);
-		if (longRows.length === 2) rows = longRows;
-	}
+	const ctxText = `${pct}/${compact(s.window)}${s.auto ? " (auto)" : ""}`;
 	const v = s.percent ?? 0;
-	const paint = (x: Seg) => (x.ctx ? (v > 90 ? color("error", x.text) : v > 70 ? color("warning", x.text) : color("dim", x.text)) : color("dim", x.text));
-	return rows.map((row) => row.map(paint).join(color("dim", " · ")));
+	const ctx = v > 90 ? color("error", ctxText) : v > 70 ? color("warning", ctxText) : color("dim", ctxText);
+	const io = [s.sent ? `↑${compact(s.sent)}` : "", s.received ? `↓${compact(s.received)}` : ""].filter(Boolean).join(" ");
+	const speed = `${s.glyph ? s.glyph + " " : ""}${s.tps !== undefined ? s.tps.toFixed(1) + " tok/s" : full ? "– tok/s" : "…"}`;
+	const sep = color("dim", " · ");
+	const vis = (parts: string[]) => parts.reduce((n, p) => n + width(p), 0) + 3 * Math.max(0, parts.length - 1);
+	// the first variant (most detail first) that fits; else the last
+	const fit = (variants: string[][]) => (variants.find((p) => vis(p) <= w) ?? variants[variants.length - 1]).join(sep);
+	const d = (t: string) => color("dim", t);
+	if (!full) {
+		const parts = [io ? d(io) : "", s.tps !== undefined || s.glyph ? d(speed) : "", ctx].filter(Boolean);
+		if (vis(parts) <= w || parts.length < 2) return [parts.join(sep)];
+		// narrow: break between parts
+		const rows: string[][] = [[]];
+		for (const p of parts) { const r = rows[rows.length - 1]; if (r.length && vis([...r, p]) > w) rows.push([p]); else r.push(p); }
+		return rows.map((r) => r.join(sep));
+	}
+	const head = [io ? d(io) : "", ctx].filter(Boolean);
+	const hit = (s.cached || s.written) && s.hit !== undefined ? Math.round(s.hit) : undefined;
+	const cacheLong = hit !== undefined && s.cached ? [d(`cache ${compact(s.cached)} (${hit}%)`)] : [];
+	const cacheShort = hit !== undefined ? [d(`cache ${hit}%`)] : [];
+	const cost = s.cost > 0 ? [d(`$${s.cost.toFixed(3)}`)] : [];
+	const session = fit([[...head, ...(cacheLong.length ? cacheLong : cacheShort), ...cost], [...head, ...cacheShort, ...cost], [...head, ...cacheShort], head]);
+	const ttft = s.firstMs !== undefined ? [d(`TTFT ${(s.firstMs / 1000).toFixed(1)}s${s.waiting ? "…" : ""}`)] : [];
+	const out = s.out !== undefined ? [d(`${s.estimated ? "~" : ""}${compact(s.out)} out`)] : [];
+	const rate = fit([[d(speed), ...ttft, ...out], [d(speed), ...ttft], [d(speed)]]);
+	return [session, rate];
 }
 
 // the stats on one line, however wide

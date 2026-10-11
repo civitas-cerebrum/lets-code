@@ -67,6 +67,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🐝 **Subagents** (optional) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
+| 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **Pastel themes** | `lets-code-soft`, `lets-code-pastel` and `lets-code-chalk`: softer takes on pi's dark theme that look the same in every terminal, in tmux and over ssh. Pastel is the default unless you already picked a theme; switch in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
 
@@ -79,12 +80,14 @@ no edits here.
 lets-code                         # interactive session
 lets-code -p "fix the failing test"   # one-shot; unknown args go to pi
 lets-code --model other-id        # pin something for one launch
+lets-code --openrouter            # a saved preset (see Presets below)
 lets-code --thinking-level low    # quieter model
 lets-code --no-git-guard          # you know what you're doing
 ```
 
 | Flag | Meaning |
 |---|---|
+| `--<preset>` / `--preset <name>` | Launch against a saved preset |
 | `--url <base>` | Endpoint for this launch (scheme and `/v1` optional) |
 | `--model <id>` | Model for this launch (default: discovered) |
 | `--context <tok>` | Context window (default: discovered, else 128000) |
@@ -99,6 +102,34 @@ lets-code --no-git-guard          # you know what you're doing
 | `--subagents` / `--no-subagents` | The `subagent` tool |
 | `--sandbox` / `--no-sandbox` | The OS sandbox for bash |
 | `--verbose` | Show each endpoint probe |
+
+<details>
+<summary><b>Presets</b></summary>
+
+A preset is another backend saved under a name: a different server, a
+gateway like OpenRouter, or a second model on the same box.
+
+```bash
+lets-code setup preset            # onboarding: asks the name, server, token, model
+lets-code setup preset qwen       # the same, name given
+lets-code presets                 # list them
+lets-code --qwen                  # launch one (or: --preset qwen)
+```
+
+Setup asks for the endpoints, token, CA (for https) and model, then probes
+the model for thinking and image input like the main setup. A gateway lists
+hundreds of models, so give it a model id; the context window is read from
+that model's entry.
+
+Presets live in `~/.config/lets-code/presets/<name>` (shell syntax, mode
+600), with the same keys as the config. A preset is applied on top of the
+config, so guards and optional features still come from the config, and any
+config key can be added to a preset to override it. Environment variables and
+flags still win. Each preset registers with pi as its own provider,
+`lets-code-<name>`, so two sessions on different presets never rewrite each
+other's backend. Names can't shadow a lets-code or pi option.
+
+</details>
 
 <details>
 <summary><b>Config file and environment</b></summary>

@@ -933,8 +933,10 @@ import { join, relative, resolve, isAbsolute, sep } from "node:path";
 import { homedir } from "node:os";
 
 const DELTAS = new Set(["text_delta", "thinking_delta", "toolcall_delta"]);
-// one terminal cell each, never drawn as emoji (✳ U+2733 can be)
-export const FRAMES = ["·", "✢", "✣", "✶", "✻", "✽", "✻", "✶", "✣", "✢"];
+// pi's own working-spinner frames: braille is in nearly every terminal
+// font, so every frame has the same width and shape (dingbats like ✢ ✶ ✻
+// come from fallback fonts in many terminals and change size per frame)
+export const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 export const FRAME_MS = 200;
 export const NUMBERS_MS = 1000;   // the numbers move once a second; the glyph every frame
 
@@ -5421,7 +5423,8 @@ banner() {
             *)               a=$'\033[38;5;'"${i256}m" ;;
         esac
         local signoffs=("let's code." "happy hacking." "go build something." "may your tests be green.")
-        printf '%s✦ lets-code%s %s%s%s%s%s%s @ %s%s%s\n' "${a}${b}" "${r}" "${b}" "${MODEL}" "${r}" "${d}" "${auto}" "${r}" "${b}" "${host}${PRESET:+  (preset ${PRESET})}" "${r}"
+        # one color after the mark: model, (auto), host
+        printf '%s✦ lets-code%s %s%s%s\n' "${a}${b}" "${r}" "${b}" "${line1}" "${r}"
         printf '  %s%s%s\n' "${d}" "${line2}" "${r}"
         printf '  %s%s%s\n' "${d}" "${signoffs[$(( RANDOM % ${#signoffs[@]} ))]}" "${r}"
     else

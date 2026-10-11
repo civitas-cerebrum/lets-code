@@ -5119,6 +5119,10 @@ case "${BASE_URL}" in
 esac
 
 MODEL="${MODEL_OVERRIDE:-${MODEL}}"
+# was the model pinned (config, preset, env, --model) or discovered: the
+# banner marks a discovered one "(auto)"; a pinned one the server does not
+# list gets a warning
+if [ -n "${MODEL}" ]; then MODEL_SOURCE="pinned"; else MODEL_SOURCE="auto"; fi
 # a pinned model's own context when the server lists it (a gateway lists
 # hundreds); else the first entry's, as for a box serving one model
 DISCOVERED="$(printf '%s' "${MODELS_JSON}" | model_entry "${MODEL}")" || DISCOVERED=""
@@ -5129,6 +5133,9 @@ if [ "${DISCOVERED##*|}" = 0 ]; then
     DISCOVERED_LEN="${DISCOVERED_LEN#*|}"; DISCOVERED_LEN="${DISCOVERED_LEN%%|*}"
 fi
 [ -n "${MODEL}" ] || MODEL="${DISCOVERED_ID}"
+if [ "${MODEL_SOURCE}" = pinned ] && [ "${DISCOVERED##*|}" = 0 ]; then
+    log "warning: ${BASE_URL} does not list ${MODEL} in /v1/models — requests to it will likely fail (check the id, or run without a pinned model to use what the server serves)."
+fi
 [ -n "${MODEL}" ] || { log_error "could not discover a model from ${BASE_URL}/v1/models and no --model given."; exit 1; }
 
 CONTEXT="${CONTEXT_OVERRIDE:-${CONTEXT}}"
@@ -5400,7 +5407,10 @@ banner() {
     done
     [ "${VISION}" = true ] && extras=" · vision"
     extras="${extras} · ${guards} guard$([ "${guards}" = 1 ] || echo s) · ${exts} extension$([ "${exts}" = 1 ] || echo s)"
-    line1="${MODEL} @ ${host}${PRESET:+  (preset ${PRESET})}"
+    # a model discovered from the server, not pinned, is marked (auto)
+    local auto=""
+    [ "${MODEL_SOURCE}" = auto ] && auto=" (auto)"
+    line1="${MODEL}${auto} @ ${host}${PRESET:+  (preset ${PRESET})}"
     line2="${ctx} context · ${think}${extras}"
     if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
         b=$'\033[1m'; d=$'\033[2m'; r=$'\033[0m'
@@ -5411,7 +5421,7 @@ banner() {
             *)               a=$'\033[38;5;'"${i256}m" ;;
         esac
         local signoffs=("let's code." "happy hacking." "go build something." "may your tests be green.")
-        printf '%s✦ lets-code%s %s%s%s\n' "${a}${b}" "${r}" "${b}" "${line1}" "${r}"
+        printf '%s✦ lets-code%s %s%s%s%s%s%s @ %s%s%s\n' "${a}${b}" "${r}" "${b}" "${MODEL}" "${r}" "${d}" "${auto}" "${r}" "${b}" "${host}${PRESET:+  (preset ${PRESET})}" "${r}"
         printf '  %s%s%s\n' "${d}" "${line2}" "${r}"
         printf '  %s%s%s\n' "${d}" "${signoffs[$(( RANDOM % ${#signoffs[@]} ))]}" "${r}"
     else

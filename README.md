@@ -60,6 +60,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 👁 **Vision probe** | One tiny request with a red 64×64 image. "Red" in the reply means pi may send screenshots. Setup asks you if the probe can't tell. |
 | 📏 **Overflow-proof** | The output cap is reserved in pi's compaction settings, so `input + max_tokens` can never exceed the server window. |
 | 🧯 **Memory guard** | When the box runs low on RAM, the session's own runaway process is stopped. Nothing else on the machine is touched. |
+| 🔍 **Grounding guard** | pi looks facts up with its tools instead of guessing them (file contents, paths, names, versions, config, command output), invents nothing and says what it could not verify. Overwriting an existing file it has not read is blocked once: read first, or write again. |
 | 🛟 **Git guard** | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
 | 🧭 **Agent guard** | Default bash timeout, a nudge to run tests after untested edits, a wrap-up hint once they pass, and thinking that switches on only while the model struggles. |
 | 🧭 **Modes** (optional) | `plan` explores read-only and ends in a numbered plan, `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
@@ -97,7 +98,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`), `adaptive[:<lvl>]` (medium, low once the tests pass, bursts up on struggle), or `auto[:<lvl>]` (off, bursts up on struggle); see [Choosing a thinking level](#choosing-a-thinking-level) |
 | `--vision` / `--no-vision` | Pin image input instead of probing |
 | `--insecure` | Skip TLS verification |
-| `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` | Launch without a guard |
+| `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` / `--no-grounding` | Launch without a guard |
 | `--no-session-tag` | Send no session tag with model requests |
 | `--metrics` / `--no-metrics` | Tokens/s and time to first token in pi's footer after each response (default off; `/metrics` toggles it inside pi) |
 | `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `yolo` or a role of yours |
@@ -165,7 +166,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MODEL`, `CONTEXT`, `OUTPUT_CAP`, `API` | Pins; empty means discovered or default. |
 | `VISION`, `REASONING` | `true`/`false` pins; empty means probed at launch. |
 | `THINKING` | Startup thinking level. Setup suggests one from the context window. |
-| `MEM_GUARD`, `GIT_GUARD`, `AGENT_GUARD` | `false` turns a guard off. |
+| `MEM_GUARD`, `GIT_GUARD`, `AGENT_GUARD`, `GROUNDING` | `false` turns a guard off. |
 | `TEMPLATE_EFFORT` | `off` skips the chat-template effort probe, `neutral` maps every level to the least-instruction value (see server setup). |
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS`, `SANDBOX` | `true` turns the feature on. |

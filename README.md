@@ -170,7 +170,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS`, `SANDBOX` | `true` turns the feature on. |
 | `REA` | `true` adds the reverse-engineering skill, `manual` makes it `/skill:reverse-engineering` only. |
-| `METRICS` | `true` shows response metrics in pi's footer: `⚡ 41.8 tok/s · 0.9s first token · 812 out · avg 40.2 tok/s`. tok/s is generation speed (from the first streamed token); first token is mostly prompt processing. `/metrics` (or `/metrics on\|off`) toggles it inside pi. |
+| `METRICS` | `true` shows response metrics in pi's footer: a small spinner while a response streams (`✶ ~38 tok/s · ~412 out`), then `✦ 41.8 tok/s · 0.9s first token · 812 out · avg 40.2 tok/s`. tok/s is generation speed (from the first streamed token); first token is mostly prompt processing. `/metrics` (or `/metrics on\|off`) toggles it inside pi. |
 
 Listing several endpoints lets one config follow you around:
 `http://localhost:8000 https://llm.home.example` works on the server box,

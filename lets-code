@@ -963,9 +963,10 @@ mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
     exec "$@"
 }
 
-# Response metrics: after each model response, pi's footer shows its tokens
-# per second, the time to its first token and its output tokens, plus the
-# session average. Written on every launch so /metrics can turn it on;
+# Response metrics: a small spinner in pi's footer while a response streams
+# (elapsed time, then a live estimate), settling after each response into
+# its tokens per second, the time to its first token and its output tokens,
+# plus the session average. Written on every launch so /metrics can turn it on;
 # shown from the start when METRICS is on (LETS_CODE_METRICS_ON=1). Inert
 # outside a lets-code launch and without a UI. Rewritten when its content
 # changes.
@@ -977,15 +978,19 @@ pi_write_metrics_extension() {
     cat > "${tmp}" <<'TS'
 // Written by lets-code (response metrics); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code (LETS_CODE_METRICS_ON set) with a
-// UI. After each model response the footer shows
-//   ⚡ 41.8 tok/s · 0.9s first token · 812 out · avg 40.2 tok/s
+// UI. While a response is on its way the footer shows a small spinner:
+//   ✳ 1.2s                      waiting for the first token
+//   ✶ ~38 tok/s · ~412 out      streaming (estimated from the text, ~)
+// and when it ends, the exact numbers under the banner's ✦:
+//   ✦ 41.8 tok/s · 0.9s first token · 812 out · avg 40.2 tok/s
 // tok/s: output tokens (thinking included) over the time from the first
 // streamed token to the end of the response, so prompt processing is not in
 // it. first token: from sending the request to the first streamed token,
 // which is mostly prompt processing. avg: the session's output tokens over
 // its generation time. Token counts are the provider's own; when it reports
 // none, output is estimated from the streamed text (~4 characters a token)
-// and marked "~". Shown from the start when LETS_CODE_METRICS_ON=1 (METRICS
+// and marked "~". The whole line is in the theme's dim gray, like the
+// footer around it. Shown from the start when LETS_CODE_METRICS_ON=1 (METRICS
 // or --metrics); /metrics toggles it, /metrics on|off sets it. Measured
 // either way, so turning it on shows the session average at once. Nothing
 // reaches the model.
@@ -995,6 +1000,9 @@ export interface Sample { sentAt: number; firstAt?: number; endAt: number; outpu
 
 const KEY = "lets-code-metrics";
 const DELTAS = new Set(["text_delta", "thinking_delta", "toolcall_delta"]);
+export const FRAMES = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
+export const FRAME_MS = 120;
+const DONE = "✦";
 
 export function tokens(n: number): string {
 	return n >= 10_000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
@@ -1004,22 +1012,57 @@ export function rate(output: number, ms: number): number | undefined {
 	return output > 0 && ms >= 50 ? output / (ms / 1000) : undefined;
 }
 
+// the finished response, without its glyph
 export function format(s: Sample, avg?: number): string {
 	const parts: string[] = [];
 	const r = s.firstAt === undefined ? undefined : rate(s.output, s.endAt - s.firstAt);
-	parts.push(r === undefined ? "⚡ – tok/s" : `⚡ ${s.estimated ? "~" : ""}${r.toFixed(1)} tok/s`);
+	parts.push(r === undefined ? "– tok/s" : `${s.estimated ? "~" : ""}${r.toFixed(1)} tok/s`);
 	if (s.firstAt !== undefined) parts.push(`${((s.firstAt - s.sentAt) / 1000).toFixed(1)}s first token`);
 	parts.push(`${s.estimated ? "~" : ""}${tokens(s.output)} out`);
 	if (avg !== undefined) parts.push(`avg ${avg.toFixed(1)} tok/s`);
 	return parts.join(" · ");
 }
 
+// a response on its way, without its glyph
+export function live(now: number, sentAt: number, firstAt: number | undefined, chars: number): string {
+	if (firstAt === undefined) return `${((now - sentAt) / 1000).toFixed(1)}s`;
+	const out = Math.round(chars / 4);
+	const r = now - firstAt >= 250 ? rate(out, now - firstAt) : undefined;
+	return r === undefined ? `~${tokens(out)} out` : `~${Math.round(r)} tok/s · ~${tokens(out)} out`;
+}
+
+type Ctx = { hasUI: boolean; ui: { setStatus(k: string, v: string | undefined): void; notify(m: string, t?: "info" | "warning" | "error"): void; theme?: { fg(c: string, s: string): string } } };
+
 export default function (pi: ExtensionAPI) {
 	if (process.env.LETS_CODE_METRICS_ON === undefined) return;
 	let shown = process.env.LETS_CODE_METRICS_ON === "1";
 	let sentAt: number | undefined, firstAt: number | undefined, chars = 0;
-	let totalOut = 0, totalMs = 0, last = "";
-	pi.on("before_provider_request", () => { sentAt = Date.now(); firstAt = undefined; chars = 0; });
+	let totalOut = 0, totalMs = 0, last = "", frame = 0;
+	let ui: Ctx | undefined, timer: ReturnType<typeof setInterval> | undefined;
+
+	const paint = (glyph: string, text: string) => {
+		if (!ui) return;
+		const t = ui.ui.theme;
+		ui.ui.setStatus(KEY, t ? t.fg("dim", `${glyph} ${text}`) : `${glyph} ${text}`);
+	};
+	const tick = () => {
+		if (sentAt === undefined) return;
+		paint(FRAMES[frame++ % FRAMES.length], live(Date.now(), sentAt, firstAt, chars));
+	};
+	const stop = () => { if (timer !== undefined) { clearInterval(timer); timer = undefined; } };
+	const start = () => {
+		stop();
+		if (!shown || !ui || sentAt === undefined) return;
+		frame = 0; tick();
+		timer = setInterval(tick, FRAME_MS);
+		(timer as { unref?: () => void }).unref?.();
+	};
+	const settle = () => { stop(); if (!ui) return; if (shown && last) paint(DONE, last); else ui.ui.setStatus(KEY, undefined); };
+
+	pi.on("before_provider_request", (_event, ctx) => {
+		sentAt = Date.now(); firstAt = undefined; chars = 0;
+		if ((ctx as Ctx).hasUI) { ui = ctx as Ctx; start(); }
+	});
 	pi.on("message_update", (event) => {
 		const e = event.assistantMessageEvent as { type: string; delta?: string };
 		if (!DELTAS.has(e.type)) return;
@@ -1028,16 +1071,19 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("message_end", (event, ctx) => {
 		const m = event.message as { role?: string; usage?: { output?: number } };
-		if (m.role !== "assistant" || !ctx.hasUI || sentAt === undefined) return;
+		if (m.role !== "assistant" || !(ctx as Ctx).hasUI || sentAt === undefined) return;
+		ui = ctx as Ctx;
 		const endAt = Date.now();
 		const reported = m.usage?.output ?? 0;
 		const output = reported > 0 ? reported : Math.round(chars / 4);
 		const s: Sample = { sentAt, firstAt, endAt, output, estimated: reported <= 0 };
 		if (firstAt !== undefined && rate(output, endAt - firstAt) !== undefined) { totalOut += output; totalMs += endAt - firstAt; }
 		last = format(s, rate(totalOut, totalMs));
-		if (shown) ctx.ui.setStatus(KEY, last);
 		sentAt = undefined;
+		settle();
 	});
+	// an interrupted or failed run ends without message_end: stop the spinner
+	pi.on("agent_end", () => { if (sentAt !== undefined) { sentAt = undefined; settle(); } });
 	pi.registerCommand("metrics", {
 		description: "Show or hide tokens/s and time to first token in the footer (on | off)",
 		getArgumentCompletions: (prefix) => ["on", "off"].filter((a) => a.startsWith(prefix.trim())).map((a) => ({ value: a, label: a })),
@@ -1045,7 +1091,11 @@ export default function (pi: ExtensionAPI) {
 			const a = args.trim().toLowerCase();
 			if (a && a !== "on" && a !== "off") { ctx.ui.notify("usage: /metrics [on|off]", "warning"); return; }
 			shown = a ? a === "on" : !shown;
-			ctx.ui.setStatus(KEY, shown ? last || "⚡ metrics on: shown after the next response" : undefined);
+			ui = ctx as unknown as Ctx;
+			if (!shown) settle();
+			else if (sentAt !== undefined) start();
+			else if (last) paint(DONE, last);
+			else paint(DONE, "metrics on: shown after the next response");
 			ctx.ui.notify(shown ? "Metrics on" : "Metrics off", "info");
 		},
 	});

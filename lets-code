@@ -52,7 +52,7 @@
 #   lets-code --mandate [<m>]    mandate on, optionally in mode plan | auto |
 #                                ask | yolo | <role> (pi's own --mode is untouched)
 #   lets-code --no-mandate       launch without the mandate (modes) extension
-#   lets-code --subagents | --no-subagents   the subagent tool on/off
+#   lets-code --subagents | --no-subagents   the subagent tool on/off (default on)
 #   lets-code --sandbox | --no-sandbox       the OS sandbox on/off
 #   lets-code --rea [manual] | --no-rea      REA reverse engineering on demand
 #                                (manual: only via /skill:reverse-engineering)
@@ -4383,7 +4383,7 @@ run_setup() {  # run_setup [full|granular]
 
     # 5b. optional features: off in the default setup, all on with 'full',
     #     one question each with 'granular'
-    local feat_mandate="false" feat_mode="" feat_subagents="false" feat_sandbox="false" feat_mcp="no" feat_rea="false" feat_metrics="false"
+    local feat_mandate="false" feat_mode="" feat_subagents="true" feat_sandbox="false" feat_mcp="no" feat_rea="false" feat_metrics="false"
     case "${profile}" in
         full) feat_mandate="true"; feat_subagents="true"; feat_sandbox="true"; feat_mcp="yes"; feat_rea="true"; feat_metrics="true" ;;
         granular)
@@ -4393,8 +4393,8 @@ run_setup() {  # run_setup [full|granular]
             read -r reply; case "${reply}" in y|Y) feat_mandate="true"
                 printf "  Start mode [auto] (plan|auto|ask|yolo): "; read -r feat_mode
                 case "${feat_mode}" in ""|auto) feat_mode="" ;; plan|ask|yolo) ;; *) log_error "mode must be plan|auto|ask|yolo"; exit 1 ;; esac ;; esac
-            printf "  Subagents — a 'subagent' tool that delegates to agent files? [y/N] "
-            read -r reply; case "${reply}" in y|Y) feat_subagents="true" ;; esac
+            printf "  Subagents — a 'subagent' tool that delegates to agent files? [Y/n] "
+            read -r reply; case "${reply}" in n|N) feat_subagents="false" ;; esac
             printf "  Sandbox — bash confined with bubblewrap/Seatbelt via sandbox-runtime? [y/N] "
             read -r reply; case "${reply}" in y|Y) feat_sandbox="true" ;; esac
             printf "  MCP — import servers from .mcp.json and other clients' configs into pi? [y/N] "
@@ -4444,15 +4444,19 @@ run_setup() {  # run_setup [full|granular]
             echo "# Grounding guard: facts about the project are looked up, not guessed, and"
             echo "# an unread existing file is not overwritten blind. GROUNDING=false disables it."
             echo "GROUNDING=\"true\""
+            echo ""
+            echo "# Subagents: a 'subagent' tool that delegates to agent files in"
+            echo "# ~/.pi/agent/agents. On by default; SUBAGENTS=false turns it off."
+            echo "SUBAGENTS=\"${feat_subagents}\""
+            echo ""
             echo "# Optional features (off by default; 'lets-code setup full' turns them on)."
             echo "# MANDATE=true: modes plan/auto/ask/yolo and roles for subagents (MODE sets"
-            echo "# the start mode, empty = auto). SUBAGENTS=true: the subagent tool."
+            echo "# the start mode, empty = auto)."
             echo "# SANDBOX=true: bash confined with sandbox-runtime."
             echo "# REA=true: a reverse-engineering skill that runs REA in a separate pi"
             echo "# (manual: only through /skill:reverse-engineering, zero context)."
             echo "MANDATE=\"${feat_mandate}\""
             echo "MODE=\"${feat_mode}\""
-            echo "SUBAGENTS=\"${feat_subagents}\""
             echo "SANDBOX=\"${feat_sandbox}\""
             echo "REA=\"${feat_rea}\""
             echo ""
@@ -5002,7 +5006,7 @@ METRICS="false"
 TEMPLATE_EFFORT="auto"
 MANDATE="false"
 MODE=""
-SUBAGENTS=""          # empty = off; a config without the key predates the feature
+SUBAGENTS="true"      # on by default; SUBAGENTS=false (config or env) or --no-subagents turns it off
 SANDBOX="false"
 REA="false"
 # shellcheck disable=SC1090
@@ -5376,7 +5380,6 @@ case "$(lc "${MANDATE}")" in
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }mandate: ${MODE:-auto}" ;;
     *) unset LETS_CODE_MODE ;;
 esac
-[ -n "${SUBAGENTS}" ] || log "tip: subagents are available but off; add SUBAGENTS=\"true\" to ${CONFIG_FILE} or launch with --subagents"
 case "$(lc "${SUBAGENTS}")" in
     true|yes|1|on)
         pi_write_subagent_extension

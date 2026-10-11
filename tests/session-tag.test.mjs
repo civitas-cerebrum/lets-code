@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Unit test for the session tag extension that lets-code writes
-// (~/.pi/agent/extensions/lets-code-sessiontag.ts). Loads it with a fake pi
+// (~/.pi/agent/extensions/session-tag/index.ts). Loads it with a fake pi
 // and drives before_provider_headers. Needs Node >= 22.6.
 //
 //   tests/session-tag.test.mjs [path/to/lets-code-sessiontag.ts]
@@ -9,7 +9,7 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code-sessiontag.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/session-tag/index.ts");
 const work = mkdtempSync(join(tmpdir(), "session-tag-test-"));
 const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
 

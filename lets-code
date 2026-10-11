@@ -52,7 +52,7 @@
 #   lets-code --mandate [<m>]    mandate on, optionally in mode plan | auto |
 #                                ask | yolo | <role> (pi's own --mode is untouched)
 #   lets-code --no-mandate       launch without the mandate (modes) extension
-#   lets-code --subagents | --no-subagents   the subagent tool on/off
+#   lets-code --subagents | --no-subagents   the subagent tool on/off (default on)
 #   lets-code --sandbox | --no-sandbox       the OS sandbox on/off
 #   lets-code --rea [manual] | --no-rea      REA reverse engineering on demand
 #                                (manual: only via /skill:reverse-engineering)
@@ -635,6 +635,40 @@ upsert(os.path.join(agent_dir, "settings.json"), to_settings)
 PY
 }
 
+# ------------------------------------------------------------ extension dirs
+# Each extension lets-code writes lives in ~/.pi/agent/extensions/<name>/
+# index.ts, so pi's startup list names it ("agent-guard", "footer") instead
+# of a file name. lc_ext_dir prints the directory for <name>: a directory of
+# that name that the user made (its index.ts not written by lets-code) is
+# left alone and lets-code-<name> is used instead. It also retires the
+# extension's old location (<legacy>, a lets-code-*.ts file or directory)
+# when lets-code wrote it: a file is removed, so pi does not load the
+# extension twice; a directory is moved, so what it holds comes along.
+lc_ext_dir() {  # lc_ext_dir <name> <legacy>
+    local base="${PI_AGENT_DIR}/extensions" dir old
+    dir="${base}/$1"; old="${base}/$2"
+    if [ -f "${dir}/index.ts" ] && ! head -n 1 "${dir}/index.ts" 2>/dev/null | grep -q "Written by lets-code"; then
+        dir="${base}/lets-code-$1"
+    fi
+    if [ -f "${old}" ] && head -n 1 "${old}" 2>/dev/null | grep -q "Written by lets-code"; then
+        rm -f "${old}"
+    elif [ -d "${old}" ] && [ "${old}" != "${dir}" ] && [ ! -e "${dir}" ] && head -n 1 "${old}/index.ts" 2>/dev/null | grep -q "Written by lets-code"; then
+        mkdir -p "${base}" && mv "${old}" "${dir}"
+    fi
+    printf '%s' "${dir}"
+}
+
+# Every launch retires all the old locations, including those of features
+# that are off this time (their old files would still load, under old names).
+lc_retire_old_extensions() {
+    local pair
+    for pair in footer:lets-code-metrics.ts grounding:lets-code-grounding.ts session-tag:lets-code-sessiontag.ts \
+                memory-guard:lets-code-memguard.ts git-guard:lets-code-gitguard.ts agent-guard:lets-code-agentguard.ts \
+                mandate:lets-code-mandate.ts subagents:lets-code-subagent.ts sandbox:lets-code-sandbox; do
+        lc_ext_dir "${pair%%:*}" "${pair#*:}" >/dev/null
+    done
+}
+
 # ------------------------------------------------------------------ themes
 # Pastel versions of pi's built-in dark theme: the same hue for every role,
 # with saturation lowered and lightness raised a step further each time
@@ -913,7 +947,7 @@ JSON
 #                 other big session processes paused, SIGINT -> SIGTERM -> SIGKILL
 #   < 2.5 % free  the largest session process is SIGKILLed immediately
 # No memory caps: nothing is limited until the machine as a whole runs low.
-# It lives in a pi extension (lets-code-memguard.ts) that runs inside pi, so
+# It lives in a pi extension (memory-guard) that runs inside pi, so
 # "this session" = descendants of that pi, plus anything in the session's
 # systemd user scope (orphans re-parented to PID 1 keep their scope). The scope
 # (lets-code-<pid>.scope, no root needed) also sets OOMPolicy=continue: if the
@@ -973,10 +1007,11 @@ mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
 # Written on every launch; METRICS=true starts in the full size. Inert outside a lets-code launch and without a UI. Rewritten
 # when its content changes.
 pi_write_metrics_extension() {
-    local dir="${PI_AGENT_DIR}/extensions" f tmp
-    f="${dir}/lets-code-metrics.ts"
+    local dir f tmp
+    dir="$(lc_ext_dir footer lets-code-metrics.ts)"
+    f="${dir}/index.ts"
     mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.lets-code-metrics.XXXXXX")"
+    tmp="$(mktemp "${dir}/.index.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (footer and metrics); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code (LETS_CODE_METRICS_ON set) with a
@@ -986,7 +1021,7 @@ pi_write_metrics_extension() {
 //     ↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)
 //   full (/metrics, METRICS=true or --metrics):
 //     ~/github/app (main)                              qwen3.8-27b • medium
-//     ↑222k ↓25k · 198k cached (86% hit) · 161.7 tok/s · 1.0s first token · 2673 out · 22.0%/262k (auto)
+//     ↑222k ↓25k · cache 198k (86%) · 161.7 tok/s · TTFT 1.0s · 2.7k out · 22.0%/262k (auto)
 // ↑ every prompt token sent, cached ones included; ↓ every token received,
 // counting up while a response streams; tok/s the session's generation
 // speed, from each response's first streamed token to its end (prompt
@@ -1007,8 +1042,10 @@ import { join, relative, resolve, isAbsolute, sep } from "node:path";
 import { homedir } from "node:os";
 
 const DELTAS = new Set(["text_delta", "thinking_delta", "toolcall_delta"]);
-export const FRAMES = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
-export const FRAME_MS = 120;
+// one terminal cell each, never drawn as emoji (✳ U+2733 can be)
+export const FRAMES = ["·", "✢", "✣", "✶", "✻", "✽", "✻", "✶", "✣", "✢"];
+export const FRAME_MS = 200;
+export const NUMBERS_MS = 1000;   // the numbers move once a second; the glyph every frame
 
 // pi's footer format: 999, 1.2k, 45k, 1.2M
 export function compact(n: number): string {
@@ -1040,23 +1077,47 @@ export interface Stats {
 }
 
 // the stats line; full adds cache, cost, first token and output
-export function statsLine(s: Stats, full: boolean, color: Color = plain): string {
-	const segs: string[] = [];
+// the stats line(s); full adds cache, cost, TTFT and output. Given a width,
+// a line that does not fit breaks between parts onto a second line; when two
+// lines are not enough, parts drop in this order: cost, cache, output, TTFT.
+// The token counts, the speed and the context always stay.
+export function statsLines(s: Stats, full: boolean, color: Color = plain, w = Infinity): string[] {
+	type Seg = { text: string; drop: number; ctx?: boolean };
+	const segs: Seg[] = [];
 	const io = [s.sent ? `↑${compact(s.sent)}` : "", s.received ? `↓${compact(s.received)}` : ""].filter(Boolean).join(" ");
-	if (io) segs.push(io);
-	if (full && s.cached) segs.push(`${compact(s.cached)} cached${s.hit !== undefined ? ` (${Math.round(s.hit)}% hit)` : ""}`);
-	if (full && s.written) segs.push(`${compact(s.written)} cache written`);
-	if (full && s.cost > 0) segs.push(`$${s.cost.toFixed(3)}`);
-	if (s.tps !== undefined || s.glyph) segs.push(`${s.glyph ? s.glyph + " " : ""}${s.tps !== undefined ? s.tps.toFixed(1) + " tok/s" : "…"}`);
-	if (full && s.firstMs !== undefined) segs.push(`${(s.firstMs / 1000).toFixed(1)}s ${s.waiting ? "to first token" : "first token"}`);
-	if (full && s.out !== undefined) segs.push(`${s.estimated ? "~" : ""}${compact(s.out)} out`);
-	const out = segs.map((x) => color("dim", x));
+	if (io) segs.push({ text: io, drop: 0 });
+	if (full && (s.cached || s.written)) {
+		const parts = [s.cached ? compact(s.cached) : "", s.written ? `+${compact(s.written)} written` : ""].filter(Boolean).join(" ");
+		segs.push({ text: `cache ${parts}${s.hit !== undefined && s.cached ? ` (${Math.round(s.hit)}%)` : ""}`, drop: 3 });
+	}
+	if (full && s.cost > 0) segs.push({ text: `$${s.cost.toFixed(3)}`, drop: 4 });
+	if (s.tps !== undefined || s.glyph) segs.push({ text: `${s.glyph ? s.glyph + " " : ""}${s.tps !== undefined ? s.tps.toFixed(1) + " tok/s" : "…"}`, drop: 0 });
+	if (full && s.firstMs !== undefined) segs.push({ text: `TTFT ${(s.firstMs / 1000).toFixed(1)}s${s.waiting ? "…" : ""}`, drop: 1 });
+	if (full && s.out !== undefined) segs.push({ text: `${s.estimated ? "~" : ""}${compact(s.out)} out`, drop: 2 });
 	const pct = s.percent === null || s.percent === undefined ? "?" : `${s.percent.toFixed(1)}%`;
-	const ctx = `${pct}/${compact(s.window)}${s.auto ? " (auto)" : ""}`;
+	segs.push({ text: `${pct}/${compact(s.window)}${s.auto ? " (auto)" : ""}`, drop: 0, ctx: true });
+	const len = (x: Seg) => [...x.text].length;
+	// greedy: fill a line, start the next at a part boundary
+	const wrap = (xs: Seg[]): Seg[][] => {
+		const rows: Seg[][] = [[]];
+		let used = 0;
+		for (const x of xs) {
+			const row = rows[rows.length - 1];
+			const need = (row.length ? 3 : 0) + len(x);
+			if (row.length && used + need > w) { rows.push([x]); used = len(x); }
+			else { row.push(x); used += need; }
+		}
+		return rows;
+	};
+	let keep = segs, rows = wrap(keep);
+	for (let level = 4; level >= 1 && rows.length > 2; level--) { keep = keep.filter((x) => x.drop !== level); rows = wrap(keep); }
 	const v = s.percent ?? 0;
-	out.push(v > 90 ? color("error", ctx) : v > 70 ? color("warning", ctx) : color("dim", ctx));
-	return out.join(color("dim", " · "));
+	const paint = (x: Seg) => (x.ctx ? (v > 90 ? color("error", x.text) : v > 70 ? color("warning", x.text) : color("dim", x.text)) : color("dim", x.text));
+	return rows.map((row) => row.map(paint).join(color("dim", " · ")));
 }
+
+// the stats on one line, however wide
+export function statsLine(s: Stats, full: boolean, color: Color = plain): string { return statsLines(s, full, color)[0]; }
 
 // visible width of a line with ANSI colors
 export function width(s: string): number { return [...s.replace(/\x1b\[[0-9;]*m/g, "")].length; }
@@ -1130,7 +1191,11 @@ export default function (pi: ExtensionAPI) {
 		usageCache = u0;
 		return u0;
 	};
+	// while a response streams, the numbers are held for NUMBERS_MS and only
+	// the glyph moves; a new phase (sent, first token, done) shows at once
+	let held: { at: number; s: Stats } | undefined;
 	const stats = (): Stats => {
+		if (sentAt !== undefined && held && Date.now() - held.at < NUMBERS_MS) return { ...held.s, glyph: glyph || undefined };
 		const u = usage();
 		const cu = ui?.getContextUsage?.();
 		const s: Stats = { sent: u.sent, received: u.received + liveOut(), cached: u.cached, written: u.written, hit: u.hit, cost: u.cost,
@@ -1141,6 +1206,7 @@ export default function (pi: ExtensionAPI) {
 		} else if (lastFirstMs !== undefined || lastOut !== undefined) {
 			s.firstMs = lastFirstMs; s.out = lastOut; s.estimated = lastEstimated;
 		}
+		held = sentAt !== undefined ? { at: Date.now(), s } : undefined;
 		return s;
 	};
 	const topLine = (data: FooterData, w: number, color: Color) => {
@@ -1161,7 +1227,7 @@ export default function (pi: ExtensionAPI) {
 		return {
 			render(w: number): string[] {
 				const lines = full ? [topLine(data, w, color)] : [];
-				lines.push(cut(statsLine(stats(), full, color), w));
+				for (const l of statsLines(stats(), full, color, w)) lines.push(cut(l, w));
 				const others = [...data.getExtensionStatuses()].sort(([a], [b]) => a.localeCompare(b)).map(([, v]) => v.replace(/\s+/g, " ").trim());
 				if (others.length) lines.push(cut(others.join(" "), w));
 				return lines;
@@ -1184,13 +1250,13 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_e, ctx) => { if (take(ctx)) ui!.ui.setFooter?.(footer); });
 	pi.on("before_provider_request", (_e, ctx) => {
-		sentAt = Date.now(); firstAt = undefined; chars = 0;
+		sentAt = Date.now(); firstAt = undefined; chars = 0; held = undefined;
 		if (take(ctx)) start();
 	});
 	pi.on("message_update", (event) => {
 		const e = event.assistantMessageEvent as { type: string; delta?: string };
 		if (!DELTAS.has(e.type)) return;
-		firstAt ??= Date.now();
+		if (firstAt === undefined) { firstAt = Date.now(); held = undefined; }
 		chars += e.delta?.length ?? 0;
 	});
 	pi.on("message_end", (event, ctx) => {
@@ -1232,10 +1298,11 @@ TS
 # overwriting an existing file the session has not read. Inert unless
 # LETS_CODE_GROUNDING_ON=1. Rewritten when its content changes.
 pi_write_grounding_extension() {
-    local dir="${PI_AGENT_DIR}/extensions" f tmp
-    f="${dir}/lets-code-grounding.ts"
+    local dir f tmp
+    dir="$(lc_ext_dir grounding lets-code-grounding.ts)"
+    f="${dir}/index.ts"
     mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.lets-code-grounding.XXXXXX")"
+    tmp="$(mktemp "${dir}/.index.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (grounding guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the grounding guard on
@@ -1324,10 +1391,11 @@ TS
 # can tell concurrent sessions apart. Inert without it. Rewritten when its
 # content changes.
 pi_write_sessiontag_extension() {
-    local dir="${PI_AGENT_DIR}/extensions" f tmp
-    f="${dir}/lets-code-sessiontag.ts"
+    local dir f tmp
+    dir="$(lc_ext_dir session-tag lets-code-sessiontag.ts)"
+    f="${dir}/index.ts"
     mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.lets-code-sessiontag.XXXXXX")"
+    tmp="$(mktemp "${dir}/.index.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (session tag); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the session tag on
@@ -1375,10 +1443,11 @@ TS
 # lets-code at launch) and silent while the machine has RAM to spare.
 # Rewritten when its content changes.
 pi_write_memguard_extension() {
-    local dir="${PI_AGENT_DIR}/extensions" f tmp
-    f="${dir}/lets-code-memguard.ts"
+    local dir f tmp
+    dir="$(lc_ext_dir memory-guard lets-code-memguard.ts)"
+    f="${dir}/index.ts"
     mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.lets-code-memguard.XXXXXX")"
+    tmp="$(mktemp "${dir}/.index.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (memory guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code (LETS_CODE_SESSION=1). Watches the
@@ -1573,7 +1642,7 @@ TS
 #   * here, at launch (zero tokens): if the cwd is a git work tree and HEAD is
 #     not on a pi/* branch, `git switch -c pi/<timestamp>` — uncommitted
 #     changes travel with the switch, nothing is lost.
-#   * a pi extension (lets-code-gitguard.ts) that blocks edit/write/bash
+#   * a pi extension (git-guard) that blocks edit/write/bash
 #     while HEAD is off a pi/* branch (only plain git inspection and a
 #     switch to a pi/* branch may run), and on any branch refuses commands
 #     that destroy work irreversibly. It reads .git/HEAD from disk; nothing
@@ -1624,10 +1693,11 @@ git_guard_plan() {  # sets GG_MODE (on|off) and GG_NOTE
 # The pi extension that enforces the rule. Inert unless LETS_CODE_GIT_GUARD_ON=1.
 # Rewritten when its content changes.
 pi_write_gitguard_extension() {
-    local dir="${PI_AGENT_DIR}/extensions" f tmp
-    f="${dir}/lets-code-gitguard.ts"
+    local dir f tmp
+    dir="$(lc_ext_dir git-guard lets-code-gitguard.ts)"
+    f="${dir}/index.ts"
     mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.lets-code-gitguard.XXXXXX")"
+    tmp="$(mktemp "${dir}/.index.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (git guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the git guard on
@@ -2395,10 +2465,11 @@ TS
 # LETS_CODE_AGENT_GUARD_LOG=<file> appends one JSON line per guard action.
 # Inert unless LETS_CODE_AGENT_GUARD_ON=1. Rewritten when its content changes.
 pi_write_agentguard_extension() {
-    local dir="${PI_AGENT_DIR}/extensions" f tmp
-    f="${dir}/lets-code-agentguard.ts"
+    local dir f tmp
+    dir="$(lc_ext_dir agent-guard lets-code-agentguard.ts)"
+    f="${dir}/index.ts"
     mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.lets-code-agentguard.XXXXXX")"
+    tmp="$(mktemp "${dir}/.index.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (agent guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the agent guard on
@@ -3191,10 +3262,11 @@ ensure_pi_tools() {
 # about or denied. Built-in roles plan / auto / ask / yolo; more in
 # ~/.pi/agent/mandate.json; a project's .pi/mandate.json may only tighten.
 pi_write_mandate_extension() {
-    local dir="${PI_AGENT_DIR}/extensions" f tmp
-    f="${dir}/lets-code-mandate.ts"
+    local dir f tmp
+    dir="$(lc_ext_dir mandate lets-code-mandate.ts)"
+    f="${dir}/index.ts"
     mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.lets-code-mandate.XXXXXX")"
+    tmp="$(mktemp "${dir}/.index.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (mandate); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the mandate on
@@ -3609,10 +3681,11 @@ TS
 # Subagents: one tool, `subagent`, that runs a named agent file in its own
 # pi process (same provider, same guards, the role its file names).
 pi_write_subagent_extension() {
-    local dir="${PI_AGENT_DIR}/extensions" f tmp
-    f="${dir}/lets-code-subagent.ts"
+    local dir f tmp
+    dir="$(lc_ext_dir subagents lets-code-subagent.ts)"
+    f="${dir}/index.ts"
     mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.lets-code-subagent.XXXXXX")"
+    tmp="$(mktemp "${dir}/.index.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (subagents); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with subagents on
@@ -3831,7 +3904,8 @@ MD
 SANDBOX_RUNTIME_VERSION="0.0.79"
 SB_NOTE=""
 pi_write_sandbox_extension() {
-    local dir="${PI_AGENT_DIR}/extensions/lets-code-sandbox" f tmp have=""
+    local dir f tmp have=""
+    dir="$(lc_ext_dir sandbox lets-code-sandbox)"
     mkdir -p "${dir}"
     f="${dir}/index.ts"
     tmp="$(mktemp "${dir}/.index.XXXXXX")"
@@ -4383,7 +4457,7 @@ run_setup() {  # run_setup [full|granular]
 
     # 5b. optional features: off in the default setup, all on with 'full',
     #     one question each with 'granular'
-    local feat_mandate="false" feat_mode="" feat_subagents="false" feat_sandbox="false" feat_mcp="no" feat_rea="false" feat_metrics="false"
+    local feat_mandate="false" feat_mode="" feat_subagents="true" feat_sandbox="false" feat_mcp="no" feat_rea="false" feat_metrics="false"
     case "${profile}" in
         full) feat_mandate="true"; feat_subagents="true"; feat_sandbox="true"; feat_mcp="yes"; feat_rea="true"; feat_metrics="true" ;;
         granular)
@@ -4393,8 +4467,8 @@ run_setup() {  # run_setup [full|granular]
             read -r reply; case "${reply}" in y|Y) feat_mandate="true"
                 printf "  Start mode [auto] (plan|auto|ask|yolo): "; read -r feat_mode
                 case "${feat_mode}" in ""|auto) feat_mode="" ;; plan|ask|yolo) ;; *) log_error "mode must be plan|auto|ask|yolo"; exit 1 ;; esac ;; esac
-            printf "  Subagents — a 'subagent' tool that delegates to agent files? [y/N] "
-            read -r reply; case "${reply}" in y|Y) feat_subagents="true" ;; esac
+            printf "  Subagents — a 'subagent' tool that delegates to agent files? [Y/n] "
+            read -r reply; case "${reply}" in n|N) feat_subagents="false" ;; esac
             printf "  Sandbox — bash confined with bubblewrap/Seatbelt via sandbox-runtime? [y/N] "
             read -r reply; case "${reply}" in y|Y) feat_sandbox="true" ;; esac
             printf "  MCP — import servers from .mcp.json and other clients' configs into pi? [y/N] "
@@ -4444,15 +4518,19 @@ run_setup() {  # run_setup [full|granular]
             echo "# Grounding guard: facts about the project are looked up, not guessed, and"
             echo "# an unread existing file is not overwritten blind. GROUNDING=false disables it."
             echo "GROUNDING=\"true\""
+            echo ""
+            echo "# Subagents: a 'subagent' tool that delegates to agent files in"
+            echo "# ~/.pi/agent/agents. On by default; SUBAGENTS=false turns it off."
+            echo "SUBAGENTS=\"${feat_subagents}\""
+            echo ""
             echo "# Optional features (off by default; 'lets-code setup full' turns them on)."
             echo "# MANDATE=true: modes plan/auto/ask/yolo and roles for subagents (MODE sets"
-            echo "# the start mode, empty = auto). SUBAGENTS=true: the subagent tool."
+            echo "# the start mode, empty = auto)."
             echo "# SANDBOX=true: bash confined with sandbox-runtime."
             echo "# REA=true: a reverse-engineering skill that runs REA in a separate pi"
             echo "# (manual: only through /skill:reverse-engineering, zero context)."
             echo "MANDATE=\"${feat_mandate}\""
             echo "MODE=\"${feat_mode}\""
-            echo "SUBAGENTS=\"${feat_subagents}\""
             echo "SANDBOX=\"${feat_sandbox}\""
             echo "REA=\"${feat_rea}\""
             echo ""
@@ -4587,7 +4665,7 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
     # 10. optional features chosen above
     if [ "${feat_sandbox}" = "true" ]; then
         pi_write_sandbox_extension
-        if [ -n "${SB_NOTE}" ]; then log "sandbox: ${SB_NOTE}"; else log "sandbox: runtime ready (${PI_AGENT_DIR}/extensions/lets-code-sandbox)"; fi
+        if [ -n "${SB_NOTE}" ]; then log "sandbox: ${SB_NOTE}"; else log "sandbox: runtime ready ($(lc_ext_dir sandbox lets-code-sandbox))"; fi
     fi
     [ "${feat_subagents}" = "true" ] && write_default_agents
     [ "${feat_mcp}" = "yes" ] && mcp_import yes
@@ -5002,7 +5080,7 @@ METRICS="false"
 TEMPLATE_EFFORT="auto"
 MANDATE="false"
 MODE=""
-SUBAGENTS=""          # empty = off; a config without the key predates the feature
+SUBAGENTS="true"      # on by default; SUBAGENTS=false (config or env) or --no-subagents turns it off
 SANDBOX="false"
 REA="false"
 # shellcheck disable=SC1090
@@ -5278,6 +5356,7 @@ if [ "${REASONING_SUPPORTED}" = true ] && [ "${API}" = openai-completions ]; the
 fi
 pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}" "${VISION}" "${REASONING_SUPPORTED}" "${THINKING}" "${EFFORT_MAP}"
 pi_write_themes
+lc_retire_old_extensions
 
 export LETS_CODE_TOKEN="${TOKEN}"
 export LETS_CODE_PROVIDER="${PROVIDER_ID}"
@@ -5376,7 +5455,6 @@ case "$(lc "${MANDATE}")" in
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }mandate: ${MODE:-auto}" ;;
     *) unset LETS_CODE_MODE ;;
 esac
-[ -n "${SUBAGENTS}" ] || log "tip: subagents are available but off; add SUBAGENTS=\"true\" to ${CONFIG_FILE} or launch with --subagents"
 case "$(lc "${SUBAGENTS}")" in
     true|yes|1|on)
         pi_write_subagent_extension
@@ -5410,7 +5488,7 @@ esac
 # (color unless NO_COLOR, and a sign-off), one plain line when piped or
 # logged. --verbose adds the probe results above and the full detail line.
 banner() {
-    local ctx="${CONTEXT}" think host guards="" extras="" b="" d="" r="" a="" line1 line2
+    local ctx="${CONTEXT}" think host guards=0 exts=0 e extras="" b="" d="" r="" a="" line1 line2
     if   [ $(( CONTEXT % 1000000 )) -eq 0 ]; then ctx="$(( CONTEXT / 1000000 ))M"
     elif [ $(( CONTEXT % 1024 )) -eq 0 ];    then ctx="$(( CONTEXT / 1024 ))k"
     elif [ "${CONTEXT}" -ge 1000 ];          then ctx="$(( CONTEXT / 1000 ))k"
@@ -5419,14 +5497,19 @@ banner() {
     [ "${REASONING_SUPPORTED}" = true ] || think="no thinking"
     case "${THINKING_DESC}" in adaptive*) think="thinking adaptive" ;; auto*) think="thinking auto" ;; esac
     host="${BASE_URL#*://}"
-    [ "${MG_MODE}" = off ] || guards="memory"
-    case "${AG_DESC}" in *" on"*) guards="${guards:+${guards}, }agent" ;; esac
-    [ "${LETS_CODE_GROUNDING_ON:-}" = 1 ] && guards="${guards:+${guards}, }grounding"
-    [ "${GG_MODE}" = off ] || guards="${guards:+${guards}, }git on ${GG_BRANCH:-a pi/* branch}"
-    [ "${VISION}" = true ] && extras=" · sees images"
-    [ -n "${FEAT_DESC}" ] && extras="${extras} · ${FEAT_DESC//  / · }"
+    # counts only; --verbose names them
+    [ "${MG_MODE}" = off ] || guards=$((guards + 1))
+    case "${AG_DESC}" in *" on"*) guards=$((guards + 1)) ;; esac
+    [ "${LETS_CODE_GROUNDING_ON:-}" = 1 ] && guards=$((guards + 1))
+    [ "${GG_MODE}" = off ] || guards=$((guards + 1))
+    # pi extensions installed: one per .ts file or per directory with an index
+    for e in "${PI_AGENT_DIR}"/extensions/*; do
+        case "${e}" in *.ts) [ -f "${e}" ] && exts=$((exts + 1)) ;; *) [ -f "${e}/index.ts" ] || [ -f "${e}/index.js" ] || [ -f "${e}/package.json" ] && exts=$((exts + 1)) ;; esac
+    done
+    [ "${VISION}" = true ] && extras=" · vision"
+    extras="${extras} · ${guards} guard$([ "${guards}" = 1 ] || echo s) · ${exts} extension$([ "${exts}" = 1 ] || echo s)"
     line1="${MODEL} @ ${host}${PRESET:+  (preset ${PRESET})}"
-    line2="${ctx} context · ${think}${extras}${guards:+ · guards: ${guards}}"
+    line2="${ctx} context · ${think}${extras}"
     if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
         b=$'\033[1m'; d=$'\033[2m'; r=$'\033[0m'
         # the magenta of the lets-code theme in use (pastel's when none is):
@@ -5442,7 +5525,8 @@ banner() {
         esac
         local signoffs=("let's code." "happy hacking." "go build something." "may your tests be green.")
         printf '%s✦ lets-code%s %s%s%s\n' "${a}${b}" "${r}" "${b}" "${line1}" "${r}"
-        printf '  %s%s · %s%s\n' "${d}" "${line2}" "${signoffs[$(( RANDOM % ${#signoffs[@]} ))]}" "${r}"
+        printf '  %s%s%s\n' "${d}" "${line2}" "${r}"
+        printf '  %s%s%s\n' "${d}" "${signoffs[$(( RANDOM % ${#signoffs[@]} ))]}" "${r}"
     else
         log "${line1} · ${line2}"
     fi

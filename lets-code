@@ -4703,7 +4703,7 @@ else
             log "thinking auto-detection needs an OpenAI-dialect endpoint — registering without thinking (pin REASONING=true if ${MODEL} supports it)." ;;
     esac
 fi
-log "thinking support: ${REASONING_SUPPORTED} (startup level: ${THINKING})"
+log_verbose "thinking support: ${REASONING_SUPPORTED} (startup level: ${THINKING})"
 # image input: the VISION pin (--vision/--no-vision, config/env) wins;
 # otherwise one tiny image request auto-detects a vision model
 # (OpenAI-dialect endpoints only). Inconclusive -> text-only, with a hint.
@@ -4722,7 +4722,7 @@ if [ -z "${VISION}" ]; then
             log "vision auto-detection needs an OpenAI-dialect endpoint — registering as text-only (pin VISION=true if ${MODEL} accepts images)." ;;
     esac
 fi
-log "image input: ${VISION}"
+log_verbose "image input: ${VISION}"
 if [ "${REASONING_SUPPORTED}" = false ] && [ "${THINKING}" != off ]; then
     log "note: thinking level ${THINKING} not applied — model not registered as a thinking model."
 fi
@@ -4731,9 +4731,9 @@ if [ "${REASONING_SUPPORTED}" = true ] && [ "${API}" = openai-completions ]; the
     case "$(printf '%s' "${TEMPLATE_EFFORT}" | tr '[:upper:]' '[:lower:]')" in
         off|false|no|0) log_verbose "template effort: off (TEMPLATE_EFFORT=off)" ;;
         neutral) probe_template_effort "${BASE_URL}" "${MODEL}" 1
-                 log "${EFFORT_NOTE} (neutral)" ;;
+                 log_verbose "${EFFORT_NOTE} (neutral)" ;;
         *) probe_template_effort "${BASE_URL}" "${MODEL}"
-           log "${EFFORT_NOTE}" ;;
+           log_verbose "${EFFORT_NOTE}" ;;
     esac
 fi
 pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}" "${VISION}" "${REASONING_SUPPORTED}" "${THINKING}" "${EFFORT_MAP}"
@@ -4837,7 +4837,39 @@ case "$(lc "${SANDBOX}")" in
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }sandbox: on${SB_NOTE:+ (${SB_NOTE})}" ;;
 esac
 
-log "connecting: ${PRESET:+preset ${PRESET}  }${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING_DESC}  api: ${API}  ${MG_DESC}  ${GG_DESC}  ${AG_DESC}${FEAT_DESC:+  ${FEAT_DESC}}${SESSION_DESC:+  ${SESSION_DESC}}"
+# The launch banner: what is running where, in two lines on a terminal
+# (color unless NO_COLOR, and a sign-off), one plain line when piped or
+# logged. --verbose adds the probe results above and the full detail line.
+banner() {
+    local ctx="${CONTEXT}" think host guards="" extras="" b="" d="" r="" a="" line1 line2
+    if   [ $(( CONTEXT % 1000000 )) -eq 0 ]; then ctx="$(( CONTEXT / 1000000 ))M"
+    elif [ $(( CONTEXT % 1024 )) -eq 0 ];    then ctx="$(( CONTEXT / 1024 ))k"
+    elif [ "${CONTEXT}" -ge 1000 ];          then ctx="$(( CONTEXT / 1000 ))k"
+    fi
+    think="thinking ${THINKING}"
+    [ "${REASONING_SUPPORTED}" = true ] || think="no thinking"
+    case "${THINKING_DESC}" in adaptive*) think="thinking adaptive" ;; auto*) think="thinking auto" ;; esac
+    host="${BASE_URL#*://}"
+    [ "${MG_MODE}" = off ] || guards="memory"
+    case "${AG_DESC}" in *" on"*) guards="${guards:+${guards}, }agent" ;; esac
+    [ "${GG_MODE}" = off ] || guards="${guards:+${guards}, }git on ${GG_BRANCH:-a pi/* branch}"
+    [ "${VISION}" = true ] && extras=" · sees images"
+    [ -n "${FEAT_DESC}" ] && extras="${extras} · ${FEAT_DESC//  / · }"
+    line1="${MODEL} @ ${host}${PRESET:+  (preset ${PRESET})}"
+    line2="${ctx} context · ${think}${extras}${guards:+ · guards: ${guards}}"
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
+        b=$'\033[1m'; d=$'\033[2m'; a=$'\033[35m'; r=$'\033[0m'
+        local signoffs=("let's code." "happy hacking." "go build something." "ship it." "may your tests be green.")
+        printf '%s✦ lets-code%s %s%s%s\n' "${a}${b}" "${r}" "${b}" "${line1}" "${r}"
+        printf '  %s%s · %s%s\n' "${d}" "${line2}" "${signoffs[$(( RANDOM % ${#signoffs[@]} ))]}" "${r}"
+    else
+        log "${line1} · ${line2}"
+    fi
+}
+if [ "${VERBOSE}" = true ]; then
+    log "connecting: ${PRESET:+preset ${PRESET}  }${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING_DESC}  api: ${API}  ${MG_DESC}  ${GG_DESC}  ${AG_DESC}${FEAT_DESC:+  ${FEAT_DESC}}${SESSION_DESC:+  ${SESSION_DESC}}"
+fi
+banner
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
     mem_guard_exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
 else

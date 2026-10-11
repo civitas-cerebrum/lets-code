@@ -39,7 +39,7 @@ lets-code                               # go
 ```
 
 `setup` keeps to the essentials. `setup full` also turns on the optional
-features below (modes, subagents, sandbox, MCP import, REA); `setup granular`
+features below (modes, sandbox, MCP import, REA); `setup granular`
 asks about each one.
 
 Setup installs the `lets-code` command itself. No npm? Grab the script:
@@ -65,7 +65,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🛟 **Git guard** | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
 | 🧭 **Agent guard** | Default bash timeout, a nudge to run tests after untested edits, a wrap-up hint once they pass, and thinking that switches on only while the model struggles. |
 | 🧭 **Modes** (optional) | `plan` explores read-only and ends in a numbered plan, `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
-| 🐝 **Subagents** (optional) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
+| 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
 | 🔬 **REA** (optional) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: a one-line skill hands the question to a separate pi that has REA's 170 tools, so they never enter your session. Zero tokens in `manual` mode. |
@@ -103,7 +103,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--no-session-tag` | Send no session tag with model requests |
 | `--metrics` / `--no-metrics` | Start with the full footer instead of the minimal one (`/metrics` switches inside pi) |
 | `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `yolo` or a role of yours |
-| `--subagents` / `--no-subagents` | The `subagent` tool |
+| `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
 | `--sandbox` / `--no-sandbox` | The OS sandbox for bash |
 | `--verbose` | Show each probe and the full launch detail (API, output cap, guards, session tag) |
 
@@ -170,7 +170,8 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MEM_GUARD`, `GIT_GUARD`, `AGENT_GUARD`, `GROUNDING` | `false` turns a guard off. |
 | `TEMPLATE_EFFORT` | `off` skips the chat-template effort probe, `neutral` maps every level to the least-instruction value (see server setup). |
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
-| `SUBAGENTS`, `SANDBOX` | `true` turns the feature on. A config without `SUBAGENTS` gets a one-line launch tip. |
+| `SUBAGENTS` | On by default; `false` turns the `subagent` tool off. |
+| `SANDBOX` | `true` turns the feature on. |
 | `REA` | `true` adds the reverse-engineering skill, `manual` makes it `/skill:reverse-engineering` only. |
 | `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with cache reads and hit rate, cost, and the latest response's time to first token and output tokens (`… · 198k cached (86% hit) · 161.7 tok/s · 1.0s first token · 2673 out · …`). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi. tok/s counts from each response's first streamed token, so prompt processing is not in it. |
 
@@ -389,8 +390,9 @@ are protected in every mode but `yolo`.
 <details>
 <summary><b>Subagents</b></summary>
 
-With `SUBAGENTS=true` the model gets one tool, `subagent`, and setup writes
-three starter agents (`scout`, `worker`, `reviewer`) to `~/.pi/agent/agents`.
+Subagents are on by default (`SUBAGENTS=false` turns them off). The model
+gets one tool, `subagent`, and lets-code writes three starter agents
+(`scout`, `worker`, `reviewer`) to `~/.pi/agent/agents` when it is empty.
 An agent is a Markdown file with YAML frontmatter, the same layout pi's own
 example and the community packages use:
 

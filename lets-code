@@ -638,7 +638,7 @@ PY
 # with saturation lowered and lightness raised a step further each time
 # (soft, pastel, chalk). Panel backgrounds keep their depth with calmer tints;
 # the thinking levels run blue-violet (medium), magenta (high, also the
-# launch banner's "✦ lets-code"), rose (xhigh), coral (max);
+# launch banner's "✦ lets-code"), deep purple (xhigh), coral (max);
 # text and muted greys are pi's own, so contrast holds. Colors are plain hex
 # and there is no "appearance" key, so pi releases before 1.0 (which know
 # neither OKHSL nor that key) load them too. Selected through the
@@ -718,7 +718,7 @@ pi_write_themes() {
 		"thinkingLow": "#6e9db7",
 		"thinkingMedium": "#7f9bd2",
 		"thinkingHigh": "#cd83ce",
-		"thinkingXhigh": "#e780aa",
+		"thinkingXhigh": "#886fc9",
 		"thinkingMax": "#f78586",
 		"bashMode": "#79c099"
 	},
@@ -798,7 +798,7 @@ JSON
 		"thinkingLow": "#8bb2c7",
 		"thinkingMedium": "#99afd7",
 		"thinkingHigh": "#d39fd3",
-		"thinkingXhigh": "#e69fba",
+		"thinkingXhigh": "#9d8cd0",
 		"thinkingMax": "#f2a4a3",
 		"bashMode": "#95cead"
 	},
@@ -878,7 +878,7 @@ JSON
 		"thinkingLow": "#a9c3d1",
 		"thinkingMedium": "#b4c2db",
 		"thinkingHigh": "#d8bad8",
-		"thinkingXhigh": "#e5bbca",
+		"thinkingXhigh": "#b3aad4",
 		"thinkingMax": "#eebfbe",
 		"bashMode": "#b2d7c1"
 	},

@@ -15,7 +15,8 @@
 ```
 $ lets-code
 ✦ lets-code Qwen/Qwen3-32B @ localhost:8000
-  128k context · thinking high · sees images · guards: memory, agent, git on pi/20261008-2144 · let's code.
+  128k context · thinking high · vision · 4 guards · 7 extensions
+  let's code.
 ```
 
 ## Why

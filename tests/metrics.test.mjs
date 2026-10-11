@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Unit test for the footer and metrics extension that lets-code writes
-// (~/.pi/agent/extensions/lets-code-metrics.ts). Loads it with a fake pi, a
+// (~/.pi/agent/extensions/footer/index.ts). Loads it with a fake pi, a
 // fake clock and a fake setInterval stepped by hand, renders the footer
 // through a fake TUI in both sizes, and drives session_start,
 // before_provider_request, message_update, message_end, agent_end and
@@ -12,7 +12,7 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code-metrics.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/footer/index.ts");
 const work = mkdtempSync(join(tmpdir(), "metrics-test-"));
 const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
 process.env.PI_CODING_AGENT_DIR = work;          // no settings.json: compaction counts as on
@@ -95,15 +95,15 @@ try {
 	await x.cmd("");
 	t("/metrics: still lets-code's footer", [typeof x.st.footer, x.st.setFooterCalls], ["object", 1]);
 	t("full: directory, branch, model, level", x.foot()[0], `~/github/app (main)${" ".repeat(200 - 19 - 20)}qwen3.8-27b • medium`);
-	t("full: cache, first token, output", x.foot()[1], "↑222k ↓25k · 198k cached (89% hit) · 83.5 tok/s · 0.3s first token · 1.0k out · 22.0%/262k (auto)");
+	t("full: cache, first token, output", x.foot()[1], "↑222k ↓25k · cache 198k (89%) · 83.5 tok/s · TTFT 0.3s · 1.0k out · 22.0%/262k (auto)");
 	clock = 70000; x.ev("before_provider_request");
 	clock = 71200; step();
-	t("full: waiting", x.foot()[1], "↑222k ↓25k · 198k cached (89% hit) · ✢ 83.5 tok/s · 1.2s to first token · 22.0%/262k (auto)");
+	t("full: waiting", x.foot()[1], "↑222k ↓25k · cache 198k (89%) · ✢ 83.5 tok/s · TTFT 1.2s… · 22.0%/262k (auto)");
 	clock = 71300; x.delta("thinking_delta", "y".repeat(400));
 	clock = 72300; step();
-	t("full: streaming, live output", x.foot()[1], "↑222k ↓25k · 198k cached (89% hit) · ✳ 84.2 tok/s · 1.3s first token · 100 out · 22.0%/262k (auto)");
+	t("full: streaming, live output", x.foot()[1], "↑222k ↓25k · cache 198k (89%) · ✣ 84.2 tok/s · TTFT 1.3s · 100 out · 22.0%/262k (auto)");
 	x.ev("agent_end");
-	t("interrupt: spinner stopped, last finished response back", [timers.length, x.foot()[1]], [0, "↑222k ↓25k · 198k cached (89% hit) · 83.5 tok/s · 0.3s first token · 1.0k out · 22.0%/262k (auto)"]);
+	t("interrupt: spinner stopped, last finished response back", [timers.length, x.foot()[1]], [0, "↑222k ↓25k · cache 198k (89%) · 83.5 tok/s · TTFT 0.3s · 1.0k out · 22.0%/262k (auto)"]);
 	await x.cmd("");
 	t("/metrics again: minimal", x.foot(), ["↑222k ↓25k · 83.5 tok/s · 22.0%/262k (auto)"]);
 	await x.cmd("on");
@@ -122,10 +122,10 @@ try {
 	t("full: no branch on the left", x.foot()[0].startsWith("~/github/app "), true);
 	t("full: provider with several, thinking off, on the right", x.foot()[0].endsWith(" (lets-code) qwen3.8-27b • thinking off") && x.mod.width(x.foot()[0]) === 200, true);
 	x.respond({ at: 0, ttft: 100, gen: 1000, output: 0, text: "x".repeat(160) });
-	t("full: cost; output estimated (~)", x.foot()[1], "↑500 ↓300 · $0.012 · 40.0 tok/s · 0.1s first token · ~40 out · 22.0%/262k (auto)");
+	t("full: cost; output estimated (~)", x.foot()[1], "↑500 ↓300 · $0.012 · 40.0 tok/s · TTFT 0.1s · ~40 out · 22.0%/262k (auto)");
 	clock = 5000; x.ev("before_provider_request");
 	clock = 6000; x.ev("message_end", { message: { role: "assistant", usage: { output: 0 } } });
-	t("full: nothing streamed", x.foot()[1], "↑500 ↓300 · $0.012 · 40.0 tok/s · 1.0s first token · ~0 out · 22.0%/262k (auto)");
+	t("full: nothing streamed", x.foot()[1], "↑500 ↓300 · $0.012 · 40.0 tok/s · TTFT 1.0s · ~0 out · 22.0%/262k (auto)");
 
 	// learned characters per token: 90 tokens for 320 characters
 	x = await load({ LETS_CODE_METRICS_ON: "1" });
@@ -134,8 +134,32 @@ try {
 	clock = 10000; x.ev("before_provider_request");
 	clock = 10500; x.delta("text_delta", "y".repeat(320));
 	clock = 12500; step();
-	t("live estimate uses the learned ratio", x.foot()[1], "↓90 · ✢ 45.0 tok/s · 0.5s first token · 90 out · 22.0%/262k (auto)");
+	t("live estimate uses the learned ratio", x.foot()[1], "↓90 · ✢ 45.0 tok/s · TTFT 0.5s · 90 out · 22.0%/262k (auto)");
 	x.ev("agent_end");
+
+	// numbers held for a second while streaming, the glyph keeps moving
+	x = await load({ LETS_CODE_METRICS_ON: "0" });
+	x.ev("session_start");
+	clock = 0; x.ev("before_provider_request");
+	clock = 100; x.delta("text_delta", "x".repeat(4000));
+	clock = 1100; step();
+	t("hold: fresh numbers", x.foot(), ["↓1.0k · ✢ 1000.0 tok/s · 22.0%/262k (auto)"]);
+	clock = 1600; step();
+	t("hold: within a second, numbers wait, glyph moves", x.foot(), ["↓1.0k · ✣ 1000.0 tok/s · 22.0%/262k (auto)"]);
+	clock = 2200; step();
+	t("hold: after a second, numbers move", x.foot(), ["↓1.0k · ✶ 476.2 tok/s · 22.0%/262k (auto)"]);
+	x.ev("agent_end");
+
+	// narrow terminals: wrap between parts first; drop cost, cache, output, TTFT only past two lines
+	const S0 = { sent: 4_700_000, received: 65_000, cached: 3_700_000, written: 0, hit: 0, cost: 1.5, tps: 53, glyph: "✻", firstMs: 43200, out: 5, percent: 41, window: 262144, auto: true };
+	const L = (w) => x.mod.statsLines(S0, true, undefined, w);
+	t("wide: one line", L(100), ["↑4.7M ↓65k · cache 3.7M (0%) · $1.500 · ✻ 53.0 tok/s · TTFT 43.2s · 5 out · 41.0%/262k (auto)"]);
+	t("narrower: two lines, broken between parts", L(60), ["↑4.7M ↓65k · cache 3.7M (0%) · $1.500 · ✻ 53.0 tok/s", "TTFT 43.2s · 5 out · 41.0%/262k (auto)"]);
+	t("every line fits", L(60).every((l) => [...l].length <= 60), true);
+	t("too narrow for two: cost, then cache drop", L(40), ["↑4.7M ↓65k · ✻ 53.0 tok/s · TTFT 43.2s", "5 out · 41.0%/262k (auto)"]);
+	t("very narrow: output drops too", L(30), ["↑4.7M ↓65k · ✻ 53.0 tok/s", "TTFT 43.2s · 41.0%/262k (auto)"]);
+	t("narrowest: context and speed stay", L(20).filter((l) => /tok\/s|262k/.test(l)).length >= 2, true);
+	t("statsLine stays one line", x.mod.statsLine(S0, false), "↑4.7M ↓65k · ✻ 53.0 tok/s · 41.0%/262k (auto)");
 
 	// colors: context warning/error, everything else dim; other statuses
 	const th = { fg: (c, s) => `<${c}>${s}</${c}>` };
@@ -149,7 +173,7 @@ try {
 	t("unknown after compaction", x.foot()[0], "<dim>?/262k (auto)</dim>");
 	x.status.set("mandate", "mode: plan");
 	t("other statuses on their own line", x.foot()[1], "mode: plan");
-	t("cut to width", x.mod.width(x.foot(5)[0]) <= 5, true);
+	t("cut to width", x.foot(5).every((l) => x.mod.width(l) <= 5), true);
 
 	// no UI
 	x = await load({ LETS_CODE_METRICS_ON: "0" }, { hasUI: false });

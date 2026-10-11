@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Unit test for the subagent extension that lets-code writes
-// (~/.pi/agent/extensions/lets-code-subagent.ts). Loads it with a fake pi
+// (~/.pi/agent/extensions/subagents/index.ts). Loads it with a fake pi
 // API and a fake `pi` binary on PATH that replays JSON events. Needs Node >= 22.6.
 //
 //   tests/subagent.test.mjs [path/to/lets-code-subagent.ts]
@@ -9,7 +9,7 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code-subagent.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/subagents/index.ts");
 const work = realpathSync(mkdtempSync(join(tmpdir(), "subagent-test-")));
 const agentDir = join(work, "agent"); mkdirSync(join(agentDir, "extensions"), { recursive: true }); mkdirSync(join(agentDir, "agents"));
 const bin = join(work, "bin"); mkdirSync(bin);

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# The pastel themes lets-code writes into ~/.pi/agent/themes: each is valid
-# JSON, named after its file, defines every color role of pi's dark theme
+# The lets-code theme written into ~/.pi/agent/themes: valid JSON, named
+# after its file, defines every color role of pi's dark theme
 # (when pi is installed), stays loadable by pi before 1.0 (hex colors or
 # variable names only, no keys that release's schema rejects), and an
-# unchanged theme is not rewritten.
+# unchanged theme is not rewritten, and the three earlier lets-code themes
+# are removed (a user file of the same name is kept).
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 agent="$(mktemp -d "${TMPDIR:-/tmp}/lets-code-themes.XXXXXX")"
@@ -17,7 +18,14 @@ sys.stdout.write(s[i:k + 3])
 PYX
 PI_AGENT_DIR="${agent}"
 . "${agent}/writer.sh"
+# the three earlier themes lets-code wrote, and one user file it must keep
+mkdir -p "${agent}/themes"
+for old in soft pastel; do printf '{\n\t"name": "lets-code-%s",\n\t"colors": {}\n}\n' "${old}" > "${agent}/themes/lets-code-${old}.json"; done
+printf '{"name": "my-chalk", "colors": {}}\n' > "${agent}/themes/lets-code-chalk.json"
 pi_write_themes
+[ ! -e "${agent}/themes/lets-code-soft.json" ] && [ ! -e "${agent}/themes/lets-code-pastel.json" ] || { echo "earlier lets-code themes were not removed"; exit 1; }
+[ -e "${agent}/themes/lets-code-chalk.json" ] || { echo "a user theme file was removed"; exit 1; }
+rm "${agent}/themes/lets-code-chalk.json"
 
 dark=""
 if command -v pi >/dev/null 2>&1; then
@@ -31,7 +39,7 @@ python3 - "${agent}/themes" "${dark}" <<'PY'
 import json, os, sys
 d, dark = sys.argv[1], sys.argv[2]
 names = sorted(os.listdir(d))
-assert names == ["lets-code-chalk.json", "lets-code-pastel.json", "lets-code-soft.json"], names
+assert names == ["lets-code.json"], names
 want = set(json.load(open(dark))["colors"]) if dark else None
 for n in names:
     t = json.load(open(os.path.join(d, n)))
@@ -48,9 +56,9 @@ for n in names:
 print("themes ok" + ("" if want is not None else " (pi not installed: role check skipped)"))
 PY
 
-before="$(stat -c %Y "${agent}/themes/lets-code-pastel.json" 2>/dev/null || stat -f %m "${agent}/themes/lets-code-pastel.json")"
-touch -d '2001-01-01' "${agent}/themes/lets-code-pastel.json" 2>/dev/null || touch -t 200101010000 "${agent}/themes/lets-code-pastel.json"
+before="$(stat -c %Y "${agent}/themes/lets-code.json" 2>/dev/null || stat -f %m "${agent}/themes/lets-code.json")"
+touch -d '2001-01-01' "${agent}/themes/lets-code.json" 2>/dev/null || touch -t 200101010000 "${agent}/themes/lets-code.json"
 pi_write_themes
-after="$(stat -c %Y "${agent}/themes/lets-code-pastel.json" 2>/dev/null || stat -f %m "${agent}/themes/lets-code-pastel.json")"
+after="$(stat -c %Y "${agent}/themes/lets-code.json" 2>/dev/null || stat -f %m "${agent}/themes/lets-code.json")"
 [ "${after}" != "${before}" ] || { echo "unchanged theme was rewritten"; exit 1; }
 [ -z "$(ls -A "${agent}/themes" | grep '^\.')" ] || { echo "temp files left behind"; exit 1; }

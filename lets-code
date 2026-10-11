@@ -485,9 +485,11 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 #                    + enableInstallTelemetry = false when the key is absent
 #                    (pi defaults it to true and pings pi.dev on first start;
 #                    an explicit true/false already in the file is kept)
-#                    + theme = "lets-code-pastel" when the key is absent
-#                    (a theme the user picked, "system" included, is kept)
-#   themes/lets-code-{soft,pastel,chalk}.json -> see pi_write_themes
+#                    + theme = "lets-code" in place of the retired
+#                    lets-code-soft/-pastel/-chalk (any other theme is
+#                    kept; with none set pi uses "system", and the first
+#                    interactive launch asks, see pick_theme_once)
+#   themes/lets-code.json -> see pi_write_themes
 # The token is never written to disk: apiKey points at $LETS_CODE_TOKEN (pi's
 # $ENV interpolation), exported at launch — the secret stays in
 # ~/.config/lets-code/config (mode 600). Writes are atomic (tmp + rename),
@@ -609,10 +611,10 @@ def to_settings(doc):
     doc["compaction"] = compaction
     # install telemetry off by default; a value the user set stays as is
     doc.setdefault("enableInstallTelemetry", False)
-    # a fixed palette looks the same in every terminal, tmux and over ssh;
-    # pi's "system" theme follows whatever the terminal reports, or falls
-    # back to bare ANSI colors when it reports nothing in time
-    doc.setdefault("theme", "lets-code-pastel")
+    # the three earlier lets-code themes are one now (also inside a "light/dark" pair)
+    if isinstance(doc.get("theme"), str):
+        doc["theme"] = "/".join("lets-code" if t in ("lets-code-soft", "lets-code-pastel", "lets-code-chalk") else t
+                                for t in doc["theme"].split("/"))
     if reasoning == "true":
         # pi's per-model startup thinking level (global default is "medium")
         levels = doc.get("modelThinkingLevels")
@@ -670,106 +672,26 @@ lc_retire_old_extensions() {
 }
 
 # ------------------------------------------------------------------ themes
-# Pastel versions of pi's built-in dark theme: the same hue for every role,
-# with saturation lowered and lightness raised a step further each time
-# (soft, pastel, chalk). Panel backgrounds keep their depth with calmer tints;
-# the thinking levels run blue-violet (medium), magenta (high, also the
-# launch banner's "✦ lets-code"), deep purple (xhigh), coral (max);
-# text and muted greys are pi's own, so contrast holds. Colors are plain hex
-# and there is no "appearance" key, so pi releases before 1.0 (which know
-# neither OKHSL nor that key) load them too. Selected through the
-# "theme" setting (default lets-code-pastel, see pi_write_configs) or /settings.
-# Rewritten when their content changes; pi hot-reloads the active one.
+# One theme, "lets-code", next to pi's built-in dark, light and system: a
+# pastel take on pi's dark theme, the same hue for every role with
+# saturation lowered and lightness raised. Panel backgrounds keep their
+# depth with calmer tints; the thinking levels run blue-violet (medium),
+# magenta (high, also the launch banner's "✦ lets-code"), deep purple
+# (xhigh), coral (max); text and muted greys are pi's own, so contrast
+# holds. Colors are plain hex and there is no "appearance" key, so pi
+# releases before 1.0 (which know neither OKHSL nor that key) load it too.
+# Picked on the first interactive launch (see pick_theme_once) or in
+# /settings; pi's own "system" (auto) is the default. Rewritten when its content changes; pi
+# hot-reloads the active theme. The three themes lets-code wrote before
+# (lets-code-soft, -pastel, -chalk) are removed.
 pi_write_themes() {
-    local dir="${PI_AGENT_DIR}/themes" name tmp
+    local dir="${PI_AGENT_DIR}/themes" tmp old
     mkdir -p "${dir}"
-    for name in soft pastel chalk; do
-        tmp="$(mktemp "${dir}/.lets-code-${name}.XXXXXX")"
-        case "${name}" in
-            soft) cat > "${tmp}" <<'JSON'
+    tmp="$(mktemp "${dir}/.lets-code.XXXXXX")"
+    cat > "${tmp}" <<'JSON'
 {
 	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
-	"name": "lets-code-soft",
-	"vars": {
-		"text": "#dee0e1",
-		"muted": "#9da5a9",
-		"violet": "#b6acd9",
-		"blue": "#87bcd8",
-		"green": "#83c5a0",
-		"red": "#e99c9b",
-		"yellow": "#daac4b",
-		"blueBg": "#253b46"
-	},
-	"colors": {
-		"accent": "violet",
-		"border": "#7db7d5",
-		"borderAccent": "#aea2d7",
-		"borderMuted": "#768186",
-		"success": "green",
-		"error": "red",
-		"warning": "yellow",
-		"muted": "muted",
-		"dim": "#7e888e",
-		"text": "text",
-		"thinkingText": "#96a0a4",
-		"selectedBg": "blueBg",
-		"scrollbarTrack": "#484e51",
-		"scrollbarThumb": "#97a0a5",
-		"searchMatchBg": "#4a3121",
-		"searchMatchText": "muted",
-		"userMessageBg": "blueBg",
-		"userMessageText": "text",
-		"customMessageBg": "#39324f",
-		"customMessageText": "muted",
-		"customMessageLabel": "violet",
-		"toolPendingBg": "#35383a",
-		"toolSuccessBg": "#284032",
-		"toolErrorBg": "#552d2e",
-		"toolTitle": "text",
-		"toolOutput": "muted",
-		"mdHeading": "yellow",
-		"mdLink": "blue",
-		"mdLinkUrl": "muted",
-		"mdCode": "violet",
-		"mdCodeBlock": "green",
-		"mdCodeBlockBorder": "muted",
-		"mdQuote": "muted",
-		"mdQuoteBorder": "muted",
-		"mdHr": "muted",
-		"mdListBullet": "violet",
-		"toolDiffAdded": "green",
-		"toolDiffRemoved": "red",
-		"toolDiffContext": "muted",
-		"syntaxComment": "muted",
-		"syntaxKeyword": "blue",
-		"syntaxFunction": "yellow",
-		"syntaxVariable": "#79c2c7",
-		"syntaxString": "#e2a37e",
-		"syntaxNumber": "green",
-		"syntaxType": "violet",
-		"syntaxOperator": "muted",
-		"syntaxPunctuation": "muted",
-		"thinkingOff": "#6c767b",
-		"thinkingMinimal": "#8297a3",
-		"thinkingLow": "#6e9db7",
-		"thinkingMedium": "#7f9bd2",
-		"thinkingHigh": "#cd83ce",
-		"thinkingXhigh": "#886fc9",
-		"thinkingMax": "#f78586",
-		"bashMode": "#79c099"
-	},
-	"export": {
-		"pageBg": "#22252b",
-		"cardBg": "#292c32",
-		"infoBg": "#4a3121"
-	}
-}
-JSON
-            ;;
-            pastel) cat > "${tmp}" <<'JSON'
-{
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
-	"name": "lets-code-pastel",
+	"name": "lets-code",
 	"vars": {
 		"text": "#dee0e1",
 		"muted": "#9da5a9",
@@ -845,91 +767,60 @@ JSON
 	}
 }
 JSON
-            ;;
-            chalk) cat > "${tmp}" <<'JSON'
-{
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
-	"name": "lets-code-chalk",
-	"vars": {
-		"text": "#dee0e1",
-		"muted": "#9da5a9",
-		"violet": "#d3cfe2",
-		"blue": "#bfd6e2",
-		"green": "#bcdac8",
-		"red": "#e9c9c8",
-		"yellow": "#e5cfa6",
-		"blueBg": "#2c3a41"
-	},
-	"colors": {
-		"accent": "violet",
-		"border": "#b7d1df",
-		"borderAccent": "#cdc9df",
-		"borderMuted": "#768186",
-		"success": "green",
-		"error": "red",
-		"warning": "yellow",
-		"muted": "muted",
-		"dim": "#7e888e",
-		"text": "text",
-		"thinkingText": "#96a0a4",
-		"selectedBg": "blueBg",
-		"scrollbarTrack": "#4a4d50",
-		"scrollbarThumb": "#97a0a5",
-		"searchMatchBg": "#443329",
-		"searchMatchText": "muted",
-		"userMessageBg": "blueBg",
-		"userMessageText": "text",
-		"customMessageBg": "#383546",
-		"customMessageText": "muted",
-		"customMessageLabel": "violet",
-		"toolPendingBg": "#363839",
-		"toolSuccessBg": "#2f3e35",
-		"toolErrorBg": "#4b3232",
-		"toolTitle": "text",
-		"toolOutput": "muted",
-		"mdHeading": "yellow",
-		"mdLink": "blue",
-		"mdLinkUrl": "muted",
-		"mdCode": "violet",
-		"mdCodeBlock": "green",
-		"mdCodeBlockBorder": "muted",
-		"mdQuote": "muted",
-		"mdQuoteBorder": "muted",
-		"mdHr": "muted",
-		"mdListBullet": "violet",
-		"toolDiffAdded": "green",
-		"toolDiffRemoved": "red",
-		"toolDiffContext": "muted",
-		"syntaxComment": "muted",
-		"syntaxKeyword": "blue",
-		"syntaxFunction": "yellow",
-		"syntaxVariable": "#b7d9dc",
-		"syntaxString": "#e6ccbc",
-		"syntaxNumber": "green",
-		"syntaxType": "violet",
-		"syntaxOperator": "muted",
-		"syntaxPunctuation": "muted",
-		"thinkingOff": "#6c767b",
-		"thinkingMinimal": "#b2bec4",
-		"thinkingLow": "#a9c3d1",
-		"thinkingMedium": "#b4c2db",
-		"thinkingHigh": "#d8bad8",
-		"thinkingXhigh": "#b3aad4",
-		"thinkingMax": "#eebfbe",
-		"bashMode": "#b2d7c1"
-	},
-	"export": {
-		"pageBg": "#232528",
-		"cardBg": "#2a2c2f",
-		"infoBg": "#443329"
-	}
-}
-JSON
-            ;;
-        esac
-        chmod 644 "${tmp}"
-        if cmp -s "${tmp}" "${dir}/lets-code-${name}.json"; then rm -f "${tmp}"; else mv "${tmp}" "${dir}/lets-code-${name}.json"; fi
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${dir}/lets-code.json"; then rm -f "${tmp}"; else mv "${tmp}" "${dir}/lets-code.json"; fi
+    for old in soft pastel chalk; do
+        if grep -q "\"name\": \"lets-code-${old}\"" "${dir}/lets-code-${old}.json" 2>/dev/null; then rm -f "${dir}/lets-code-${old}.json"; fi
     done
+}
+
+# The first interactive launch asks for a theme while settings.json has
+# none: auto (pi's "system", the default: it follows the terminal's colors),
+# lets-code, dark or light. The answer is saved, so it is asked once; a
+# launch without a terminal (scripts, -p in a pipe) never asks and leaves
+# pi's default. LETS_CODE_THEME_PROMPT=force asks without a terminal (tests).
+pick_theme_once() {
+    local settings="${PI_AGENT_DIR}/settings.json" reply theme
+    if [ "${LETS_CODE_THEME_PROMPT:-}" != force ]; then
+        [ -t 0 ] && [ -t 1 ] || return 0
+    fi
+    python3 -c 'import json,sys
+try: d = json.load(open(sys.argv[1]))
+except Exception: d = {}
+sys.exit(0 if isinstance(d, dict) and "theme" in d else 1)' "${settings}" && return 0
+    echo ""
+    echo "Theme for pi (change it any time in /settings):"
+    echo "  1) auto       follows your terminal's colors  (default)"
+    echo "  2) lets-code  pastel, the same in every terminal and over ssh"
+    echo "  3) dark"
+    echo "  4) light"
+    printf "Theme [1]: "
+    read -r reply || reply=""
+    case "${reply}" in
+        2|lets-code) theme="lets-code" ;;
+        3|dark)      theme="dark" ;;
+        4|light)     theme="light" ;;
+        *)           theme="system" ;;
+    esac
+    python3 - "${settings}" "${theme}" <<'PY'
+import json, os, sys, tempfile
+path, theme = sys.argv[1], sys.argv[2]
+try:
+    doc = json.load(open(path))
+except Exception:
+    doc = {}
+if not isinstance(doc, dict):
+    doc = {}
+doc["theme"] = theme
+os.makedirs(os.path.dirname(path), exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".lets-code-")
+with os.fdopen(fd, "w") as f:
+    json.dump(doc, f, indent=2)
+    f.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
+    log "theme: ${theme/system/auto} (saved in ${settings}; /settings changes it)"
 }
 
 # ------------------------------------------------------------- memory guard
@@ -5357,6 +5248,7 @@ fi
 pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}" "${VISION}" "${REASONING_SUPPORTED}" "${THINKING}" "${EFFORT_MAP}"
 pi_write_themes
 lc_retire_old_extensions
+pick_theme_once
 
 export LETS_CODE_TOKEN="${TOKEN}"
 export LETS_CODE_PROVIDER="${PROVIDER_ID}"
@@ -5512,13 +5404,8 @@ banner() {
     line2="${ctx} context · ${think}${extras}"
     if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
         b=$'\033[1m'; d=$'\033[2m'; r=$'\033[0m'
-        # the magenta of the lets-code theme in use (pastel's when none is):
-        # the color of the high thinking level in pi's editor
+        # the lets-code theme's magenta: the color of the high thinking level
         local hex="#d39fd3" i256=182
-        case "$(grep -o '"theme"[^,}]*' "${PI_AGENT_DIR}/settings.json" 2>/dev/null)" in
-            *lets-code-soft*) hex="#cd83ce" i256=176 ;;
-            *lets-code-chalk*) hex="#d8bad8" i256=182 ;;
-        esac
         case "${COLORTERM:-}" in
             truecolor|24bit) a=$'\033[38;2;'"$((16#${hex:1:2}));$((16#${hex:3:2}));$((16#${hex:5:2}))m" ;;
             *)               a=$'\033[38;5;'"${i256}m" ;;

@@ -46,9 +46,9 @@
 #   lets-code --no-grounding     launch without the grounding guard (look up
 #                                facts instead of guessing; read before overwrite)
 #   lets-code --no-session-tag   send no session tag with model requests
-#   lets-code --metrics | --no-metrics   start with pi's full footer and
-#                                detailed metrics instead of the minimal footer
-#                                (/metrics switches inside pi)
+#   lets-code --metrics | --no-metrics   start with the full footer (directory,
+#                                model, cache, first token, output) instead of
+#                                the minimal one (/metrics switches inside pi)
 #   lets-code --mandate [<m>]    mandate on, optionally in mode plan | auto |
 #                                ask | yolo | <role> (pi's own --mode is untouched)
 #   lets-code --no-mandate       launch without the mandate (modes) extension
@@ -965,11 +965,12 @@ mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
     exec "$@"
 }
 
-# Footer and metrics: replaces pi's footer with one minimal line (tokens
-# sent and received, the session's tokens/s with a spinner while a response
-# streams, context use); /metrics switches to pi's full footer plus a
-# detailed metrics line. Written on every launch; METRICS=true starts in the
-# full view. Inert outside a lets-code launch and without a UI. Rewritten
+# Footer and metrics: replaces pi's footer with lets-code's own, in one
+# style and two sizes. Minimal (default): tokens sent and received, the
+# session's tokens/s with a spinner while a response streams, context use.
+# Full (/metrics): adds the directory and branch, model and thinking level,
+# cache reads and hit rate, cost, time to first token and output tokens.
+# Written on every launch; METRICS=true starts in the full size. Inert outside a lets-code launch and without a UI. Rewritten
 # when its content changes.
 pi_write_metrics_extension() {
     local dir="${PI_AGENT_DIR}/extensions" f tmp
@@ -979,41 +980,35 @@ pi_write_metrics_extension() {
     cat > "${tmp}" <<'TS'
 // Written by lets-code (footer and metrics); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code (LETS_CODE_METRICS_ON set) with a
-// UI. Two footers, switched with /metrics:
-//   minimal (the default): one dim line in place of pi's footer
+// UI. Replaces pi's footer with one in a single style (dim, " · " between
+// parts), in two sizes switched with /metrics:
+//   minimal (the default):
 //     ↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)
-//     ↑ every prompt token sent (cached ones included), ↓ every token
-//     received (counting up while a response streams), the session's
-//     generation speed (with a small spinner while a response is on its
-//     way), and context use (yellow over 70 %, red over 90 %, as in pi).
-//     Other extensions' statuses keep a second line.
-//   full (/metrics, METRICS=true or --metrics): pi's own footer, plus
-//     ✶ 163.0 tok/s avg · 1.0s first token · 1204 out   while streaming
-//     ✦ 161.9 tok/s avg · 1.0s first token · 2673 out   when done
-// tok/s: every output token of the session (thinking included) over the
-// time spent generating them, from each response's first streamed token to
-// its end, so prompt processing is not in it; the response on its way
-// counts too. first token: from sending the request to the first streamed
-// token, mostly prompt processing. Live token counts are estimated from the
-// streamed text with a characters-per-token ratio learned from the
-// provider's exact counts (4 until the first response); the provider's
-// count replaces the estimate at the end ("~" when it reports none).
-// /metrics toggles full and minimal; /metrics on|off picks one. Nothing
-// reaches the model.
+//   full (/metrics, METRICS=true or --metrics):
+//     ~/github/app (main)                              qwen3.8-27b • medium
+//     ↑222k ↓25k · 198k cached (86% hit) · 161.7 tok/s · 1.0s first token · 2673 out · 22.0%/262k (auto)
+// ↑ every prompt token sent, cached ones included; ↓ every token received,
+// counting up while a response streams; tok/s the session's generation
+// speed, from each response's first streamed token to its end (prompt
+// processing is not in it; the response on its way counts too), with a
+// small spinner while a response is on its way; context use is yellow over
+// 70 % and red over 90 %, as in pi. The full size adds the directory and
+// git branch, the model and thinking level, cache reads and the latest
+// request's hit rate, cost when there is one, and the latest response's
+// time to first token and output tokens. Live token counts are estimated
+// from the streamed text with a characters-per-token ratio learned from the
+// provider's exact counts (4 until the first response); "~" marks an
+// estimate the provider never replaced. Other extensions' statuses keep a
+// line of their own. /metrics toggles the size; /metrics on|off picks one.
+// Nothing reaches the model.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, resolve, isAbsolute, sep } from "node:path";
 import { homedir } from "node:os";
 
-const KEY = "lets-code-metrics";
 const DELTAS = new Set(["text_delta", "thinking_delta", "toolcall_delta"]);
 export const FRAMES = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
 export const FRAME_MS = 120;
-const DONE = "✦";
-
-export function tokens(n: number): string {
-	return n >= 10_000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
-}
 
 // pi's footer format: 999, 1.2k, 45k, 1.2M
 export function compact(n: number): string {
@@ -1028,44 +1023,78 @@ export function rate(output: number, ms: number): number | undefined {
 	return output > 0 && ms >= 50 ? output / (ms / 1000) : undefined;
 }
 
-// the detailed line of the full view, without its glyph
-export interface Line { avg?: number; waitedMs: number; firstToken: boolean; out?: number; estimated?: boolean }
-export function line(l: Line): string {
-	const parts: string[] = [];
-	if (l.avg !== undefined) parts.push(`${l.avg.toFixed(1)} tok/s avg`);
-	parts.push(`${(l.waitedMs / 1000).toFixed(1)}s ${l.firstToken ? "first token" : "to first token"}`);
-	if (l.out !== undefined) parts.push(`${l.estimated ? "~" : ""}${tokens(l.out)} out`);
-	return parts.join(" · ");
+export function tilde(cwd: string, home = homedir()): string {
+	const r = relative(resolve(home), resolve(cwd));
+	if (r === "") return "~";
+	return r === ".." || r.startsWith(".." + sep) || isAbsolute(r) ? cwd : `~${sep}${r}`;
 }
 
-// the minimal footer line; color(name, text) applies the theme
-export interface Mini { sent: number; received: number; tps?: number; glyph?: string; percent?: number | null; window: number; auto: boolean }
-export function mini(m: Mini, color: (c: string, s: string) => string = (_c, s) => s): string {
+type Color = (c: string, s: string) => string;
+const plain: Color = (_c, s) => s;
+
+export interface Stats {
+	sent: number; received: number; cached: number; written: number; hit?: number; cost: number;
+	tps?: number; glyph?: string;
+	firstMs?: number; waiting?: boolean; out?: number; estimated?: boolean;
+	percent?: number | null; window: number; auto: boolean;
+}
+
+// the stats line; full adds cache, cost, first token and output
+export function statsLine(s: Stats, full: boolean, color: Color = plain): string {
 	const segs: string[] = [];
-	const io = [m.sent ? `↑${compact(m.sent)}` : "", m.received ? `↓${compact(m.received)}` : ""].filter(Boolean).join(" ");
-	if (io) segs.push(color("dim", io));
-	if (m.tps !== undefined || m.glyph) segs.push(color("dim", `${m.glyph ? m.glyph + " " : ""}${m.tps !== undefined ? m.tps.toFixed(1) + " tok/s" : "…"}`));
-	const pct = m.percent === null || m.percent === undefined ? "?" : `${m.percent.toFixed(1)}%`;
-	const ctx = `${pct}/${compact(m.window)}${m.auto ? " (auto)" : ""}`;
-	const v = m.percent ?? 0;
-	segs.push(v > 90 ? color("error", ctx) : v > 70 ? color("warning", ctx) : color("dim", ctx));
-	return segs.join(color("dim", " · "));
+	const io = [s.sent ? `↑${compact(s.sent)}` : "", s.received ? `↓${compact(s.received)}` : ""].filter(Boolean).join(" ");
+	if (io) segs.push(io);
+	if (full && s.cached) segs.push(`${compact(s.cached)} cached${s.hit !== undefined ? ` (${Math.round(s.hit)}% hit)` : ""}`);
+	if (full && s.written) segs.push(`${compact(s.written)} cache written`);
+	if (full && s.cost > 0) segs.push(`$${s.cost.toFixed(3)}`);
+	if (s.tps !== undefined || s.glyph) segs.push(`${s.glyph ? s.glyph + " " : ""}${s.tps !== undefined ? s.tps.toFixed(1) + " tok/s" : "…"}`);
+	if (full && s.firstMs !== undefined) segs.push(`${(s.firstMs / 1000).toFixed(1)}s ${s.waiting ? "to first token" : "first token"}`);
+	if (full && s.out !== undefined) segs.push(`${s.estimated ? "~" : ""}${compact(s.out)} out`);
+	const out = segs.map((x) => color("dim", x));
+	const pct = s.percent === null || s.percent === undefined ? "?" : `${s.percent.toFixed(1)}%`;
+	const ctx = `${pct}/${compact(s.window)}${s.auto ? " (auto)" : ""}`;
+	const v = s.percent ?? 0;
+	out.push(v > 90 ? color("error", ctx) : v > 70 ? color("warning", ctx) : color("dim", ctx));
+	return out.join(color("dim", " · "));
+}
+
+// visible width of a line with ANSI colors
+export function width(s: string): number { return [...s.replace(/\x1b\[[0-9;]*m/g, "")].length; }
+
+// cut a line with ANSI colors to a visible width
+export function cut(s: string, w: number): string {
+	let out = "", seen = 0, cutoff = false;
+	for (let i = 0; i < s.length; ) {
+		const esc = /^\x1b\[[0-9;]*m/.exec(s.slice(i));
+		if (esc) { out += esc[0]; i += esc[0].length; continue; }
+		const ch = String.fromCodePoint(s.codePointAt(i)!);
+		if (seen >= w) { cutoff = true; break; }
+		out += ch; seen++; i += ch.length;
+	}
+	return cutoff ? out + "\x1b[0m" : out;
+}
+
+// left and right on one line, right side dropped first when it does not fit
+export function spread(left: string, right: string, w: number): string {
+	const lw = width(left), rw = width(right);
+	if (!right || lw + 2 + rw > w) return cut(left, w);
+	return left + " ".repeat(w - lw - rw) + right;
 }
 
 type Theme = { fg(c: string, s: string): string };
+type FooterData = { getExtensionStatuses(): ReadonlyMap<string, string>; getGitBranch?(): string | null; getAvailableProviderCount?(): number };
 type Ctx = {
-	hasUI: boolean;
+	hasUI: boolean; cwd?: string;
 	ui: { setStatus(k: string, v: string | undefined): void; notify(m: string, t?: "info" | "warning" | "error"): void; theme?: Theme; setFooter?(f: unknown): void };
-	sessionManager?: { getEntries(): any[] };
+	sessionManager?: { getEntries(): any[]; getCwd?(): string; getSessionName?(): string | undefined };
 	getContextUsage?(): { percent: number | null; contextWindow: number } | undefined;
-	model?: { contextWindow?: number };
+	model?: { id?: string; provider?: string; reasoning?: boolean; contextWindow?: number };
 };
 
 function autoCompaction(): boolean {
 	try {
 		const dir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-		const s = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
-		return s?.compaction?.enabled !== false;
+		return JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"))?.compaction?.enabled !== false;
 	} catch { return true; }
 }
 
@@ -1073,69 +1102,75 @@ export default function (pi: ExtensionAPI) {
 	if (process.env.LETS_CODE_METRICS_ON === undefined) return;
 	let full = process.env.LETS_CODE_METRICS_ON === "1";
 	let sentAt: number | undefined, firstAt: number | undefined, chars = 0;
-	let totalOut = 0, totalMs = 0, last = "", frame = 0, glyph = "";
+	let totalOut = 0, totalMs = 0, frame = 0, glyph = "";
+	let lastFirstMs: number | undefined, lastOut: number | undefined, lastEstimated = false;
 	let calTokens = 0, calChars = 0;
 	let ui: Ctx | undefined, timer: ReturnType<typeof setInterval> | undefined;
 	let tuiRef: { requestRender(): void } | undefined;
-	let usageCache = { n: -1, sent: 0, received: 0 };
+	let usageCache: { n: number; sent: number; received: number; cached: number; written: number; cost: number; hit?: number } = { n: -1, sent: 0, received: 0, cached: 0, written: 0, cost: 0 };
 	const AUTO = autoCompaction();
 
 	const perChar = () => (calChars > 0 ? calTokens / calChars : 0.25);
 	const liveOut = () => (sentAt !== undefined && firstAt !== undefined ? Math.round(chars * perChar()) : 0);
-	const avgNow = () => {
-		if (sentAt !== undefined && firstAt !== undefined) return rate(totalOut + liveOut(), totalMs + (Date.now() - firstAt));
-		return rate(totalOut, totalMs);
-	};
+	const avgNow = () => (sentAt !== undefined && firstAt !== undefined
+		? rate(totalOut + liveOut(), totalMs + (Date.now() - firstAt)) : rate(totalOut, totalMs));
 	const usage = () => {
 		const entries = ui?.sessionManager?.getEntries?.() ?? [];
 		if (entries.length === usageCache.n) return usageCache;
-		let sent = 0, received = 0;
+		const u0 = { n: entries.length, sent: 0, received: 0, cached: 0, written: 0, cost: 0, hit: undefined as number | undefined };
 		for (const e of entries) {
 			const u = e?.type === "message" && e.message?.role === "assistant" ? e.message.usage : undefined;
 			if (!u) continue;
-			sent += (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
-			received += u.output ?? 0;
+			const prompt = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+			u0.sent += prompt; u0.received += u.output ?? 0;
+			u0.cached += u.cacheRead ?? 0; u0.written += u.cacheWrite ?? 0;
+			u0.cost += (typeof u.cost === "object" ? u.cost?.total : u.cost) ?? 0;
+			u0.hit = prompt > 0 ? ((u.cacheRead ?? 0) / prompt) * 100 : undefined;
 		}
-		usageCache = { n: entries.length, sent, received };
-		return usageCache;
+		usageCache = u0;
+		return u0;
 	};
-	const miniLine = (theme?: Theme) => {
+	const stats = (): Stats => {
 		const u = usage();
 		const cu = ui?.getContextUsage?.();
-		return mini({ sent: u.sent, received: u.received + liveOut(), tps: avgNow(), glyph: glyph || undefined,
-			percent: cu ? cu.percent : 0, window: cu?.contextWindow ?? ui?.model?.contextWindow ?? 0, auto: AUTO },
-			theme ? (c, s) => theme.fg(c, s) : undefined);
+		const s: Stats = { sent: u.sent, received: u.received + liveOut(), cached: u.cached, written: u.written, hit: u.hit, cost: u.cost,
+			tps: avgNow(), glyph: glyph || undefined, percent: cu ? cu.percent : 0, window: cu?.contextWindow ?? ui?.model?.contextWindow ?? 0, auto: AUTO };
+		if (sentAt !== undefined) {
+			if (firstAt === undefined) { s.firstMs = Date.now() - sentAt; s.waiting = true; }
+			else { s.firstMs = firstAt - sentAt; s.out = liveOut(); }
+		} else if (lastFirstMs !== undefined || lastOut !== undefined) {
+			s.firstMs = lastFirstMs; s.out = lastOut; s.estimated = lastEstimated;
+		}
+		return s;
 	};
-	const footer = (tui: { requestRender(): void }, theme: Theme, data: { getExtensionStatuses(): ReadonlyMap<string, string> }) => {
+	const topLine = (data: FooterData, w: number, color: Color) => {
+		let where = tilde(ui?.sessionManager?.getCwd?.() ?? ui?.cwd ?? process.cwd());
+		const branch = data.getGitBranch?.();
+		if (branch) where += ` (${branch})`;
+		const name = ui?.sessionManager?.getSessionName?.();
+		if (name) where += ` • ${name}`;
+		const m = ui?.model;
+		let model = m?.id ?? "no model";
+		if (m?.reasoning) { const lvl = pi.getThinkingLevel?.() ?? "off"; model += lvl === "off" ? " • thinking off" : ` • ${lvl}`; }
+		if ((data.getAvailableProviderCount?.() ?? 1) > 1 && m?.provider) model = `(${m.provider}) ${model}`;
+		return spread(color("dim", where), color("dim", model), w);
+	};
+	const footer = (tui: { requestRender(): void }, theme: Theme, data: FooterData) => {
 		tuiRef = tui;
+		const color: Color = (c, s) => theme.fg(c, s);
 		return {
-			render(width: number): string[] {
-				const lines = [cut(miniLine(theme), width)];
-				const others = [...data.getExtensionStatuses()].filter(([k]) => k !== KEY).sort(([a], [b]) => a.localeCompare(b)).map(([, v]) => v.replace(/\s+/g, " ").trim());
-				if (others.length) lines.push(cut(others.join(" "), width));
+			render(w: number): string[] {
+				const lines = full ? [topLine(data, w, color)] : [];
+				lines.push(cut(statsLine(stats(), full, color), w));
+				const others = [...data.getExtensionStatuses()].sort(([a], [b]) => a.localeCompare(b)).map(([, v]) => v.replace(/\s+/g, " ").trim());
+				if (others.length) lines.push(cut(others.join(" "), w));
 				return lines;
 			},
 			invalidate() {},
 			dispose() { if (tuiRef === tui) tuiRef = undefined; },
 		};
 	};
-	const apply = () => {
-		if (!ui?.ui.setFooter) return;
-		if (full) { ui.ui.setFooter(undefined); paintFull(); }
-		else { ui.ui.setStatus(KEY, undefined); ui.ui.setFooter(footer); }
-	};
-	const paintFull = () => {
-		if (!ui || !full) return;
-		const t = ui.ui.theme;
-		let text: string;
-		if (sentAt !== undefined) {
-			text = `${glyph || FRAMES[0]} ` + (firstAt === undefined
-				? line({ avg: avgNow(), waitedMs: Date.now() - sentAt, firstToken: false })
-				: line({ avg: avgNow(), waitedMs: firstAt - sentAt, firstToken: true, out: liveOut() }));
-		} else text = `${DONE} ${last || "metrics: shown with the next response"}`;
-		ui.ui.setStatus(KEY, t ? t.fg("dim", text) : text);
-	};
-	const repaint = () => { if (full) paintFull(); else tuiRef?.requestRender(); };
+	const repaint = () => tuiRef?.requestRender();
 	const tick = () => { if (sentAt === undefined) return; glyph = FRAMES[frame++ % FRAMES.length]; repaint(); };
 	const stop = () => { if (timer !== undefined) { clearInterval(timer); timer = undefined; } glyph = ""; };
 	const start = () => {
@@ -1145,15 +1180,12 @@ export default function (pi: ExtensionAPI) {
 		timer = setInterval(tick, FRAME_MS);
 		(timer as { unref?: () => void }).unref?.();
 	};
+	const take = (ctx: unknown) => { const c = ctx as Ctx; if (!c.hasUI) return false; ui = c; return true; };
 
-	pi.on("session_start", (_event, ctx) => {
-		if (!(ctx as unknown as Ctx).hasUI) return;
-		ui = ctx as unknown as Ctx;
-		apply();
-	});
-	pi.on("before_provider_request", (_event, ctx) => {
+	pi.on("session_start", (_e, ctx) => { if (take(ctx)) ui!.ui.setFooter?.(footer); });
+	pi.on("before_provider_request", (_e, ctx) => {
 		sentAt = Date.now(); firstAt = undefined; chars = 0;
-		if ((ctx as unknown as Ctx).hasUI) { ui = ctx as unknown as Ctx; start(); }
+		if (take(ctx)) start();
 	});
 	pi.on("message_update", (event) => {
 		const e = event.assistantMessageEvent as { type: string; delta?: string };
@@ -1163,46 +1195,30 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("message_end", (event, ctx) => {
 		const m = event.message as { role?: string; usage?: { output?: number } };
-		if (m.role !== "assistant" || !(ctx as unknown as Ctx).hasUI || sentAt === undefined) return;
-		ui = ctx as unknown as Ctx;
+		if (m.role !== "assistant" || sentAt === undefined || !take(ctx)) return;
 		const endAt = Date.now();
 		const reported = m.usage?.output ?? 0;
 		const output = reported > 0 ? reported : Math.round(chars * perChar());
 		if (reported > 0 && chars > 0) { calTokens += reported; calChars += chars; }
 		if (firstAt !== undefined && rate(output, endAt - firstAt) !== undefined) { totalOut += output; totalMs += endAt - firstAt; }
-		last = firstAt === undefined
-			? line({ avg: rate(totalOut, totalMs), waitedMs: endAt - sentAt, firstToken: false, out: output, estimated: reported <= 0 })
-			: line({ avg: rate(totalOut, totalMs), waitedMs: firstAt - sentAt, firstToken: true, out: output, estimated: reported <= 0 });
+		lastFirstMs = (firstAt ?? endAt) - sentAt; lastOut = output; lastEstimated = reported <= 0;
 		sentAt = undefined;
 		stop(); repaint();
 	});
 	// an interrupted or failed run ends without message_end: stop the spinner
 	pi.on("agent_end", () => { if (sentAt !== undefined) { sentAt = undefined; stop(); repaint(); } });
 	pi.registerCommand("metrics", {
-		description: "Toggle the full footer with detailed metrics; on = full, off = minimal",
+		description: "Toggle the full footer (directory, model, cache, first token, output); on = full, off = minimal",
 		getArgumentCompletions: (prefix) => ["on", "off"].filter((a) => a.startsWith(prefix.trim())).map((a) => ({ value: a, label: a })),
 		handler: async (args, ctx) => {
 			const a = args.trim().toLowerCase();
 			if (a && a !== "on" && a !== "off") { ctx.ui.notify("usage: /metrics [on|off]", "warning"); return; }
 			full = a ? a === "on" : !full;
-			ui = ctx as unknown as Ctx;
-			apply();
-			ctx.ui.notify(full ? "Full footer with metrics" : "Minimal footer", "info");
+			if (take(ctx) && !tuiRef) ui!.ui.setFooter?.(footer);
+			repaint();
+			ctx.ui.notify(full ? "Full footer" : "Minimal footer", "info");
 		},
 	});
-}
-
-// cut a line with ANSI colors to a visible width
-function cut(s: string, width: number): string {
-	let out = "", seen = 0;
-	for (let i = 0; i < s.length; ) {
-		const esc = /^\x1b\[[0-9;]*m/.exec(s.slice(i));
-		if (esc) { out += esc[0]; i += esc[0].length; continue; }
-		const ch = String.fromCodePoint(s.codePointAt(i)!);
-		if (seen >= width) break;
-		out += ch; seen++; i += ch.length;
-	}
-	return out + (seen >= width && out.length < s.length ? "\x1b[0m" : "");
 }
 TS
     chmod 644 "${tmp}"
@@ -4440,8 +4456,8 @@ run_setup() {  # run_setup [full|granular]
             echo "SANDBOX=\"${feat_sandbox}\""
             echo "REA=\"${feat_rea}\""
             echo ""
-            echo "# METRICS=true: start with pi's full footer and detailed metrics instead"
-            echo "# of the minimal footer (also: --metrics / --no-metrics; /metrics in pi)."
+            echo "# METRICS=true: start with the full footer (directory, model, cache, first"
+            echo "# token, output) instead of the minimal one (--metrics; /metrics in pi)."
             echo "METRICS=\"${feat_metrics}\""
         } > "${CONFIG_FILE}"
         chmod 600 "${CONFIG_FILE}"
@@ -5344,7 +5360,7 @@ esac
 # optional features: mandate (modes/roles), subagents, sandbox, REA, metrics
 unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL LETS_CODE_METRICS_ON
 FEAT_DESC=""
-# footer: the minimal one by default; METRICS=true starts with pi's full footer and metrics
+# footer: minimal by default; METRICS=true starts with the full one
 pi_write_metrics_extension
 case "$(printf '%s' "${METRICS}" | tr '[:upper:]' '[:lower:]')" in
     true|yes|1|on) export LETS_CODE_METRICS_ON=1; FEAT_DESC="metrics: on" ;;

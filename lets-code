@@ -44,6 +44,9 @@
 #   lets-code --no-git-guard     launch without the git guard
 #   lets-code --no-agent-guard   launch without the agent guard
 #   lets-code --no-session-tag   send no session tag with model requests
+#   lets-code --metrics | --no-metrics   tokens/s and time to first token in
+#                                pi's footer after each response (default off;
+#                                /metrics toggles it inside pi)
 #   lets-code --mandate [<m>]    mandate on, optionally in mode plan | auto |
 #                                ask | yolo | <role> (pi's own --mode is untouched)
 #   lets-code --no-mandate       launch without the mandate (modes) extension
@@ -120,7 +123,7 @@
 #                LETS_CODE_MANDATE (true|false), LETS_CODE_MODE, LETS_CODE_SUBAGENTS,
 #                LETS_CODE_SANDBOX (true|false), LETS_CODE_SUBAGENT_CONCURRENCY (2)
 #                LETS_CODE_REA (true|manual|false)
-#                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
+#                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
 #                LETS_CODE_WRAP_TURNS (6), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
 #                LETS_CODE_BURST_TURNS (3), LETS_CODE_MAX_BURSTS (8), LETS_CODE_THINKING_REPLAY (all|<n>)
 #                LETS_CODE_FINAL_REVIEW (auto|on|0), LETS_CODE_PLAN_BURST (0|1), LETS_CODE_PLAN_LEVEL (low)
@@ -634,6 +637,8 @@ PY
 # Pastel versions of pi's built-in dark theme: the same hue for every role,
 # with saturation lowered and lightness raised a step further each time
 # (soft, pastel, chalk). Panel backgrounds keep their depth with calmer tints;
+# the thinking levels run blue-violet (medium), magenta (high, also the
+# launch banner's "✦ lets-code"), deep purple (xhigh), coral (max);
 # text and muted greys are pi's own, so contrast holds. Colors are plain hex
 # and there is no "appearance" key, so pi releases before 1.0 (which know
 # neither OKHSL nor that key) load them too. Selected through the
@@ -712,8 +717,8 @@ pi_write_themes() {
 		"thinkingMinimal": "#8297a3",
 		"thinkingLow": "#6e9db7",
 		"thinkingMedium": "#7f9bd2",
-		"thinkingHigh": "#a692e1",
-		"thinkingXhigh": "#de80c7",
+		"thinkingHigh": "#cd83ce",
+		"thinkingXhigh": "#886fc9",
 		"thinkingMax": "#f78586",
 		"bashMode": "#79c099"
 	},
@@ -792,8 +797,8 @@ JSON
 		"thinkingMinimal": "#98a9b3",
 		"thinkingLow": "#8bb2c7",
 		"thinkingMedium": "#99afd7",
-		"thinkingHigh": "#b7aae2",
-		"thinkingXhigh": "#de9fcd",
+		"thinkingHigh": "#d39fd3",
+		"thinkingXhigh": "#9d8cd0",
 		"thinkingMax": "#f2a4a3",
 		"bashMode": "#95cead"
 	},
@@ -872,8 +877,8 @@ JSON
 		"thinkingMinimal": "#b2bec4",
 		"thinkingLow": "#a9c3d1",
 		"thinkingMedium": "#b4c2db",
-		"thinkingHigh": "#c8c1e3",
-		"thinkingXhigh": "#e0b9d4",
+		"thinkingHigh": "#d8bad8",
+		"thinkingXhigh": "#b3aad4",
 		"thinkingMax": "#eebfbe",
 		"bashMode": "#b2d7c1"
 	},
@@ -956,6 +961,98 @@ mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
             -p OOMPolicy=continue -- "$@"
     fi
     exec "$@"
+}
+
+# Response metrics: after each model response, pi's footer shows its tokens
+# per second, the time to its first token and its output tokens, plus the
+# session average. Written on every launch so /metrics can turn it on;
+# shown from the start when METRICS is on (LETS_CODE_METRICS_ON=1). Inert
+# outside a lets-code launch and without a UI. Rewritten when its content
+# changes.
+pi_write_metrics_extension() {
+    local dir="${PI_AGENT_DIR}/extensions" f tmp
+    f="${dir}/lets-code-metrics.ts"
+    mkdir -p "${dir}"
+    tmp="$(mktemp "${dir}/.lets-code-metrics.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (response metrics); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code (LETS_CODE_METRICS_ON set) with a
+// UI. After each model response the footer shows
+//   ⚡ 41.8 tok/s · 0.9s first token · 812 out · avg 40.2 tok/s
+// tok/s: output tokens (thinking included) over the time from the first
+// streamed token to the end of the response, so prompt processing is not in
+// it. first token: from sending the request to the first streamed token,
+// which is mostly prompt processing. avg: the session's output tokens over
+// its generation time. Token counts are the provider's own; when it reports
+// none, output is estimated from the streamed text (~4 characters a token)
+// and marked "~". Shown from the start when LETS_CODE_METRICS_ON=1 (METRICS
+// or --metrics); /metrics toggles it, /metrics on|off sets it. Measured
+// either way, so turning it on shows the session average at once. Nothing
+// reaches the model.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+export interface Sample { sentAt: number; firstAt?: number; endAt: number; output: number; estimated: boolean }
+
+const KEY = "lets-code-metrics";
+const DELTAS = new Set(["text_delta", "thinking_delta", "toolcall_delta"]);
+
+export function tokens(n: number): string {
+	return n >= 10_000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
+}
+
+export function rate(output: number, ms: number): number | undefined {
+	return output > 0 && ms >= 50 ? output / (ms / 1000) : undefined;
+}
+
+export function format(s: Sample, avg?: number): string {
+	const parts: string[] = [];
+	const r = s.firstAt === undefined ? undefined : rate(s.output, s.endAt - s.firstAt);
+	parts.push(r === undefined ? "⚡ – tok/s" : `⚡ ${s.estimated ? "~" : ""}${r.toFixed(1)} tok/s`);
+	if (s.firstAt !== undefined) parts.push(`${((s.firstAt - s.sentAt) / 1000).toFixed(1)}s first token`);
+	parts.push(`${s.estimated ? "~" : ""}${tokens(s.output)} out`);
+	if (avg !== undefined) parts.push(`avg ${avg.toFixed(1)} tok/s`);
+	return parts.join(" · ");
+}
+
+export default function (pi: ExtensionAPI) {
+	if (process.env.LETS_CODE_METRICS_ON === undefined) return;
+	let shown = process.env.LETS_CODE_METRICS_ON === "1";
+	let sentAt: number | undefined, firstAt: number | undefined, chars = 0;
+	let totalOut = 0, totalMs = 0, last = "";
+	pi.on("before_provider_request", () => { sentAt = Date.now(); firstAt = undefined; chars = 0; });
+	pi.on("message_update", (event) => {
+		const e = event.assistantMessageEvent as { type: string; delta?: string };
+		if (!DELTAS.has(e.type)) return;
+		firstAt ??= Date.now();
+		chars += e.delta?.length ?? 0;
+	});
+	pi.on("message_end", (event, ctx) => {
+		const m = event.message as { role?: string; usage?: { output?: number } };
+		if (m.role !== "assistant" || !ctx.hasUI || sentAt === undefined) return;
+		const endAt = Date.now();
+		const reported = m.usage?.output ?? 0;
+		const output = reported > 0 ? reported : Math.round(chars / 4);
+		const s: Sample = { sentAt, firstAt, endAt, output, estimated: reported <= 0 };
+		if (firstAt !== undefined && rate(output, endAt - firstAt) !== undefined) { totalOut += output; totalMs += endAt - firstAt; }
+		last = format(s, rate(totalOut, totalMs));
+		if (shown) ctx.ui.setStatus(KEY, last);
+		sentAt = undefined;
+	});
+	pi.registerCommand("metrics", {
+		description: "Show or hide tokens/s and time to first token in the footer (on | off)",
+		getArgumentCompletions: (prefix) => ["on", "off"].filter((a) => a.startsWith(prefix.trim())).map((a) => ({ value: a, label: a })),
+		handler: async (args, ctx) => {
+			const a = args.trim().toLowerCase();
+			if (a && a !== "on" && a !== "off") { ctx.ui.notify("usage: /metrics [on|off]", "warning"); return; }
+			shown = a ? a === "on" : !shown;
+			ctx.ui.setStatus(KEY, shown ? last || "⚡ metrics on: shown after the next response" : undefined);
+			ctx.ui.notify(shown ? "Metrics on" : "Metrics off", "info");
+		},
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
 
 # The pi extension that tags each model request with the session it came from
@@ -4015,9 +4112,9 @@ run_setup() {  # run_setup [full|granular]
 
     # 5b. optional features: off in the default setup, all on with 'full',
     #     one question each with 'granular'
-    local feat_mandate="false" feat_mode="" feat_subagents="false" feat_sandbox="false" feat_mcp="no" feat_rea="false"
+    local feat_mandate="false" feat_mode="" feat_subagents="false" feat_sandbox="false" feat_mcp="no" feat_rea="false" feat_metrics="false"
     case "${profile}" in
-        full) feat_mandate="true"; feat_subagents="true"; feat_sandbox="true"; feat_mcp="yes"; feat_rea="true" ;;
+        full) feat_mandate="true"; feat_subagents="true"; feat_sandbox="true"; feat_mcp="yes"; feat_rea="true"; feat_metrics="true" ;;
         granular)
             echo ""
             echo "Optional features (each can be changed later in ${CONFIG_FILE}):"
@@ -4032,7 +4129,9 @@ run_setup() {  # run_setup [full|granular]
             printf "  MCP — import servers from .mcp.json and other clients' configs into pi? [y/N] "
             read -r reply; case "${reply}" in y|Y) feat_mcp="yes" ;; esac
             printf "  REA — reverse engineering on demand, run in a separate agent (~160 MB)? [y/N/manual] "
-            read -r reply; case "${reply}" in y|Y) feat_rea="true" ;; m|manual) feat_rea="manual" ;; esac ;;
+            read -r reply; case "${reply}" in y|Y) feat_rea="true" ;; m|manual) feat_rea="manual" ;; esac
+            printf "  Metrics — tokens/s and time to first token in pi's footer? [y/N] "
+            read -r reply; case "${reply}" in y|Y) feat_metrics="true" ;; esac ;;
     esac
 
     # 6. save config (re-emitted after the live probe with the thinking level)
@@ -4081,6 +4180,10 @@ run_setup() {  # run_setup [full|granular]
             echo "SUBAGENTS=\"${feat_subagents}\""
             echo "SANDBOX=\"${feat_sandbox}\""
             echo "REA=\"${feat_rea}\""
+            echo ""
+            echo "# METRICS=true: tokens/s and time to first token in pi's footer after"
+            echo "# each response (also: --metrics / --no-metrics)."
+            echo "METRICS=\"${feat_metrics}\""
         } > "${CONFIG_FILE}"
         chmod 600 "${CONFIG_FILE}"
     }
@@ -4268,7 +4371,7 @@ print("%s|%s|%s" % (d.get("id", ""), d.get("max_model_len") or d.get("context_le
 # never rewrite each other's backend.
 # Names that would shadow a lets-code option; pi's own options are checked
 # against `pi --help` at setup.
-PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard no-session-tag mandate no-mandate subagents no-subagents sandbox no-sandbox verbose debug help preset"
+PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard no-session-tag metrics no-metrics rea no-rea mandate no-mandate subagents no-subagents sandbox no-sandbox verbose debug help preset"
 preset_name_ok() {  # preset_name_ok <name> -> 0 when usable as --<name>
     case "$1" in ""|[!a-z0-9]*|*[!a-z0-9_-]*) return 1 ;; esac
     case " ${PRESET_RESERVED} " in *" $1 "*) return 1 ;; esac
@@ -4619,6 +4722,7 @@ MEM_GUARD="true"
 GIT_GUARD="true"
 AGENT_GUARD="true"
 SESSION_TAG="true"
+METRICS="false"
 TEMPLATE_EFFORT="auto"
 MANDATE="false"
 MODE=""
@@ -4647,6 +4751,7 @@ MEM_GUARD="${LETS_CODE_MEM_GUARD:-${MEM_GUARD}}"
 GIT_GUARD="${LETS_CODE_GIT_GUARD:-${GIT_GUARD}}"
 AGENT_GUARD="${LETS_CODE_AGENT_GUARD:-${AGENT_GUARD}}"
 SESSION_TAG="${LETS_CODE_SESSION_TAG:-${SESSION_TAG}}"
+METRICS="${LETS_CODE_METRICS:-${METRICS}}"
 TEMPLATE_EFFORT="${LETS_CODE_TEMPLATE_EFFORT:-${TEMPLATE_EFFORT}}"
 MANDATE="${LETS_CODE_MANDATE:-${MANDATE}}"
 MODE="${LETS_CODE_MODE:-${MODE}}"
@@ -4689,6 +4794,8 @@ while [ $# -gt 0 ]; do
         --no-git-guard) GIT_GUARD=false; shift ;;
         --no-agent-guard) AGENT_GUARD=false; shift ;;
         --no-session-tag) SESSION_TAG=false; shift ;;
+        --metrics)  METRICS=true; shift ;;
+        --no-metrics) METRICS=false; shift ;;
         --mandate)  MANDATE=true
                     case "${2:-}" in ""|-*) shift ;; *) MODE="$2"; shift 2 ;; esac ;;
         --no-mandate) MANDATE=false; shift ;;
@@ -4964,9 +5071,15 @@ case "$(printf '%s' "${SESSION_TAG}" | tr '[:upper:]' '[:lower:]')" in
         SESSION_DESC="session tag: ${LETS_CODE_SESSION_ID}" ;;
 esac
 
-# optional features: mandate (modes/roles), subagents, sandbox, REA
-unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL
+# optional features: mandate (modes/roles), subagents, sandbox, REA, metrics
+unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL LETS_CODE_METRICS_ON
 FEAT_DESC=""
+# metrics: always installed so /metrics works; METRICS decides the start
+pi_write_metrics_extension
+case "$(printf '%s' "${METRICS}" | tr '[:upper:]' '[:lower:]')" in
+    true|yes|1|on) export LETS_CODE_METRICS_ON=1; FEAT_DESC="metrics: on" ;;
+    *)             export LETS_CODE_METRICS_ON=0 ;;
+esac
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 case "$(lc "${MANDATE}")" in
     true|yes|1|on)
@@ -4974,7 +5087,7 @@ case "$(lc "${MANDATE}")" in
         pi_write_mandate_extension
         export LETS_CODE_MANDATE_ON=1
         if [ -n "${MODE}" ]; then export LETS_CODE_MODE="${MODE}"; else unset LETS_CODE_MODE; fi
-        FEAT_DESC="mandate: ${MODE:-auto}" ;;
+        FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }mandate: ${MODE:-auto}" ;;
     *) unset LETS_CODE_MODE ;;
 esac
 case "$(lc "${SUBAGENTS}")" in
@@ -5027,8 +5140,19 @@ banner() {
     line1="${MODEL} @ ${host}${PRESET:+  (preset ${PRESET})}"
     line2="${ctx} context · ${think}${extras}${guards:+ · guards: ${guards}}"
     if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
-        b=$'\033[1m'; d=$'\033[2m'; a=$'\033[35m'; r=$'\033[0m'
-        local signoffs=("let's code." "happy hacking." "go build something." "ship it." "may your tests be green.")
+        b=$'\033[1m'; d=$'\033[2m'; r=$'\033[0m'
+        # the magenta of the lets-code theme in use (pastel's when none is):
+        # the color of the high thinking level in pi's editor
+        local hex="#d39fd3" i256=182
+        case "$(grep -o '"theme"[^,}]*' "${PI_AGENT_DIR}/settings.json" 2>/dev/null)" in
+            *lets-code-soft*) hex="#cd83ce" i256=176 ;;
+            *lets-code-chalk*) hex="#d8bad8" i256=182 ;;
+        esac
+        case "${COLORTERM:-}" in
+            truecolor|24bit) a=$'\033[38;2;'"$((16#${hex:1:2}));$((16#${hex:3:2}));$((16#${hex:5:2}))m" ;;
+            *)               a=$'\033[38;5;'"${i256}m" ;;
+        esac
+        local signoffs=("let's code." "happy hacking." "go build something." "may your tests be green.")
         printf '%s✦ lets-code%s %s%s%s\n' "${a}${b}" "${r}" "${b}" "${line1}" "${r}"
         printf '  %s%s · %s%s\n' "${d}" "${line2}" "${signoffs[$(( RANDOM % ${#signoffs[@]} ))]}" "${r}"
     else

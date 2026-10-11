@@ -168,7 +168,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MEM_GUARD`, `GIT_GUARD`, `AGENT_GUARD` | `false` turns a guard off. |
 | `TEMPLATE_EFFORT` | `off` skips the chat-template effort probe, `neutral` maps every level to the least-instruction value (see server setup). |
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
-| `SUBAGENTS`, `SANDBOX` | `true` turns the feature on. |
+| `SUBAGENTS`, `SANDBOX` | `true` turns the feature on. A config without `SUBAGENTS` gets a one-line launch tip. |
 | `REA` | `true` adds the reverse-engineering skill, `manual` makes it `/skill:reverse-engineering` only. |
 | `METRICS` | `true` shows response metrics in pi's footer: `⚡ 41.8 tok/s · 0.9s first token · 812 out · avg 40.2 tok/s`. tok/s is generation speed (from the first streamed token); first token is mostly prompt processing. `/metrics` (or `/metrics on\|off`) toggles it inside pi. |
 

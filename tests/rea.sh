@@ -15,7 +15,7 @@ PY
 )"
 LOG_PREFIX="[lets-code]"; log() { echo "${LOG_PREFIX} ${1}"; }
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/rea-test.XXXXXX")"
+work="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/rea-test.XXXXXX")" && pwd)"   # macOS TMPDIR ends in /; the runner sees the cd'd path
 trap 'rm -rf "${work}"' EXIT
 mkdir -p "${work}/bin" "${work}/agent/skills/mine" "${work}/agent/sessions" "${work}/agent/extensions"
 cat > "${work}/bin/npm" <<'SH'

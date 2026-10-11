@@ -33,7 +33,9 @@ s.serve_forever()
 PY
 python3 "${d}/server.py" > "${d}/port" &
 srv=$!
-for _ in $(seq 50); do [ -s "${d}/port" ] && break; sleep 0.1; done
+# (a slow CI runner can take seconds to start python)
+for _ in $(seq 300); do [ -s "${d}/port" ] && break; sleep 0.1; done
+[ -s "${d}/port" ] || { echo "FAIL  the fake server did not start within 30 s"; exit 1; }
 url="http://127.0.0.1:$(cat "${d}/port")"
 
 # a pi that records its arguments and the environment lets-code hands it

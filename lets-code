@@ -43,6 +43,8 @@
 #   lets-code --no-mem-guard     launch without the memory guard
 #   lets-code --no-git-guard     launch without the git guard
 #   lets-code --no-agent-guard   launch without the agent guard
+#   lets-code --no-grounding     launch without the grounding guard (look up
+#                                facts instead of guessing; read before overwrite)
 #   lets-code --no-session-tag   send no session tag with model requests
 #   lets-code --metrics | --no-metrics   tokens/s and time to first token in
 #                                pi's footer after each response (default off;
@@ -123,7 +125,7 @@
 #                LETS_CODE_MANDATE (true|false), LETS_CODE_MODE, LETS_CODE_SUBAGENTS,
 #                LETS_CODE_SANDBOX (true|false), LETS_CODE_SUBAGENT_CONCURRENCY (2)
 #                LETS_CODE_REA (true|manual|false)
-#                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
+#                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_GROUNDING (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
 #                LETS_CODE_WRAP_TURNS (6), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
 #                LETS_CODE_BURST_TURNS (3), LETS_CODE_MAX_BURSTS (8), LETS_CODE_THINKING_REPLAY (all|<n>)
 #                LETS_CODE_FINAL_REVIEW (auto|on|0), LETS_CODE_PLAN_BURST (0|1), LETS_CODE_PLAN_LEVEL (low)
@@ -1096,6 +1098,100 @@ export default function (pi: ExtensionAPI) {
 			else paint(DONE, "metrics on: shown with the next response");
 			ctx.ui.notify(shown ? "Metrics on" : "Metrics off", "info");
 		},
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+}
+
+# Grounding guard: a short system-prompt section that has pi look facts up
+# with its tools instead of guessing them (file contents, paths, names,
+# versions, config, command output), invent nothing, say what it could not
+# verify and report results as they are; and a block, once per file, on
+# overwriting an existing file the session has not read. Inert unless
+# LETS_CODE_GROUNDING_ON=1. Rewritten when its content changes.
+pi_write_grounding_extension() {
+    local dir="${PI_AGENT_DIR}/extensions" f tmp
+    f="${dir}/lets-code-grounding.ts"
+    mkdir -p "${dir}"
+    tmp="$(mktemp "${dir}/.lets-code-grounding.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (grounding guard); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code with the grounding guard on
+// (LETS_CODE_GROUNDING_ON=1). Two parts:
+//   * a short system-prompt section: facts about the project and machine
+//     (file contents, paths, names, versions, config, command output) are
+//     looked up with tools, not guessed; nothing is invented; what could
+//     not be checked is said; results are reported as they are;
+//   * overwriting an existing file the session has not read (read tool,
+//     or a bash command naming it) is blocked once, with a pointer to read
+//     it first; writing it again goes through, so a deliberate overwrite is
+//     one retry away. New files, and files read, edited or written before,
+//     are never blocked.
+// Nothing else is changed: no extra turns, nothing appended to results.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+
+export const SECTION = [
+	"Ground truth (lets-code):",
+	"- Look, don't guess. Before you state or rely on a fact about this project or machine (what a file contains, whether a path exists, a function, flag or option name, a version, a config value, what a command prints), check it with a tool: read the file, list the directory, search, or run the command or its --help. Memory and plausible-looking names are not evidence.",
+	"- Never invent identifiers, paths, URLs, numbers or command output. If something you need does not exist, say so instead of making it up.",
+	"- Read a file before you change or overwrite it, and look at what you are about to delete before you delete it.",
+	"- When you cannot verify something, say plainly what you could not check and why. Do not present a guess as a fact.",
+	"- Report results as they are: if a command failed or a test is red, say so with the relevant output; if you skipped a step, say that.",
+].join("\n");
+
+export function blockText(path: string): string {
+	return `[lets-code] ${path} already exists and has not been read in this session. ` +
+		"Read it first so you know what you are replacing (or use edit for a partial change). " +
+		"If replacing it without reading is intended, write it again.";
+}
+
+const isFile = (p: string) => { try { return existsSync(p) && statSync(p).isFile(); } catch { return false; } };
+
+// files a bash command names (cat a, sed -n 1,9p b, head c ...): any word
+// that is an existing file counts as looked at
+export function namedFiles(command: string, cwd: string): string[] {
+	const out: string[] = [];
+	for (const raw of command.split(/[\s;&|()<>]+/)) {
+		const w = raw.replace(/^['"]|['"]$/g, "");
+		if (!w || w.startsWith("-") || w.includes("$") || w.includes("*")) continue;
+		const p = resolve(cwd, w);
+		if (isFile(p)) out.push(p);
+	}
+	return out;
+}
+
+export default function (pi: ExtensionAPI) {
+	if (process.env.LETS_CODE_GROUNDING_ON !== "1") return;
+	const seen = new Set<string>();      // read, edited or written this session
+	const warned = new Set<string>();    // blocked once already
+
+	pi.on("before_agent_start", async (event: any) => {
+		const sections = event?.systemPromptOptions?.sections;
+		if (sections && typeof sections === "object") sections.lets_code_grounding = SECTION;
+		return undefined;
+	});
+
+	pi.on("tool_call", async (event: any, ctx: any) => {
+		const cwd = ctx?.cwd ?? process.cwd();
+		const input = event?.input ?? {};
+		const name = event?.toolName;
+		if (name === "read" || name === "edit") {
+			if (input.path) seen.add(resolve(cwd, String(input.path)));
+			return undefined;
+		}
+		if (name === "bash") {
+			for (const p of namedFiles(String(input.command ?? ""), cwd)) seen.add(p);
+			return undefined;
+		}
+		if (name !== "write" || !input.path) return undefined;
+		const p = resolve(cwd, String(input.path));
+		if (seen.has(p) || warned.has(p) || !isFile(p)) { seen.add(p); return undefined; }
+		warned.add(p);
+		return { block: true, reason: blockText(String(input.path)) };
 	});
 }
 TS
@@ -4224,6 +4320,10 @@ run_setup() {  # run_setup [full|granular]
             echo "# Agent guard: bash timeouts, cut-off reply recovery, a wrap-up hint"
             echo "# once tests pass, and the auto thinking level. AGENT_GUARD=false disables it."
             echo "AGENT_GUARD=\"true\""
+            echo ""
+            echo "# Grounding guard: facts about the project are looked up, not guessed, and"
+            echo "# an unread existing file is not overwritten blind. GROUNDING=false disables it."
+            echo "GROUNDING=\"true\""
             echo "# Optional features (off by default; 'lets-code setup full' turns them on)."
             echo "# MANDATE=true: modes plan/auto/ask/yolo and roles for subagents (MODE sets"
             echo "# the start mode, empty = auto). SUBAGENTS=true: the subagent tool."
@@ -4426,7 +4526,7 @@ print("%s|%s|%s" % (d.get("id", ""), d.get("max_model_len") or d.get("context_le
 # never rewrite each other's backend.
 # Names that would shadow a lets-code option; pi's own options are checked
 # against `pi --help` at setup.
-PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard no-session-tag metrics no-metrics rea no-rea mandate no-mandate subagents no-subagents sandbox no-sandbox verbose debug help preset"
+PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard grounding no-grounding no-session-tag metrics no-metrics rea no-rea mandate no-mandate subagents no-subagents sandbox no-sandbox verbose debug help preset"
 preset_name_ok() {  # preset_name_ok <name> -> 0 when usable as --<name>
     case "$1" in ""|[!a-z0-9]*|*[!a-z0-9_-]*) return 1 ;; esac
     case " ${PRESET_RESERVED} " in *" $1 "*) return 1 ;; esac
@@ -4776,6 +4876,7 @@ THINKING=""
 MEM_GUARD="true"
 GIT_GUARD="true"
 AGENT_GUARD="true"
+GROUNDING="true"
 SESSION_TAG="true"
 METRICS="false"
 TEMPLATE_EFFORT="auto"
@@ -4805,6 +4906,7 @@ THINKING="${LETS_CODE_THINKING:-${THINKING}}"
 MEM_GUARD="${LETS_CODE_MEM_GUARD:-${MEM_GUARD}}"
 GIT_GUARD="${LETS_CODE_GIT_GUARD:-${GIT_GUARD}}"
 AGENT_GUARD="${LETS_CODE_AGENT_GUARD:-${AGENT_GUARD}}"
+GROUNDING="${LETS_CODE_GROUNDING:-${GROUNDING}}"
 SESSION_TAG="${LETS_CODE_SESSION_TAG:-${SESSION_TAG}}"
 METRICS="${LETS_CODE_METRICS:-${METRICS}}"
 TEMPLATE_EFFORT="${LETS_CODE_TEMPLATE_EFFORT:-${TEMPLATE_EFFORT}}"
@@ -4848,6 +4950,8 @@ while [ $# -gt 0 ]; do
         --no-mem-guard) MEM_GUARD=false; shift ;;
         --no-git-guard) GIT_GUARD=false; shift ;;
         --no-agent-guard) AGENT_GUARD=false; shift ;;
+        --grounding) GROUNDING=true; shift ;;
+        --no-grounding) GROUNDING=false; shift ;;
         --no-session-tag) SESSION_TAG=false; shift ;;
         --metrics)  METRICS=true; shift ;;
         --no-metrics) METRICS=false; shift ;;
@@ -5110,6 +5214,13 @@ if [ -n "${THINKING_AUTO}" ]; then
     fi
 fi
 
+# grounding guard: look facts up instead of guessing; read before overwrite
+unset LETS_CODE_GROUNDING_ON
+case "$(printf '%s' "${GROUNDING}" | tr '[:upper:]' '[:lower:]')" in
+    false|no|0|off) ;;
+    *) pi_write_grounding_extension; export LETS_CODE_GROUNDING_ON=1 ;;
+esac
+
 # session tag: one id per launch, sent as a request header (see the extension)
 unset LETS_CODE_SESSION_ID
 SESSION_DESC=""
@@ -5190,6 +5301,7 @@ banner() {
     host="${BASE_URL#*://}"
     [ "${MG_MODE}" = off ] || guards="memory"
     case "${AG_DESC}" in *" on"*) guards="${guards:+${guards}, }agent" ;; esac
+    [ "${LETS_CODE_GROUNDING_ON:-}" = 1 ] && guards="${guards:+${guards}, }grounding"
     [ "${GG_MODE}" = off ] || guards="${guards:+${guards}, }git on ${GG_BRANCH:-a pi/* branch}"
     [ "${VISION}" = true ] && extras=" · sees images"
     [ -n "${FEAT_DESC}" ] && extras="${extras} · ${FEAT_DESC//  / · }"
@@ -5216,7 +5328,7 @@ banner() {
     fi
 }
 if [ "${VERBOSE}" = true ]; then
-    log "connecting: ${PRESET:+preset ${PRESET}  }${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING_DESC}  api: ${API}  ${MG_DESC}  ${GG_DESC}  ${AG_DESC}${FEAT_DESC:+  ${FEAT_DESC}}${SESSION_DESC:+  ${SESSION_DESC}}"
+    log "connecting: ${PRESET:+preset ${PRESET}  }${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING_DESC}  api: ${API}  ${MG_DESC}  ${GG_DESC}  ${AG_DESC}  grounding guard is $( [ "${LETS_CODE_GROUNDING_ON:-}" = 1 ] && echo on || echo off )${FEAT_DESC:+  ${FEAT_DESC}}${SESSION_DESC:+  ${SESSION_DESC}}"
 fi
 banner
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then

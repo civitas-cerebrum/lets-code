@@ -67,6 +67,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🐝 **Subagents** (optional) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
+| 🎨 **Pastel themes** | `lets-code-soft`, `lets-code-pastel` and `lets-code-chalk`: softer takes on pi's dark theme that look the same in every terminal, in tmux and over ssh. Pastel is the default unless you already picked a theme; switch in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
 
 Everything is re-derived at launch, so swapping models on the server needs

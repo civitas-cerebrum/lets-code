@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Unit test for the sandbox extension that lets-code writes
-// (~/.pi/agent/extensions/lets-code-sandbox/index.ts): config merging,
+// (~/.pi/agent/extensions/sandbox/index.ts): config merging,
 // mode events, and the fallback to plain bash when the runtime is absent.
 // Needs Node >= 22.6. The OS sandbox itself is exercised by hand
 // (tests/sandbox-live.sh), since CI runners lack bubblewrap.
@@ -11,7 +11,7 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code-sandbox/index.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/sandbox/index.ts");
 const work = realpathSync(mkdtempSync(join(tmpdir(), "sandbox-test-")));
 const agentDir = join(work, "agent"); mkdirSync(join(agentDir, "extensions", "lets-code-sandbox"), { recursive: true });
 process.env.PI_CODING_AGENT_DIR = agentDir;

@@ -10,7 +10,7 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code-gitguard.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/git-guard/index.ts");
 process.env.LETS_CODE_GIT_GUARD_ON = "1";
 process.env.LETS_CODE_GIT_CHECKPOINT_DEBOUNCE_MS = "50";
 process.env.LETS_CODE_GIT_CHECKPOINT_KEEP = "3";

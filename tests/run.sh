@@ -31,6 +31,10 @@ mkdir -p "${agent}/extensions"
 python3 - "${root}/lets-code" > "${agent}/writers.sh" <<'PYX'
 import sys
 s = open(sys.argv[1]).read()
+# the helper the writers share (no heredoc: ends at the first line "}")
+i = s.find("\nlc_ext_dir() {")
+if i >= 0:
+    sys.stdout.write(s[i:s.find("\n}\n", i) + 3])
 for name in ("pi_write_gitguard_extension", "pi_write_memguard_extension", "pi_write_agentguard_extension", "pi_write_mandate_extension", "pi_write_subagent_extension", "pi_write_sandbox_extension", "pi_write_sessiontag_extension", "pi_write_metrics_extension", "pi_write_grounding_extension"):
     i = s.find("\n%s() {" % name)
     if i < 0:
@@ -54,18 +58,18 @@ PYX
 for t in "${here}"/*.test.mjs; do
     [ -e "${t}" ] || continue
     case "$(basename "${t}")" in
-        git-guard*|git-checkpoint*) ext="${agent}/extensions/lets-code-gitguard.ts" ;;
-        agent-guard*)               ext="${agent}/extensions/lets-code-agentguard.ts" ;;
-        mem-guard*)                 ext="${agent}/extensions/lets-code-memguard.ts" ;;
-        mandate*)                   ext="${agent}/extensions/lets-code-mandate.ts" ;;
-        subagent*)                  ext="${agent}/extensions/lets-code-subagent.ts" ;;
-        sandbox*)                   ext="${agent}/extensions/lets-code-sandbox/index.ts" ;;
-        session-tag*)               ext="${agent}/extensions/lets-code-sessiontag.ts" ;;
-        metrics*)                   ext="${agent}/extensions/lets-code-metrics.ts" ;;
-        grounding*)                 ext="${agent}/extensions/lets-code-grounding.ts" ;;
+        git-guard*|git-checkpoint*) ext="${agent}/extensions/git-guard/index.ts" ;;
+        agent-guard*)               ext="${agent}/extensions/agent-guard/index.ts" ;;
+        mem-guard*)                 ext="${agent}/extensions/memory-guard/index.ts" ;;
+        mandate*)                   ext="${agent}/extensions/mandate/index.ts" ;;
+        subagent*)                  ext="${agent}/extensions/subagents/index.ts" ;;
+        sandbox*)                   ext="${agent}/extensions/sandbox/index.ts" ;;
+        session-tag*)               ext="${agent}/extensions/session-tag/index.ts" ;;
+        metrics*)                   ext="${agent}/extensions/footer/index.ts" ;;
+        grounding*)                 ext="${agent}/extensions/grounding/index.ts" ;;
         *)                          ext="" ;;
     esac
-    if [ -n "${ext}" ] && [ ! -f "${ext}" ]; then echo "=== $(basename "${t}"): skipped (no ${ext##*/} in this build)"; continue; fi
+    if [ -n "${ext}" ] && [ ! -f "${ext}" ]; then echo "=== $(basename "${t}"): skipped (no ${ext#${agent}/extensions/} in this build)"; continue; fi
     run "$(basename "${t}")" node "${t}" ${ext:+"${ext}"}
 done
 

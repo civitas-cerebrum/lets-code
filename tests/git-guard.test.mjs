@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Unit test for the git guard extension that lets-code writes
-// (~/.pi/agent/extensions/lets-code-gitguard.ts). Loads it with a fake pi,
+// (~/.pi/agent/extensions/git-guard/index.ts). Loads it with a fake pi,
 // drives the tool_call handler against throwaway repos. Needs Node >= 22.6
 // (runs the .ts directly: it only imports types from pi).
 //
@@ -11,7 +11,7 @@ import { tmpdir, homedir } from "node:os";
 import { join, relative, basename } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code-gitguard.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/git-guard/index.ts");
 process.env.LETS_CODE_GIT_GUARD_ON = "1";
 
 // Node strips types but does not resolve the type-only import of a package

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Unit test for the agent guard extension that lets-code writes
-// (~/.pi/agent/extensions/lets-code-agentguard.ts). Loads it with a fake pi and
+// (~/.pi/agent/extensions/agent-guard/index.ts). Loads it with a fake pi and
 // drives its handlers. Needs Node >= 22.6 (runs the .ts directly: it only
 // imports types from pi).
 //
@@ -15,7 +15,7 @@ const realNow = Date.now; let fakeNow = null;
 Date.now = () => (fakeNow ?? realNow());
 const advance = (ms) => { fakeNow = (fakeNow ?? realNow()) + ms; };
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code-agentguard.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/agent-guard/index.ts");
 const work = realpathSync(mkdtempSync(join(tmpdir(), "agentguard-test-")));
 const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
 

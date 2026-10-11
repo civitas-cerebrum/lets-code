@@ -93,6 +93,9 @@ async function load(env = {}) {
 {
 	const h = await load({ LETS_CODE_MODE: "ask" });
 	t("tool registered", h.tool?.name, "subagent");
+	t("prompt snippet names the agents", /^subagent: delegate to agents \((scout, worker|worker, scout)\); parallel or chained$/.test(h.tool.promptSnippet), true);
+	t("one short guideline that says it already exists", [h.tool.promptGuidelines.length, /never build your own/.test(h.tool.promptGuidelines[0]), h.tool.promptGuidelines[0].length < 120], [1, true, true]);
+	t("description names the agents and stays short", [/scout/.test(h.tool.description), h.tool.description.length < 160], [true, true]);
 	const r = await h.run({ agent: "scout", task: "find the config" });
 	t("single: not an error", r.isError, false);
 	t("single: result text", /Result for: find the config/.test(r.content[0].text), true);

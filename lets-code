@@ -3451,10 +3451,17 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) =
 export default function (pi: ExtensionAPI) {
 	if (!ACTIVE || DEPTH >= MAX_DEPTH) return;   // a child at the depth limit gets no tool at all (and pays no tokens for it)
 	const Item = Type.Object({ agent: Type.String({ description: "agent name" }), task: Type.String({ description: "task; in a chain, {previous} is the prior step's output" }) });
+	// Kept to two short lines in the system prompt: the snippet puts the tool in
+	// pi's "Available tools" list (custom tools without one are left out), and
+	// the guideline is what makes the model reach for it instead of building
+	// its own delegation. Agent names are listed so one call is enough.
+	const names = discoverAgents(process.cwd(), false).map((a) => a.name).slice(0, 8).join(", ") || "none yet";
 	pi.registerTool({
 		name: "subagent",
 		label: "subagent",
-		description: "Delegate to a named agent with a fresh context: {agent, task} for one; {tasks:[...]} for parallel; {chain:[...]} for sequential with {previous}. Names: see the agents list in the result of a call without arguments.",
+		description: `Run agents (${names}) in fresh contexts: {agent,task}; {tasks:[...]} parallel; {chain:[...]} sequential, {previous} = prior output.`,
+		promptSnippet: `subagent: delegate to agents (${names}); parallel or chained`,
+		promptGuidelines: ["To delegate, parallelise or get a second opinion, call subagent; it already exists, never build your own."],
 		parameters: Type.Object({
 			agent: Type.Optional(Type.String({ description: "agent name (single)" })),
 			task: Type.Optional(Type.String({ description: "task (single)" })),
@@ -4726,7 +4733,7 @@ METRICS="false"
 TEMPLATE_EFFORT="auto"
 MANDATE="false"
 MODE=""
-SUBAGENTS="false"
+SUBAGENTS=""          # empty = off; a config without the key predates the feature
 SANDBOX="false"
 REA="false"
 # shellcheck disable=SC1090
@@ -5090,6 +5097,7 @@ case "$(lc "${MANDATE}")" in
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }mandate: ${MODE:-auto}" ;;
     *) unset LETS_CODE_MODE ;;
 esac
+[ -n "${SUBAGENTS}" ] || log "tip: subagents are available but off; add SUBAGENTS=\"true\" to ${CONFIG_FILE} or launch with --subagents"
 case "$(lc "${SUBAGENTS}")" in
     true|yes|1|on)
         pi_write_subagent_extension

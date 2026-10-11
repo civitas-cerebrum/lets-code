@@ -165,6 +165,20 @@ when they are missing.
 and `.pi/mcp.json`. Setup imports `mcpServers` entries from the standard
 files of other clients without overwriting names pi already has.
 
+**REA.** The case MCP cannot cover cheaply: REA's 170 tools and 14 KB skill.
+In pi, any server in `mcp.json` adds a `mcp_servers` prompt line, turns on
+codemode and spawns the server in every session, and pi reads only the user
+and project `mcp.json`. So the main session gets a skill through `--skill`
+(name + description in the prompt; `disable-model-invocation` for manual),
+and the skill runs a child `pi -p --no-session` with
+`PI_CODING_AGENT_DIR=~/.pi/agent/rea/agent`: symlinks to every entry of the
+main agent dir except `mcp.json`, `mcp-auth.json`, `skills` and `sessions`,
+plus its own `mcp.json` with REA alone (compact schemas, user env kept).
+The child inherits the `LETS_CODE_*` environment, so the same provider,
+guards and mandate role apply; `LETS_CODE_SUBAGENT_DEPTH` + 1 keeps the
+subagent tool out of it. The package is pinned and npm-installed like the
+sandbox runtime; output is capped at 50 KB like a subagent's.
+
 ## Script layout
 
 The script is one file, built in order: header and logging; probing
@@ -176,7 +190,8 @@ extension source); the git guard (launch logic and extension source); the
 agent guard extension source; the
 optional features (`pi_write_mandate_extension`,
 `pi_write_subagent_extension`, `write_default_agents`,
-`pi_write_sandbox_extension`, `mcp_import`, `mandate_init`); main.
+`pi_write_sandbox_extension`, `mcp_import`, `pi_write_rea`, `mandate_init`);
+main.
 
 Portability: bash 3.2 (macOS) has no `pipefail` without a guard, cannot
 parse a `case` pattern inside `$(...)`, and `"${array[@]}"` on an empty

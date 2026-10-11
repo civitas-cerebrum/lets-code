@@ -13,6 +13,10 @@
 #                                the name when not given); launch it with
 #                                `lets-code --<name>` or `--preset <name>`
 #   lets-code presets            list saved presets
+#   lets-code update             replace this lets-code with the latest
+#                                release published to npm
+#   lets-code update --snapshot  ... with the latest commit on main instead
+#   lets-code --version          print the version
 #   lets-code mandate init       write a starter .pi/mandate.json (--global:
 #                                ~/.pi/agent/mandate.json)
 #   lets-code [args...]          launch pi (args pass to `pi`, e.g.
@@ -120,6 +124,10 @@
 
 set -eu
 (set -o pipefail) 2>/dev/null && set -o pipefail   # pipefail is bash 4+; keep 3.2 alive
+
+# Stamped by the publish workflow (the release tag) and by `update --snapshot`
+# (main-<commit>); "dev" in a checkout.
+LETS_CODE_VERSION="dev"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lets-code"
 CONFIG_FILE="${CONFIG_DIR}/config"
@@ -4276,6 +4284,133 @@ run_preset_setup() {  # run_preset_setup [<name>]
     exit 0
 }
 
+# ------------------------------------------------------------------ update
+# `lets-code update` replaces this lets-code with the latest release on npm;
+# `update --snapshot` with the script at the latest commit on main.
+#   * installed by npm (the script resolves into node_modules): npm installs
+#     the release, or main from GitHub, over itself
+#   * a copied script (setup's ~/.local/bin or /usr/local/bin, or a symlink
+#     to one): the new script is downloaded (the release tarball from the npm
+#     registry, checked against its sha512; or main's file pinned to the
+#     commit it was read at), syntax-checked, stamped with its version and
+#     moved over the old one, so a lets-code that is running keeps reading
+#     the file it started from
+#   * a git checkout: refused, `git pull` is the update there
+# Extensions and themes are rewritten by the next launch.
+# Endpoints are overridable for tests.
+UPDATE_PACKAGE="@civitas-cerebrum/lets-code"
+UPDATE_REPO="civitas-cerebrum/lets-code"
+UPDATE_REGISTRY="${LETS_CODE_UPDATE_REGISTRY:-https://registry.npmjs.org}"
+UPDATE_GITHUB_API="${LETS_CODE_UPDATE_GITHUB_API:-https://api.github.com}"
+UPDATE_GITHUB_RAW="${LETS_CODE_UPDATE_GITHUB_RAW:-https://raw.githubusercontent.com}"
+
+run_update() {  # run_update [--snapshot]
+    local mode="release" self dir tmp new_version="" json sha url integrity
+    case "${1:-}" in
+        "") ;;
+        --snapshot) mode="snapshot" ;;
+        *) log_error "usage: lets-code update [--snapshot]"; exit 1 ;;
+    esac
+    command -v curl    >/dev/null || { log_error "curl not found."; exit 1; }
+    command -v python3 >/dev/null || { log_error "python3 not found."; exit 1; }
+    self="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$0")"
+    dir="$(dirname "${self}")"
+
+    if [ -e "${dir}/.git" ] && [ -f "${dir}/package.json" ]; then
+        log_error "${self} is a git checkout — update it with: git -C ${dir} pull"
+        exit 1
+    fi
+
+    case "${self}" in
+        */node_modules/*)
+            command -v npm >/dev/null || { log_error "lets-code was installed by npm, but npm is not on PATH."; exit 1; }
+            local spec="${UPDATE_PACKAGE}@latest"
+            [ "${mode}" = snapshot ] && spec="github:${UPDATE_REPO}"
+            log "installed by npm — running: npm install -g ${spec}"
+            npm install -g "${spec}" || { log_error "npm install failed — see the npm output above."; exit 1; }
+            log "updated: $("${self}" --version 2>/dev/null || echo lets-code)"
+            exit 0 ;;
+    esac
+
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/lets-code-update.XXXXXX")"
+    trap 'rm -rf "${tmp}"' EXIT
+    if [ "${mode}" = release ]; then
+        if ! json="$(curl -sfL --max-time 30 "${UPDATE_REGISTRY}/$(printf '%s' "${UPDATE_PACKAGE}" | sed 's|/|%2f|')/latest")"; then
+            log_error "no release of ${UPDATE_PACKAGE} found on ${UPDATE_REGISTRY} — get the latest main instead with: lets-code update --snapshot"
+            exit 1
+        fi
+        new_version="$(printf '%s' "${json}" | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')" \
+            || { log_error "unexpected answer from ${UPDATE_REGISTRY}."; exit 1; }
+        if [ "${new_version}" = "${LETS_CODE_VERSION}" ]; then
+            log "already up to date (${LETS_CODE_VERSION})."
+            exit 0
+        fi
+        url="$(printf '%s' "${json}" | python3 -c 'import json, sys; print(json.load(sys.stdin)["dist"]["tarball"])')"
+        integrity="$(printf '%s' "${json}" | python3 -c 'import json, sys; print(json.load(sys.stdin)["dist"].get("integrity", ""))')"
+        log "downloading ${UPDATE_PACKAGE} ${new_version} ..."
+        curl -sfL --max-time 120 -o "${tmp}/pkg.tgz" "${url}" || { log_error "download failed: ${url}"; exit 1; }
+        if [ -n "${integrity}" ]; then
+            python3 - "${tmp}/pkg.tgz" "${integrity}" <<'PY' || { log_error "the downloaded package does not match the registry's checksum — not installed."; exit 1; }
+import base64, hashlib, sys
+algo, _, want = sys.argv[2].partition("-")
+h = hashlib.new(algo)
+h.update(open(sys.argv[1], "rb").read())
+sys.exit(0 if base64.b64encode(h.digest()).decode() == want else 1)
+PY
+        fi
+        tar -xzf "${tmp}/pkg.tgz" -C "${tmp}" package/lets-code || { log_error "the package has no lets-code script."; exit 1; }
+        mv "${tmp}/package/lets-code" "${tmp}/new"
+    else
+        if ! json="$(curl -sfL --max-time 30 -H "Accept: application/vnd.github+json" "${UPDATE_GITHUB_API}/repos/${UPDATE_REPO}/commits/main")"; then
+            log_error "could not read the latest commit on main from ${UPDATE_GITHUB_API}."
+            exit 1
+        fi
+        sha="$(printf '%s' "${json}" | python3 -c 'import json, sys; print(json.load(sys.stdin)["sha"])')" \
+            || { log_error "unexpected answer from ${UPDATE_GITHUB_API}."; exit 1; }
+        new_version="main-$(printf '%.7s' "${sha}")"
+        if [ "${new_version}" = "${LETS_CODE_VERSION}" ]; then
+            log "already up to date (${LETS_CODE_VERSION})."
+            exit 0
+        fi
+        log "downloading lets-code at main ($(printf '%.7s' "${sha}")) ..."
+        curl -sfL --max-time 120 -o "${tmp}/new" "${UPDATE_GITHUB_RAW}/${UPDATE_REPO}/${sha}/lets-code" \
+            || { log_error "download failed: ${UPDATE_GITHUB_RAW}/${UPDATE_REPO}/${sha}/lets-code"; exit 1; }
+    fi
+
+    # sanity: a bash script that parses, then stamped with the version it is
+    head -n 1 "${tmp}/new" | grep -q '^#!.*bash' && bash -n "${tmp}/new" 2>/dev/null \
+        || { log_error "the downloaded lets-code is not a valid script — not installed."; exit 1; }
+    python3 - "${tmp}/new" "${new_version}" <<'PY'
+import re, sys
+p, v = sys.argv[1], sys.argv[2]
+s = open(p).read()
+s, n = re.subn(r'(?m)^LETS_CODE_VERSION=.*$', 'LETS_CODE_VERSION="%s"' % v, s, count=1)
+if n == 0:  # a version from before the stamp existed
+    s = s.replace("\nset -eu\n", '\nset -eu\nLETS_CODE_VERSION="%s"\n' % v, 1)
+open(p, "w").write(s)
+PY
+    if cmp -s "${tmp}/new" "${self}"; then
+        log "already up to date (${new_version})."
+        exit 0
+    fi
+
+    # replace by rename in the same directory (sudo when it is not ours)
+    if [ -w "${dir}" ]; then
+        cp "${tmp}/new" "${dir}/.lets-code.update.$$" && chmod 755 "${dir}/.lets-code.update.$$" \
+            && mv -f "${dir}/.lets-code.update.$$" "${self}" \
+            || { rm -f "${dir}/.lets-code.update.$$"; log_error "could not replace ${self}."; exit 1; }
+    elif command -v sudo >/dev/null 2>&1; then
+        log "${dir} is not writable — using sudo to replace ${self}"
+        sudo install -m 755 "${tmp}/new" "${dir}/.lets-code.update.$$" && sudo mv -f "${dir}/.lets-code.update.$$" "${self}" \
+            || { log_error "could not replace ${self}."; exit 1; }
+    else
+        log_error "${dir} is not writable — re-run as a user who can write ${self}."
+        exit 1
+    fi
+    log "updated ${self}: ${LETS_CODE_VERSION} -> ${new_version}"
+    exit 0
+}
+
 # --------------------------------------------------------------------- main
 # setup is a terminal path: it exits on every branch
 if [ "${1:-}" = "setup" ]; then
@@ -4287,6 +4422,8 @@ if [ "${1:-}" = "setup" ]; then
     run_setup "${2:-}"
 fi
 [ "${1:-}" = "presets" ] && list_presets
+[ "${1:-}" = "update" ] && run_update "${2:-}"
+case "${1:-}" in --version|-V) echo "lets-code ${LETS_CODE_VERSION}"; exit 0 ;; esac
 [ "${1:-}" = "mandate" ] && { [ "${2:-}" = "init" ] || { log_error "usage: lets-code mandate init [--global]"; exit 1; }; mandate_init "${3:-}"; }
 
 # preset: --<name> (a saved preset's name) or --preset <name>. Taken out of

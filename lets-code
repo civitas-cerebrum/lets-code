@@ -1003,7 +1003,7 @@ export function statsLines(s: Stats, full: boolean, color: Color = plain, w = In
 	const fit = (variants: string[][]) => (variants.find((p) => vis(p) <= w) ?? variants[variants.length - 1]).join(sep);
 	const d = (t: string) => color("dim", t);
 	if (!full) {
-		const parts = [io ? d(io) : "", s.tps !== undefined || s.glyph ? d(speed) : "", ctx, runText(s) ? d(runText(s)) : ""].filter(Boolean);
+		const parts = [io ? d(io) : "", s.tps !== undefined || s.glyph ? d(speed) : "", ctx].filter(Boolean);
 		if (vis(parts) <= w || parts.length < 2) return [parts.join(sep)];
 		// narrow: break between parts
 		const rows: string[][] = [[]];

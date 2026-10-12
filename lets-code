@@ -913,7 +913,7 @@ pi_write_metrics_extension() {
 //   full (/metrics, METRICS=true or --metrics):
 //     ~/github/app (main)                              qwen3.8-27b • medium
 //     ↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012
-//     ⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out
+//     ⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out · done in 1m 23s
 // ↑ every prompt token sent, cached ones included; ↓ every token received,
 // counting up while a response streams; tok/s the session's generation
 // speed, from each response's first streamed token to its end (prompt
@@ -968,6 +968,19 @@ export interface Stats {
 	tps?: number; glyph?: string;
 	firstMs?: number; waiting?: boolean; out?: number; estimated?: boolean;
 	percent?: number | null; window: number; auto: boolean;
+	runMs?: number; running?: boolean; stopped?: boolean;
+}
+
+// how long a prompt took, from sending it until pi settled: 14s, 1m 23s, 1h 2m
+export function duration(ms: number): string {
+	const t = Math.max(0, Math.floor(ms / 1000));
+	if (t < 60) return `${t}s`;
+	if (t < 3600) return `${Math.floor(t / 60)}m ${t % 60}s`;
+	return `${Math.floor(t / 3600)}h ${Math.floor((t % 3600) / 60)}m`;
+}
+export function runText(s: Stats): string {
+	if (s.runMs === undefined) return "";
+	return s.running ? `working ${duration(s.runMs)}` : s.stopped ? `stopped after ${duration(s.runMs)}` : `done in ${duration(s.runMs)}`;
 }
 
 // The stats. Minimal: one line (token counts, speed, context), wrapped
@@ -1005,7 +1018,8 @@ export function statsLines(s: Stats, full: boolean, color: Color = plain, w = In
 	const session = fit([[...head, ...(cacheLong.length ? cacheLong : cacheShort), ...cost], [...head, ...cacheShort, ...cost], [...head, ...cacheShort], head]);
 	const ttft = s.firstMs !== undefined ? [d(`TTFT ${(s.firstMs / 1000).toFixed(1)}s${s.waiting ? "…" : ""}`)] : [];
 	const out = s.out !== undefined ? [d(`${s.estimated ? "~" : ""}${compact(s.out)} out`)] : [];
-	const rate = fit([[d(speed), ...ttft, ...out], [d(speed), ...ttft], [d(speed)]]);
+	const run = runText(s) ? [d(runText(s))] : [];
+	const rate = fit([[d(speed), ...ttft, ...out, ...run], [d(speed), ...ttft, ...run], [d(speed), ...run], [d(speed)]]);
 	return [session, rate];
 }
 
@@ -1057,6 +1071,9 @@ export default function (pi: ExtensionAPI) {
 	let full = process.env.LETS_CODE_METRICS_ON === "1";
 	let sentAt: number | undefined, firstAt: number | undefined, chars = 0;
 	let totalOut = 0, totalMs = 0, frame = 0, glyph = "";
+	// the prompt's own clock: agent_start to agent_settled (pi continues on its own in between)
+	let runStart: number | undefined, lastRunMs: number | undefined, lastStopped = false, stopReason = "";
+	let runTimer: ReturnType<typeof setInterval> | undefined;
 	let lastFirstMs: number | undefined, lastOut: number | undefined, lastEstimated = false;
 	let calTokens = 0, calChars = 0;
 	let ui: Ctx | undefined, timer: ReturnType<typeof setInterval> | undefined;
@@ -1099,6 +1116,8 @@ export default function (pi: ExtensionAPI) {
 		} else if (lastFirstMs !== undefined || lastOut !== undefined) {
 			s.firstMs = lastFirstMs; s.out = lastOut; s.estimated = lastEstimated;
 		}
+		if (runStart !== undefined) { s.runMs = Date.now() - runStart; s.running = true; }
+		else if (lastRunMs !== undefined) { s.runMs = lastRunMs; s.stopped = lastStopped; }
 		held = sentAt !== undefined ? { at: Date.now(), s } : undefined;
 		return s;
 	};
@@ -1153,7 +1172,8 @@ export default function (pi: ExtensionAPI) {
 		chars += e.delta?.length ?? 0;
 	});
 	pi.on("message_end", (event, ctx) => {
-		const m = event.message as { role?: string; usage?: { output?: number } };
+		const m = event.message as { role?: string; usage?: { output?: number }; stopReason?: string };
+		if (m.role === "assistant") stopReason = m.stopReason ?? "";
 		if (m.role !== "assistant" || sentAt === undefined || !take(ctx)) return;
 		const endAt = Date.now();
 		const reported = m.usage?.output ?? 0;
@@ -1166,6 +1186,21 @@ export default function (pi: ExtensionAPI) {
 	});
 	// an interrupted or failed run ends without message_end: stop the spinner
 	pi.on("agent_end", () => { if (sentAt !== undefined) { sentAt = undefined; stop(); repaint(); } });
+	// the prompt's clock; the footer counts it up once a second while pi works
+	pi.on("agent_start", (_e, ctx) => {
+		if (runStart !== undefined || !take(ctx)) return;
+		runStart = Date.now(); stopReason = "";
+		runTimer = setInterval(repaint, 1000);
+		(runTimer as { unref?: () => void }).unref?.();
+		repaint();
+	});
+	pi.on("agent_settled", () => {
+		if (runStart === undefined) return;
+		lastRunMs = Date.now() - runStart; lastStopped = stopReason === "aborted" || stopReason === "error";
+		runStart = undefined;
+		if (runTimer !== undefined) { clearInterval(runTimer); runTimer = undefined; }
+		held = undefined; repaint();
+	});
 	pi.registerCommand("metrics", {
 		description: "Toggle the full footer (directory, model, cache, first token, output); on = full, off = minimal",
 		getArgumentCompletions: (prefix) => ["on", "off"].filter((a) => a.startsWith(prefix.trim())).map((a) => ({ value: a, label: a })),

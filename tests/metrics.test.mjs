@@ -176,6 +176,26 @@ try {
 	t("other statuses on their own line", x.foot()[1], "mode: plan");
 	t("cut to width", x.foot(5).every((l) => x.mod.width(l) <= 5), true);
 
+	// the prompt's clock: agent_start to agent_settled, live once a second
+	x = await load({ LETS_CODE_METRICS_ON: "0" });
+	x.ev("session_start");
+	clock = 0; x.ev("agent_start");
+	t("run: counts while working", x.foot()[0].endsWith("working 0s"), true);
+	clock = 42000; step();
+	t("run: live", x.foot()[0].endsWith("working 42s"), true);
+	x.respond({ at: 43000, ttft: 500, gen: 2000, output: 100 });
+	x.ev("agent_start");                                   // pi continuing on its own: same prompt
+	clock = 83000; x.ev("agent_settled");
+	t("run: done once pi settles", x.foot()[0].endsWith("done in 1m 23s"), true);
+	t("run: interval cleared", timers.length, 0);
+	clock = 100000; x.ev("agent_start"); clock = 137000;
+	x.ev("message_end", { message: { role: "assistant", stopReason: "aborted", usage: { output: 0 } } });
+	x.ev("agent_settled");
+	t("run: interrupted", x.foot()[0].endsWith("stopped after 37s"), true);
+	await x.cmd("on");
+	t("run: full size, on the moment line", x.foot()[2].endsWith("stopped after 37s"), true);
+	t("duration", [5000, 83000, 3720000].map(x.mod.duration), ["5s", "1m 23s", "1h 2m"]);
+
 	// no UI
 	x = await load({ LETS_CODE_METRICS_ON: "0" }, { hasUI: false });
 	x.ev("session_start");

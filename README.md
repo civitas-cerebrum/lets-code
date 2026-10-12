@@ -15,7 +15,7 @@
 ```
 $ lets-code
 ✦ lets-code Qwen/Qwen3-32B (auto) @ localhost:8000
-  128k context · thinking high · vision · 4 guards · 7 extensions
+  131k context · thinking high · vision · 4 guards · 7 extensions
   let's code.
 ```
 

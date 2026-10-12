@@ -5390,10 +5390,11 @@ esac
 # logged. --verbose adds the probe results above and the full detail line.
 banner() {
     local ctx="${CONTEXT}" think host guards=0 exts=0 e extras="" b="" d="" r="" a="" line1 line2
-    if   [ $(( CONTEXT % 1000000 )) -eq 0 ]; then ctx="$(( CONTEXT / 1000000 ))M"
-    elif [ $(( CONTEXT % 1024 )) -eq 0 ];    then ctx="$(( CONTEXT / 1024 ))k"
-    elif [ "${CONTEXT}" -ge 1000 ];          then ctx="$(( CONTEXT / 1000 ))k"
-    fi
+    # the window the way pi's footer writes it (262144 -> 262k, 1000000 -> 1.0M)
+    ctx="$(awk -v n="${CONTEXT}" 'BEGIN {
+        if (n < 1000) printf "%d", n; else if (n < 10000) printf "%.1fk", n / 1000;
+        else if (n < 1000000) printf "%dk", int(n / 1000 + 0.5); else if (n < 10000000) printf "%.1fM", n / 1000000;
+        else printf "%dM", int(n / 1000000 + 0.5) }')"
     think="thinking ${THINKING}"
     [ "${REASONING_SUPPORTED}" = true ] || think="no thinking"
     case "${THINKING_DESC}" in adaptive*) think="thinking adaptive" ;; auto*) think="thinking auto" ;; esac

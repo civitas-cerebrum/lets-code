@@ -642,37 +642,143 @@ PY
 }
 
 # ------------------------------------------------------------ extension dirs
-# Each extension lets-code writes lives in ~/.pi/agent/extensions/<name>/
-# index.ts, so pi's startup list names it ("agent-guard", "footer") instead
-# of a file name. lc_ext_dir prints the directory for <name>: a directory of
-# that name that the user made (its index.ts not written by lets-code) is
-# left alone and lets-code-<name> is used instead. It also retires the
-# extension's old location (<legacy>, a lets-code-*.ts file or directory)
-# when lets-code wrote it: a file is removed, so pi does not load the
-# extension twice; a directory is moved, so what it holds comes along.
-lc_ext_dir() {  # lc_ext_dir <name> <legacy>
-    local base="${PI_AGENT_DIR}/extensions" dir old
-    dir="${base}/$1"; old="${base}/$2"
-    if [ -f "${dir}/index.ts" ] && ! head -n 1 "${dir}/index.ts" 2>/dev/null | grep -q "Written by lets-code"; then
-        dir="${base}/lets-code-$1"
+# Everything lets-code runs inside pi is ONE pi extension,
+# ~/.pi/agent/extensions/lets-code/, so pi's startup [Extensions] list shows
+# "lets-code" once instead of a name per feature. Its index.ts (see
+# pi_write_lets_code_extension) loads each feature module that is present:
+# <feature>.ts, or <feature>/index.ts for a feature with files of its own
+# (the sandbox and its npm runtime). pi loads only index.ts from a directory
+# (no recursion), so a module never loads on its own as well. A module is
+# written when its feature is on; one written by an earlier launch with the
+# feature off now stays inert, as each still checks its own switch. A
+# "lets-code" directory the user made (an extension there not written by
+# lets-code) is left alone and lets-code-ext is used instead.
+LC_EXT_FEATURES="agent-guard backend footer git-guard grounding mandate memory-guard sandbox session-tag subagents"
+LC_EXT_ROOT=""
+LC_ACTIVE=""    # the features whose module this launch wrote, i.e. the ones on
+lc_written() {  # lc_written <file>: true when lets-code wrote <file>
+    [ -f "$1" ] && head -n 1 "$1" 2>/dev/null | grep -q "Written by lets-code"
+}
+lc_ext_root() {  # sets LC_EXT_ROOT, the lets-code extension's directory (decided once)
+    local base="${PI_AGENT_DIR}/extensions" d
+    [ -z "${LC_EXT_ROOT}" ] || return 0
+    d="${base}/lets-code"
+    if ! lc_written "${d}/index.ts" && { [ -e "${d}/index.ts" ] || [ -e "${d}/index.js" ] || [ -e "${d}/package.json" ]; }; then
+        d="${base}/lets-code-ext"
+        log "note: ${base}/lets-code is your own extension; lets-code's features go in ${d}."
     fi
-    if [ -f "${old}" ] && head -n 1 "${old}" 2>/dev/null | grep -q "Written by lets-code"; then
-        rm -f "${old}"
-    elif [ -d "${old}" ] && [ "${old}" != "${dir}" ] && [ ! -e "${dir}" ] && head -n 1 "${old}/index.ts" 2>/dev/null | grep -q "Written by lets-code"; then
-        mkdir -p "${base}" && mv "${old}" "${dir}"
-    fi
-    printf '%s' "${dir}"
+    LC_EXT_ROOT="${d}"
+}
+# lc_ext_module <feature>: sets LC_MOD_DIR (where the module's files go) and
+# LC_MOD_FILE (its source), creates the directory, makes sure the index that
+# loads it is there, and records the feature as on. Called directly, not in
+# "$(...)", so the record survives.
+lc_ext_module() {
+    lc_ext_root
+    case "$1" in
+        sandbox) LC_MOD_DIR="${LC_EXT_ROOT}/$1"; LC_MOD_FILE="${LC_MOD_DIR}/index.ts" ;;
+        *)       LC_MOD_DIR="${LC_EXT_ROOT}"; LC_MOD_FILE="${LC_EXT_ROOT}/$1.ts" ;;
+    esac
+    mkdir -p "${LC_MOD_DIR}"
+    lc_written "${LC_EXT_ROOT}/index.ts" || pi_write_lets_code_extension
+    case " ${LC_ACTIVE} " in *" $1 "*) ;; *) LC_ACTIVE="${LC_ACTIVE:+${LC_ACTIVE} }$1" ;; esac
 }
 
-# Every launch retires all the old locations, including those of features
-# that are off this time (their old files would still load, under old names).
-lc_retire_old_extensions() {
-    local pair
-    for pair in footer:lets-code-metrics.ts grounding:lets-code-grounding.ts session-tag:lets-code-sessiontag.ts \
-                memory-guard:lets-code-memguard.ts git-guard:lets-code-gitguard.ts agent-guard:lets-code-agentguard.ts \
-                mandate:lets-code-mandate.ts subagents:lets-code-subagent.ts sandbox:lets-code-sandbox; do
-        lc_ext_dir "${pair%%:*}" "${pair#*:}" >/dev/null
+# Every launch moves what earlier versions wrote into the one extension,
+# features that are off this time included (left in place, pi would still
+# load them under their old names): the per-feature directories <feature>/
+# (lets-code-<feature>/ where the user had a directory of that name, and
+# lets-code-sandbox/ from before that) and the older single files
+# lets-code-*.ts. Only what lets-code wrote is touched: a directory whose
+# index.ts, or a file whose first line, says "Written by lets-code". A
+# module moves to lets-code/<feature>.ts unless the new place already has
+# one; the sandbox directory moves whole, npm runtime included, so nothing
+# is reinstalled. A directory left holding files lets-code did not write
+# stays (it is no longer an extension) and the launch says so.
+lc_migrate_extensions() {
+    local base="${PI_AGENT_DIR}/extensions" feat d f
+    lc_ext_root
+    mkdir -p "${LC_EXT_ROOT}"
+    pi_write_lets_code_extension
+    for feat in ${LC_EXT_FEATURES}; do
+        for d in "${base}/${feat}" "${base}/lets-code-${feat}"; do
+            [ "${d}" != "${LC_EXT_ROOT}" ] && lc_written "${d}/index.ts" || continue
+            if [ "${feat}" = sandbox ] && [ ! -e "${LC_EXT_ROOT}/sandbox" ]; then
+                mv "${d}" "${LC_EXT_ROOT}/sandbox"; continue
+            fi
+            if [ "${feat}" = sandbox ]; then
+                rm -rf "${d}/node_modules"; rm -f "${d}/package.json" "${d}/package-lock.json"
+            elif [ ! -e "${LC_EXT_ROOT}/${feat}.ts" ]; then
+                mv "${d}/index.ts" "${LC_EXT_ROOT}/${feat}.ts"
+            fi
+            rm -f "${d}/index.ts" "${d}"/.index.*
+            rmdir "${d}" 2>/dev/null || log "note: ${d} holds files lets-code did not write; left in place (no longer loaded)."
+        done
     done
+    for f in "${base}"/lets-code-*.ts; do
+        if lc_written "${f}"; then rm -f "${f}"; fi
+    done
+}
+
+# The one extension pi loads: imports each feature module present, in the
+# order pi loaded them when they were separate (alphabetical), and isolates
+# them, so one that fails to import or to set up is reported by name and the
+# others still run. Rewritten when its content changes.
+pi_write_lets_code_extension() {
+    local f tmp
+    lc_ext_root
+    mkdir -p "${LC_EXT_ROOT}"
+    f="${LC_EXT_ROOT}/index.ts"
+    tmp="$(mktemp "${LC_EXT_ROOT}/.index.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (its pi features, as one extension); regenerated on launch, edits are overwritten.
+// pi lists this directory once, as "lets-code". Each feature is a module
+// next to this file, <feature>.ts or <feature>/index.ts (the sandbox, with
+// its npm runtime), written by lets-code when the feature is on; each one
+// checks its own switch (LETS_CODE_*), so a module left from a launch with
+// the feature off stays inert. pi loads only this file from the directory.
+// Modules load one at a time in a fixed order, each on its own: a module
+// that is missing is skipped; one that fails to import, or whose setup
+// throws, is reported by name (a notification with a UI, stderr without)
+// and the others still load. Handlers a failing setup registered before it
+// threw stay registered.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+// pi's load order when they were separate extensions (alphabetical)
+export const FEATURES = ["agent-guard", "backend", "footer", "git-guard", "grounding", "mandate", "memory-guard", "sandbox", "session-tag", "subagents"];
+
+export function moduleFile(dir: string, name: string): string | undefined {
+	return [join(dir, `${name}.ts`), join(dir, name, "index.ts")].find((f) => existsSync(f));
+}
+
+export default async function (pi: ExtensionAPI) {
+	const failed: string[] = [];
+	for (const name of FEATURES) {
+		const file = moduleFile(HERE, name);
+		if (!file) continue;
+		try {
+			const mod = await import(pathToFileURL(file).href);
+			const setup = typeof mod.default === "function" ? mod.default : mod.default?.default;
+			if (typeof setup !== "function") throw new Error("no default export function");
+			await setup(pi);
+		} catch (e) {
+			failed.push(`${name} (${e instanceof Error ? e.message : String(e)})`);
+		}
+	}
+	if (failed.length === 0) return;
+	const msg = `lets-code: ${failed.length === 1 ? "feature" : "features"} not loaded: ${failed.join("; ")}. The others are running.`;
+	pi.on("session_start", (_e: unknown, ctx: { hasUI?: boolean; ui?: { notify(m: string, t?: string): void } }) => {
+		if (ctx?.hasUI && ctx.ui) ctx.ui.notify(msg, "error");
+		else console.error(msg);
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
 
 # ------------------------------------------------------------------ themes
@@ -905,10 +1011,8 @@ mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
 # nothing without a UI. Rewritten when its content changes.
 pi_write_metrics_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir footer lets-code-metrics.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module footer; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.footer.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (footer and metrics); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code (LETS_CODE_METRICS_ON set); the
@@ -1341,10 +1445,8 @@ TS
 # LETS_CODE_GROUNDING_ON=1. Rewritten when its content changes.
 pi_write_grounding_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir grounding lets-code-grounding.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module grounding; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.grounding.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (grounding guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the grounding guard on
@@ -1435,10 +1537,8 @@ TS
 # Inert unless LETS_CODE_BACKEND is set. Rewritten when its content changes.
 pi_write_backend_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir backend lets-code-backend.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module backend; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.backend.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (backend facts); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code (LETS_CODE_BACKEND set). The
@@ -1516,10 +1616,8 @@ TS
 # content changes.
 pi_write_sessiontag_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir session-tag lets-code-sessiontag.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module session-tag; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.session-tag.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (session tag); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the session tag on
@@ -1568,10 +1666,8 @@ TS
 # Rewritten when its content changes.
 pi_write_memguard_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir memory-guard lets-code-memguard.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module memory-guard; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.memory-guard.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (memory guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code (LETS_CODE_SESSION=1). Watches the
@@ -1818,10 +1914,8 @@ git_guard_plan() {  # sets GG_MODE (on|off) and GG_NOTE
 # Rewritten when its content changes.
 pi_write_gitguard_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir git-guard lets-code-gitguard.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module git-guard; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.git-guard.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (git guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the git guard on
@@ -2590,10 +2684,8 @@ TS
 # Inert unless LETS_CODE_AGENT_GUARD_ON=1. Rewritten when its content changes.
 pi_write_agentguard_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir agent-guard lets-code-agentguard.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module agent-guard; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.agent-guard.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (agent guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the agent guard on
@@ -3387,10 +3479,8 @@ ensure_pi_tools() {
 # ~/.pi/agent/mandate.json; a project's .pi/mandate.json may only tighten.
 pi_write_mandate_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir mandate lets-code-mandate.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module mandate; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.mandate.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (mandate); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the mandate on
@@ -3806,10 +3896,8 @@ TS
 # pi process (same provider, same guards, the role its file names).
 pi_write_subagent_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir subagents lets-code-subagent.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module subagents; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.subagents.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (subagents); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with subagents on
@@ -4146,16 +4234,15 @@ MD
 }
 
 # Sandbox: bash confined with @anthropic-ai/sandbox-runtime. The runtime is
-# an npm package installed next to the extension (a directory extension);
+# an npm package installed next to the module (lets-code/sandbox/, a
+# directory of its own inside the lets-code extension);
 # lets-code installs or updates it when missing. Never fatal: without the
 # runtime the extension warns and bash runs as before.
 SANDBOX_RUNTIME_VERSION="0.0.79"
 SB_NOTE=""
 pi_write_sandbox_extension() {
     local dir f tmp have=""
-    dir="$(lc_ext_dir sandbox lets-code-sandbox)"
-    mkdir -p "${dir}"
-    f="${dir}/index.ts"
+    lc_ext_module sandbox; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
     tmp="$(mktemp "${dir}/.index.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (sandbox); regenerated on launch, edits are overwritten.
@@ -4954,7 +5041,7 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
     # 10. optional features chosen above
     if [ "${feat_sandbox}" = "true" ]; then
         pi_write_sandbox_extension
-        if [ -n "${SB_NOTE}" ]; then log "sandbox: ${SB_NOTE}"; else log "sandbox: runtime ready ($(lc_ext_dir sandbox lets-code-sandbox))"; fi
+        if [ -n "${SB_NOTE}" ]; then log "sandbox: ${SB_NOTE}"; else log "sandbox: runtime ready (${LC_MOD_DIR})"; fi
     fi
     [ "${feat_subagents}" = "true" ] && write_default_agents
     [ "${feat_mcp}" = "yes" ] && mcp_import yes
@@ -5656,7 +5743,7 @@ if [ "${REASONING_SUPPORTED}" = true ] && [ "${API}" = openai-completions ]; the
 fi
 pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}" "${VISION}" "${REASONING_SUPPORTED}" "${THINKING}" "${EFFORT_MAP}"
 pi_write_themes
-lc_retire_old_extensions
+lc_migrate_extensions
 pick_theme_once
 
 export LETS_CODE_TOKEN="${TOKEN}"
@@ -5838,9 +5925,13 @@ banner() {
     case "${AG_DESC}" in *" on"*) guards=$((guards + 1)) ;; esac
     [ "${LETS_CODE_GROUNDING_ON:-}" = 1 ] && guards=$((guards + 1))
     [ "${GG_MODE}" = off ] || guards=$((guards + 1))
-    # pi extensions installed: one per .ts file or per directory with an index
+    # extensions: lets-code's features on this launch (pi lists them as one,
+    # "lets-code") plus the user's own (a .ts/.js file, or a directory with
+    # an index or a package.json)
+    for e in ${LC_ACTIVE}; do exts=$((exts + 1)); done
     for e in "${PI_AGENT_DIR}"/extensions/*; do
-        case "${e}" in *.ts) [ -f "${e}" ] && exts=$((exts + 1)) ;; *) [ -f "${e}/index.ts" ] || [ -f "${e}/index.js" ] || [ -f "${e}/package.json" ] && exts=$((exts + 1)) ;; esac
+        [ "${e}" = "${LC_EXT_ROOT}" ] && continue
+        case "${e}" in *.ts|*.js) [ -f "${e}" ] && exts=$((exts + 1)) ;; *) [ -f "${e}/index.ts" ] || [ -f "${e}/index.js" ] || [ -f "${e}/package.json" ] && exts=$((exts + 1)) ;; esac
     done
     [ "${VISION}" = true ] && extras=" · vision"
     extras="${extras} · ${guards} guard$([ "${guards}" = 1 ] || echo s) · ${exts} extension$([ "${exts}" = 1 ] || echo s)"

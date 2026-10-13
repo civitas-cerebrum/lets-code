@@ -121,8 +121,25 @@ sent instead, via `compat.supportsThinkingTokenBudget`.
 ## Optional features
 
 Off unless `lets-code setup full` / `granular` or the config turns them on,
-so the default setup behaves exactly as before. Each is a pi extension
-written like the guards, inert without its `LETS_CODE_*_ON` variable.
+so the default setup behaves exactly as before. Each is a module of the
+lets-code pi extension written like the guards, inert without its
+`LETS_CODE_*_ON` variable.
+
+**One extension.** pi lists every extension it loads by path, so one
+directory per feature showed six to ten names. All modules now live in
+`~/.pi/agent/extensions/lets-code/` behind one `index.ts`: pi loads only a
+directory's `index.ts` (or what its `package.json` `pi.extensions` names; it
+does not recurse), so a module never loads on its own as well (checked in
+pi 0.87.1 and 1.0.3). The index imports each present module in pi's former
+order (alphabetical), awaits its factory (pi allows async ones) and catches
+per module: an import or setup error becomes one `ui.notify(..., "error")`
+at `session_start` (stderr without a UI) naming the feature, instead of
+pi's `[Extension issues]` naming only `lets-code` and dropping every
+feature with it. A pi package was not used: it needs a `packages` entry in
+settings and still lists one name per extension it declares. Migration
+runs every launch and touches only what lets-code wrote (first line
+`// Written by lets-code`); the sandbox directory moves whole so its
+`node_modules` is kept.
 
 **Mandate.** A role per session (the mode) or per subagent (`LETS_CODE_ROLE`
 from the agent file). Decisions are made in `tool_call`: tool allowlist,
@@ -153,8 +170,8 @@ child registers no tool, so it pays nothing for it); 50 KB output cap.
 
 **Sandbox.** The example extension's shape: `createBashTool(cwd,
 {operations})` with commands wrapped by `SandboxManager.wrapWithSandbox`,
-`user_bash` too. The runtime is a directory extension with its own
-`package.json`; lets-code pins the version and runs `npm install` when the
+`user_bash` too. The module is a directory (`lets-code/sandbox/`) with its
+own `package.json`, not a `pi` manifest, so pi does not load it directly; lets-code pins the version and runs `npm install` when the
 installed one differs. Config merge: defaults, `~/.pi/agent/extensions/
 sandbox.json`, `.pi/sandbox.json`, then the active role (`network: off`
 empties the allowlist, `sandbox` overrides, `bypass` disables). Runtime and
@@ -193,7 +210,9 @@ keeps the file on disk from listing it in sessions with REA off or manual.
 
 The script is one file, built in order: header and logging; probing
 (`probe`, `probe_thinking`, `probe_vision`, `suggested_thinking_level`);
-the pi config writer (`pi_write_configs`, python3); harness gate, pi
+the pi config writer (`pi_write_configs`, python3); the one extension's
+layout, migration and index (`lc_ext_module`, `lc_migrate_extensions`,
+`pi_write_lets_code_extension`); harness gate, pi
 install and tool prefetch (`ensure_pi`, `ensure_pi_tools`); onboarding
 (`run_setup`); the memory guard (`mem_guard_plan`, `mem_guard_exec`, the
 extension source); the git guard (launch logic and extension source); the

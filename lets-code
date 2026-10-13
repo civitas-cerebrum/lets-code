@@ -160,6 +160,23 @@ default_output_cap() {  # default_output_cap <context>
     q=$(( ctx / 4 ))
     if [ "${q}" -lt "${DEFAULT_OUTPUT_CAP}" ]; then echo "${q}"; else echo "${DEFAULT_OUTPUT_CAP}"; fi
 }
+# xhigh thinking (opt-in): pi itself clamps xhigh to high (same 16k budget),
+# so lets-code gives xhigh its own engine-enforced budget, sent through
+# samplingParamsByThinkingLevel. It is enabled only when the output cap holds
+# that budget plus XHIGH_ANSWER_ROOM tokens of answer; otherwise xhigh stays
+# clamped to high as before. A startup level of xhigh with no pinned output
+# cap raises the default cap to XHIGH_OUTPUT_CAP, never above a quarter of
+# the context window.
+XHIGH_THINKING_BUDGET=32768
+XHIGH_ANSWER_ROOM=8192
+XHIGH_OUTPUT_CAP=49152
+xhigh_output_cap() {  # xhigh_output_cap <context> -> the default cap for xhigh, or "" if the window is too small
+    local ctx="$1" q c
+    case "${ctx}" in *[!0-9]*|"") return 0 ;; esac
+    q=$(( ctx / 4 )); c="${XHIGH_OUTPUT_CAP}"
+    if [ "${q}" -lt "${c}" ]; then c="${q}"; fi
+    if [ "${c}" -ge $(( XHIGH_THINKING_BUDGET + XHIGH_ANSWER_ROOM )) ]; then echo "${c}"; fi
+}
 DEFAULT_API="openai-completions"
 DEFAULT_THINKING="medium"
 
@@ -390,8 +407,10 @@ else:
 # Renders the prompt through vLLM's /tokenize (no generation, milliseconds)
 # without the kwarg and with each candidate value. If some accepted value
 # changes the rendered prompt, the template uses it: each pi level from minimal
-# to high gets the accepted value nearest to it. xhigh/max stay unmapped so pi
-# keeps clamping them to high. Servers without /tokenize: nothing is sent.
+# to high gets the accepted value nearest to it. xhigh gets its nearest value
+# too, but pi_write_configs keeps it only when xhigh's larger budget fits the
+# output cap (see XHIGH_THINKING_BUDGET); otherwise xhigh, like max, stays
+# unmapped and pi clamps it to high. Servers without /tokenize: nothing is sent.
 # Sets EFFORT_MAP ("" or JSON like {"low": "low", ...}) and EFFORT_NOTE.
 probe_template_effort() {  # probe_template_effort <base-url-without-/v1> <model> [1 = neutral: map every level to the least-instruction value]
     EFFORT_MAP=""; EFFORT_NOTE=""
@@ -439,7 +458,7 @@ if not accepted or len(renders) < 2:
     raise SystemExit
 mapping = {}
 neutral = min(accepted, key=lambda v: (len(accepted[v]), RANK[v]))  # the value whose instruction is shortest
-for level in ("minimal", "low", "medium", "high"):
+for level in ("minimal", "low", "medium", "high", "xhigh"):
     mapping[level] = neutral if os.environ.get("LC_NEUTRAL") == "1" else min(accepted, key=lambda v: (abs(RANK[v] - RANK[level]), RANK[v]))
 default = [v for v, t in accepted.items() if t == baseline]
 note = "template effort control: accepts %s%s; pi levels map %s" % (
@@ -460,7 +479,8 @@ print(json.dumps(mapping) + "|" + note)
 # medium, the default: on the benchmark's hard tasks fixed high timed out
 # where medium finished (see README, "Choosing a thinking level"), so a
 # large window alone is no reason to pick it. xhigh/max are never suggested
-# either: on the chat-template path pi clamps their budget to high's 16k.
+# either: xhigh (32k budget, larger output cap) is opt-in only, and max is
+# clamped by pi (to xhigh when xhigh is on, else to high).
 suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
     local ctx="$1" cap="$2" room
     room=$(( ctx / 4 ))
@@ -499,7 +519,7 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 # ~/.config/lets-code/config (mode 600). Writes are atomic (tmp + rename),
 # every other key in the files is preserved, and a corrupt file fails loudly.
 pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-cap> <vision> <reasoning> <thinking> [<effort-map-json>]
-    PI_AGENT_DIR="${PI_AGENT_DIR}" LC_PROVIDER="${PROVIDER_ID:-lets-code}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
+    PI_AGENT_DIR="${PI_AGENT_DIR}" LC_PROVIDER="${PROVIDER_ID:-lets-code}" LC_XHIGH_BUDGET="${XHIGH_THINKING_BUDGET:-}" LC_XHIGH_ROOM="${XHIGH_ANSWER_ROOM:-}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
 import json, os, sys, tempfile
 
 base, api, model, context, cap, vision, reasoning, thinking, effort_map = sys.argv[1:10]
@@ -507,6 +527,8 @@ provider = os.environ.get("LC_PROVIDER") or "lets-code"
 agent_dir = os.environ["PI_AGENT_DIR"]
 ctx = int(context)
 cap = int(cap)
+xhigh_budget = int(os.environ.get("LC_XHIGH_BUDGET") or 32768)
+xhigh_room = int(os.environ.get("LC_XHIGH_ROOM") or 8192)
 
 def upsert(path, mutate):
     doc = {}
@@ -584,9 +606,24 @@ def to_models(doc):
         # substitutes its current level through thinkingLevelMap, so the
         # model gets the matching instruction instead of the template's
         # default. Omitted when thinking is off (no thinking section at all).
+        level_map = json.loads(effort_map) if effort_map else {}
+        xhigh_value = level_map.pop("xhigh", None)
+        # xhigh (opt-in, see XHIGH_THINKING_BUDGET): pi treats xhigh as a
+        # supported level only when thinkingLevelMap has an entry for it, and
+        # otherwise clamps it to high; even when supported, pi's own budget
+        # for xhigh is high's. samplingParamsByThinkingLevel is merged into
+        # the request after pi's thinking_token_budget, so its value wins.
+        # Enabled only when the output cap leaves answer room after the
+        # budget. max stays unmapped and so clamps to xhigh when it is on.
+        if cap - xhigh_budget >= xhigh_room:
+            # without a template effort control the value is never sent;
+            # the entry only makes xhigh a supported level
+            level_map["xhigh"] = xhigh_value or "xhigh"
+            model_doc["samplingParamsByThinkingLevel"] = {"xhigh": {"thinking_token_budget": xhigh_budget}}
         if effort_map:
             compat["chatTemplateKwargs"]["reasoning_effort"] = {"$var": "thinking.level", "omitWhenOff": True}
-            model_doc["thinkingLevelMap"] = json.loads(effort_map)
+        if level_map:
+            model_doc["thinkingLevelMap"] = level_map
     if openrouter and os.environ.get("LETS_CODE_OPENROUTER_PROVIDER"):
         # Pin one upstream provider (no fallbacks): providers serving the same
         # model differ in quantization and in how they honour reasoning effort
@@ -5631,7 +5668,8 @@ CONTEXT="${CONTEXT_OVERRIDE:-${CONTEXT}}"
 [ -n "${CONTEXT}" ] || CONTEXT="${DISCOVERED_LEN}"
 [ -n "${CONTEXT}" ] || CONTEXT="${DEFAULT_CONTEXT}"
 OUTPUT_CAP="${OUTPUT_CAP_OVERRIDE:-${OUTPUT_CAP}}"
-[ -n "${OUTPUT_CAP}" ] || OUTPUT_CAP="$(default_output_cap "${CONTEXT}")"
+OUTPUT_CAP_PINNED=true
+[ -n "${OUTPUT_CAP}" ] || { OUTPUT_CAP="$(default_output_cap "${CONTEXT}")"; OUTPUT_CAP_PINNED=false; }
 API="${API_OVERRIDE:-${API}}"
 [ -n "${API}" ] || API="${DEFAULT_API}"
 VISION="${VISION_OVERRIDE:-${VISION}}"
@@ -5669,6 +5707,20 @@ case "${THINKING}" in
     off|minimal|low|medium|high|xhigh|max) ;;
     *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max|adaptive[:<ceiling>]|auto[:<level>] (got: ${THINKING}) — set it via --thinking-level, LETS_CODE_THINKING, or THINKING= in ${CONFIG_FILE} (if present)."; exit 1 ;;
 esac
+# xhigh at startup: room for its thinking budget plus an answer (see
+# XHIGH_THINKING_BUDGET). Only the default cap is raised; a pinned cap too
+# small for it leaves xhigh clamped to high, as does a small window.
+if [ "${THINKING}" = xhigh ] && [ "${OUTPUT_CAP_PINNED}" = false ]; then
+    XHIGH_CAP="$(xhigh_output_cap "${CONTEXT}")"
+    if [ -n "${XHIGH_CAP}" ]; then
+        OUTPUT_CAP="${XHIGH_CAP}"
+        log_verbose "thinking xhigh: ${XHIGH_THINKING_BUDGET}-token thinking budget, output cap raised to ${OUTPUT_CAP}"
+    else
+        log "note: thinking xhigh needs an output cap of $(( XHIGH_THINKING_BUDGET + XHIGH_ANSWER_ROOM )) (${XHIGH_THINKING_BUDGET} thinking + ${XHIGH_ANSWER_ROOM} answer), more than a quarter of the ${CONTEXT}-token context; xhigh runs as high (16k budget)."
+    fi
+elif [ "${THINKING}" = xhigh ] && [ "${OUTPUT_CAP}" -lt $(( XHIGH_THINKING_BUDGET + XHIGH_ANSWER_ROOM )) ] 2>/dev/null; then
+    log "note: thinking xhigh needs an output cap of at least $(( XHIGH_THINKING_BUDGET + XHIGH_ANSWER_ROOM )) (pinned: ${OUTPUT_CAP}); xhigh runs as high (16k budget)."
+fi
 
 case "${CONTEXT}" in
     *[!0-9]*|0) log_error "context length must be a positive integer (tokens); got: ${CONTEXT} (from --context or config/env)."; exit 1 ;;

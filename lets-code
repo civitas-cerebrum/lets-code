@@ -3914,8 +3914,13 @@ function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSigna
 	for (const s of agent.skills ?? []) args.push("--skill", s);
 	const tmp = mkdtempSync(join(tmpdir(), "lets-code-agent-"));
 	const promptFile = join(tmp, "prompt.md");
-	writeFileSync(promptFile, `You are the "${agent.name}" agent. ${agent.description}\n\n${agent.prompt}\n`);
-	args.push("--append-system-prompt", promptFile);
+	// An agent that brings its own instructions (append_prompt) and has no body
+	// gets exactly those, without the generic preamble (REA: the child sees the
+	// same instructions as through rea/run).
+	if (agent.prompt.trim() || !agent.appendPrompt) {
+		writeFileSync(promptFile, `You are the "${agent.name}" agent. ${agent.description}\n\n${agent.prompt}\n`);
+		args.push("--append-system-prompt", promptFile);
+	}
 	if (agent.appendPrompt) args.push("--append-system-prompt", agent.appendPrompt);
 	args.push(`Task: ${task}`);
 	const env = { ...process.env, LETS_CODE_SUBAGENT_DEPTH: String(DEPTH + 1), LETS_CODE_ROLE: agent.role || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "" };

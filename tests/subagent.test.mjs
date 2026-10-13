@@ -229,6 +229,14 @@ async function load(env = {}) {
 	t("child gets each skill", after("--skill"), [join(rea, "skill-a"), join(rea, "skill-b")]);
 	t("child gets the agent prompt, then append_prompt", [after("--append-system-prompt").length, after("--append-system-prompt")[1]], [2, join(rea, "prompt.md")]);
 	t("child task still last", c.argv.at(-1), "Task: inspect /bin/true");
+	// no body, own instructions: exactly those (REA sees what rea/run gave it), no generic preamble
+	writeFileSync(join(agentDir, "agents", "re2.md"), fm(full).replace("name: re", "name: re2").replace("---\nbody\n", "---\n"));
+	const on2 = await load();
+	await on2.run({ agent: "re2", task: "inspect /bin/false" });
+	const c2 = calls().find((x) => x.argv.at(-1) === "Task: inspect /bin/false");
+	const after2 = (flag) => c2.argv.flatMap((v, i) => (v === flag ? [c2.argv[i + 1]] : []));
+	t("no body + append_prompt: only its own instructions", after2("--append-system-prompt"), [join(rea, "prompt.md")]);
+	rmSync(join(agentDir, "agents", "re2.md"));
 	t("other agents keep the parent's agent dir", calls().find((x) => x.argv.at(-1) === "Task: find the config").agentDir, agentDir);
 	const started = Date.now();
 	const slow = await on.run({ agent: "slow", task: "slow down" });

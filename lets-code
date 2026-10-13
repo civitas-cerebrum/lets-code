@@ -3826,20 +3826,67 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) =
 	return out;
 }
 
+// The tool description, always in context, under 160 characters: the agent
+// names and the three call shapes. Their jobs are in orchestration().
+export function agentsBlurb(agents: AgentDef[]): string {
+	const names = agents.map((a) => a.name).join(", ") || "none yet";
+	return `Agents (${names}), fresh contexts: brief fully. {agent,task} | {tasks:[..]} parallel | {chain:[..]} with {previous}=prior output`;
+}
+// "name (job)" with the job cut to about 60 characters
+export function agentJobs(agents: AgentDef[]): string {
+	return agents.map((a) => {
+		const d = (a.description || "").replace(/\s+/g, " ").trim();
+		return `${a.name} (${d.length > 60 ? d.slice(0, 57).replace(/[\s,;:]+\S*$/, "") + "…" : d || "no description"})`;
+	}).join("; ");
+}
+
+// When a session gets the orchestration method. Judged on the user's own
+// words: code (fenced or inline) is dropped first, so "parallel" or
+// "workflow" in a snippet never counts. Strong intent only; "workflow"
+// only as something to design or plan, and not about CI pipelines.
+export const ORCH_CONTEXT_PCT = 50;
+export function wantsOrchestration(prompt: string): boolean {
+	const p = String(prompt ?? "").replace(/```[\s\S]*?(```|$)/g, " ").replace(/`[^`\n]*`/g, " ");
+	if (/\bsub-?agents?\b|\bdelegat(e|ing|ion)\b|\borchestrat\w*|\bfan[- ]?out\b|\bin parallel\b|\bparalleli[sz](e|ing)\b|\bsplit (the|this) work\b/i.test(p)) return true;
+	return /\b(design|plan|build|set up|sketch)\b[^.?!\n]{0,40}\bworkflows?\b/i.test(p) && !/\b(github|gitlab|ci|actions?|yaml|pipeline|n8n|zapier)\b/i.test(p);
+}
+
+// The method, about 170 tokens.
+export function orchestration(agents: AgentDef[]): string {
+	const has = (n: string) => agents.some((a) => a.name === n);
+	const flow = has("scout") && has("worker") && has("reviewer")
+		? "scouts in parallel map the code (one per area) -> you decide -> workers in parallel on disjoint files -> reviewer -> you run the tests"
+		: "gather in parallel -> you decide -> act in parallel on disjoint parts -> check -> you run the tests";
+	return [
+		"Orchestration (lets-code): you are the orchestrator; subagents read and work in fresh contexts, you keep the plan and the decisions.",
+		...(agents.length ? [`- Agents: ${agentJobs(agents)}.`] : []),
+		"- Delegate now: do not explore yourself what a subagent can explore. Independent parts go in ONE call with tasks:[...]; chain:[...] only when a step needs the previous output.",
+		"- Brief each task fully (goal, paths or names, constraints, answer shape): they see nothing of this conversation.",
+		`- Usual flow: ${flow}.`,
+		"- Trust their reports; re-read code only to settle a conflict or verify a change.",
+	].join("\n");
+}
+
 export default function (pi: ExtensionAPI) {
 	if (!ACTIVE || DEPTH >= MAX_DEPTH) return;   // a child at the depth limit gets no tool at all (and pays no tokens for it)
 	const Item = Type.Object({ agent: Type.String({ description: "agent name" }), task: Type.String({ description: "task; in a chain, {previous} is the prior step's output" }) });
-	// Kept to two short lines in the system prompt: the snippet puts the tool in
-	// pi's "Available tools" list (custom tools without one are left out), and
-	// the guideline is what makes the model reach for it instead of building
-	// its own delegation. Agent names are listed so one call is enough.
-	const names = discoverAgents(process.cwd(), false).map((a) => a.name).slice(0, 8).join(", ") || "none yet";
+	// Always in context, kept small: the snippet puts the tool in pi's
+	// "Available tools" list, the guideline makes the model orchestrate
+	// instead of building its own delegation, and the tool description names
+	// each agent's job with the three call shapes so the first call needs no
+	// discovery. The full method (orchestration()) joins the system prompt
+	// only once a session asks for it (wantsOrchestration) or its context
+	// passes ORCH_CONTEXT_PCT, and then stays: a section that comes and goes
+	// costs a change note in the conversation each time it flips.
+	const known = discoverAgents(process.cwd(), false).slice(0, 8);
+	const names = known.map((a) => a.name).join(", ") || "none yet";
+	let orchestrating = false;
 	pi.registerTool({
 		name: "subagent",
 		label: "subagent",
-		description: `Run agents (${names}) in fresh contexts: {agent,task}; {tasks:[...]} parallel; {chain:[...]} sequential, {previous} = prior output.`,
+		description: agentsBlurb(known),
 		promptSnippet: `subagent: delegate to agents (${names}); parallel or chained`,
-		promptGuidelines: ["To delegate, parallelise or get a second opinion, call subagent; it already exists, never build your own."],
+		promptGuidelines: ["Orchestrate independent parts or heavy reading via subagent (tasks:[...] = parallel); never build your own."],
 		parameters: Type.Object({
 			agent: Type.Optional(Type.String({ description: "agent name (single)" })),
 			task: Type.Optional(Type.String({ description: "task (single)" })),
@@ -3873,6 +3920,17 @@ export default function (pi: ExtensionAPI) {
 			const r = await runAgent(a, params.task, ctx.cwd, signal, progress);
 			return { content: [{ type: "text" as const, text: render(r) }], isError: r.exitCode !== 0 };
 		},
+	});
+	// once on, it stays on for the session (see above); subagents never get it
+	pi.on("before_agent_start", async (event: any, ctx: any) => {
+		const sections = event?.systemPromptOptions?.sections;
+		if (!sections || typeof sections !== "object") return undefined;
+		if (!orchestrating && DEPTH === 0) {
+			const pct = ctx?.getContextUsage?.()?.percent;
+			orchestrating = wantsOrchestration(event.prompt) || (typeof pct === "number" && pct >= ORCH_CONTEXT_PCT);
+		}
+		if (orchestrating) sections.lets_code_orchestration = orchestration(known);
+		return undefined;
 	});
 }
 TS

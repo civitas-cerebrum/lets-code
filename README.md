@@ -254,7 +254,7 @@ processes this session started:
 | under 2.5 % | the largest process is killed at once |
 
 Nothing is capped; pi is told what was stopped and why. The guard is a pi
-extension (`~/.pi/agent/extensions/memory-guard/`) and is inert in
+extension (part of lets-code's, `~/.pi/agent/extensions/lets-code/memory-guard.ts`) and is inert in
 sessions not started by lets-code. It defers to a machine-wide
 [memguard](https://github.com/civitas-cerebrum/memguard) daemon when one runs.
 
@@ -295,7 +295,7 @@ repo the guard is off. `LETS_CODE_GIT_CHECKPOINTS=0` turns checkpoints off.
 <details>
 <summary><b>Agent guard</b></summary>
 
-A pi extension (`~/.pi/agent/extensions/agent-guard/`) with
+A pi extension (part of lets-code's, `~/.pi/agent/extensions/lets-code/agent-guard.ts`) with
 rules for failure modes measured in sessions against a local thinking
 model. Apart from a five-line working-method section in the system prompt
 it adds nothing unless a rule acts.
@@ -453,7 +453,7 @@ children of its own. Output is capped at 50 KB per agent.
 With `SANDBOX=true` the model's bash commands and your own `!` commands run
 inside `@anthropic-ai/sandbox-runtime`: bubblewrap plus a filtering proxy
 on Linux (install `bubblewrap` and `socat`), Seatbelt on macOS. lets-code
-installs the runtime next to the extension on first use. Defaults: writes
+installs the runtime next to it (`~/.pi/agent/extensions/lets-code/sandbox/`) on first use. Defaults: writes
 allowed in the project, `/tmp` and a few caches; `~/.ssh`, `~/.aws`,
 `~/.gnupg`, the lets-code config and pi's auth files unreadable; network
 limited to package registries and GitHub. Configure in
@@ -549,14 +549,28 @@ bash sandbox with your user's rights, and mandate modes that deny MCP
 Each launch probes the endpoints, reads `/v1/models`, runs the thinking and
 vision probes, then writes pi's `models.json` and `settings.json` under the
 provider id `lets-code`. Your other providers and settings are untouched.
+Everything lets-code adds to pi is one extension,
+`~/.pi/agent/extensions/lets-code/`, listed once as `lets-code` in pi's
+startup `[Extensions]`: an `index.ts` that loads one module per feature
+(`footer.ts`, `agent-guard.ts`, `git-guard.ts`, `memory-guard.ts`,
+`grounding.ts`, `backend.ts`, `session-tag.ts`, `mandate.ts`,
+`subagents.ts`, and `sandbox/` with its npm runtime). A module is written
+when its feature is on and stays inert while it is off; one that fails to
+load is reported by name and the others still run. The per-feature
+directories (`footer/`, `agent-guard/`, ...) and `lets-code-*.ts` files
+earlier versions wrote are moved in on the next launch; only files lets-code
+wrote are touched. If you have an extension of your own called `lets-code`,
+lets-code uses `lets-code-ext/` instead. The banner's extension count is
+lets-code's features on this launch plus your own extensions.
 pi's file-search helpers (`fd`, `ripgrep`) are fetched before the first
 start so the first session starts clean. Design notes and the reasoning
 behind each decision are in [DESIGN.md](DESIGN.md).
 
 `tests/run.sh` runs the suite CI runs on every pull request: shell tests
 for the probes, endpoint parsing, the chat-template effort probe and the
-OpenRouter config, node tests for the git guard, checkpoints, agent guard,
-mandate, subagents and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
+OpenRouter config, the move into the one extension, node tests for that
+extension's index, the git guard, checkpoints, agent guard, mandate,
+subagents and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
 the memory guard. Releases are published to npm from GitHub releases.
 
 ## License

@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 // Unit test for the sandbox extension that lets-code writes
-// (~/.pi/agent/extensions/sandbox/index.ts): config merging,
+// (~/.pi/agent/extensions/lets-code/sandbox/index.ts): config merging,
 // mode events, and the fallback to plain bash when the runtime is absent.
 // Needs Node >= 22.6. The OS sandbox itself is exercised by hand
 // (tests/sandbox-live.sh), since CI runners lack bubblewrap.
 //
-//   tests/sandbox.test.mjs [path/to/index.ts]
+//   tests/sandbox.test.mjs [path/to/lets-code/sandbox/index.ts]
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/sandbox/index.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/sandbox/index.ts");
 const work = realpathSync(mkdtempSync(join(tmpdir(), "sandbox-test-")));
-const agentDir = join(work, "agent"); mkdirSync(join(agentDir, "extensions", "lets-code-sandbox"), { recursive: true });
+const agentDir = join(work, "agent"); mkdirSync(join(agentDir, "extensions", "lets-code", "sandbox"), { recursive: true });
 process.env.PI_CODING_AGENT_DIR = agentDir;
 process.env.LETS_CODE_SANDBOX_ON = "1";
 const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
@@ -23,7 +23,7 @@ const t = (name, got, want) => { n++; const ok = JSON.stringify(got) === JSON.st
 
 let loads = 0;
 async function load() {
-	const f = join(agentDir, "extensions", "lets-code-sandbox", `index-${loads++}.ts`); writeFileSync(f, src);
+	const f = join(agentDir, "extensions", "lets-code", "sandbox", `index-${loads++}.ts`); writeFileSync(f, src);
 	const mod = await import(pathToFileURL(f).href);
 	const handlers = {}, commands = {}, listeners = {}, notices = [], status = [];
 	let tool = null;

@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 // Unit test for the footer and metrics extension that lets-code writes
-// (~/.pi/agent/extensions/footer/index.ts). Loads it with a fake pi, a
+// (~/.pi/agent/extensions/lets-code/footer.ts). Loads it with a fake pi, a
 // fake clock and a fake setInterval stepped by hand, renders the footer
 // through a fake TUI in both sizes, and drives session_start,
 // before_provider_request, message_update, message_end, agent_end and
 // /metrics, and checks the JSON lines of LETS_CODE_METRICS_LOG. Needs Node >= 22.6.
 //
-//   tests/metrics.test.mjs [path/to/lets-code-metrics.ts]
+//   tests/metrics.test.mjs [path/to/lets-code/footer.ts]
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/footer/index.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/footer.ts");
 const work = mkdtempSync(join(tmpdir(), "metrics-test-"));
 const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
 process.env.PI_CODING_AGENT_DIR = work;          // no settings.json: compaction counts as on

@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 // Unit test for the backend facts extension that lets-code writes
-// (~/.pi/agent/extensions/backend/index.ts). Loads it with a fake pi and
+// (~/.pi/agent/extensions/lets-code/backend.ts). Loads it with a fake pi and
 // drives before_agent_start and tool_result. Needs Node >= 22.6.
 //
-//   tests/backend.test.mjs [path/to/backend/index.ts]
+//   tests/backend.test.mjs [path/to/lets-code/backend.ts]
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/backend/index.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/backend.ts");
 const work = mkdtempSync(join(tmpdir(), "backend-test-"));
 const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
 let fail = 0;

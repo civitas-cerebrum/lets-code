@@ -453,15 +453,16 @@ print(json.dumps(mapping) + "|" + note)
 # high ~16k). A level is suggested only when 4x its cost fits the window
 # (pi's own model catalog follows this: 64k deployments top out at high,
 # 131k just misses xhigh's 32k, 256k gets xhigh) and half the output cap
-# (thinking must not eat the response budget). xhigh/max are never
-# suggested: on the chat-template path pi clamps their budget to high's
-# 16k, so they behave identically to high.
+# (thinking must not eat the response budget). The suggestion stops at
+# medium, the default: on the benchmark's hard tasks fixed high timed out
+# where medium finished (see README, "Choosing a thinking level"), so a
+# large window alone is no reason to pick it. xhigh/max are never suggested
+# either: on the chat-template path pi clamps their budget to high's 16k.
 suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
     local ctx="$1" cap="$2" room
     room=$(( ctx / 4 ))
     if [ $(( cap / 2 )) -lt "${room}" ]; then room=$(( cap / 2 )); fi
-    if   [ "${room}" -ge 16384 ]; then echo "high"
-    elif [ "${room}" -ge 8192  ]; then echo "medium"
+    if   [ "${room}" -ge 8192  ]; then echo "medium"
     elif [ "${room}" -ge 2048  ]; then echo "low"
     elif [ "${room}" -ge 1024  ]; then echo "minimal"
     else echo "off"; fi

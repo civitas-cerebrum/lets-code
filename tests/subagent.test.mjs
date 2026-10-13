@@ -68,9 +68,46 @@ async function load(env = {}) {
 	Object.assign(process.env, env);
 	const f = join(agentDir, "extensions", `subagent-${loads++}.ts`); writeFileSync(f, src);
 	const mod = await import(pathToFileURL(f).href);
-	let tool = null;
-	mod.default({ registerTool: (d) => { tool = d; }, on() { return () => {}; } });
-	return { mod, tool, run: (params, cwd = work, trusted = true) => tool.execute("id", params, undefined, undefined, { cwd, isProjectTrusted: trusted }) };
+	let tool = null; const handlers = {};
+	mod.default({ registerTool: (d) => { tool = d; }, on(ev, h) { handlers[ev] = h; return () => {}; } });
+	return { mod, tool, handlers, run: (params, cwd = work, trusted = true) => tool.execute("id", params, undefined, undefined, { cwd, isProjectTrusted: trusted }) };
+}
+
+// --- what the model is told: agents and call shapes in the tool; the method once asked for
+{
+	const { tool, mod } = await load();
+	t("description: agent names", /scout/.test(tool.description) && /worker/.test(tool.description), true);
+	t("description: the three call shapes", ["{agent,task}", "{tasks:", "parallel", "{chain:", "{previous}"].every((k) => tool.description.includes(k)), true);
+	t("method: each agent's job", /scout \(finds things\); worker \(does things\)/.test(mod.orchestration(mod.discoverAgents(work, true))), true);
+	t("guideline: orchestrate", /orchestrate/i.test(tool.promptGuidelines[0]), true);
+	const long = mod.agentJobs([{ name: "x", description: "a".repeat(30) + " " + "b".repeat(50) }]);
+	t("long agent descriptions are cut", /x \(a{30}…\)/.test(long), true);
+
+	const want = mod.wantsOrchestration;
+	for (const p of ["use subagents to map the repo", "Delegate the test writing", "do these three in parallel", "orchestrate the refactor",
+		"fan out over the modules", "parallelize the audit", "split the work between scouts", "design a workflow for releasing docs", "plan the workflow for onboarding"])
+		t(`trigger: "${p}"`, want(p), true);
+	for (const p of ["fix the failing test in parser.py", "add a GitHub Actions workflow for the tests", "set up a CI workflow", "the workflow file is broken",
+		"why does `in parallel` appear in the log?", "explain this:\n```\nrun in parallel; delegate()\n```", "the parallel port driver crashes"])
+		t(`no trigger: "${p.replace(/\n/g, " ")}"`, want(p), false);
+}
+{
+	const { handlers } = await load();
+	const run = (prompt, pct = 10) => { const sections = { other: "kept" }; handlers.before_agent_start({ prompt, systemPromptOptions: { sections } }, { getContextUsage: () => ({ percent: pct }) }); return sections; };
+	t("plain prompt: no method", Object.keys(run("fix the failing test")), ["other"]);
+	t("asked for: method added", /you are the orchestrator/.test(run("use subagents for this").lets_code_orchestration), true);
+	t("and it stays for the session", typeof run("now fix the typo").lets_code_orchestration, "string");
+}
+{
+	const { handlers } = await load();
+	const run = (prompt, pct) => { const sections = {}; handlers.before_agent_start({ prompt, systemPromptOptions: { sections } }, { getContextUsage: () => ({ percent: pct }) }); return sections; };
+	t("context under 50%: no method", "lets_code_orchestration" in run("keep going", 49), false);
+	t("context at 50%: method added", "lets_code_orchestration" in run("keep going", 50), true);
+}
+{
+	const { handlers, tool } = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
+	const sections = {}; handlers.before_agent_start?.({ prompt: "use subagents", systemPromptOptions: { sections } }, { getContextUsage: () => ({ percent: 90 }) });
+	t("a subagent never gets the method", "lets_code_orchestration" in sections, false);
 }
 
 // --- discovery

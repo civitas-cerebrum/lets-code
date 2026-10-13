@@ -21,8 +21,9 @@ for t in "${here}"/*.sh; do
     run "$(basename "${t}")" bash "${t}"
 done
 
-# the extensions lets-code writes into ~/.pi/agent/extensions, produced here
-# into a scratch agent dir from the functions in the script
+# the extension lets-code writes into ~/.pi/agent/extensions/lets-code (an
+# index and one module per feature), produced here into a scratch agent dir
+# from the functions in the script
 agent="$(mktemp -d "${TMPDIR:-/tmp}/lets-code-ci.XXXXXX")"
 trap 'rm -rf "${agent}"' EXIT
 mkdir -p "${agent}/extensions"
@@ -31,10 +32,11 @@ mkdir -p "${agent}/extensions"
 python3 - "${root}/lets-code" > "${agent}/writers.sh" <<'PYX'
 import sys
 s = open(sys.argv[1]).read()
-# the helper the writers share (no heredoc: ends at the first line "}")
-i = s.find("\nlc_ext_dir() {")
+# the helpers the writers share and the index of the one lets-code extension
+# (the block between the "extension dirs" and "themes" section rules)
+i = s.find("\n# ------------------------------------------------------------ extension dirs\n")
 if i >= 0:
-    sys.stdout.write(s[i:s.find("\n}\n", i) + 3])
+    sys.stdout.write(s[i:s.find("\n# ------------------------------------------------------------------ themes\n", i)])
 for name in ("pi_write_gitguard_extension", "pi_write_memguard_extension", "pi_write_agentguard_extension", "pi_write_mandate_extension", "pi_write_subagent_extension", "pi_write_sandbox_extension", "pi_write_sessiontag_extension", "pi_write_metrics_extension", "pi_write_grounding_extension", "pi_write_backend_extension"):
     i = s.find("\n%s() {" % name)
     if i < 0:
@@ -50,7 +52,7 @@ PYX
     npm() { return 1; }     # the sandbox writer would install its runtime; not here
     SANDBOX_RUNTIME_VERSION="test"; SB_NOTE=""
     . "${agent}/writers.sh"
-    for f in pi_write_gitguard_extension pi_write_memguard_extension pi_write_agentguard_extension pi_write_mandate_extension pi_write_subagent_extension pi_write_sandbox_extension pi_write_sessiontag_extension pi_write_metrics_extension pi_write_grounding_extension pi_write_backend_extension; do
+    for f in pi_write_lets_code_extension pi_write_gitguard_extension pi_write_memguard_extension pi_write_agentguard_extension pi_write_mandate_extension pi_write_subagent_extension pi_write_sandbox_extension pi_write_sessiontag_extension pi_write_metrics_extension pi_write_grounding_extension pi_write_backend_extension; do
         if declare -F "${f}" >/dev/null; then "${f}"; fi
     done
 ) || { echo "could not extract the extensions from lets-code"; exit 1; }
@@ -58,16 +60,17 @@ PYX
 for t in "${here}"/*.test.mjs; do
     [ -e "${t}" ] || continue
     case "$(basename "${t}")" in
-        git-guard*|git-checkpoint*) ext="${agent}/extensions/git-guard/index.ts" ;;
-        agent-guard*)               ext="${agent}/extensions/agent-guard/index.ts" ;;
-        mem-guard*)                 ext="${agent}/extensions/memory-guard/index.ts" ;;
-        mandate*)                   ext="${agent}/extensions/mandate/index.ts" ;;
-        subagent*)                  ext="${agent}/extensions/subagents/index.ts" ;;
-        sandbox*)                   ext="${agent}/extensions/sandbox/index.ts" ;;
-        session-tag*)               ext="${agent}/extensions/session-tag/index.ts" ;;
-        metrics*)                   ext="${agent}/extensions/footer/index.ts" ;;
-        grounding*)                 ext="${agent}/extensions/grounding/index.ts" ;;
-        backend*)                   ext="${agent}/extensions/backend/index.ts" ;;
+        lets-code*)                 ext="${agent}/extensions/lets-code/index.ts" ;;
+        git-guard*|git-checkpoint*) ext="${agent}/extensions/lets-code/git-guard.ts" ;;
+        agent-guard*)               ext="${agent}/extensions/lets-code/agent-guard.ts" ;;
+        mem-guard*)                 ext="${agent}/extensions/lets-code/memory-guard.ts" ;;
+        mandate*)                   ext="${agent}/extensions/lets-code/mandate.ts" ;;
+        subagent*)                  ext="${agent}/extensions/lets-code/subagents.ts" ;;
+        sandbox*)                   ext="${agent}/extensions/lets-code/sandbox/index.ts" ;;
+        session-tag*)               ext="${agent}/extensions/lets-code/session-tag.ts" ;;
+        metrics*)                   ext="${agent}/extensions/lets-code/footer.ts" ;;
+        grounding*)                 ext="${agent}/extensions/lets-code/grounding.ts" ;;
+        backend*)                   ext="${agent}/extensions/lets-code/backend.ts" ;;
         *)                          ext="" ;;
     esac
     if [ -n "${ext}" ] && [ ! -f "${ext}" ]; then echo "=== $(basename "${t}"): skipped (no ${ext#${agent}/extensions/} in this build)"; continue; fi

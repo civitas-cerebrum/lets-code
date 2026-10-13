@@ -4,10 +4,10 @@
 // fake clock and a fake setInterval stepped by hand, renders the footer
 // through a fake TUI in both sizes, and drives session_start,
 // before_provider_request, message_update, message_end, agent_end and
-// /metrics. Needs Node >= 22.6.
+// /metrics, and checks the JSON lines of LETS_CODE_METRICS_LOG. Needs Node >= 22.6.
 //
 //   tests/metrics.test.mjs [path/to/lets-code-metrics.ts]
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -31,7 +31,7 @@ const HOME = homedir();
 let loads = 0;
 async function load(env, { hasUI = true, theme, providers = 1, branch = "main", level = "medium" } = {}) {
 	timers = [];
-	delete process.env.LETS_CODE_METRICS_ON;
+	delete process.env.LETS_CODE_METRICS_ON; delete process.env.LETS_CODE_METRICS_LOG; delete process.env.LETS_CODE_SUBAGENT_DEPTH;
 	Object.assign(process.env, env);
 	const f = join(work, `metrics-${loads++}.ts`); writeFileSync(f, src);
 	const mod = await import(pathToFileURL(f).href);
@@ -201,6 +201,84 @@ try {
 	x.ev("session_start");
 	x.respond({ at: 0, ttft: 100, gen: 1000, output: 50 });
 	t("no UI: footer untouched, no spinner", [x.st.footer, timers.length], ["pi", 0]);
+
+	// ---------------------------------------------------------- metrics log (JSON lines)
+	const logf = join(work, "log", "sub", "metrics.jsonl");        // parent directories created
+	const readLog = (f) => (existsSync(f) ? readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+	const ts = (ms) => new Date(ms).toISOString();
+	const pid = process.pid;
+	x = await load({ LETS_CODE_METRICS_ON: "0", LETS_CODE_METRICS_LOG: logf });
+	clock = 0; x.ev("session_start");
+	t("log: session record", readLog(logf), [{ type: "session", ts: ts(0), model: "qwen3.8-27b", provider: "lets-code", context_window: 262144, thinking_level: "medium", depth: 0, pid }]);
+	clock = 1000; x.ev("agent_start"); x.ev("before_provider_request");
+	clock = 1500; x.delta("text_delta", "x".repeat(400));
+	clock = 3500; x.ev("message_end", { message: { role: "assistant", stopReason: "toolUse", usage: { input: 2000, cacheRead: 8000, cacheWrite: 0, output: 100 },
+		content: [{ type: "text", text: "hi" }, { type: "toolCall", name: "bash", arguments: { command: "ls" } },
+			{ type: "toolCall", name: "subagent", arguments: { tasks: [{}, {}, {}] } }, { type: "toolCall", name: "subagent", arguments: { chain: [{}, {}] } },
+			{ type: "toolCall", name: "subagent", arguments: { agent: "scout", task: "look" } }] } });
+	x.ev("message_end", { message: { role: "toolResult", content: [] } });       // not a response
+	clock = 4000; x.ev("before_provider_request");
+	clock = 4200; x.delta("text_delta", "y".repeat(200));
+	clock = 5200; x.ev("message_end", { message: { role: "assistant", stopReason: "stop", usage: { input: 100, cacheRead: 10000, output: 50 }, content: [{ type: "text", text: "done" }] } });
+	x.ev("agent_start");                                   // pi continuing on its own: same prompt
+	clock = 5300; x.ev("agent_settled");
+	t("log: request, prompt records", readLog(logf).slice(1), [
+		{ type: "request", ts: ts(3500), ttft_ms: 500, gen_ms: 2000, output_tokens: 100, input_tokens: 10000, cached_tokens: 8000, cache_hit_pct: 80, tok_s: 50, estimated: false, thinking_level: "medium", stop_reason: "toolUse", depth: 0, pid },
+		{ type: "request", ts: ts(5200), ttft_ms: 200, gen_ms: 1000, output_tokens: 50, input_tokens: 10100, cached_tokens: 10000, cache_hit_pct: 99, tok_s: 50, estimated: false, thinking_level: "medium", stop_reason: "stop", depth: 0, pid },
+		{ type: "prompt", ts: ts(5300), duration_ms: 4300, requests: 2, tool_calls: 4, subagent_calls: 3, subagent_tasks: 6, outcome: "completed", depth: 0, pid },
+	]);
+	clock = 6000; x.ev("agent_start"); x.ev("before_provider_request");
+	clock = 7000; x.ev("message_end", { message: { role: "assistant", stopReason: "aborted", usage: { output: 0 }, content: [] } });
+	clock = 7100; x.ev("agent_settled");
+	t("log: interrupted prompt, nothing streamed", readLog(logf).slice(4), [
+		{ type: "request", ts: ts(7000), ttft_ms: 1000, gen_ms: 0, output_tokens: 0, input_tokens: 0, cached_tokens: 0, cache_hit_pct: null, tok_s: null, estimated: true, thinking_level: "medium", stop_reason: "aborted", depth: 0, pid },
+		{ type: "prompt", ts: ts(7100), duration_ms: 1100, requests: 1, tool_calls: 0, subagent_calls: 0, subagent_tasks: 0, outcome: "interrupted", depth: 0, pid },
+	]);
+	clock = 8000; x.ev("session_shutdown", { type: "session_shutdown", reason: "quit" });
+	t("log: session_end totals", readLog(logf).slice(6), [{ type: "session_end", ts: ts(8000), reason: "quit", duration_ms: 8000, prompts: 2, requests: 3, tool_calls: 4,
+		subagent_calls: 3, subagent_tasks: 6, input_tokens: 20100, output_tokens: 150, cached_tokens: 18000, depth: 0, pid }]);
+	t("log: the footer still works alongside", stats(x), "50.0 tok/s · 22.0%/262k (auto)");
+	t("outcome from the stop reason", ["stop", "toolUse", "aborted", "error", ""].map(x.mod.outcome), ["completed", "completed", "interrupted", "error", "completed"]);
+
+	// shutdown in the middle of a prompt: the prompt is logged as interrupted
+	const logc = join(work, "cut.jsonl");
+	x = await load({ LETS_CODE_METRICS_ON: "0", LETS_CODE_METRICS_LOG: logc });
+	clock = 0; x.ev("session_start"); x.ev("agent_start"); x.ev("before_provider_request");
+	clock = 2000; x.ev("session_shutdown", { reason: "quit" });
+	t("log: shutdown mid-prompt", readLog(logc).slice(1).map((r) => [r.type, r.outcome ?? r.prompts, r.duration_ms]), [["prompt", "interrupted", 2000], ["session_end", 1, 2000]]);
+
+	// no UI (print mode, --mode json), as a subagent: measured and logged, nothing drawn
+	const log2 = join(work, "noui.jsonl");
+	x = await load({ LETS_CODE_METRICS_ON: "0", LETS_CODE_METRICS_LOG: log2, LETS_CODE_SUBAGENT_DEPTH: "2" }, { hasUI: false });
+	clock = 0; x.ev("session_start"); x.ev("agent_start");
+	x.respond({ at: 100, ttft: 400, gen: 1000, output: 80 });
+	clock = 2000; x.ev("agent_settled");
+	const r2 = readLog(log2);
+	t("no UI: session, request, prompt logged", r2.map((r) => r.type), ["session", "request", "prompt"]);
+	t("no UI: numbers measured", [r2[1].ttft_ms, r2[1].gen_ms, r2[1].tok_s, r2[2].duration_ms, r2[2].requests], [400, 1000, 80, 2000, 1]);
+	t("subagent: its depth in every record", r2.map((r) => r.depth), [2, 2, 2]);
+	t("no UI: footer untouched, no timers", [x.st.footer, timers.length], ["pi", 0]);
+
+	// unset: nothing written
+	const before = readdirSync(work).filter((f) => !f.endsWith(".ts")).sort();
+	x = await load({ LETS_CODE_METRICS_ON: "0" });
+	clock = 0; x.ev("session_start"); x.ev("agent_start");
+	x.respond({ at: 0, ttft: 100, gen: 1000, output: 50 });
+	x.ev("agent_settled"); x.ev("session_shutdown", { reason: "quit" });
+	t("log unset: nothing written", readdirSync(work).filter((f) => !f.endsWith(".ts")).sort(), before);
+
+	// unwritable: never throws, the footer keeps working
+	writeFileSync(join(work, "a-file"), "");
+	let threw = false;
+	try {
+		x = await load({ LETS_CODE_METRICS_ON: "0", LETS_CODE_METRICS_LOG: join(work, "a-file", "metrics.jsonl") });
+		clock = 0; x.ev("session_start"); x.ev("agent_start");
+		x.respond({ at: 0, ttft: 100, gen: 1000, output: 50 });
+		x.ev("agent_settled"); x.ev("session_shutdown", { reason: "quit" });
+	} catch (e) { threw = String(e); }
+	t("log unwritable: no throw", threw, false);
+	t("log unwritable: footer still drawn", stats(x), "50.0 tok/s · 22.0%/262k (auto)");
+	t("appendRecord reports failure", x.mod.appendRecord(join(work, "a-file", "x"), { a: 1 }), false);
 
 	// helpers
 	t("compact like pi", [999, 1234, 45200, 1_234_567, 15_000_000].map(x.mod.compact), ["999", "1.2k", "45k", "1.2M", "15M"]);

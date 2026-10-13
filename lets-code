@@ -49,6 +49,8 @@
 #   lets-code --metrics | --no-metrics   start with the full footer (directory,
 #                                model, cache, first token, output) instead of
 #                                the minimal one (/metrics switches inside pi)
+#   lets-code --metrics-log <file>   append per-request and per-prompt metrics
+#                                to <file> as JSON lines (also without a UI)
 #   lets-code --mandate [<m>]    mandate on, optionally in mode plan | auto |
 #                                ask | yolo | <role> (pi's own --mode is untouched)
 #   lets-code --no-mandate       launch without the mandate (modes) extension
@@ -125,7 +127,7 @@
 #                LETS_CODE_MANDATE (true|false), LETS_CODE_MODE, LETS_CODE_SUBAGENTS,
 #                LETS_CODE_SANDBOX (true|false), LETS_CODE_SUBAGENT_CONCURRENCY (2)
 #                LETS_CODE_REA (true|manual|false)
-#                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_GROUNDING (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
+#                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_METRICS_LOG (<file>), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_GROUNDING (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
 #                LETS_CODE_WRAP_TURNS (6), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
 #                LETS_CODE_BURST_TURNS (3), LETS_CODE_MAX_BURSTS (8), LETS_CODE_THINKING_REPLAY (all|<n>)
 #                LETS_CODE_FINAL_REVIEW (auto|on|0), LETS_CODE_PLAN_BURST (0|1), LETS_CODE_PLAN_LEVEL (low)
@@ -896,8 +898,10 @@ mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
 # session's tokens/s with a spinner while a response streams, context use.
 # Full (/metrics): adds the directory and branch, model and thinking level,
 # cache reads and hit rate, cost, time to first token and output tokens.
-# Written on every launch; METRICS=true starts in the full size. Inert outside a lets-code launch and without a UI. Rewritten
-# when its content changes.
+# Written on every launch; METRICS=true starts in the full size. With
+# LETS_CODE_METRICS_LOG (--metrics-log) it also appends the numbers to a JSON
+# lines file, with or without a UI. Inert outside a lets-code launch; draws
+# nothing without a UI. Rewritten when its content changes.
 pi_write_metrics_extension() {
     local dir f tmp
     dir="$(lc_ext_dir footer lets-code-metrics.ts)"
@@ -906,8 +910,8 @@ pi_write_metrics_extension() {
     tmp="$(mktemp "${dir}/.index.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (footer and metrics); regenerated on launch, edits are overwritten.
-// Active only in a pi launched by lets-code (LETS_CODE_METRICS_ON set) with a
-// UI. Replaces pi's footer with one in a single style (dim, " · " between
+// Active only in a pi launched by lets-code (LETS_CODE_METRICS_ON set); the
+// footer needs a UI, the metrics log below does not. Replaces pi's footer with one in a single style (dim, " · " between
 // parts), in two sizes switched with /metrics:
 //   minimal (the default):
 //     ↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)
@@ -929,9 +933,35 @@ pi_write_metrics_extension() {
 // estimate the provider never replaced. Other extensions' statuses keep a
 // line of their own. /metrics toggles the size; /metrics on|off picks one.
 // Nothing reaches the model.
+//
+// Metrics log: with LETS_CODE_METRICS_LOG=<file> (--metrics-log <file>) the
+// same numbers are appended to <file> as JSON lines, one object per event,
+// written as it happens (append-only, parent directory created; a file that
+// cannot be written is skipped silently). Works without a UI (-p, --mode
+// json) and in subagents (child pi, LETS_CODE_SUBAGENT_DEPTH > 0), which
+// inherit the variable and write the same file. Every record has type, ts
+// (ISO time), depth (0 = the top session) and pid (to tell concurrent
+// sessions apart); times are in ms, null where unknown:
+//   {"type":"session", ts, model, provider, context_window, thinking_level, depth, pid}
+//     once, at session start
+//   {"type":"request", ts, ttft_ms, gen_ms, output_tokens, input_tokens, cached_tokens,
+//    cache_hit_pct, tok_s, estimated, thinking_level, stop_reason, depth, pid}
+//     per model response: ttft_ms request sent to first streamed token, gen_ms
+//     first token to end; input_tokens every prompt token sent (cached included:
+//     input + cacheRead + cacheWrite), cached_tokens the cache reads;
+//     estimated = the provider gave no output count (estimated from the text);
+//     thinking_level as of the request
+//   {"type":"prompt", ts, duration_ms, requests, tool_calls, subagent_calls,
+//    subagent_tasks, outcome, depth, pid}
+//     per user prompt, agent_start to agent_settled; outcome completed |
+//     interrupted | error (the last response's stop reason); subagent_tasks
+//     counts each call's tasks or chain steps (1 for a single task)
+//   {"type":"session_end", ts, reason, duration_ms, prompts, requests, tool_calls,
+//    subagent_calls, subagent_tasks, input_tokens, output_tokens, cached_tokens, depth, pid}
+//     at session shutdown (quit, /new, /resume, ...), totals for the session
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFileSync } from "node:fs";
-import { join, relative, resolve, isAbsolute, sep } from "node:path";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname, join, relative, resolve, isAbsolute, sep } from "node:path";
 import { homedir } from "node:os";
 
 const DELTAS = new Set(["text_delta", "thinking_delta", "toolcall_delta"]);
@@ -1060,6 +1090,34 @@ type Ctx = {
 	model?: { id?: string; provider?: string; reasoning?: boolean; contextWindow?: number };
 };
 
+// one JSON line appended to the metrics log; never throws
+export function appendRecord(file: string, rec: Record<string, unknown>): boolean {
+	if (!file) return false;
+	try {
+		mkdirSync(dirname(file), { recursive: true });
+		appendFileSync(file, JSON.stringify(rec) + "\n");
+		return true;
+	} catch { return false; }
+}
+const round1 = (n: number | undefined) => (n === undefined || !Number.isFinite(n) ? null : Math.round(n * 10) / 10);
+export function outcome(stopReason: string): "completed" | "interrupted" | "error" {
+	return stopReason === "aborted" ? "interrupted" : stopReason === "error" ? "error" : "completed";
+}
+// tool calls in an assistant message, and the subagent tool's calls and tasks
+export function toolCounts(content: unknown): { tools: number; subagents: number; tasks: number } {
+	const c = { tools: 0, subagents: 0, tasks: 0 };
+	if (!Array.isArray(content)) return c;
+	for (const p of content) {
+		if (p?.type !== "toolCall") continue;
+		c.tools++;
+		if (p.name !== "subagent") continue;
+		const a = p.arguments ?? {};
+		c.subagents++;
+		c.tasks += (Array.isArray(a.tasks) && a.tasks.length) || (Array.isArray(a.chain) && a.chain.length) || 1;
+	}
+	return c;
+}
+
 function autoCompaction(): boolean {
 	try {
 		const dir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -1081,6 +1139,22 @@ export default function (pi: ExtensionAPI) {
 	let tuiRef: { requestRender(): void } | undefined;
 	let usageCache: { n: number; sent: number; received: number; cached: number; written: number; cost: number; hit?: number } = { n: -1, sent: 0, received: 0, cached: 0, written: 0, cost: 0 };
 	const AUTO = autoCompaction();
+	// the metrics log (see the top): measured with or without a UI
+	const LOG = process.env.LETS_CODE_METRICS_LOG ?? "";
+	const DEPTH = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
+	const record = (type: string, fields: Record<string, unknown>) => {
+		if (LOG) appendRecord(LOG, { type, ts: new Date(Date.now()).toISOString(), ...fields, depth: DEPTH, pid: process.pid });
+	};
+	const level = () => { try { return pi.getThinkingLevel?.() ?? null; } catch { return null; } };
+	let reqLevel: string | null = null, sessionAt: number | undefined, sessionLogged = false;
+	let run = { requests: 0, tools: 0, subagents: 0, tasks: 0 };
+	const tot = { prompts: 0, requests: 0, tools: 0, subagents: 0, tasks: 0, input: 0, output: 0, cached: 0 };
+	const endPrompt = (reason: string) => {
+		if (runStart === undefined) return;
+		record("prompt", { duration_ms: Date.now() - runStart, requests: run.requests, tool_calls: run.tools,
+			subagent_calls: run.subagents, subagent_tasks: run.tasks, outcome: reason ? outcome(reason) : "completed" });
+		tot.prompts++;
+	};
 
 	const perChar = () => (calChars > 0 ? calTokens / calChars : 0.25);
 	const liveOut = () => (sentAt !== undefined && firstAt !== undefined ? Math.round(chars * perChar()) : 0);
@@ -1159,11 +1233,32 @@ export default function (pi: ExtensionAPI) {
 		timer = setInterval(tick, FRAME_MS);
 		(timer as { unref?: () => void }).unref?.();
 	};
-	const take = (ctx: unknown) => { const c = ctx as Ctx; if (!c.hasUI) return false; ui = c; return true; };
+	// the UI context, kept for drawing; measuring never needs it
+	const take = (ctx: unknown) => { const c = ctx as Ctx; if (!c?.hasUI) return false; ui = c; return true; };
 
-	pi.on("session_start", (_e, ctx) => { if (take(ctx)) ui!.ui.setFooter?.(footer); });
+	pi.on("session_start", (_e, ctx) => {
+		const c = ctx as Ctx;
+		if (!sessionLogged) {
+			sessionLogged = true; sessionAt = Date.now();
+			const m = c?.model;
+			record("session", { model: m?.id ?? null, provider: m?.provider ?? null,
+				context_window: c?.getContextUsage?.()?.contextWindow ?? m?.contextWindow ?? null, thinking_level: level() });
+		}
+		if (take(ctx)) ui!.ui.setFooter?.(footer);
+	});
+	pi.on("session_shutdown", (event) => {
+		if (!sessionLogged || sessionAt === undefined) return;
+		// a prompt still open: cut short, unless its last response had finished the turn
+		endPrompt(sentAt !== undefined || stopReason === "" || stopReason === "toolUse" ? "aborted" : stopReason);
+		runStart = undefined;
+		if (runTimer !== undefined) { clearInterval(runTimer); runTimer = undefined; }
+		record("session_end", { reason: (event as { reason?: string })?.reason ?? null, duration_ms: Date.now() - sessionAt,
+			prompts: tot.prompts, requests: tot.requests, tool_calls: tot.tools, subagent_calls: tot.subagents, subagent_tasks: tot.tasks,
+			input_tokens: tot.input, output_tokens: tot.output, cached_tokens: tot.cached });
+		sessionAt = undefined;
+	});
 	pi.on("before_provider_request", (_e, ctx) => {
-		sentAt = Date.now(); firstAt = undefined; chars = 0; held = undefined;
+		sentAt = Date.now(); firstAt = undefined; chars = 0; held = undefined; reqLevel = level();
 		if (take(ctx)) start();
 	});
 	pi.on("message_update", (event) => {
@@ -1173,15 +1268,29 @@ export default function (pi: ExtensionAPI) {
 		chars += e.delta?.length ?? 0;
 	});
 	pi.on("message_end", (event, ctx) => {
-		const m = event.message as { role?: string; usage?: { output?: number }; stopReason?: string };
-		if (m.role === "assistant") stopReason = m.stopReason ?? "";
-		if (m.role !== "assistant" || sentAt === undefined || !take(ctx)) return;
+		const m = event.message as { role?: string; usage?: { input?: number; cacheRead?: number; cacheWrite?: number; output?: number }; stopReason?: string; content?: unknown };
+		if (m.role !== "assistant") return;
+		stopReason = m.stopReason ?? "";
+		take(ctx);
+		const tc = toolCounts(m.content);
+		run.requests++; run.tools += tc.tools; run.subagents += tc.subagents; run.tasks += tc.tasks;
+		tot.requests++; tot.tools += tc.tools; tot.subagents += tc.subagents; tot.tasks += tc.tasks;
+		if (sentAt === undefined) return;
 		const endAt = Date.now();
 		const reported = m.usage?.output ?? 0;
 		const output = reported > 0 ? reported : Math.round(chars * perChar());
 		if (reported > 0 && chars > 0) { calTokens += reported; calChars += chars; }
 		if (firstAt !== undefined && rate(output, endAt - firstAt) !== undefined) { totalOut += output; totalMs += endAt - firstAt; }
 		lastFirstMs = (firstAt ?? endAt) - sentAt; lastOut = output; lastEstimated = reported <= 0;
+		if (LOG) {
+			const u = m.usage ?? {};
+			const input = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0), cached = u.cacheRead ?? 0;
+			const gen = firstAt !== undefined ? endAt - firstAt : 0;
+			tot.input += input; tot.output += output; tot.cached += cached;
+			record("request", { ttft_ms: lastFirstMs, gen_ms: gen, output_tokens: output, input_tokens: input, cached_tokens: cached,
+				cache_hit_pct: input > 0 ? round1((cached / input) * 100) : null, tok_s: round1(rate(output, gen)),
+				estimated: lastEstimated, thinking_level: reqLevel, stop_reason: m.stopReason ?? null });
+		}
 		sentAt = undefined;
 		stop(); repaint();
 	});
@@ -1189,14 +1298,17 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", () => { if (sentAt !== undefined) { sentAt = undefined; stop(); repaint(); } });
 	// the prompt's clock; the footer counts it up once a second while pi works
 	pi.on("agent_start", (_e, ctx) => {
-		if (runStart !== undefined || !take(ctx)) return;
+		if (runStart !== undefined) return;
 		runStart = Date.now(); stopReason = "";
+		run = { requests: 0, tools: 0, subagents: 0, tasks: 0 };
+		if (!take(ctx)) return;
 		runTimer = setInterval(repaint, 1000);
 		(runTimer as { unref?: () => void }).unref?.();
 		repaint();
 	});
 	pi.on("agent_settled", () => {
 		if (runStart === undefined) return;
+		endPrompt(stopReason);
 		lastRunMs = Date.now() - runStart; lastStopped = stopReason === "aborted" || stopReason === "error";
 		runStart = undefined;
 		if (runTimer !== undefined) { clearInterval(runTimer); runTimer = undefined; }
@@ -4653,7 +4765,7 @@ print("%s|%s|%s" % (d.get("id", ""), d.get("max_model_len") or d.get("context_le
 # never rewrite each other's backend.
 # Names that would shadow a lets-code option; pi's own options are checked
 # against `pi --help` at setup.
-PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard grounding no-grounding no-session-tag metrics no-metrics rea no-rea mandate no-mandate subagents no-subagents sandbox no-sandbox verbose debug help preset"
+PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard grounding no-grounding no-session-tag metrics no-metrics metrics-log rea no-rea mandate no-mandate subagents no-subagents sandbox no-sandbox verbose debug help preset"
 preset_name_ok() {  # preset_name_ok <name> -> 0 when usable as --<name>
     case "$1" in ""|[!a-z0-9]*|*[!a-z0-9_-]*) return 1 ;; esac
     case " ${PRESET_RESERVED} " in *" $1 "*) return 1 ;; esac
@@ -5036,6 +5148,7 @@ AGENT_GUARD="${LETS_CODE_AGENT_GUARD:-${AGENT_GUARD}}"
 GROUNDING="${LETS_CODE_GROUNDING:-${GROUNDING}}"
 SESSION_TAG="${LETS_CODE_SESSION_TAG:-${SESSION_TAG}}"
 METRICS="${LETS_CODE_METRICS:-${METRICS}}"
+METRICS_LOG="${LETS_CODE_METRICS_LOG:-}"
 TEMPLATE_EFFORT="${LETS_CODE_TEMPLATE_EFFORT:-${TEMPLATE_EFFORT}}"
 MANDATE="${LETS_CODE_MANDATE:-${MANDATE}}"
 MODE="${LETS_CODE_MODE:-${MODE}}"
@@ -5082,6 +5195,9 @@ while [ $# -gt 0 ]; do
         --no-session-tag) SESSION_TAG=false; shift ;;
         --metrics)  METRICS=true; shift ;;
         --no-metrics) METRICS=false; shift ;;
+        --metrics-log) [ -n "${2:-}" ] || { log_error "--metrics-log requires a file."; exit 1; }
+                    METRICS_LOG="$2"; shift 2 ;;
+        --metrics-log=*) METRICS_LOG="${1#--metrics-log=}"; shift ;;
         --mandate)  MANDATE=true
                     case "${2:-}" in ""|-*) shift ;; *) MODE="$2"; shift 2 ;; esac ;;
         --no-mandate) MANDATE=false; shift ;;
@@ -5382,6 +5498,15 @@ case "$(printf '%s' "${METRICS}" | tr '[:upper:]' '[:lower:]')" in
     true|yes|1|on) export LETS_CODE_METRICS_ON=1; FEAT_DESC="metrics: on" ;;
     *)             export LETS_CODE_METRICS_ON=0 ;;
 esac
+# metrics log: JSON lines from the footer extension (and from subagents, which
+# inherit it); an absolute path, so a child in another directory writes the same file
+if [ -n "${METRICS_LOG}" ]; then
+    case "${METRICS_LOG}" in /*) ;; *) METRICS_LOG="${PWD}/${METRICS_LOG}" ;; esac
+    export LETS_CODE_METRICS_LOG="${METRICS_LOG}"
+    FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }metrics log: ${METRICS_LOG}"
+else
+    unset LETS_CODE_METRICS_LOG
+fi
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 case "$(lc "${MANDATE}")" in
     true|yes|1|on)

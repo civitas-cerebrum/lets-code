@@ -104,6 +104,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` / `--no-grounding` | Launch without a guard |
 | `--no-session-tag` | Send no session tag with model requests |
 | `--metrics` / `--no-metrics` | Start with the full footer instead of the minimal one (`/metrics` switches inside pi) |
+| `--metrics-log <file>` | Append the footer's numbers to `<file>` as JSON lines, also without a UI (see [Metrics log](#metrics-log)) |
 | `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `yolo` or a role of yours |
 | `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
 | `--sandbox` / `--no-sandbox` | The OS sandbox for bash |
@@ -180,6 +181,31 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 Listing several endpoints lets one config follow you around:
 `http://localhost:8000 https://llm.home.example` works on the server box,
 on the LAN and over a VPN.
+
+#### Metrics log
+
+`--metrics-log <file>` (or `LETS_CODE_METRICS_LOG=<file>`) has the footer
+extension append one JSON object per line to `<file>` as things happen, for
+harnesses and benchmarks. It works without a UI (`-p`, `--mode json`), and
+subagents inherit it and write the same file with their `depth`. The file is
+only appended to; one that cannot be written is skipped. Every record has
+`type`, `ts` (ISO time), `depth` (0 = the top session) and `pid`; times are
+in ms, `null` where unknown:
+
+```json
+{"type":"session","ts":"…","model":"qwen3.8-27b","provider":"lets-code","context_window":262144,"thinking_level":"medium","depth":0,"pid":4242}
+{"type":"request","ts":"…","ttft_ms":500,"gen_ms":2000,"output_tokens":100,"input_tokens":10000,"cached_tokens":8000,"cache_hit_pct":80,"tok_s":50,"estimated":false,"thinking_level":"medium","stop_reason":"toolUse","depth":0,"pid":4242}
+{"type":"prompt","ts":"…","duration_ms":4300,"requests":2,"tool_calls":4,"subagent_calls":3,"subagent_tasks":6,"outcome":"completed","depth":0,"pid":4242}
+{"type":"session_end","ts":"…","reason":"quit","duration_ms":8000,"prompts":2,"requests":3,"tool_calls":4,"subagent_calls":3,"subagent_tasks":6,"input_tokens":20100,"output_tokens":150,"cached_tokens":18000,"depth":0,"pid":4242}
+```
+
+`request`: one per model response; `ttft_ms` from sending to the first
+streamed token, `gen_ms` from there to the end, `input_tokens` every prompt
+token sent (cached included), `cached_tokens` the cache reads, `estimated`
+when the provider gave no output count. `prompt`: one per user prompt, until
+pi settles; `outcome` is `completed`, `interrupted` or `error`;
+`subagent_tasks` counts each subagent call's tasks or chain steps.
+`session_end`: the session's totals at shutdown.
 
 </details>
 

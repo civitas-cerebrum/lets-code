@@ -23,7 +23,7 @@ process.env.PATH = `${bin}:${process.env.PATH}`;
 writeFileSync(join(bin, "pi"), `#!/usr/bin/env node
 const fs = require("fs"); const path = require("path");
 const dir = process.env.FAKE_PI_DIR; const id = Date.now() + "-" + Math.random().toString(36).slice(2);
-fs.writeFileSync(path.join(dir, "call-" + id + ".json"), JSON.stringify({ argv: process.argv.slice(2), env: { role: process.env.LETS_CODE_ROLE, depth: process.env.LETS_CODE_SUBAGENT_DEPTH }, cwd: process.cwd(), prompt: fs.readFileSync(process.argv[process.argv.indexOf("--append-system-prompt") + 1], "utf8") }));
+fs.writeFileSync(path.join(dir, "call-" + id + ".json"), JSON.stringify({ argv: process.argv.slice(2), env: { role: process.env.LETS_CODE_ROLE, depth: process.env.LETS_CODE_SUBAGENT_DEPTH }, agentDir: process.env.PI_CODING_AGENT_DIR, cwd: process.cwd(), prompt: fs.readFileSync(process.argv[process.argv.indexOf("--append-system-prompt") + 1], "utf8") }));
 const task = process.argv[process.argv.length - 1];
 const running = path.join(dir, "running-" + id); fs.writeFileSync(running, "");
 const n = fs.readdirSync(dir).filter((f) => f.startsWith("running-")).length;
@@ -31,11 +31,13 @@ fs.appendFileSync(path.join(dir, "concurrency"), n + "\\n");
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 out({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } });
 setTimeout(() => {
+  if (/slow/.test(task)) return;   // never answers; only a timeout ends it
   if (/fail/.test(task)) { process.stderr.write("boom"); fs.unlinkSync(running); process.exit(3); }
   const text = /big/.test(task) ? "x".repeat(60 * 1024) : "Result for: " + task.replace(/^Task: /, "");
   out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], usage: { input: 10, output: 5 } } });
   fs.unlinkSync(running); process.exit(0);
 }, 150);
+if (/slow/.test(task)) setTimeout(() => {}, 60000);
 `);
 chmodSync(join(bin, "pi"), 0o755);
 const fake = join(work, "fake"); mkdirSync(fake); process.env.FAKE_PI_DIR = fake;
@@ -175,6 +177,86 @@ async function load(env = {}) {
 	delete process.env.LETS_CODE_SUBAGENTS_ON;
 	const off = await load({});
 	t("inert when off", off.tool, null);
+}
+
+// --- agent types: agent_dir, skills, append_prompt, timeout, requires, requires_env
+{
+	process.env.LETS_CODE_SUBAGENTS_ON = "1";
+	const { mod } = await load();
+	const rea = join(agentDir, "rea");
+	for (const d of ["agent", "skill-a", "skill-b", "runtime"]) mkdirSync(join(rea, d), { recursive: true });
+	writeFileSync(join(rea, "prompt.md"), "REA standing instructions\n");
+	const fm = (lines) => `---\nname: re\ndescription: reverse engineers\n${lines.join("\n")}\n---\nbody\n`;
+	const full = ["agent_dir: rea/agent", "skills:", "  - rea/skill-a", `  - ${join(rea, "skill-b")}`, "append_prompt: rea/prompt.md", "timeout: 3600", "requires: rea/runtime", "requires_env: TEST_RE_ON"];
+	process.env.TEST_RE_ON = "1";
+	const a = mod.parseAgentFile(fm(full), "re.md", "user");
+	t("fields parsed and resolved under the agent dir", a && { agentDir: a.agentDir, skills: a.skills, appendPrompt: a.appendPrompt, timeout: a.timeout },
+		{ agentDir: join(rea, "agent"), skills: [join(rea, "skill-a"), join(rea, "skill-b")], appendPrompt: join(rea, "prompt.md"), timeout: 3600 });
+	t("inline skill list", mod.parseAgentFile(fm(["skills: [rea/skill-a, rea/skill-b]"]), "re.md", "user")?.skills, [join(rea, "skill-a"), join(rea, "skill-b")]);
+	t("unknown fields ignored", mod.parseAgentFile(fm(["colour: blue", "agent_dir: rea/agent"]), "re.md", "user")?.agentDir, join(rea, "agent"));
+	const proj = join(work, "proj2"); mkdirSync(join(proj, "env"), { recursive: true });
+	for (const [what, line] of [["agent_dir ..", "agent_dir: ../outside"], ["agent_dir absolute elsewhere", `agent_dir: ${work}`], ["agent_dir /etc", "agent_dir: /etc"],
+		["skill ..", "skills: rea/../../x"], ["one bad skill of two", "skills: rea/skill-a, /etc"], ["append_prompt /etc/passwd", "append_prompt: /etc/passwd"],
+		["requires ..", "requires: ../outside"], ["user agent: path in the project", `agent_dir: ${join(proj, "env")}`]])
+		t(`path escape rejected: ${what}`, mod.parseAgentFile(fm([line]), "re.md", "user", proj), null);
+	t("trusted project agent: path in the project allowed", mod.parseAgentFile(fm([`agent_dir: ${join(proj, "env")}`]), "re.md", "project", proj)?.agentDir, join(proj, "env"));
+	t("project agent: relative paths still under the agent dir", mod.parseAgentFile(fm(["agent_dir: ../env"]), "re.md", "project", proj), null);
+	for (const v of ["0", "-5", "abc", "1.5", String(mod.MAX_TIMEOUT + 1)]) t(`timeout ${v} rejected`, mod.parseAgentFile(fm([`timeout: ${v}`]), "re.md", "user"), null);
+	t("missing append_prompt hides (never passed as literal text)", mod.parseAgentFile(fm(["append_prompt: rea/nope.md"]), "re.md", "user"), null);
+	t("missing agent_dir hides", mod.parseAgentFile(fm(["agent_dir: rea/nope"]), "re.md", "user"), null);
+	t("missing skill hides", mod.parseAgentFile(fm(["skills: rea/nope"]), "re.md", "user"), null);
+	t("requires missing hides", mod.parseAgentFile(fm(["requires: rea/runtime/nope"]), "re.md", "user"), null);
+	t("requires_env bad name rejected", mod.parseAgentFile(fm(["requires_env: A-B"]), "re.md", "user"), null);
+	process.env.TEST_RE_ON = "0";
+	t("requires_env 0 hides", mod.parseAgentFile(fm(full), "re.md", "user"), null);
+	delete process.env.TEST_RE_ON;
+	t("requires_env unset hides", mod.parseAgentFile(fm(full), "re.md", "user"), null);
+
+	// discovery and the tool: hidden agents are neither listed nor callable
+	writeFileSync(join(agentDir, "agents", "re.md"), fm(full));
+	writeFileSync(join(agentDir, "agents", "slow.md"), "---\ndescription: times out\ntimeout: 1\n---\nx\n");
+	const off = await load();
+	t("hidden: not in the tool description", /\bre\b/.test(off.tool.description), false);
+	t("hidden: not callable", /Unknown agent "re"/.test((await off.run({ agent: "re", task: "x" })).content[0].text), true);
+	process.env.TEST_RE_ON = "1";
+	const on = await load();
+	t("shown once its env is set", /\bre\b/.test(on.tool.description), true);
+	const r = await on.run({ agent: "re", task: "inspect /bin/true" });
+	t("agent type run: not an error", r.isError, false);
+	const c = calls().find((x) => x.argv.at(-1) === "Task: inspect /bin/true");
+	const after = (flag) => c.argv.flatMap((v, i) => (v === flag ? [c.argv[i + 1]] : []));
+	t("child gets agent_dir as PI_CODING_AGENT_DIR", c.agentDir, join(rea, "agent"));
+	t("child gets each skill", after("--skill"), [join(rea, "skill-a"), join(rea, "skill-b")]);
+	t("child gets the agent prompt, then append_prompt", [after("--append-system-prompt").length, after("--append-system-prompt")[1]], [2, join(rea, "prompt.md")]);
+	t("child task still last", c.argv.at(-1), "Task: inspect /bin/true");
+	t("other agents keep the parent's agent dir", calls().find((x) => x.argv.at(-1) === "Task: find the config").agentDir, agentDir);
+	const started = Date.now();
+	const slow = await on.run({ agent: "slow", task: "slow down" });
+	t("timeout stops the child", [slow.isError, /timed out after 1s/.test(slow.content[0].text), Date.now() - started < 8000], [true, true, true]);
+	delete process.env.TEST_RE_ON;
+	rmSync(join(agentDir, "agents", "re.md")); rmSync(join(agentDir, "agents", "slow.md"));
+
+	// the description budget with the starter agents plus reverse-engineer
+	t("description < 160 with scout, worker, reviewer, reverse-engineer", mod.agentsBlurb(["scout", "worker", "reviewer", "reverse-engineer"].map((name) => ({ name }))).length < 160, true);
+
+	// the reverse-engineer file lets-code writes, as this extension reads it
+	const script = join(new URL(".", import.meta.url).pathname, "..", "lets-code");
+	if (existsSync(script)) {
+		const s = readFileSync(script, "utf8"); const i = s.indexOf(`cat > "\${tmp}" <<'MD'\n---\n# Written by lets-code (REA)`);
+		const file = i < 0 ? "" : s.slice(s.indexOf("\n", i) + 1, s.indexOf("\nMD\n", i) + 1);
+		mkdirSync(join(rea, "runtime", "node_modules", "rea-agents", "skills", "reverse-engineer-anything"), { recursive: true });
+		writeFileSync(join(rea, "runtime", "node_modules", "rea-agents", "package.json"), "{}");
+		process.env.LETS_CODE_REA_AGENT = "1";
+		const ra = mod.parseAgentFile(file, "reverse-engineer.md", "user");
+		t("reverse-engineer: parses with its environment", ra && [ra.name, ra.agentDir, ra.skills, ra.appendPrompt, ra.timeout],
+			["reverse-engineer", join(rea, "agent"), [join(rea, "runtime", "node_modules", "rea-agents", "skills", "reverse-engineer-anything")], join(rea, "prompt.md"), 3600]);
+		t("reverse-engineer: description fits the jobs line", ra && ra.description.length <= 60, true);
+		delete process.env.LETS_CODE_REA_AGENT;
+		t("reverse-engineer: hidden without LETS_CODE_REA_AGENT", mod.parseAgentFile(file, "reverse-engineer.md", "user"), null);
+		process.env.LETS_CODE_REA_AGENT = "1"; rmSync(join(rea, "runtime"), { recursive: true });
+		t("reverse-engineer: hidden once the runtime is gone", mod.parseAgentFile(file, "reverse-engineer.md", "user"), null);
+		delete process.env.LETS_CODE_REA_AGENT;
+	}
 }
 
 rmSync(work, { recursive: true, force: true });

@@ -112,8 +112,9 @@
 #      bash confined with @anthropic-ai/sandbox-runtime (bubblewrap on
 #      Linux, Seatbelt on macOS); MCP — setup imports an existing .mcp.json
 #      or another client's config into pi's built-in MCP support; REA — a
-#      reverse-engineering skill (one line of context) that runs REA's MCP
-#      server in a separate pi, so its tools never enter this session.
+#      reverse-engineer subagent (or, with subagents off, a one-line skill)
+#      that runs REA's MCP server in a separate pi, so its tools never enter
+#      this session.
 #
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
 # Presets: ~/.config/lets-code/presets/<name>   (`lets-code setup --preset <name>`)
@@ -3821,11 +3822,22 @@ pi_write_subagent_extension() {
 // the project is trusted. Every child goes through lets-code's provider and
 // the same guards; it runs under the mandate role the agent file names.
 // A child cannot start children of its own (LETS_CODE_SUBAGENT_DEPTH).
+//
+// An agent type can bring its own environment (all optional; paths relative
+// to ~/.pi/agent, or absolute under it, or under the project for a trusted
+// project's agent; anything else rejects the file):
+//   agent_dir      the child's PI_CODING_AGENT_DIR (own mcp.json, ...)
+//   skills         paths passed as --skill
+//   append_prompt  a file appended with --append-system-prompt
+//   timeout        seconds before the child is stopped (default: none)
+//   requires       a path that must exist, else the agent is hidden
+//   requires_env   an environment variable that must be set (not 0), else hidden
+// A missing agent_dir, skill or append_prompt hides the agent too.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { Type } from "typebox";
 
 const ACTIVE = process.env.LETS_CODE_SUBAGENTS_ON === "1";
@@ -3837,44 +3849,86 @@ const OUTPUT_CAP = 50 * 1024;
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const MODEL = process.env.LETS_CODE_MODEL || "";
 
-export interface AgentDef { name: string; description: string; tools?: string[]; thinking?: string; role?: string; prompt: string; source: "user" | "project"; file: string }
+export interface AgentDef {
+	name: string; description: string; tools?: string[]; thinking?: string; role?: string; prompt: string; source: "user" | "project"; file: string;
+	agentDir?: string; skills?: string[]; appendPrompt?: string; timeout?: number;
+}
+export const MAX_TIMEOUT = 24 * 3600;
 
-export function parseAgentFile(text: string, file: string, source: "user" | "project"): AgentDef | null {
+// A path named in an agent file, resolved and checked lexically: relative to
+// the agent dir, or absolute under one of the roots. null = outside them.
+export function agentPath(p: string, roots: string[]): string | null {
+	if (!p || /[\0\r\n]/.test(p)) return null;
+	const abs = isAbsolute(p) ? resolve(p) : resolve(AGENT_DIR, p);
+	return roots.some((r) => { const root = resolve(r); return abs === root || abs.startsWith(root.endsWith(sep) ? root : root + sep); }) ? abs : null;
+}
+
+// null when the file is not a usable agent: bad name, a field that does not
+// validate, or an environment it needs that is missing here (hidden).
+export function parseAgentFile(text: string, file: string, source: "user" | "project", projectRoot?: string): AgentDef | null {
 	const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
 	const fm: Record<string, string> = {}; let body = text;
-	if (m) { body = m[2]; for (const line of m[1].split(/\r?\n/)) { const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line); if (kv) fm[kv[1]] = kv[2].trim().replace(/^["']|["']$/g, ""); } }
+	if (m) {
+		body = m[2]; let last = "";
+		for (const line of m[1].split(/\r?\n/)) {
+			const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line);
+			if (kv) { last = kv[1]; fm[last] = kv[2].trim().replace(/^["']|["']$/g, ""); continue; }
+			const item = /^\s+-\s+(.*)$/.exec(line);   // a block list under the last key
+			if (item && last) fm[last] = [fm[last], item[1].trim().replace(/^["']|["']$/g, "")].filter(Boolean).join(",");
+		}
+	}
 	const name = (fm.name || file.replace(/^.*\//, "").replace(/\.md$/, "")).trim();
 	if (!/^[A-Za-z0-9][\w.-]*$/.test(name)) return null;
-	const list = (v?: string) => v ? v.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim()).filter(Boolean) : undefined;
-	return { name, description: fm.description ?? "", tools: list(fm.tools), thinking: fm.thinking, role: fm.role, prompt: body.trim(), source, file };
+	const list = (v?: string) => v ? v.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean) : undefined;
+	const roots = [AGENT_DIR, ...(source === "project" && projectRoot ? [projectRoot] : [])];
+	const a: AgentDef = { name, description: fm.description ?? "", tools: list(fm.tools), thinking: fm.thinking, role: fm.role, prompt: body.trim(), source, file };
+	const path = (key: string) => { const p = agentPath(fm[key], roots); if (!p) throw new Error(key); return p; };
+	try {
+		if (fm.agent_dir) { a.agentDir = path("agent_dir"); if (!statSync(a.agentDir, { throwIfNoEntry: false })?.isDirectory()) return null; }
+		if (fm.skills) { a.skills = list(fm.skills)!.map((s) => { const p = agentPath(s, roots); if (!p) throw new Error("skills"); return p; }); if (!a.skills.every((s) => existsSync(s))) return null; }
+		if (fm.append_prompt) { a.appendPrompt = path("append_prompt"); if (!statSync(a.appendPrompt, { throwIfNoEntry: false })?.isFile()) return null; }
+		if (fm.timeout) { const s = Number(fm.timeout); if (!/^\d+$/.test(fm.timeout) || s < 1 || s > MAX_TIMEOUT) return null; a.timeout = s; }
+		if (fm.requires && !existsSync(path("requires"))) return null;
+		if (fm.requires_env) { if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(fm.requires_env)) return null; const v = process.env[fm.requires_env]; if (!v || v === "0") return null; }
+	} catch { return null; }   // a path outside the allowed roots
+	return a;
 }
 export function discoverAgents(cwd: string, trusted: boolean): AgentDef[] {
 	const out = new Map<string, AgentDef>();
 	const scan = (dir: string, source: "user" | "project") => {
 		if (!existsSync(dir)) return;
-		for (const f of readdirSync(dir)) { if (!f.endsWith(".md")) continue; try { const a = parseAgentFile(readFileSync(join(dir, f), "utf8"), join(dir, f), source); if (a && !out.has(a.name)) out.set(a.name, a); } catch { /* skip bad file */ } }
+		for (const f of readdirSync(dir)) { if (!f.endsWith(".md")) continue; try { const a = parseAgentFile(readFileSync(join(dir, f), "utf8"), join(dir, f), source, cwd); if (a && !out.has(a.name)) out.set(a.name, a); } catch { /* skip bad file */ } }
 	};
 	if (trusted) { scan(join(cwd, ".pi", "agents"), "project"); scan(join(cwd, ".agents", "agents"), "project"); }
 	scan(join(AGENT_DIR, "agents"), "user");
 	return [...out.values()];
 }
 
-interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number }
+interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number; timedOut?: number }
 
 function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSignal | undefined, onProgress?: (line: string) => void): Promise<RunResult> {
 	const args = ["--mode", "json", "-p", "--no-session"];
 	if (MODEL) args.push("--provider", process.env.LETS_CODE_PROVIDER || "lets-code", "--model", MODEL);
 	if (agent.thinking) args.push("--thinking", agent.thinking);
 	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
+	for (const s of agent.skills ?? []) args.push("--skill", s);
 	const tmp = mkdtempSync(join(tmpdir(), "lets-code-agent-"));
 	const promptFile = join(tmp, "prompt.md");
 	writeFileSync(promptFile, `You are the "${agent.name}" agent. ${agent.description}\n\n${agent.prompt}\n`);
-	args.push("--append-system-prompt", promptFile, `Task: ${task}`);
+	args.push("--append-system-prompt", promptFile);
+	if (agent.appendPrompt) args.push("--append-system-prompt", agent.appendPrompt);
+	args.push(`Task: ${task}`);
 	const env = { ...process.env, LETS_CODE_SUBAGENT_DEPTH: String(DEPTH + 1), LETS_CODE_ROLE: agent.role || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "" };
 	if (!env.LETS_CODE_ROLE) delete (env as any).LETS_CODE_ROLE;
+	if (agent.agentDir) env.PI_CODING_AGENT_DIR = agent.agentDir;
 	const r: RunResult = { agent: agent.name, task, text: "", exitCode: 0, stderr: "", turns: 0, input: 0, output: 0 };
 	return new Promise((resolve) => {
 		const child = spawn("pi", args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+		const timer = agent.timeout ? setTimeout(() => {
+			r.timedOut = agent.timeout;
+			try { child.kill("SIGTERM"); } catch { /* gone */ }
+			setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* gone */ } }, 5000).unref();
+		}, agent.timeout * 1000) : undefined;
 		let buf = "";
 		const handle = (line: string) => {
 			if (!line.trim()) return;
@@ -3891,13 +3945,14 @@ function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSigna
 		const onAbort = () => { try { child.kill("SIGTERM"); } catch { /* gone */ } };
 		signal?.addEventListener("abort", onAbort, { once: true });
 		child.on("error", (e) => { r.exitCode = 1; r.stderr += `\n${e.message}`; finish(); });
-		child.on("close", (code) => { if (buf) handle(buf); r.exitCode = code ?? 1; finish(); });
-		const finish = () => { signal?.removeEventListener("abort", onAbort); try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ok */ } resolve(r); };
+		child.on("close", (code) => { if (buf) handle(buf); r.exitCode = r.timedOut ? (code || 124) : code ?? 1; finish(); });
+		const finish = () => { if (timer) clearTimeout(timer); signal?.removeEventListener("abort", onAbort); try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ok */ } resolve(r); };
 	});
 }
 function cap(s: string): string { if (Buffer.byteLength(s, "utf8") <= OUTPUT_CAP) return s; let t = s.slice(0, OUTPUT_CAP); while (Buffer.byteLength(t, "utf8") > OUTPUT_CAP) t = t.slice(0, -1); return `${t}\n\n[output truncated at 50 KB]`; }
 function render(r: RunResult): string {
-	const head = `## ${r.agent}${r.step ? ` (step ${r.step})` : ""} — ${r.exitCode === 0 ? "done" : `exit ${r.exitCode}`}, ${r.turns} turn${r.turns === 1 ? "" : "s"}, ↑${r.input} ↓${r.output}`;
+	const status = r.timedOut ? `timed out after ${r.timedOut}s` : r.exitCode === 0 ? "done" : `exit ${r.exitCode}`;
+	const head = `## ${r.agent}${r.step ? ` (step ${r.step})` : ""} — ${status}, ${r.turns} turn${r.turns === 1 ? "" : "s"}, ↑${r.input} ↓${r.output}`;
 	const body = r.text.trim() || (r.stderr.trim() ? `(no output; stderr: ${r.stderr.trim().slice(-800)})` : "(no output)");
 	return `${head}\n${cap(body)}`;
 }
@@ -3912,7 +3967,7 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) =
 // names and the three call shapes. Their jobs are in orchestration().
 export function agentsBlurb(agents: AgentDef[]): string {
 	const names = agents.map((a) => a.name).join(", ") || "none yet";
-	return `Agents (${names}), fresh contexts: brief fully. {agent,task} | {tasks:[..]} parallel | {chain:[..]} with {previous}=prior output`;
+	return `Agents (${names}), fresh contexts: brief fully. {agent,task} | {tasks:[..]} parallel | {chain:[..]}, {previous}=prior output`;
 }
 // "name (job)" with the job cut to about 60 characters
 export function agentJobs(agents: AgentDef[]): string {
@@ -4020,10 +4075,17 @@ TS
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
 
-# Three starter agents, written only when the user has none yet.
+# Three starter agents, written only when the user has none yet (agents
+# lets-code maintains itself, such as reverse-engineer, do not count).
 write_default_agents() {
-    local dir="${PI_AGENT_DIR}/agents"
-    if [ -d "${dir}" ] && [ -n "$(ls -A "${dir}" 2>/dev/null)" ]; then return 0; fi
+    local dir="${PI_AGENT_DIR}/agents" e
+    if [ -d "${dir}" ]; then
+        for e in "${dir}"/* "${dir}"/.[!.]*; do
+            [ -e "${e}" ] || continue
+            [ -f "${e}" ] && grep -q '^# Written by lets-code' "${e}" 2>/dev/null && continue
+            return 0
+        done
+    fi
     mkdir -p "${dir}"
     cat > "${dir}/scout.md" <<'MD'
 ---
@@ -4341,18 +4403,32 @@ PY
 
 # REA (https://github.com/morluto/rea): reverse engineering on demand. REA is
 # one MCP server with ~170 tools (~65k tokens of input schemas even in its
-# compact profile), so it is never registered in the main session. The main
-# session gets one skill line (none with REA=manual); the skill runs
-# ${REA_DIR}/run, a fresh pi whose own agent dir registers REA, so its tools,
+# compact profile), so it is never registered in the main session. With
+# subagents on, the main session gets the agent type reverse-engineer
+# (agents/reverse-engineer.md: its name in the subagent tool); otherwise one
+# skill line (none with REA=manual) whose skill runs ${REA_DIR}/run. Either
+# way the child is a fresh pi whose own agent dir registers REA, so its tools,
 # its own skill and the raw evidence stay in that child and only the report
 # comes back. The child agent dir links everything of ~/.pi/agent (models,
 # auth, settings, extensions, so the same provider and guards apply) except
 # mcp.json and skills. REA is pinned and installed like the sandbox runtime.
 REA_VERSION="6.4.0"
 REA_DIR="${PI_AGENT_DIR}/rea"
+# What the main session gets, after pi_write_rea. With subagents on and the
+# reverse-engineer agent in place: the agent (LETS_CODE_REA_AGENT lists it in
+# the subagent tool, whose agent names are in context anyway) and no skill
+# line. Otherwise (subagents off, REA=manual, a user's own agent file of that
+# name): the skill, which runs ${REA_DIR}/run by bash.
+rea_surface() {  # rea_surface <on|manual>; sets REA_SURFACE (agent|skill)
+    REA_SURFACE=skill
+    if [ "$1" = on ] && [ "${REA_AGENT:-}" = 1 ] && [ "${LETS_CODE_SUBAGENTS_ON:-}" = 1 ]; then
+        REA_SURFACE=agent; export LETS_CODE_REA_AGENT=1
+    fi
+    return 0
+}
 pi_write_rea() {  # pi_write_rea <on|manual>; sets REA_NOTE (empty = ready)
     local invoke="$1" rt="${REA_DIR}/runtime" agent="${REA_DIR}/agent" have="" e name
-    REA_NOTE=""
+    REA_NOTE=""; REA_AGENT=""
     mkdir -p "${rt}" "${agent}" "${REA_DIR}/skill/reverse-engineering"
 
     # 1. the pinned REA package (first run, or when REA_VERSION changes)
@@ -4471,6 +4547,33 @@ SH
         echo "run it again with a narrower task to dig further. Do not call REA or"
         echo "npx rea-agents yourself."
     } > "${REA_DIR}/skill/reverse-engineering/SKILL.md"
+
+    # 5. the same child as an agent type for the subagent tool (progress,
+    # parallel tasks, orchestration). Listed only in a session launched with
+    # REA on (requires_env; the launch exports it), so REA off or manual adds
+    # nothing to context; hidden too once the runtime is gone. A user's own
+    # agent of that name is left alone (REA_AGENT stays empty).
+    local af="${PI_AGENT_DIR}/agents/reverse-engineer.md" tmp
+    if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    mkdir -p "${PI_AGENT_DIR}/agents"
+    tmp="$(mktemp "${af}.XXXXXX")" || return 0
+    cat > "${tmp}" <<'MD'
+---
+# Written by lets-code (REA); regenerated on launch, edits are overwritten.
+# To keep your own version, delete this line: lets-code then leaves it alone.
+name: reverse-engineer
+description: Reverse engineers binaries, apps, APKs, firmware, websites
+agent_dir: rea/agent
+skills: rea/runtime/node_modules/rea-agents/skills/reverse-engineer-anything
+append_prompt: rea/prompt.md
+timeout: 3600
+requires: rea/runtime/node_modules/rea-agents/package.json
+requires_env: LETS_CODE_REA_AGENT
+---
+MD
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+    REA_AGENT=1
 }
 
 # `lets-code mandate init [--global]`: a starter manifest to edit.
@@ -5653,7 +5756,7 @@ case "$(printf '%s' "${SESSION_TAG}" | tr '[:upper:]' '[:lower:]')" in
 esac
 
 # optional features: mandate (modes/roles), subagents, sandbox, REA, metrics
-unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL LETS_CODE_METRICS_ON
+unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL LETS_CODE_REA_AGENT LETS_CODE_METRICS_ON
 FEAT_DESC=""
 # footer: minimal by default; METRICS=true starts with the full one
 pi_write_metrics_extension
@@ -5701,7 +5804,9 @@ case "$(lc "${REA}")" in
         pi_write_rea "${rea_invoke}"
         if [ -z "${REA_NOTE}" ]; then
             export LETS_CODE_REA_PROVIDER="${PROVIDER_ID}" LETS_CODE_REA_MODEL="${MODEL}"
-            if [ ${#PASSTHROUGH[@]} -eq 0 ]; then PASSTHROUGH=(--skill "${REA_DIR}/skill/reverse-engineering")
+            rea_surface "${rea_invoke}"
+            if [ "${REA_SURFACE}" = agent ]; then rea_invoke="on (agent)"
+            elif [ ${#PASSTHROUGH[@]} -eq 0 ]; then PASSTHROUGH=(--skill "${REA_DIR}/skill/reverse-engineering")
             else PASSTHROUGH=(--skill "${REA_DIR}/skill/reverse-engineering" "${PASSTHROUGH[@]}"); fi
             FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }rea: ${rea_invoke}"
         else

@@ -69,7 +69,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
-| 🔬 **REA** (optional) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: a one-line skill hands the question to a separate pi that has REA's 170 tools, so they never enter your session. Zero tokens in `manual` mode. |
+| 🔬 **REA** (optional) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: a `reverse-engineer` subagent (or a one-line skill with subagents off) hands the question to a separate pi that has REA's 170 tools, so they never enter your session. Zero tokens in `manual` mode. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -176,7 +176,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS` | On by default; `false` turns the `subagent` tool off. |
 | `SANDBOX` | `true` turns the feature on. |
-| `REA` | `true` adds the reverse-engineering skill, `manual` makes it `/skill:reverse-engineering` only. |
+| `REA` | `true` adds the `reverse-engineer` agent (the reverse-engineering skill with subagents off), `manual` makes it `/skill:reverse-engineering` only. |
 | `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with the latest request's cache hit rate, cost, and the latest response's time to first token and output tokens (two lines that keep their height: `↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012` and `⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out`; on a narrow terminal the cache shortens to its hit rate, then cost, cache, output and TTFT drop; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi. tok/s counts from each response's first streamed token, so prompt processing is not in it. |
 
 Listing several endpoints lets one config follow you around:
@@ -445,6 +445,37 @@ trusted. Calls: `{agent, task}`, `{tasks: [...]}` for parallel work (at most
 the same provider and guards, with its own context, and cannot start
 children of its own. Output is capped at 50 KB per agent.
 
+An agent type can also bring its own environment. These fields are
+optional; unknown fields are ignored:
+
+| Field | Meaning |
+|---|---|
+| `agent_dir` | The child's `PI_CODING_AGENT_DIR`: its own `mcp.json`, skills and settings. Link models, auth and extensions into it to share them (as `~/.pi/agent/rea/agent` does). |
+| `skills` | Skill paths passed to the child as `--skill` (`a, b`, `[a, b]` or a `- a` list). |
+| `append_prompt` | A file appended to the child's system prompt after the agent's own body. |
+| `timeout` | Seconds before the child is stopped (1 to 86400; none by default). |
+| `requires` | A path that must exist, otherwise the agent is hidden: not listed, not callable. |
+| `requires_env` | An environment variable that must be set (and not `0`), otherwise hidden. |
+
+Paths are relative to `~/.pi/agent`, or absolute under it (or under the
+project, for a trusted project's agent); a file that points anywhere else,
+or has a bad `timeout`, is ignored. A missing `agent_dir`, skill or
+`append_prompt` hides the agent like `requires` does. The
+`reverse-engineer` agent lets-code writes is the example:
+
+```markdown
+---
+name: reverse-engineer
+description: Reverse engineers binaries, apps, APKs, firmware, websites
+agent_dir: rea/agent
+skills: rea/runtime/node_modules/rea-agents/skills/reverse-engineer-anything
+append_prompt: rea/prompt.md
+timeout: 3600
+requires: rea/runtime/node_modules/rea-agents/package.json
+requires_env: LETS_CODE_REA_AGENT
+---
+```
+
 </details>
 
 <details>
@@ -506,11 +537,24 @@ lets-code --rea            # or REA=true in the config, or setup full
 lets-code --rea manual     # only when you type /skill:reverse-engineering
 ```
 
-Your session gets one skill, `reverse-engineering`: its name and a
-one-sentence description are all that sit in the context (nothing with
-`manual`). When a question depends on a built artifact, pi loads the skill
-and runs `~/.pi/agent/rea/run "<task>"`, a fresh `pi -p` with its own agent
-dir, `~/.pi/agent/rea/agent`. That dir links your models, auth, settings and
+With subagents on (the default), your session gets the agent
+`reverse-engineer`: its name in the `subagent` tool is all that sits in the
+context, and `subagent({agent: "reverse-engineer", task})` (or several in
+`tasks: [...]`) runs it with progress, in parallel and inside an
+orchestration like any other agent, stopped after an hour. lets-code
+writes `~/.pi/agent/agents/reverse-engineer.md` and keeps it current; it is
+listed only in sessions launched with REA on, and a file of yours by that
+name (without the `# Written by lets-code` line) is left alone, in which
+case the skill below is used instead.
+
+With subagents off, or a file of your own by that name, your session gets
+one skill, `reverse-engineering`: its name and a one-sentence description
+(nothing with `manual`, which always uses the skill). When a question
+depends on a built artifact, pi loads the skill and runs
+`~/.pi/agent/rea/run "<task>"`.
+
+Either way the child is a fresh pi with its own agent dir,
+`~/.pi/agent/rea/agent`. That dir links your models, auth, settings and
 extensions, so the child uses the same server and guards, but its `mcp.json`
 holds only REA, and REA's own skill loads there. The child works through
 REA's tools in codemode and returns a short Answer / Evidence / Unknowns

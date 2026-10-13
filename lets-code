@@ -1427,6 +1427,88 @@ TS
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
 
+# Backend facts: what lets-code knows about the backend (server, model,
+# API, context, thinking, vision, preset) handed to the agent only when it
+# needs it: a prompt about the backend adds a short system-prompt section,
+# or the first command probing the backend gets the facts in its result.
+# Inert unless LETS_CODE_BACKEND is set. Rewritten when its content changes.
+pi_write_backend_extension() {
+    local dir f tmp
+    dir="$(lc_ext_dir backend lets-code-backend.ts)"
+    f="${dir}/index.ts"
+    mkdir -p "${dir}"
+    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (backend facts); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code (LETS_CODE_BACKEND set). The
+// agent learns what lets-code already knows about its backend (server,
+// model, API, context, thinking, vision, preset) without discovering it,
+// and only when it needs it, so nothing is in context by default:
+//   * a prompt that asks about the backend (which model, the server, the
+//     endpoint, context window, tok/s, GPU, KV cache...; judged on the
+//     user's words with code removed; a bare "endpoint" or "backend" is app work, not
+//     this) adds a short section to the system
+//     prompt, kept for the session (a section that comes and goes costs a
+//     change note each time it flips);
+//   * otherwise the first command that probes the backend (curl to /v1 or
+//     /metrics, LETS_CODE_* variables, nvidia-smi, vllm/sglang/ollama,
+//     models.json) gets the facts appended to its result, once.
+// The API key is never written out; the facts point at $LETS_CODE_TOKEN.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+export interface Backend {
+	server?: string; url?: string; api_base?: string; api?: string; model?: string; model_source?: string;
+	context?: number; output_cap?: number; thinking?: string; reasoning?: boolean; vision?: boolean; preset?: string; provider?: string;
+}
+
+const k = (n?: number) => (n === undefined ? "?" : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+
+// about 120 tokens
+export function facts(b: Backend): string {
+	const lines = [
+		`Backend, observed by lets-code at launch (GET ${b.api_base ?? "the server"}/models): checked facts; re-query only for live load or cache numbers.`,
+		`- Model ${b.model ?? "?"}${b.model_source === "auto" ? " (discovered from the server)" : ""}, served by ${b.server ?? "an OpenAI-compatible server"} at ${b.url ?? "?"}${b.preset ? ` (preset ${b.preset})` : ""}.`,
+		`- ${b.api ?? "openai-completions"} API at ${b.api_base ?? "?"}; auth header: Authorization: Bearer $LETS_CODE_TOKEN.`,
+		`- Context ${k(b.context)} tokens, output cap ${k(b.output_cap)}, thinking ${b.reasoning ? b.thinking ?? "on" : "not supported"}, vision ${b.vision ? "yes" : "no"}.`,
+		`- Useful: GET ${b.api_base ?? "<api>"}/models${b.server === "vllm" ? `; GET ${b.url}/metrics (queue, KV cache, prefix-cache hits)` : ""}.`,
+	];
+	return lines.join("\n");
+}
+
+const strip = (p: string) => String(p ?? "").replace(/```[\s\S]*?(```|$)/g, " ").replace(/`[^`\n]*`/g, " ");
+export function asksAboutBackend(prompt: string): boolean {
+	return /\b((llm|model|inference|your|the model.s|ai) (backend|endpoint|server)s?|backend (model|server)|inference|vllm|sglang|ollama|lm ?studio|llama\.cpp|openrouter|model server|llm server|(which|what) model|your model|served model|base ?url|api ?key|context (window|size|length)|output cap|tok\/s|tokens? (per|a) second|throughput|ttft|gpu|kv[- ]?cache|prefix[- ]cache)\b/i.test(strip(prompt));
+}
+export function probesBackend(command: string): boolean {
+	return /\/v1\/(models|chat|completions)\b|\/metrics\b|\bLETS_CODE_\w*|\bnvidia-smi\b|\b(vllm|sglang|ollama)\b|models\.json\b|\.config\/lets-code\b/i.test(String(command ?? ""));
+}
+
+export default function (pi: ExtensionAPI) {
+	let b: Backend;
+	try { b = JSON.parse(process.env.LETS_CODE_BACKEND ?? ""); } catch { return; }
+	if (!b || typeof b !== "object") return;
+	const text = facts(b);
+	// once in context, never twice: the section (asked for) or one appended result (probed)
+	let section = false, told = false;
+
+	pi.on("before_agent_start", async (event: any) => {
+		const sections = event?.systemPromptOptions?.sections;
+		if (!sections || typeof sections !== "object") return undefined;
+		if (!section && !told && asksAboutBackend(event.prompt)) section = true;
+		if (section) sections.lets_code_backend = text;
+		return undefined;
+	});
+	pi.on("tool_result", async (event: any) => {
+		if (section || told || event?.toolName !== "bash" || !probesBackend(event?.input?.command)) return undefined;
+		told = true;
+		return { content: [...(event.content ?? []), { type: "text", text: `\n[lets-code] ${text}` }] };
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+}
+
 # The pi extension that tags each model request with the session it came from
 # (LETS_CODE_SESSION_ID, set by lets-code at launch), so a proxy's access log
 # can tell concurrent sessions apart. Inert without it. Rewritten when its
@@ -5471,6 +5553,29 @@ pick_theme_once
 
 export LETS_CODE_TOKEN="${TOKEN}"
 export LETS_CODE_PROVIDER="${PROVIDER_ID}"
+# the backend facts for the agent (see pi_write_backend_extension); no secrets
+LETS_CODE_BACKEND="$(printf '%s' "${MODELS_JSON}" | LC_MODEL="${MODEL}" python3 -c '
+import json, os, sys
+try: data = json.load(sys.stdin).get("data") or []
+except Exception: data = []
+e = next((m for m in data if m.get("id") == os.environ["LC_MODEL"]), data[0] if data else {})
+print(e.get("owned_by") or "")' 2>/dev/null || true)"
+case "${BASE_URL}" in *openrouter.ai*) LETS_CODE_BACKEND="openrouter" ;; esac
+LETS_CODE_BACKEND="$(LC_SERVER="${LETS_CODE_BACKEND}" LC_URL="${BASE_URL}" LC_API_BASE="${PROVIDER_BASE}" LC_API="${API}" \
+    LC_MODEL="${MODEL}" LC_MODEL_SOURCE="${MODEL_SOURCE:-}" LC_CONTEXT="${CONTEXT}" LC_CAP="${OUTPUT_CAP}" \
+    LC_THINKING="${THINKING_DESC:-${THINKING}}" LC_REASONING="${REASONING_SUPPORTED}" LC_VISION="${VISION}" \
+    LC_PRESET="${PRESET:-}" LC_PROVIDER="${PROVIDER_ID}" python3 -c '
+import json, os
+g = os.environ.get
+num = lambda v: int(v) if (v or "").isdigit() else None
+print(json.dumps({k: v for k, v in {
+    "server": g("LC_SERVER") or None, "url": g("LC_URL"), "api_base": g("LC_API_BASE"), "api": g("LC_API"),
+    "model": g("LC_MODEL"), "model_source": g("LC_MODEL_SOURCE") or None, "context": num(g("LC_CONTEXT")),
+    "output_cap": num(g("LC_CAP")), "thinking": (g("LC_THINKING") or "").split(" (")[0] or None,
+    "reasoning": g("LC_REASONING") == "true", "vision": g("LC_VISION") == "true",
+    "preset": g("LC_PRESET") or None, "provider": g("LC_PROVIDER")}.items() if v is not None}, separators=(",", ":")))')"
+export LETS_CODE_BACKEND
+pi_write_backend_extension
 export PI_SKIP_VERSION_CHECK=1
 case "${BASE_URL}" in
     https://*)

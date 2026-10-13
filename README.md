@@ -69,7 +69,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
-| 🔬 **REA** (optional) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: a one-line skill hands the question to a separate pi that has REA's 170 tools, so they never enter your session. Zero tokens in `manual` mode. |
+| 🔬 **REA** (optional) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: a `reverse-engineer` subagent (or a one-line skill with subagents off) hands the question to a separate pi that has REA's 170 tools, so they never enter your session. Zero tokens in `manual` mode. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -176,7 +176,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS` | On by default; `false` turns the `subagent` tool off. |
 | `SANDBOX` | `true` turns the feature on. |
-| `REA` | `true` adds the reverse-engineering skill, `manual` makes it `/skill:reverse-engineering` only. |
+| `REA` | `true` adds the `reverse-engineer` agent (the reverse-engineering skill with subagents off), `manual` makes it `/skill:reverse-engineering` only. |
 | `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with the latest request's cache hit rate, cost, and the latest response's time to first token and output tokens (two lines that keep their height: `↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012` and `⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out`; on a narrow terminal the cache shortens to its hit rate, then cost, cache, output and TTFT drop; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi. tok/s counts from each response's first streamed token, so prompt processing is not in it. |
 
 Listing several endpoints lets one config follow you around:
@@ -265,7 +265,7 @@ processes this session started:
 | under 2.5 % | the largest process is killed at once |
 
 Nothing is capped; pi is told what was stopped and why. The guard is a pi
-extension (`~/.pi/agent/extensions/memory-guard/`) and is inert in
+extension (part of lets-code's, `~/.pi/agent/extensions/lets-code/memory-guard.ts`) and is inert in
 sessions not started by lets-code. It defers to a machine-wide
 [memguard](https://github.com/civitas-cerebrum/memguard) daemon when one runs.
 
@@ -306,7 +306,7 @@ repo the guard is off. `LETS_CODE_GIT_CHECKPOINTS=0` turns checkpoints off.
 <details>
 <summary><b>Agent guard</b></summary>
 
-A pi extension (`~/.pi/agent/extensions/agent-guard/`) with
+A pi extension (part of lets-code's, `~/.pi/agent/extensions/lets-code/agent-guard.ts`) with
 rules for failure modes measured in sessions against a local thinking
 model. Apart from a five-line working-method section in the system prompt
 it adds nothing unless a rule acts.
@@ -456,6 +456,37 @@ trusted. Calls: `{agent, task}`, `{tasks: [...]}` for parallel work (at most
 the same provider and guards, with its own context, and cannot start
 children of its own. Output is capped at 50 KB per agent.
 
+An agent type can also bring its own environment. These fields are
+optional; unknown fields are ignored:
+
+| Field | Meaning |
+|---|---|
+| `agent_dir` | The child's `PI_CODING_AGENT_DIR`: its own `mcp.json`, skills and settings. Link models, auth and extensions into it to share them (as `~/.pi/agent/rea/agent` does). |
+| `skills` | Skill paths passed to the child as `--skill` (`a, b`, `[a, b]` or a `- a` list). |
+| `append_prompt` | A file appended to the child's system prompt after the agent's own body. |
+| `timeout` | Seconds before the child is stopped (1 to 86400; none by default). |
+| `requires` | A path that must exist, otherwise the agent is hidden: not listed, not callable. |
+| `requires_env` | An environment variable that must be set (and not `0`), otherwise hidden. |
+
+Paths are relative to `~/.pi/agent`, or absolute under it (or under the
+project, for a trusted project's agent); a file that points anywhere else,
+or has a bad `timeout`, is ignored. A missing `agent_dir`, skill or
+`append_prompt` hides the agent like `requires` does. The
+`reverse-engineer` agent lets-code writes is the example:
+
+```markdown
+---
+name: reverse-engineer
+description: Reverse engineers binaries, apps, APKs, firmware, websites
+agent_dir: rea/agent
+skills: rea/runtime/node_modules/rea-agents/skills/reverse-engineer-anything
+append_prompt: rea/prompt.md
+timeout: 3600
+requires: rea/runtime/node_modules/rea-agents/package.json
+requires_env: LETS_CODE_REA_AGENT
+---
+```
+
 </details>
 
 <details>
@@ -464,7 +495,7 @@ children of its own. Output is capped at 50 KB per agent.
 With `SANDBOX=true` the model's bash commands and your own `!` commands run
 inside `@anthropic-ai/sandbox-runtime`: bubblewrap plus a filtering proxy
 on Linux (install `bubblewrap` and `socat`), Seatbelt on macOS. lets-code
-installs the runtime next to the extension on first use. Defaults: writes
+installs the runtime next to it (`~/.pi/agent/extensions/lets-code/sandbox/`) on first use. Defaults: writes
 allowed in the project, `/tmp` and a few caches; `~/.ssh`, `~/.aws`,
 `~/.gnupg`, the lets-code config and pi's auth files unreadable; network
 limited to package registries and GitHub. Configure in
@@ -517,11 +548,24 @@ lets-code --rea            # or REA=true in the config, or setup full
 lets-code --rea manual     # only when you type /skill:reverse-engineering
 ```
 
-Your session gets one skill, `reverse-engineering`: its name and a
-one-sentence description are all that sit in the context (nothing with
-`manual`). When a question depends on a built artifact, pi loads the skill
-and runs `~/.pi/agent/rea/run "<task>"`, a fresh `pi -p` with its own agent
-dir, `~/.pi/agent/rea/agent`. That dir links your models, auth, settings and
+With subagents on (the default), your session gets the agent
+`reverse-engineer`: its name in the `subagent` tool is all that sits in the
+context, and `subagent({agent: "reverse-engineer", task})` (or several in
+`tasks: [...]`) runs it with progress, in parallel and inside an
+orchestration like any other agent, stopped after an hour. lets-code
+writes `~/.pi/agent/agents/reverse-engineer.md` and keeps it current; it is
+listed only in sessions launched with REA on, and a file of yours by that
+name (without the `# Written by lets-code` line) is left alone, in which
+case the skill below is used instead.
+
+With subagents off, or a file of your own by that name, your session gets
+one skill, `reverse-engineering`: its name and a one-sentence description
+(nothing with `manual`, which always uses the skill). When a question
+depends on a built artifact, pi loads the skill and runs
+`~/.pi/agent/rea/run "<task>"`.
+
+Either way the child is a fresh pi with its own agent dir,
+`~/.pi/agent/rea/agent`. That dir links your models, auth, settings and
 extensions, so the child uses the same server and guards, but its `mcp.json`
 holds only REA, and REA's own skill loads there. The child works through
 REA's tools in codemode and returns a short Answer / Evidence / Unknowns
@@ -560,14 +604,28 @@ bash sandbox with your user's rights, and mandate modes that deny MCP
 Each launch probes the endpoints, reads `/v1/models`, runs the thinking and
 vision probes, then writes pi's `models.json` and `settings.json` under the
 provider id `lets-code`. Your other providers and settings are untouched.
+Everything lets-code adds to pi is one extension,
+`~/.pi/agent/extensions/lets-code/`, listed once as `lets-code` in pi's
+startup `[Extensions]`: an `index.ts` that loads one module per feature
+(`footer.ts`, `agent-guard.ts`, `git-guard.ts`, `memory-guard.ts`,
+`grounding.ts`, `backend.ts`, `session-tag.ts`, `mandate.ts`,
+`subagents.ts`, and `sandbox/` with its npm runtime). A module is written
+when its feature is on and stays inert while it is off; one that fails to
+load is reported by name and the others still run. The per-feature
+directories (`footer/`, `agent-guard/`, ...) and `lets-code-*.ts` files
+earlier versions wrote are moved in on the next launch; only files lets-code
+wrote are touched. If you have an extension of your own called `lets-code`,
+lets-code uses `lets-code-ext/` instead. The banner's extension count is
+lets-code's features on this launch plus your own extensions.
 pi's file-search helpers (`fd`, `ripgrep`) are fetched before the first
 start so the first session starts clean. Design notes and the reasoning
 behind each decision are in [DESIGN.md](DESIGN.md).
 
 `tests/run.sh` runs the suite CI runs on every pull request: shell tests
 for the probes, endpoint parsing, the chat-template effort probe and the
-OpenRouter config, node tests for the git guard, checkpoints, agent guard,
-mandate, subagents and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
+OpenRouter config, the move into the one extension, node tests for that
+extension's index, the git guard, checkpoints, agent guard, mandate,
+subagents and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
 the memory guard. Releases are published to npm from GitHub releases.
 
 ## License

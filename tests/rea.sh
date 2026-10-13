@@ -55,6 +55,30 @@ t "compact schemas"                "$(python3 -c 'import json,sys; print(json.lo
 t "main mcp.json untouched"        "$(cat "${PI_AGENT_DIR}/mcp.json")" '{"mcpServers":{"other":{"command":"x"}}}'
 t "skill model-invocable"          "$(grep -c disable-model-invocation "${REA_DIR}/skill/reverse-engineering/SKILL.md")" 0
 
+# the reverse-engineer agent type (shown only where the launch picks it)
+af="${PI_AGENT_DIR}/agents/reverse-engineer.md"
+t "agent file written"             "$(grep -c '^# Written by lets-code' "${af}")" 1
+t "agent: in place"                "${REA_AGENT}" 1
+t "agent: REA's agent dir"         "$(grep '^agent_dir:' "${af}")" "agent_dir: rea/agent"
+t "agent: REA's prompt"            "$([ -f "${PI_AGENT_DIR}/$(sed -n 's/^append_prompt: //p' "${af}")" ] && echo yes)" yes
+t "agent: REA's skill exists"      "$([ -d "${PI_AGENT_DIR}/$(sed -n 's/^skills: //p' "${af}")" ] && echo yes)" yes
+t "agent: requires the runtime"    "$([ -e "${PI_AGENT_DIR}/$(sed -n 's/^requires: //p' "${af}")" ] && echo yes)" yes
+t "agent: timeout 3600"            "$(grep '^timeout:' "${af}")" "timeout: 3600"
+surface() { ( unset LETS_CODE_REA_AGENT; LETS_CODE_SUBAGENTS_ON="$2"; rea_surface "$1"; echo "${REA_SURFACE}:${LETS_CODE_REA_AGENT:-}" ); }
+t "subagents on: agent, no skill"  "$(surface on 1)" "agent:1"
+t "subagents off: skill (rea/run)" "$(surface on '')" "skill:"
+t "manual: skill only, no agent"   "$(surface manual 1)" "skill:"
+rm -rf "${PI_AGENT_DIR}/agents"; mkdir -p "${PI_AGENT_DIR}/agents"
+printf -- '---\nname: reverse-engineer\ndescription: mine\n---\nmine\n' > "${af}"
+pi_write_rea on >/dev/null
+t "user's own file kept"           "$(grep -c 'description: mine' "${af}")" 1
+t "user's file: not ours"          "${REA_AGENT:-none}" none
+t "user's file: skill instead"     "$(surface on 1)" "skill:"
+rm -f "${af}"
+pi_write_rea on >/dev/null
+t "agent rewritten after removal"  "$(grep -c '^# Written by lets-code' "${af}")" 1
+t "no temp files left"             "$(ls "${PI_AGENT_DIR}/agents" | tr '\n' ' ')" "reverse-engineer.md "
+
 # user env on the entry survives; a file pi replaced is linked again; no reinstall
 python3 - "${a}/mcp.json" <<'PY'
 import json, sys
@@ -80,6 +104,13 @@ t "child is one level deeper"      "$(grep '^depth=' "${PI_LOG}")" "depth=1"
 t "child gets the REA skill"       "$(grep -c '^arg=.*rea-agents/skills/reverse-engineer-anything$' "${PI_LOG}")" 1
 t "child gets the task"            "$(grep -c '^arg=Task: explain search in /apps/notes$' "${PI_LOG}")" 1
 t "child has no session"           "$(grep -c '^arg=--no-session$' "${PI_LOG}")" 1
+
+# install fails: a note, no agent file
+rm -rf "${REA_DIR}" "${af}"
+mkdir -p "${work}/badbin"; printf '#!/bin/sh\nexit 1\n' > "${work}/badbin/npm"; chmod +x "${work}/badbin/npm"
+PATH="${work}/badbin:${PATH}" pi_write_rea on >/dev/null
+t "install fails -> note"          "$(echo "${REA_NOTE}" | grep -c 'install failed')" 1
+t "not installed -> no agent"      "$([ -e "${af}" ] && echo yes || echo no):${REA_AGENT:-}" "no:"
 
 # no npm: a note, nothing half-written
 rm -rf "${REA_DIR}"

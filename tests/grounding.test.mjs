@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 // Unit test for the grounding guard extension that lets-code writes
-// (~/.pi/agent/extensions/grounding/index.ts). Loads it with a fake pi in
+// (~/.pi/agent/extensions/lets-code/grounding.ts). Loads it with a fake pi in
 // a scratch project and drives before_agent_start and tool_call.
 // Needs Node >= 22.6.
 //
-//   tests/grounding.test.mjs [path/to/lets-code-grounding.ts]
+//   tests/grounding.test.mjs [path/to/lets-code/grounding.ts]
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/grounding/index.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/grounding.ts");
 const work = mkdtempSync(join(tmpdir(), "grounding-test-"));
 const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
 

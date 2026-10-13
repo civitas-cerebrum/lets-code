@@ -3,14 +3,14 @@
 // successful edit/write/bash in a pi/* repo, the working tree is snapshotted
 // under refs/pi-checkpoints/<branch>/<stamp> without touching index or HEAD.
 //
-//   tests/git-checkpoint.test.mjs [path/to/lets-code-gitguard.ts]
+//   tests/git-checkpoint.test.mjs [path/to/lets-code/git-guard.ts]
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync, realpathSync, existsSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/git-guard/index.ts");
+const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/git-guard.ts");
 process.env.LETS_CODE_GIT_GUARD_ON = "1";
 process.env.LETS_CODE_GIT_CHECKPOINT_DEBOUNCE_MS = "50";
 process.env.LETS_CODE_GIT_CHECKPOINT_KEEP = "3";

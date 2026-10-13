@@ -62,6 +62,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 📏 **Overflow-proof** | The output cap is reserved in pi's compaction settings, so `input + max_tokens` can never exceed the server window. |
 | 🧯 **Memory guard** | When the box runs low on RAM, the session's own runaway process is stopped. Nothing else on the machine is touched. |
 | 🔍 **Grounding guard** | pi looks facts up with its tools instead of guessing them (file contents, paths, names, versions, config, command output), invents nothing and says what it could not verify. Overwriting an existing file it has not read is blocked once: read first, or write again. |
+| 🧭 **Backend facts** | The agent knows its backend (server, model, API, context, thinking, vision) without discovering it, at no cost until it needs it: a prompt about the backend adds a short section, or the first command probing it gets the facts in its result. The API key is never written out. |
 | 🛟 **Git guard** | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
 | 🧭 **Agent guard** | Default bash timeout, a nudge to run tests after untested edits, a wrap-up hint once they pass, and thinking that switches on only while the model struggles. |
 | 🧭 **Modes** (optional) | `plan` explores read-only and ends in a numbered plan, `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |

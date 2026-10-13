@@ -196,6 +196,16 @@ guards and mandate role apply; `LETS_CODE_SUBAGENT_DEPTH` + 1 keeps the
 subagent tool out of it. The package is pinned and npm-installed like the
 sandbox runtime; output is capped at 50 KB like a subagent's.
 
+With subagents on, the same child is the agent type `reverse-engineer`
+(`agents/reverse-engineer.md`, written by lets-code): agent files may name
+an `agent_dir`, `skills`, an `append_prompt` file, a `timeout`, and gates
+(`requires` a path, `requires_env` a variable), all paths checked lexically
+to stay under the agent dir (or a trusted project). Its name in the
+subagent tool (a few tokens, in context anyway) replaces the skill entry
+(name, sentence and path, ~65 tokens), and it gains progress, parallel tasks and orchestration.
+`requires_env: LETS_CODE_REA_AGENT`, exported only by a launch with REA on,
+keeps the file on disk from listing it in sessions with REA off or manual.
+
 ## Script layout
 
 The script is one file, built in order: header and logging; probing

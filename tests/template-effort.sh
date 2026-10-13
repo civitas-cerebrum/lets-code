@@ -41,10 +41,10 @@ check() {  # check <mode> <want-map> <want-note-substring>
         echo "ok    $1: ${EFFORT_MAP:-<none>} | ${EFFORT_NOTE}"
     else echo "FAIL  $1: map=${EFFORT_MAP} note=${EFFORT_NOTE} (want $2 / *$3*)"; fail=1; fi
 }
-check qwen    '{"minimal": "low", "low": "low", "medium": "medium", "high": "high"}' "default high|xhigh"
+check qwen    '{"minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh"}' "default high|xhigh"
 check ignores ''                                                                   "no effort control"
 check none    ''                                                                   "no /tokenize"
-check all     '{"minimal": "minimal", "low": "low", "medium": "medium", "high": "high"}' "accepts minimal|low|medium|high|xhigh|max"
+check all     '{"minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh"}' "accepts minimal|low|medium|high|xhigh|max"
 TOKEN=t CA_FOUND="" probe_template_effort "http://127.0.0.1:1" m
 if [ -z "${EFFORT_MAP}" ]; then echo "ok    unreachable: ${EFFORT_NOTE}"; else echo "FAIL  unreachable: ${EFFORT_MAP}"; fail=1; fi
 exit "${fail}"

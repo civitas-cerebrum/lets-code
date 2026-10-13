@@ -35,7 +35,7 @@ s = open(sys.argv[1]).read()
 i = s.find("\nlc_ext_dir() {")
 if i >= 0:
     sys.stdout.write(s[i:s.find("\n}\n", i) + 3])
-for name in ("pi_write_gitguard_extension", "pi_write_memguard_extension", "pi_write_agentguard_extension", "pi_write_mandate_extension", "pi_write_subagent_extension", "pi_write_sandbox_extension", "pi_write_sessiontag_extension", "pi_write_metrics_extension", "pi_write_grounding_extension"):
+for name in ("pi_write_gitguard_extension", "pi_write_memguard_extension", "pi_write_agentguard_extension", "pi_write_mandate_extension", "pi_write_subagent_extension", "pi_write_sandbox_extension", "pi_write_sessiontag_extension", "pi_write_metrics_extension", "pi_write_grounding_extension", "pi_write_backend_extension"):
     i = s.find("\n%s() {" % name)
     if i < 0:
         continue
@@ -50,7 +50,7 @@ PYX
     npm() { return 1; }     # the sandbox writer would install its runtime; not here
     SANDBOX_RUNTIME_VERSION="test"; SB_NOTE=""
     . "${agent}/writers.sh"
-    for f in pi_write_gitguard_extension pi_write_memguard_extension pi_write_agentguard_extension pi_write_mandate_extension pi_write_subagent_extension pi_write_sandbox_extension pi_write_sessiontag_extension pi_write_metrics_extension pi_write_grounding_extension; do
+    for f in pi_write_gitguard_extension pi_write_memguard_extension pi_write_agentguard_extension pi_write_mandate_extension pi_write_subagent_extension pi_write_sandbox_extension pi_write_sessiontag_extension pi_write_metrics_extension pi_write_grounding_extension pi_write_backend_extension; do
         if declare -F "${f}" >/dev/null; then "${f}"; fi
     done
 ) || { echo "could not extract the extensions from lets-code"; exit 1; }
@@ -67,6 +67,7 @@ for t in "${here}"/*.test.mjs; do
         session-tag*)               ext="${agent}/extensions/session-tag/index.ts" ;;
         metrics*)                   ext="${agent}/extensions/footer/index.ts" ;;
         grounding*)                 ext="${agent}/extensions/grounding/index.ts" ;;
+        backend*)                   ext="${agent}/extensions/backend/index.ts" ;;
         *)                          ext="" ;;
     esac
     if [ -n "${ext}" ] && [ ! -f "${ext}" ]; then echo "=== $(basename "${t}"): skipped (no ${ext#${agent}/extensions/} in this build)"; continue; fi

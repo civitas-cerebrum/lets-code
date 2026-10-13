@@ -112,8 +112,9 @@
 #      bash confined with @anthropic-ai/sandbox-runtime (bubblewrap on
 #      Linux, Seatbelt on macOS); MCP — setup imports an existing .mcp.json
 #      or another client's config into pi's built-in MCP support; REA — a
-#      reverse-engineering skill (one line of context) that runs REA's MCP
-#      server in a separate pi, so its tools never enter this session.
+#      reverse-engineer subagent (or, with subagents off, a one-line skill)
+#      that runs REA's MCP server in a separate pi, so its tools never enter
+#      this session.
 #
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
 # Presets: ~/.config/lets-code/presets/<name>   (`lets-code setup --preset <name>`)
@@ -678,37 +679,143 @@ PY
 }
 
 # ------------------------------------------------------------ extension dirs
-# Each extension lets-code writes lives in ~/.pi/agent/extensions/<name>/
-# index.ts, so pi's startup list names it ("agent-guard", "footer") instead
-# of a file name. lc_ext_dir prints the directory for <name>: a directory of
-# that name that the user made (its index.ts not written by lets-code) is
-# left alone and lets-code-<name> is used instead. It also retires the
-# extension's old location (<legacy>, a lets-code-*.ts file or directory)
-# when lets-code wrote it: a file is removed, so pi does not load the
-# extension twice; a directory is moved, so what it holds comes along.
-lc_ext_dir() {  # lc_ext_dir <name> <legacy>
-    local base="${PI_AGENT_DIR}/extensions" dir old
-    dir="${base}/$1"; old="${base}/$2"
-    if [ -f "${dir}/index.ts" ] && ! head -n 1 "${dir}/index.ts" 2>/dev/null | grep -q "Written by lets-code"; then
-        dir="${base}/lets-code-$1"
+# Everything lets-code runs inside pi is ONE pi extension,
+# ~/.pi/agent/extensions/lets-code/, so pi's startup [Extensions] list shows
+# "lets-code" once instead of a name per feature. Its index.ts (see
+# pi_write_lets_code_extension) loads each feature module that is present:
+# <feature>.ts, or <feature>/index.ts for a feature with files of its own
+# (the sandbox and its npm runtime). pi loads only index.ts from a directory
+# (no recursion), so a module never loads on its own as well. A module is
+# written when its feature is on; one written by an earlier launch with the
+# feature off now stays inert, as each still checks its own switch. A
+# "lets-code" directory the user made (an extension there not written by
+# lets-code) is left alone and lets-code-ext is used instead.
+LC_EXT_FEATURES="agent-guard backend footer git-guard grounding mandate memory-guard sandbox session-tag subagents"
+LC_EXT_ROOT=""
+LC_ACTIVE=""    # the features whose module this launch wrote, i.e. the ones on
+lc_written() {  # lc_written <file>: true when lets-code wrote <file>
+    [ -f "$1" ] && head -n 1 "$1" 2>/dev/null | grep -q "Written by lets-code"
+}
+lc_ext_root() {  # sets LC_EXT_ROOT, the lets-code extension's directory (decided once)
+    local base="${PI_AGENT_DIR}/extensions" d
+    [ -z "${LC_EXT_ROOT}" ] || return 0
+    d="${base}/lets-code"
+    if ! lc_written "${d}/index.ts" && { [ -e "${d}/index.ts" ] || [ -e "${d}/index.js" ] || [ -e "${d}/package.json" ]; }; then
+        d="${base}/lets-code-ext"
+        log "note: ${base}/lets-code is your own extension; lets-code's features go in ${d}."
     fi
-    if [ -f "${old}" ] && head -n 1 "${old}" 2>/dev/null | grep -q "Written by lets-code"; then
-        rm -f "${old}"
-    elif [ -d "${old}" ] && [ "${old}" != "${dir}" ] && [ ! -e "${dir}" ] && head -n 1 "${old}/index.ts" 2>/dev/null | grep -q "Written by lets-code"; then
-        mkdir -p "${base}" && mv "${old}" "${dir}"
-    fi
-    printf '%s' "${dir}"
+    LC_EXT_ROOT="${d}"
+}
+# lc_ext_module <feature>: sets LC_MOD_DIR (where the module's files go) and
+# LC_MOD_FILE (its source), creates the directory, makes sure the index that
+# loads it is there, and records the feature as on. Called directly, not in
+# "$(...)", so the record survives.
+lc_ext_module() {
+    lc_ext_root
+    case "$1" in
+        sandbox) LC_MOD_DIR="${LC_EXT_ROOT}/$1"; LC_MOD_FILE="${LC_MOD_DIR}/index.ts" ;;
+        *)       LC_MOD_DIR="${LC_EXT_ROOT}"; LC_MOD_FILE="${LC_EXT_ROOT}/$1.ts" ;;
+    esac
+    mkdir -p "${LC_MOD_DIR}"
+    lc_written "${LC_EXT_ROOT}/index.ts" || pi_write_lets_code_extension
+    case " ${LC_ACTIVE} " in *" $1 "*) ;; *) LC_ACTIVE="${LC_ACTIVE:+${LC_ACTIVE} }$1" ;; esac
 }
 
-# Every launch retires all the old locations, including those of features
-# that are off this time (their old files would still load, under old names).
-lc_retire_old_extensions() {
-    local pair
-    for pair in footer:lets-code-metrics.ts grounding:lets-code-grounding.ts session-tag:lets-code-sessiontag.ts \
-                memory-guard:lets-code-memguard.ts git-guard:lets-code-gitguard.ts agent-guard:lets-code-agentguard.ts \
-                mandate:lets-code-mandate.ts subagents:lets-code-subagent.ts sandbox:lets-code-sandbox; do
-        lc_ext_dir "${pair%%:*}" "${pair#*:}" >/dev/null
+# Every launch moves what earlier versions wrote into the one extension,
+# features that are off this time included (left in place, pi would still
+# load them under their old names): the per-feature directories <feature>/
+# (lets-code-<feature>/ where the user had a directory of that name, and
+# lets-code-sandbox/ from before that) and the older single files
+# lets-code-*.ts. Only what lets-code wrote is touched: a directory whose
+# index.ts, or a file whose first line, says "Written by lets-code". A
+# module moves to lets-code/<feature>.ts unless the new place already has
+# one; the sandbox directory moves whole, npm runtime included, so nothing
+# is reinstalled. A directory left holding files lets-code did not write
+# stays (it is no longer an extension) and the launch says so.
+lc_migrate_extensions() {
+    local base="${PI_AGENT_DIR}/extensions" feat d f
+    lc_ext_root
+    mkdir -p "${LC_EXT_ROOT}"
+    pi_write_lets_code_extension
+    for feat in ${LC_EXT_FEATURES}; do
+        for d in "${base}/${feat}" "${base}/lets-code-${feat}"; do
+            [ "${d}" != "${LC_EXT_ROOT}" ] && lc_written "${d}/index.ts" || continue
+            if [ "${feat}" = sandbox ] && [ ! -e "${LC_EXT_ROOT}/sandbox" ]; then
+                mv "${d}" "${LC_EXT_ROOT}/sandbox"; continue
+            fi
+            if [ "${feat}" = sandbox ]; then
+                rm -rf "${d}/node_modules"; rm -f "${d}/package.json" "${d}/package-lock.json"
+            elif [ ! -e "${LC_EXT_ROOT}/${feat}.ts" ]; then
+                mv "${d}/index.ts" "${LC_EXT_ROOT}/${feat}.ts"
+            fi
+            rm -f "${d}/index.ts" "${d}"/.index.*
+            rmdir "${d}" 2>/dev/null || log "note: ${d} holds files lets-code did not write; left in place (no longer loaded)."
+        done
     done
+    for f in "${base}"/lets-code-*.ts; do
+        if lc_written "${f}"; then rm -f "${f}"; fi
+    done
+}
+
+# The one extension pi loads: imports each feature module present, in the
+# order pi loaded them when they were separate (alphabetical), and isolates
+# them, so one that fails to import or to set up is reported by name and the
+# others still run. Rewritten when its content changes.
+pi_write_lets_code_extension() {
+    local f tmp
+    lc_ext_root
+    mkdir -p "${LC_EXT_ROOT}"
+    f="${LC_EXT_ROOT}/index.ts"
+    tmp="$(mktemp "${LC_EXT_ROOT}/.index.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (its pi features, as one extension); regenerated on launch, edits are overwritten.
+// pi lists this directory once, as "lets-code". Each feature is a module
+// next to this file, <feature>.ts or <feature>/index.ts (the sandbox, with
+// its npm runtime), written by lets-code when the feature is on; each one
+// checks its own switch (LETS_CODE_*), so a module left from a launch with
+// the feature off stays inert. pi loads only this file from the directory.
+// Modules load one at a time in a fixed order, each on its own: a module
+// that is missing is skipped; one that fails to import, or whose setup
+// throws, is reported by name (a notification with a UI, stderr without)
+// and the others still load. Handlers a failing setup registered before it
+// threw stay registered.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+// pi's load order when they were separate extensions (alphabetical)
+export const FEATURES = ["agent-guard", "backend", "footer", "git-guard", "grounding", "mandate", "memory-guard", "sandbox", "session-tag", "subagents"];
+
+export function moduleFile(dir: string, name: string): string | undefined {
+	return [join(dir, `${name}.ts`), join(dir, name, "index.ts")].find((f) => existsSync(f));
+}
+
+export default async function (pi: ExtensionAPI) {
+	const failed: string[] = [];
+	for (const name of FEATURES) {
+		const file = moduleFile(HERE, name);
+		if (!file) continue;
+		try {
+			const mod = await import(pathToFileURL(file).href);
+			const setup = typeof mod.default === "function" ? mod.default : mod.default?.default;
+			if (typeof setup !== "function") throw new Error("no default export function");
+			await setup(pi);
+		} catch (e) {
+			failed.push(`${name} (${e instanceof Error ? e.message : String(e)})`);
+		}
+	}
+	if (failed.length === 0) return;
+	const msg = `lets-code: ${failed.length === 1 ? "feature" : "features"} not loaded: ${failed.join("; ")}. The others are running.`;
+	pi.on("session_start", (_e: unknown, ctx: { hasUI?: boolean; ui?: { notify(m: string, t?: string): void } }) => {
+		if (ctx?.hasUI && ctx.ui) ctx.ui.notify(msg, "error");
+		else console.error(msg);
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
 
 # ------------------------------------------------------------------ themes
@@ -941,10 +1048,8 @@ mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
 # nothing without a UI. Rewritten when its content changes.
 pi_write_metrics_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir footer lets-code-metrics.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module footer; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.footer.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (footer and metrics); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code (LETS_CODE_METRICS_ON set); the
@@ -1377,10 +1482,8 @@ TS
 # LETS_CODE_GROUNDING_ON=1. Rewritten when its content changes.
 pi_write_grounding_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir grounding lets-code-grounding.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module grounding; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.grounding.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (grounding guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the grounding guard on
@@ -1471,10 +1574,8 @@ TS
 # Inert unless LETS_CODE_BACKEND is set. Rewritten when its content changes.
 pi_write_backend_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir backend lets-code-backend.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module backend; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.backend.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (backend facts); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code (LETS_CODE_BACKEND set). The
@@ -1552,10 +1653,8 @@ TS
 # content changes.
 pi_write_sessiontag_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir session-tag lets-code-sessiontag.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module session-tag; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.session-tag.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (session tag); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the session tag on
@@ -1604,10 +1703,8 @@ TS
 # Rewritten when its content changes.
 pi_write_memguard_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir memory-guard lets-code-memguard.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module memory-guard; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.memory-guard.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (memory guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code (LETS_CODE_SESSION=1). Watches the
@@ -1854,10 +1951,8 @@ git_guard_plan() {  # sets GG_MODE (on|off) and GG_NOTE
 # Rewritten when its content changes.
 pi_write_gitguard_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir git-guard lets-code-gitguard.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module git-guard; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.git-guard.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (git guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the git guard on
@@ -2626,10 +2721,8 @@ TS
 # Inert unless LETS_CODE_AGENT_GUARD_ON=1. Rewritten when its content changes.
 pi_write_agentguard_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir agent-guard lets-code-agentguard.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module agent-guard; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.agent-guard.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (agent guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the agent guard on
@@ -3423,10 +3516,8 @@ ensure_pi_tools() {
 # ~/.pi/agent/mandate.json; a project's .pi/mandate.json may only tighten.
 pi_write_mandate_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir mandate lets-code-mandate.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module mandate; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.mandate.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (mandate); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the mandate on
@@ -3842,10 +3933,8 @@ TS
 # pi process (same provider, same guards, the role its file names).
 pi_write_subagent_extension() {
     local dir f tmp
-    dir="$(lc_ext_dir subagents lets-code-subagent.ts)"
-    f="${dir}/index.ts"
-    mkdir -p "${dir}"
-    tmp="$(mktemp "${dir}/.index.XXXXXX")"
+    lc_ext_module subagents; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.subagents.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (subagents); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with subagents on
@@ -3858,11 +3947,22 @@ pi_write_subagent_extension() {
 // the project is trusted. Every child goes through lets-code's provider and
 // the same guards; it runs under the mandate role the agent file names.
 // A child cannot start children of its own (LETS_CODE_SUBAGENT_DEPTH).
+//
+// An agent type can bring its own environment (all optional; paths relative
+// to ~/.pi/agent, or absolute under it, or under the project for a trusted
+// project's agent; anything else rejects the file):
+//   agent_dir      the child's PI_CODING_AGENT_DIR (own mcp.json, ...)
+//   skills         paths passed as --skill
+//   append_prompt  a file appended with --append-system-prompt
+//   timeout        seconds before the child is stopped (default: none)
+//   requires       a path that must exist, else the agent is hidden
+//   requires_env   an environment variable that must be set (not 0), else hidden
+// A missing agent_dir, skill or append_prompt hides the agent too.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { Type } from "typebox";
 
 const ACTIVE = process.env.LETS_CODE_SUBAGENTS_ON === "1";
@@ -3874,44 +3974,91 @@ const OUTPUT_CAP = 50 * 1024;
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const MODEL = process.env.LETS_CODE_MODEL || "";
 
-export interface AgentDef { name: string; description: string; tools?: string[]; thinking?: string; role?: string; prompt: string; source: "user" | "project"; file: string }
+export interface AgentDef {
+	name: string; description: string; tools?: string[]; thinking?: string; role?: string; prompt: string; source: "user" | "project"; file: string;
+	agentDir?: string; skills?: string[]; appendPrompt?: string; timeout?: number;
+}
+export const MAX_TIMEOUT = 24 * 3600;
 
-export function parseAgentFile(text: string, file: string, source: "user" | "project"): AgentDef | null {
+// A path named in an agent file, resolved and checked lexically: relative to
+// the agent dir, or absolute under one of the roots. null = outside them.
+export function agentPath(p: string, roots: string[]): string | null {
+	if (!p || /[\0\r\n]/.test(p)) return null;
+	const abs = isAbsolute(p) ? resolve(p) : resolve(AGENT_DIR, p);
+	return roots.some((r) => { const root = resolve(r); return abs === root || abs.startsWith(root.endsWith(sep) ? root : root + sep); }) ? abs : null;
+}
+
+// null when the file is not a usable agent: bad name, a field that does not
+// validate, or an environment it needs that is missing here (hidden).
+export function parseAgentFile(text: string, file: string, source: "user" | "project", projectRoot?: string): AgentDef | null {
 	const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
 	const fm: Record<string, string> = {}; let body = text;
-	if (m) { body = m[2]; for (const line of m[1].split(/\r?\n/)) { const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line); if (kv) fm[kv[1]] = kv[2].trim().replace(/^["']|["']$/g, ""); } }
+	if (m) {
+		body = m[2]; let last = "";
+		for (const line of m[1].split(/\r?\n/)) {
+			const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line);
+			if (kv) { last = kv[1]; fm[last] = kv[2].trim().replace(/^["']|["']$/g, ""); continue; }
+			const item = /^\s+-\s+(.*)$/.exec(line);   // a block list under the last key
+			if (item && last) fm[last] = [fm[last], item[1].trim().replace(/^["']|["']$/g, "")].filter(Boolean).join(",");
+		}
+	}
 	const name = (fm.name || file.replace(/^.*\//, "").replace(/\.md$/, "")).trim();
 	if (!/^[A-Za-z0-9][\w.-]*$/.test(name)) return null;
-	const list = (v?: string) => v ? v.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim()).filter(Boolean) : undefined;
-	return { name, description: fm.description ?? "", tools: list(fm.tools), thinking: fm.thinking, role: fm.role, prompt: body.trim(), source, file };
+	const list = (v?: string) => v ? v.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean) : undefined;
+	const roots = [AGENT_DIR, ...(source === "project" && projectRoot ? [projectRoot] : [])];
+	const a: AgentDef = { name, description: fm.description ?? "", tools: list(fm.tools), thinking: fm.thinking, role: fm.role, prompt: body.trim(), source, file };
+	const path = (key: string) => { const p = agentPath(fm[key], roots); if (!p) throw new Error(key); return p; };
+	try {
+		if (fm.agent_dir) { a.agentDir = path("agent_dir"); if (!statSync(a.agentDir, { throwIfNoEntry: false })?.isDirectory()) return null; }
+		if (fm.skills) { a.skills = list(fm.skills)!.map((s) => { const p = agentPath(s, roots); if (!p) throw new Error("skills"); return p; }); if (!a.skills.every((s) => existsSync(s))) return null; }
+		if (fm.append_prompt) { a.appendPrompt = path("append_prompt"); if (!statSync(a.appendPrompt, { throwIfNoEntry: false })?.isFile()) return null; }
+		if (fm.timeout) { const s = Number(fm.timeout); if (!/^\d+$/.test(fm.timeout) || s < 1 || s > MAX_TIMEOUT) return null; a.timeout = s; }
+		if (fm.requires && !existsSync(path("requires"))) return null;
+		if (fm.requires_env) { if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(fm.requires_env)) return null; const v = process.env[fm.requires_env]; if (!v || v === "0") return null; }
+	} catch { return null; }   // a path outside the allowed roots
+	return a;
 }
 export function discoverAgents(cwd: string, trusted: boolean): AgentDef[] {
 	const out = new Map<string, AgentDef>();
 	const scan = (dir: string, source: "user" | "project") => {
 		if (!existsSync(dir)) return;
-		for (const f of readdirSync(dir)) { if (!f.endsWith(".md")) continue; try { const a = parseAgentFile(readFileSync(join(dir, f), "utf8"), join(dir, f), source); if (a && !out.has(a.name)) out.set(a.name, a); } catch { /* skip bad file */ } }
+		for (const f of readdirSync(dir)) { if (!f.endsWith(".md")) continue; try { const a = parseAgentFile(readFileSync(join(dir, f), "utf8"), join(dir, f), source, cwd); if (a && !out.has(a.name)) out.set(a.name, a); } catch { /* skip bad file */ } }
 	};
 	if (trusted) { scan(join(cwd, ".pi", "agents"), "project"); scan(join(cwd, ".agents", "agents"), "project"); }
 	scan(join(AGENT_DIR, "agents"), "user");
 	return [...out.values()];
 }
 
-interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number }
+interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number; timedOut?: number }
 
 function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSignal | undefined, onProgress?: (line: string) => void): Promise<RunResult> {
 	const args = ["--mode", "json", "-p", "--no-session"];
 	if (MODEL) args.push("--provider", process.env.LETS_CODE_PROVIDER || "lets-code", "--model", MODEL);
 	if (agent.thinking) args.push("--thinking", agent.thinking);
 	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
+	for (const s of agent.skills ?? []) args.push("--skill", s);
 	const tmp = mkdtempSync(join(tmpdir(), "lets-code-agent-"));
 	const promptFile = join(tmp, "prompt.md");
-	writeFileSync(promptFile, `You are the "${agent.name}" agent. ${agent.description}\n\n${agent.prompt}\n`);
-	args.push("--append-system-prompt", promptFile, `Task: ${task}`);
+	// An agent that brings its own instructions (append_prompt) and has no body
+	// gets exactly those, without the generic preamble (REA: the child sees the
+	// same instructions as through rea/run).
+	if (agent.prompt.trim() || !agent.appendPrompt) {
+		writeFileSync(promptFile, `You are the "${agent.name}" agent. ${agent.description}\n\n${agent.prompt}\n`);
+		args.push("--append-system-prompt", promptFile);
+	}
+	if (agent.appendPrompt) args.push("--append-system-prompt", agent.appendPrompt);
+	args.push(`Task: ${task}`);
 	const env = { ...process.env, LETS_CODE_SUBAGENT_DEPTH: String(DEPTH + 1), LETS_CODE_ROLE: agent.role || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "" };
 	if (!env.LETS_CODE_ROLE) delete (env as any).LETS_CODE_ROLE;
+	if (agent.agentDir) env.PI_CODING_AGENT_DIR = agent.agentDir;
 	const r: RunResult = { agent: agent.name, task, text: "", exitCode: 0, stderr: "", turns: 0, input: 0, output: 0 };
 	return new Promise((resolve) => {
 		const child = spawn("pi", args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+		const timer = agent.timeout ? setTimeout(() => {
+			r.timedOut = agent.timeout;
+			try { child.kill("SIGTERM"); } catch { /* gone */ }
+			setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* gone */ } }, 5000).unref();
+		}, agent.timeout * 1000) : undefined;
 		let buf = "";
 		const handle = (line: string) => {
 			if (!line.trim()) return;
@@ -3928,13 +4075,14 @@ function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSigna
 		const onAbort = () => { try { child.kill("SIGTERM"); } catch { /* gone */ } };
 		signal?.addEventListener("abort", onAbort, { once: true });
 		child.on("error", (e) => { r.exitCode = 1; r.stderr += `\n${e.message}`; finish(); });
-		child.on("close", (code) => { if (buf) handle(buf); r.exitCode = code ?? 1; finish(); });
-		const finish = () => { signal?.removeEventListener("abort", onAbort); try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ok */ } resolve(r); };
+		child.on("close", (code) => { if (buf) handle(buf); r.exitCode = r.timedOut ? (code || 124) : code ?? 1; finish(); });
+		const finish = () => { if (timer) clearTimeout(timer); signal?.removeEventListener("abort", onAbort); try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ok */ } resolve(r); };
 	});
 }
 function cap(s: string): string { if (Buffer.byteLength(s, "utf8") <= OUTPUT_CAP) return s; let t = s.slice(0, OUTPUT_CAP); while (Buffer.byteLength(t, "utf8") > OUTPUT_CAP) t = t.slice(0, -1); return `${t}\n\n[output truncated at 50 KB]`; }
 function render(r: RunResult): string {
-	const head = `## ${r.agent}${r.step ? ` (step ${r.step})` : ""} — ${r.exitCode === 0 ? "done" : `exit ${r.exitCode}`}, ${r.turns} turn${r.turns === 1 ? "" : "s"}, ↑${r.input} ↓${r.output}`;
+	const status = r.timedOut ? `timed out after ${r.timedOut}s` : r.exitCode === 0 ? "done" : `exit ${r.exitCode}`;
+	const head = `## ${r.agent}${r.step ? ` (step ${r.step})` : ""} — ${status}, ${r.turns} turn${r.turns === 1 ? "" : "s"}, ↑${r.input} ↓${r.output}`;
 	const body = r.text.trim() || (r.stderr.trim() ? `(no output; stderr: ${r.stderr.trim().slice(-800)})` : "(no output)");
 	return `${head}\n${cap(body)}`;
 }
@@ -3949,7 +4097,7 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) =
 // names and the three call shapes. Their jobs are in orchestration().
 export function agentsBlurb(agents: AgentDef[]): string {
 	const names = agents.map((a) => a.name).join(", ") || "none yet";
-	return `Agents (${names}), fresh contexts: brief fully. {agent,task} | {tasks:[..]} parallel | {chain:[..]} with {previous}=prior output`;
+	return `Agents (${names}), fresh contexts: brief fully. {agent,task} | {tasks:[..]} parallel | {chain:[..]}, {previous}=prior output`;
 }
 // "name (job)" with the job cut to about 60 characters
 export function agentJobs(agents: AgentDef[]): string {
@@ -4057,10 +4205,17 @@ TS
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
 
-# Three starter agents, written only when the user has none yet.
+# Three starter agents, written only when the user has none yet (agents
+# lets-code maintains itself, such as reverse-engineer, do not count).
 write_default_agents() {
-    local dir="${PI_AGENT_DIR}/agents"
-    if [ -d "${dir}" ] && [ -n "$(ls -A "${dir}" 2>/dev/null)" ]; then return 0; fi
+    local dir="${PI_AGENT_DIR}/agents" e
+    if [ -d "${dir}" ]; then
+        for e in "${dir}"/* "${dir}"/.[!.]*; do
+            [ -e "${e}" ] || continue
+            [ -f "${e}" ] && grep -q '^# Written by lets-code' "${e}" 2>/dev/null && continue
+            return 0
+        done
+    fi
     mkdir -p "${dir}"
     cat > "${dir}/scout.md" <<'MD'
 ---
@@ -4116,16 +4271,15 @@ MD
 }
 
 # Sandbox: bash confined with @anthropic-ai/sandbox-runtime. The runtime is
-# an npm package installed next to the extension (a directory extension);
+# an npm package installed next to the module (lets-code/sandbox/, a
+# directory of its own inside the lets-code extension);
 # lets-code installs or updates it when missing. Never fatal: without the
 # runtime the extension warns and bash runs as before.
 SANDBOX_RUNTIME_VERSION="0.0.79"
 SB_NOTE=""
 pi_write_sandbox_extension() {
     local dir f tmp have=""
-    dir="$(lc_ext_dir sandbox lets-code-sandbox)"
-    mkdir -p "${dir}"
-    f="${dir}/index.ts"
+    lc_ext_module sandbox; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
     tmp="$(mktemp "${dir}/.index.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (sandbox); regenerated on launch, edits are overwritten.
@@ -4378,18 +4532,32 @@ PY
 
 # REA (https://github.com/morluto/rea): reverse engineering on demand. REA is
 # one MCP server with ~170 tools (~65k tokens of input schemas even in its
-# compact profile), so it is never registered in the main session. The main
-# session gets one skill line (none with REA=manual); the skill runs
-# ${REA_DIR}/run, a fresh pi whose own agent dir registers REA, so its tools,
+# compact profile), so it is never registered in the main session. With
+# subagents on, the main session gets the agent type reverse-engineer
+# (agents/reverse-engineer.md: its name in the subagent tool); otherwise one
+# skill line (none with REA=manual) whose skill runs ${REA_DIR}/run. Either
+# way the child is a fresh pi whose own agent dir registers REA, so its tools,
 # its own skill and the raw evidence stay in that child and only the report
 # comes back. The child agent dir links everything of ~/.pi/agent (models,
 # auth, settings, extensions, so the same provider and guards apply) except
 # mcp.json and skills. REA is pinned and installed like the sandbox runtime.
 REA_VERSION="6.4.0"
 REA_DIR="${PI_AGENT_DIR}/rea"
+# What the main session gets, after pi_write_rea. With subagents on and the
+# reverse-engineer agent in place: the agent (LETS_CODE_REA_AGENT lists it in
+# the subagent tool, whose agent names are in context anyway) and no skill
+# line. Otherwise (subagents off, REA=manual, a user's own agent file of that
+# name): the skill, which runs ${REA_DIR}/run by bash.
+rea_surface() {  # rea_surface <on|manual>; sets REA_SURFACE (agent|skill)
+    REA_SURFACE=skill
+    if [ "$1" = on ] && [ "${REA_AGENT:-}" = 1 ] && [ "${LETS_CODE_SUBAGENTS_ON:-}" = 1 ]; then
+        REA_SURFACE=agent; export LETS_CODE_REA_AGENT=1
+    fi
+    return 0
+}
 pi_write_rea() {  # pi_write_rea <on|manual>; sets REA_NOTE (empty = ready)
     local invoke="$1" rt="${REA_DIR}/runtime" agent="${REA_DIR}/agent" have="" e name
-    REA_NOTE=""
+    REA_NOTE=""; REA_AGENT=""
     mkdir -p "${rt}" "${agent}" "${REA_DIR}/skill/reverse-engineering"
 
     # 1. the pinned REA package (first run, or when REA_VERSION changes)
@@ -4508,6 +4676,33 @@ SH
         echo "run it again with a narrower task to dig further. Do not call REA or"
         echo "npx rea-agents yourself."
     } > "${REA_DIR}/skill/reverse-engineering/SKILL.md"
+
+    # 5. the same child as an agent type for the subagent tool (progress,
+    # parallel tasks, orchestration). Listed only in a session launched with
+    # REA on (requires_env; the launch exports it), so REA off or manual adds
+    # nothing to context; hidden too once the runtime is gone. A user's own
+    # agent of that name is left alone (REA_AGENT stays empty).
+    local af="${PI_AGENT_DIR}/agents/reverse-engineer.md" tmp
+    if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    mkdir -p "${PI_AGENT_DIR}/agents"
+    tmp="$(mktemp "${af}.XXXXXX")" || return 0
+    cat > "${tmp}" <<'MD'
+---
+# Written by lets-code (REA); regenerated on launch, edits are overwritten.
+# To keep your own version, delete this line: lets-code then leaves it alone.
+name: reverse-engineer
+description: Reverse engineers binaries, apps, APKs, firmware, websites
+agent_dir: rea/agent
+skills: rea/runtime/node_modules/rea-agents/skills/reverse-engineer-anything
+append_prompt: rea/prompt.md
+timeout: 3600
+requires: rea/runtime/node_modules/rea-agents/package.json
+requires_env: LETS_CODE_REA_AGENT
+---
+MD
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+    REA_AGENT=1
 }
 
 # `lets-code mandate init [--global]`: a starter manifest to edit.
@@ -4883,7 +5078,7 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
     # 10. optional features chosen above
     if [ "${feat_sandbox}" = "true" ]; then
         pi_write_sandbox_extension
-        if [ -n "${SB_NOTE}" ]; then log "sandbox: ${SB_NOTE}"; else log "sandbox: runtime ready ($(lc_ext_dir sandbox lets-code-sandbox))"; fi
+        if [ -n "${SB_NOTE}" ]; then log "sandbox: ${SB_NOTE}"; else log "sandbox: runtime ready (${LC_MOD_DIR})"; fi
     fi
     [ "${feat_subagents}" = "true" ] && write_default_agents
     [ "${feat_mcp}" = "yes" ] && mcp_import yes
@@ -5600,7 +5795,7 @@ if [ "${REASONING_SUPPORTED}" = true ] && [ "${API}" = openai-completions ]; the
 fi
 pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}" "${VISION}" "${REASONING_SUPPORTED}" "${THINKING}" "${EFFORT_MAP}"
 pi_write_themes
-lc_retire_old_extensions
+lc_migrate_extensions
 pick_theme_once
 
 export LETS_CODE_TOKEN="${TOKEN}"
@@ -5705,7 +5900,7 @@ case "$(printf '%s' "${SESSION_TAG}" | tr '[:upper:]' '[:lower:]')" in
 esac
 
 # optional features: mandate (modes/roles), subagents, sandbox, REA, metrics
-unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL LETS_CODE_METRICS_ON
+unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL LETS_CODE_REA_AGENT LETS_CODE_METRICS_ON
 FEAT_DESC=""
 # footer: minimal by default; METRICS=true starts with the full one
 pi_write_metrics_extension
@@ -5753,7 +5948,9 @@ case "$(lc "${REA}")" in
         pi_write_rea "${rea_invoke}"
         if [ -z "${REA_NOTE}" ]; then
             export LETS_CODE_REA_PROVIDER="${PROVIDER_ID}" LETS_CODE_REA_MODEL="${MODEL}"
-            if [ ${#PASSTHROUGH[@]} -eq 0 ]; then PASSTHROUGH=(--skill "${REA_DIR}/skill/reverse-engineering")
+            rea_surface "${rea_invoke}"
+            if [ "${REA_SURFACE}" = agent ]; then rea_invoke="on (agent)"
+            elif [ ${#PASSTHROUGH[@]} -eq 0 ]; then PASSTHROUGH=(--skill "${REA_DIR}/skill/reverse-engineering")
             else PASSTHROUGH=(--skill "${REA_DIR}/skill/reverse-engineering" "${PASSTHROUGH[@]}"); fi
             FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }rea: ${rea_invoke}"
         else
@@ -5780,9 +5977,13 @@ banner() {
     case "${AG_DESC}" in *" on"*) guards=$((guards + 1)) ;; esac
     [ "${LETS_CODE_GROUNDING_ON:-}" = 1 ] && guards=$((guards + 1))
     [ "${GG_MODE}" = off ] || guards=$((guards + 1))
-    # pi extensions installed: one per .ts file or per directory with an index
+    # extensions: lets-code's features on this launch (pi lists them as one,
+    # "lets-code") plus the user's own (a .ts/.js file, or a directory with
+    # an index or a package.json)
+    for e in ${LC_ACTIVE}; do exts=$((exts + 1)); done
     for e in "${PI_AGENT_DIR}"/extensions/*; do
-        case "${e}" in *.ts) [ -f "${e}" ] && exts=$((exts + 1)) ;; *) [ -f "${e}/index.ts" ] || [ -f "${e}/index.js" ] || [ -f "${e}/package.json" ] && exts=$((exts + 1)) ;; esac
+        [ "${e}" = "${LC_EXT_ROOT}" ] && continue
+        case "${e}" in *.ts|*.js) [ -f "${e}" ] && exts=$((exts + 1)) ;; *) [ -f "${e}/index.ts" ] || [ -f "${e}/index.js" ] || [ -f "${e}/package.json" ] && exts=$((exts + 1)) ;; esac
     done
     [ "${VISION}" = true ] && extras=" · vision"
     extras="${extras} · ${guards} guard$([ "${guards}" = 1 ] || echo s) · ${exts} extension$([ "${exts}" = 1 ] || echo s)"

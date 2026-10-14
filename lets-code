@@ -409,8 +409,8 @@ else:
 # changes the rendered prompt, the template uses it: each pi level from minimal
 # to high gets the accepted value nearest to it. xhigh gets its nearest value
 # too, but pi_write_configs keeps it only when xhigh's larger budget fits the
-# output cap (see XHIGH_THINKING_BUDGET); otherwise xhigh, like max, stays
-# unmapped and pi clamps it to high. Servers without /tokenize: nothing is sent.
+# output cap, its own or the model's (see XHIGH_THINKING_BUDGET); otherwise
+# xhigh, like max, stays unmapped and pi clamps it to high. Servers without /tokenize: nothing is sent.
 # Sets EFFORT_MAP ("" or JSON like {"low": "low", ...}) and EFFORT_NOTE.
 probe_template_effort() {  # probe_template_effort <base-url-without-/v1> <model> [1 = neutral: map every level to the least-instruction value]
     EFFORT_MAP=""; EFFORT_NOTE=""
@@ -519,7 +519,7 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 # ~/.config/lets-code/config (mode 600). Writes are atomic (tmp + rename),
 # every other key in the files is preserved, and a corrupt file fails loudly.
 pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-cap> <vision> <reasoning> <thinking> [<effort-map-json>]
-    PI_AGENT_DIR="${PI_AGENT_DIR}" LC_PROVIDER="${PROVIDER_ID:-lets-code}" LC_XHIGH_BUDGET="${XHIGH_THINKING_BUDGET:-}" LC_XHIGH_ROOM="${XHIGH_ANSWER_ROOM:-}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
+    PI_AGENT_DIR="${PI_AGENT_DIR}" LC_PROVIDER="${PROVIDER_ID:-lets-code}" LC_XHIGH_BUDGET="${XHIGH_THINKING_BUDGET:-}" LC_XHIGH_ROOM="${XHIGH_ANSWER_ROOM:-}" LC_XHIGH_CAP="${XHIGH_LEVEL_CAP:-}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
 import json, os, sys, tempfile
 
 base, api, model, context, cap, vision, reasoning, thinking, effort_map = sys.argv[1:10]
@@ -529,6 +529,8 @@ ctx = int(context)
 cap = int(cap)
 xhigh_budget = int(os.environ.get("LC_XHIGH_BUDGET") or 32768)
 xhigh_room = int(os.environ.get("LC_XHIGH_ROOM") or 8192)
+# output cap for xhigh requests alone when the model's cap is too small (unpinned caps only)
+xhigh_cap = int(os.environ.get("LC_XHIGH_CAP") or 0)
 
 def upsert(path, mutate):
     doc = {}
@@ -613,13 +615,21 @@ def to_models(doc):
         # otherwise clamps it to high; even when supported, pi's own budget
         # for xhigh is high's. samplingParamsByThinkingLevel is merged into
         # the request after pi's thinking_token_budget, so its value wins.
-        # Enabled only when the output cap leaves answer room after the
-        # budget. max stays unmapped and so clamps to xhigh when it is on.
-        if cap - xhigh_budget >= xhigh_room:
+        # Enabled when the output cap leaves answer room after the budget,
+        # or else (unpinned cap) with a larger output cap for xhigh requests
+        # alone, so xhigh is offered in-session at every startup level while
+        # the other levels keep theirs. max stays unmapped and so clamps to
+        # xhigh when it is on.
+        xhigh_params = {"thinking_token_budget": xhigh_budget}
+        if cap - xhigh_budget < xhigh_room and xhigh_cap - xhigh_budget >= xhigh_room:
+            # pi sends one of the two fields (detected per server); both
+            # carry the same value, so whichever the server reads agrees
+            xhigh_params.update({"max_tokens": xhigh_cap, "max_completion_tokens": xhigh_cap})
+        if cap - xhigh_budget >= xhigh_room or len(xhigh_params) > 1:
             # without a template effort control the value is never sent;
             # the entry only makes xhigh a supported level
             level_map["xhigh"] = xhigh_value or "xhigh"
-            model_doc["samplingParamsByThinkingLevel"] = {"xhigh": {"thinking_token_budget": xhigh_budget}}
+            model_doc["samplingParamsByThinkingLevel"] = {"xhigh": xhigh_params}
         if effort_map:
             compat["chatTemplateKwargs"]["reasoning_effort"] = {"$var": "thinking.level", "omitWhenOff": True}
         if level_map:
@@ -5793,6 +5803,10 @@ if [ "${REASONING_SUPPORTED}" = true ] && [ "${API}" = openai-completions ]; the
            log_verbose "${EFFORT_NOTE}" ;;
     esac
 fi
+# xhigh in-session: with an unpinned cap too small for xhigh, its requests
+# alone get the raised cap, so xhigh can be picked at any startup level.
+XHIGH_LEVEL_CAP=""
+[ "${OUTPUT_CAP_PINNED}" = false ] && XHIGH_LEVEL_CAP="$(xhigh_output_cap "${CONTEXT}")"
 pi_write_configs "${PROVIDER_BASE}" "${API}" "${MODEL}" "${CONTEXT}" "${OUTPUT_CAP}" "${VISION}" "${REASONING_SUPPORTED}" "${THINKING}" "${EFFORT_MAP}"
 pi_write_themes
 lc_migrate_extensions

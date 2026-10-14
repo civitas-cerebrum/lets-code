@@ -700,7 +700,7 @@ PY
 # feature off now stays inert, as each still checks its own switch. A
 # "lets-code" directory the user made (an extension there not written by
 # lets-code) is left alone and lets-code-ext is used instead.
-LC_EXT_FEATURES="agent-guard backend footer git-guard grounding mandate memory-guard sandbox session-tag subagents"
+LC_EXT_FEATURES="agent-guard backend footer git-guard grounding mandate memory-guard sandbox session-tag subagents thinking"
 LC_EXT_ROOT=""
 LC_ACTIVE=""    # the features whose module this launch wrote, i.e. the ones on
 lc_written() {  # lc_written <file>: true when lets-code wrote <file>
@@ -796,7 +796,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // pi's load order when they were separate extensions (alphabetical)
-export const FEATURES = ["agent-guard", "backend", "footer", "git-guard", "grounding", "mandate", "memory-guard", "sandbox", "session-tag", "subagents"];
+export const FEATURES = ["agent-guard", "backend", "footer", "git-guard", "grounding", "mandate", "memory-guard", "sandbox", "session-tag", "subagents", "thinking"];
 
 export function moduleFile(dir: string, name: string): string | undefined {
 	return [join(dir, `${name}.ts`), join(dir, name, "index.ts")].find((f) => existsSync(f));
@@ -1706,6 +1706,65 @@ export default function (pi: ExtensionAPI) {
 TS
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+}
+
+# thinking memory: the level picked in a session is the next launch's level.
+# Rewritten when its content changes.
+pi_write_thinking_extension() {
+    local dir f tmp
+    lc_ext_module thinking; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.thinking.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (thinking memory); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code at a fixed thinking level
+// (LETS_CODE_THINKING_SAVE = "<provider>/<model>"; not set for auto or
+// adaptive thinking, whose level the agent guard moves). A level picked in
+// the session (Shift+Tab, /thinking, the settings menu) is written to
+// LETS_CODE_STATE_FILE under that key, and lets-code starts the next session
+// at it. Only while the launched model is the current one; subagents
+// (LETS_CODE_SUBAGENT_DEPTH > 0) save nothing.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
+
+export function saveLevel(file: string, key: string, level: string): void {
+	let doc: any = {};
+	try { doc = JSON.parse(readFileSync(file, "utf8")); } catch { /* missing or unreadable: start over */ }
+	if (!doc || typeof doc !== "object" || Array.isArray(doc)) doc = {};
+	const levels = doc.thinkingLevels && typeof doc.thinkingLevels === "object" && !Array.isArray(doc.thinkingLevels) ? doc.thinkingLevels : {};
+	if (levels[key] === level) return;
+	doc.thinkingLevels = { ...levels, [key]: level };
+	const tmp = `${file}.${process.pid}.tmp`;
+	writeFileSync(tmp, JSON.stringify(doc, null, 2) + "\n", { mode: 0o600 });
+	renameSync(tmp, file);
+}
+
+export default function (pi: ExtensionAPI) {
+	const key = process.env.LETS_CODE_THINKING_SAVE ?? "";
+	const file = process.env.LETS_CODE_STATE_FILE ?? "";
+	if (!key || !file || (Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0) > 0) return;
+	pi.on("thinking_level_select", (event: any, ctx: any) => {
+		const m = ctx?.model;
+		if (!m || `${m.provider}/${m.id}` !== key) return;
+		try { saveLevel(file, key, String(event.level)); } catch { /* best effort: the level just isn't remembered */ }
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+}
+
+# lc_saved_thinking <provider/model>: the level last picked in a session for
+# that model (see the thinking module), or nothing
+lc_saved_thinking() {
+    LC_STATE="${PI_AGENT_DIR}/lets-code-state.json" python3 - "$1" <<'PY' 2>/dev/null || true
+import json, os, sys
+try:
+    v = json.load(open(os.environ["LC_STATE"]))["thinkingLevels"][sys.argv[1]]
+except Exception:
+    sys.exit(0)
+if v in ("off", "minimal", "low", "medium", "high", "xhigh", "max"):
+    print(v)
+PY
 }
 
 # The pi extension that IS the guard. Inert unless LETS_CODE_SESSION=1 (set by
@@ -4924,8 +4983,9 @@ run_setup() {  # run_setup [full|granular]
             echo ""
             echo "# Thinking support pin (empty = auto-detected at launch): true|false"
             echo "REASONING=\"\""
-            echo "# Thinking level for new sessions (default: medium; setup"
-            echo "# suggests one based on the detected context window):"
+            echo "# Thinking level for new sessions until one is picked in a session"
+            echo "# (that one is kept; default: medium; setup suggests one based on"
+            echo "# the detected context window):"
             echo "THINKING=\"${1}\""
             echo ""
             echo "# Memory guard (Linux): when the machine runs low on RAM, stop the"
@@ -5525,6 +5585,7 @@ OUTPUT_CAP="${LETS_CODE_OUTPUT_CAP:-${OUTPUT_CAP}}"
 API="${LETS_CODE_API:-${API}}"
 VISION="${LETS_CODE_VISION:-${VISION}}"
 REASONING="${LETS_CODE_REASONING:-${REASONING}}"
+THINKING_PINNED="${LETS_CODE_THINKING:+1}"   # this launch's level given by env (or by flag, below)
 THINKING="${LETS_CODE_THINKING:-${THINKING}}"
 MEM_GUARD="${LETS_CODE_MEM_GUARD:-${MEM_GUARD}}"
 GIT_GUARD="${LETS_CODE_GIT_GUARD:-${GIT_GUARD}}"
@@ -5694,7 +5755,22 @@ case "${REASONING}" in
     *) log_error "REASONING must be empty (auto-detect), true, or false (got: ${REASONING}) — pin it in ${CONFIG_FILE} (if present) or via LETS_CODE_REASONING."; exit 1 ;;
 esac
 THINKING="${THINKING_OVERRIDE:-${THINKING}}"
+[ -n "${THINKING_OVERRIDE}" ] && THINKING_PINNED=1
 [ -n "${THINKING}" ] || THINKING="${DEFAULT_THINKING}"
+# A level picked in a session is remembered (see pi_write_thinking_extension)
+# and is where the next launch starts, ahead of THINKING= in the config and
+# the medium default; --thinking-level / LETS_CODE_THINKING still decide for
+# their launch. auto and adaptive keep their mode.
+case "${THINKING}" in
+    auto*|adaptive*) ;;
+    *) if [ -z "${THINKING_PINNED}" ]; then
+           THINKING_SAVED="$(lc_saved_thinking "${PROVIDER_ID}/${MODEL}")"
+           if [ -n "${THINKING_SAVED}" ]; then
+               THINKING="${THINKING_SAVED}"
+               log_verbose "thinking: ${THINKING} (last picked in a session)"
+           fi
+       fi ;;
+esac
 # auto[:<ceiling>]: dynamic thinking. Start with thinking off; the agent
 # guard raises it to <ceiling> (default high) for a short burst when a
 # struggle signal fires, and drops it back as soon as the signal is resolved.
@@ -5890,6 +5966,11 @@ if [ -n "${THINKING_AUTO}" ]; then
     else
         log "note: ${THINKING_BASE:+adaptive}${THINKING_BASE:-auto} thinking not applied — model not registered as a thinking model."
     fi
+fi
+unset LETS_CODE_THINKING_SAVE LETS_CODE_STATE_FILE
+if [ -z "${THINKING_AUTO}" ] && [ "${REASONING_SUPPORTED}" = true ]; then
+    export LETS_CODE_THINKING_SAVE="${PROVIDER_ID}/${MODEL}" LETS_CODE_STATE_FILE="${PI_AGENT_DIR}/lets-code-state.json"
+    pi_write_thinking_extension
 fi
 
 # grounding guard: look facts up instead of guessing; read before overwrite

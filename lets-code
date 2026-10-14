@@ -55,6 +55,9 @@
 #                                ask | yolo | <role> (pi's own --mode is untouched)
 #   lets-code --no-mandate       launch without the mandate (modes) extension
 #   lets-code --subagents | --no-subagents   the subagent tool on/off (default on)
+#   lets-code --claude-code | --no-claude-code   the Claude Code adapter on/off
+#                                (default on): .claude/ commands, skills, agents,
+#                                hooks, permissions, MCP, workflows, CLAUDE.md
 #   lets-code --sandbox | --no-sandbox       the OS sandbox on/off
 #   lets-code --rea [manual] | --no-rea      REA reverse engineering on demand
 #                                (manual: only via /skill:reverse-engineering)
@@ -115,6 +118,13 @@
 #      reverse-engineer subagent (or, with subagents off, a one-line skill)
 #      that runs REA's MCP server in a separate pi, so its tools never enter
 #      this session.
+#  10. Claude Code adapter (on by default): a project or user set up for
+#      Claude Code works as it is, read at each start: CLAUDE.md files and
+#      their @imports, .claude/skills, .claude/commands (/name), agents
+#      (as subagents), hooks (Claude's events, stdin JSON and exit codes on
+#      pi's), permission rules, MCP servers, workflow scripts and settings
+#      env. Project hooks, MCP, env and agents need the folder trusted
+#      (in Claude Code, in pi, or once here).
 #
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
 # Presets: ~/.config/lets-code/presets/<name>   (`lets-code setup --preset <name>`)
@@ -127,6 +137,7 @@
 #                LETS_CODE_GIT_CHECKPOINTS (1|0),
 #                LETS_CODE_MANDATE (true|false), LETS_CODE_MODE, LETS_CODE_SUBAGENTS,
 #                LETS_CODE_SANDBOX (true|false), LETS_CODE_SUBAGENT_CONCURRENCY (2)
+#                LETS_CODE_CLAUDE_CODE (true|false)
 #                LETS_CODE_REA (true|manual|false)
 #                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_METRICS_LOG (<file>), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_GROUNDING (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
 #                LETS_CODE_WRAP_TURNS (6), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
@@ -700,7 +711,7 @@ PY
 # feature off now stays inert, as each still checks its own switch. A
 # "lets-code" directory the user made (an extension there not written by
 # lets-code) is left alone and lets-code-ext is used instead.
-LC_EXT_FEATURES="agent-guard backend footer git-guard grounding mandate memory-guard sandbox session-tag subagents thinking"
+LC_EXT_FEATURES="agent-guard backend claude-code footer git-guard grounding mandate memory-guard sandbox session-tag subagents thinking"
 LC_EXT_ROOT=""
 LC_ACTIVE=""    # the features whose module this launch wrote, i.e. the ones on
 lc_written() {  # lc_written <file>: true when lets-code wrote <file>
@@ -796,7 +807,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // pi's load order when they were separate extensions (alphabetical)
-export const FEATURES = ["agent-guard", "backend", "footer", "git-guard", "grounding", "mandate", "memory-guard", "sandbox", "session-tag", "subagents", "thinking"];
+export const FEATURES = ["agent-guard", "backend", "claude-code", "footer", "git-guard", "grounding", "mandate", "memory-guard", "sandbox", "session-tag", "subagents", "thinking"];
 
 export function moduleFile(dir: string, name: string): string | undefined {
 	return [join(dir, `${name}.ts`), join(dir, name, "index.ts")].find((f) => existsSync(f));
@@ -4390,6 +4401,1304 @@ MD
     log "subagents: starter agents written to ${dir} (scout, worker, reviewer)"
 }
 
+# Claude Code adapter: a project or user set up for Claude Code works in pi
+# as it is, read at each start (CLAUDE.md and imports, skills, commands,
+# hooks, permissions, MCP, workflows; agents through the subagents module,
+# settings env through claude_code_scan). On by default, inert where there
+# is no .claude/ folder, CLAUDE.md or ~/.claude.
+pi_write_claudecode_extension() {
+    local dir f tmp
+    lc_ext_module claude-code; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.claude-code.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (claude-code); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code with the Claude Code adapter on
+// (LETS_CODE_CLAUDE_CODE_ON=1). A project or user set up for Claude Code
+// works here as it is: everything is read live at each start, nothing is
+// copied or converted.
+//   memory       ~/.claude/CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md,
+//                .claude/rules/*.md without paths:, a CLAUDE.md pi passes over
+//                for an AGENTS.md, and @path imports (4 hops), as context files
+//   skills       .claude/skills up to the git root and ~/.claude/skills, as pi
+//                skills (name + description in the prompt), also /<name>
+//   commands     .claude/commands/**/*.md and ~/.claude/commands: /<dir>:<name>
+//                with $ARGUMENTS, $N, $name, !`cmd` and @file
+//   hooks        the settings files' hooks on pi's events, with Claude's
+//                stdin JSON, exit codes and JSON output
+//   permissions  allow / ask / deny rules; lets-code's guards stay authoritative
+//   MCP          .mcp.json and ~/.claude.json (user and local scope), with
+//                Claude's approvals
+//   workflows    .claude/workflows/*.js: the `workflow` tool, /workflow and
+//                /<name>, each agent() a child pi (needs subagents on)
+// Agent files (.claude/agents) are read by the subagents module; settings
+// `env` is exported by the launcher.
+//
+// Trust, as Claude Code does it: user-level files always count. Project
+// hooks, MCP servers, env, allow rules, agents, workflows and the !`cmd` of
+// project commands need the folder trusted: in Claude Code (~/.claude.json
+// projects[<dir or a parent>].hasTrustDialogAccepted), in pi (trust.json),
+// or by the answer to the one question asked here with a UI (remembered in
+// lets-code-state.json, key claudeCodeTrust). Without a UI an untrusted
+// folder's project parts are skipped with a one-line note. deny and ask
+// rules always apply: they only tighten. Hooks are a snapshot taken at
+// session start; edits apply to the next session.
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import vm from "node:vm";
+import { Type } from "typebox";
+
+const ACTIVE = process.env.LETS_CODE_CLAUDE_CODE_ON === "1";
+const DEPTH = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
+const MAX_DEPTH = Number(process.env.LETS_CODE_SUBAGENT_MAX_DEPTH ?? "1") || 1;
+const CONCURRENCY = Math.max(1, Number(process.env.LETS_CODE_SUBAGENT_CONCURRENCY ?? "2") || 2);
+const agentDir = () => process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+const home = () => process.env.HOME || homedir();
+// Claude Code's own override moves both ~/.claude and ~/.claude.json
+export const claudeDir = () => process.env.CLAUDE_CONFIG_DIR || join(home(), ".claude");
+export const claudeJsonPath = () => (process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, ".claude.json") : join(home(), ".claude.json"));
+const MAX_FILE = 256 * 1024;
+const CAP = 10_000;          // Claude's cap on one hook's context or message
+const short = (s: string, n = 190) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+// ------------------------------------------------------------------ files
+function readJson(p: string): any {
+	try { return JSON.parse(readFileSync(p, "utf8")); } catch { return undefined; }
+}
+function readText(p: string): string | undefined {
+	try { const s = statSync(p); if (!s.isFile() || s.size > MAX_FILE) return undefined; return readFileSync(p, "utf8"); } catch { return undefined; }
+}
+function real(p: string): string { try { return realpathSync(p); } catch { return resolve(p); } }
+function isDir(p: string): boolean { try { return statSync(p).isDirectory(); } catch { return false; } }
+function under(p: string, root: string): boolean { const r = relative(root, p); return r === "" || (!r.startsWith("..") && !isAbsolute(r)); }
+// the directory and its parents, nearest first
+function ancestors(dir: string, stop?: string): string[] {
+	const out: string[] = []; let d = resolve(dir);
+	while (true) { out.push(d); if (stop && d === stop) break; const p = dirname(d); if (p === d) break; d = p; }
+	return out;
+}
+export function gitRoot(cwd: string): string | undefined { return ancestors(cwd).find((d) => existsSync(join(d, ".git"))); }
+// project .claude dirs are looked up from cwd to the git root (cwd alone outside git)
+const projectDirs = (cwd: string) => ancestors(cwd, gitRoot(cwd) ?? resolve(cwd));
+const expandHome = (p: string) => (p === "~" ? home() : p.startsWith("~/") ? join(home(), p.slice(2)) : p);
+
+// A small YAML subset for frontmatter: key: value, quoted strings, inline
+// [a, b] and block (- a) lists, folded (>) and literal (|) blocks, booleans.
+export function parseFrontmatter(text: string): { fm: Record<string, any>; body: string } {
+	const m = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)([\s\S]*)$/.exec(text);
+	if (!m) return { fm: {}, body: text };
+	const fm: Record<string, any> = {}; const lines = m[1].split(/\r?\n/);
+	const scalar = (v: string): any => {
+		v = v.trim();
+		if (/^".*"$/.test(v)) { try { return JSON.parse(v); } catch { return v.slice(1, -1); } }
+		if (/^'.*'$/.test(v)) return v.slice(1, -1).replace(/''/g, "'");
+		if (/^\[.*\]$/.test(v)) return v.slice(1, -1).split(",").map((x) => scalar(x)).filter((x) => x !== "");
+		if (/^(true|yes|on)$/i.test(v)) return true;
+		if (/^(false|no|off)$/i.test(v)) return false;
+		return v;
+	};
+	for (let i = 0; i < lines.length; i++) {
+		const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(lines[i]);
+		if (!kv) continue;
+		const key = kv[1]; const v = kv[2].trim();
+		if (/^[>|][+-]?$/.test(v)) {        // block scalar: the indented lines that follow
+			const block: string[] = [];
+			while (i + 1 < lines.length && (/^\s+\S/.test(lines[i + 1]) || lines[i + 1].trim() === "")) block.push(lines[++i].trim());
+			fm[key] = v.startsWith(">") ? block.join(" ").replace(/\s+/g, " ").trim() : block.join("\n").trim();
+		} else if (v === "") {               // a block list, or nothing
+			const items: any[] = [];
+			while (i + 1 < lines.length && /^\s*-\s+/.test(lines[i + 1])) items.push(scalar(lines[++i].replace(/^\s*-\s+/, "")));
+			fm[key] = items.length ? items : "";
+		} else fm[key] = scalar(v);
+	}
+	return { fm, body: m[2] };
+}
+export function asList(v: unknown): string[] {
+	if (Array.isArray(v)) return v.map(String).map((s) => s.trim()).filter(Boolean);
+	if (typeof v === "string") return v.split(/[,\s]+(?![^(]*\))/).map((s) => s.trim()).filter(Boolean);
+	return [];
+}
+
+// ------------------------------------------------------------------ trust
+function nearestEntry<T>(map: Record<string, T> | undefined, cwd: string, value: (v: T) => boolean | null | undefined): boolean | null {
+	if (!map || typeof map !== "object") return null;
+	for (const d of [...new Set([...ancestors(real(cwd)), ...ancestors(resolve(cwd))])]) {
+		const v = map[d] === undefined ? undefined : value(map[d]);
+		if (v === true || v === false) return v;
+	}
+	return null;
+}
+// Claude Code: a folder whose trust dialog was accepted, or a parent of it
+export function claudeTrusted(cwd: string): boolean {
+	return nearestEntry<any>(readJson(claudeJsonPath())?.projects, cwd, (p) => (p?.hasTrustDialogAccepted === true ? true : null)) === true;
+}
+// pi: an explicit entry in trust.json (pi calls a folder without .pi resources trusted, which says nothing here)
+export function piTrusted(cwd: string): boolean | null { return nearestEntry<any>(readJson(join(agentDir(), "trust.json")), cwd, (v) => v); }
+const statePath = () => join(agentDir(), "lets-code-state.json");
+export function rememberedTrust(cwd: string): boolean | null { return nearestEntry<any>(readJson(statePath())?.claudeCodeTrust, cwd, (v) => v); }
+export function rememberTrust(cwd: string, decision: boolean): void {
+	try {   // merge-safe: other keys of the file stay
+		const p = statePath(); const s = readJson(p) ?? {};
+		s.claudeCodeTrust = { ...(s.claudeCodeTrust ?? {}), [real(cwd)]: decision };
+		mkdirSync(dirname(p), { recursive: true });
+		const tmp = `${p}.${process.pid}.tmp`; writeFileSync(tmp, JSON.stringify(s, null, 2) + "\n"); renameSync(tmp, p);
+	} catch { /* never fatal */ }
+}
+export function trustDecision(cwd: string): { trusted: boolean; source: string } {
+	const inherited = process.env.LETS_CODE_CLAUDE_TRUST;   // a subagent gets its parent's decision
+	if (DEPTH > 0 && (inherited === "1" || inherited === "0")) return { trusted: inherited === "1", source: "parent" };
+	if (claudeTrusted(cwd)) return { trusted: true, source: "claude" };
+	if (piTrusted(cwd) === true) return { trusted: true, source: "pi" };
+	const r = rememberedTrust(cwd);
+	return r === null ? { trusted: false, source: "undecided" } : { trusted: r, source: "lets-code" };
+}
+
+// --------------------------------------------------------------- settings
+export interface HookDef { event: string; matcher: string; type: string; command?: string; url?: string; headers?: Record<string, string>; allowedEnvVars?: string[]; timeout?: number; scope: string }
+export interface Rule { raw: string; tool: string; spec?: string; base: string }
+export interface Settings {
+	hooks: HookDef[]; allow: Rule[]; ask: Rule[]; deny: Rule[]; env: Record<string, string>; disableAllHooks: boolean;
+	enableAllProjectMcpServers: boolean; enabledMcpjsonServers: string[]; disabledMcpjsonServers: string[];
+	untrustedHooks: HookDef[]; untrustedEnv: string[];
+}
+export function parseRule(raw: string, base: string): Rule | null {
+	const m = /^\s*([^()\s]+)\s*(?:\(([\s\S]*)\))?\s*$/.exec(String(raw));
+	return m ? { raw: String(raw).trim(), tool: m[1], spec: m[2] === undefined || m[2] === "*" ? undefined : m[2], base } : null;
+}
+export function settingsLayers(cwd: string): { scope: "user" | "project" | "local"; file: string; data: any }[] {
+	const out: { scope: "user" | "project" | "local"; file: string; data: any }[] = [];
+	const add = (scope: "user" | "project" | "local", file: string) => { const d = readJson(file); if (d && typeof d === "object") out.push({ scope, file, data: d }); };
+	add("user", join(claudeDir(), "settings.json"));
+	add("project", join(cwd, ".claude", "settings.json"));
+	add("local", join(cwd, ".claude", "settings.local.json"));
+	return out;
+}
+export function loadSettings(cwd: string, trusted: boolean): Settings {
+	const s: Settings = { hooks: [], allow: [], ask: [], deny: [], env: {}, disableAllHooks: false, enableAllProjectMcpServers: false, enabledMcpjsonServers: [], disabledMcpjsonServers: [], untrustedHooks: [], untrustedEnv: [] };
+	let disable: boolean | undefined;
+	for (const l of settingsLayers(cwd)) {
+		const ok = l.scope === "user" || trusted;
+		const base = dirname(dirname(l.file));
+		const p = l.data.permissions ?? {};
+		for (const k of ["deny", "ask", "allow"] as const) {
+			if (k === "allow" && !ok) continue;     // deny and ask only tighten: they apply untrusted too
+			for (const r of Array.isArray(p[k]) ? p[k] : []) { const rule = parseRule(r, base); if (rule) s[k].push(rule); }
+		}
+		const hooks: HookDef[] = [];
+		for (const [event, groups] of Object.entries(l.data.hooks ?? {})) {
+			for (const g of Array.isArray(groups) ? groups : []) {
+				for (const h of Array.isArray((g as any)?.hooks) ? (g as any).hooks : []) {
+					if (!h || typeof h !== "object") continue;
+					hooks.push({ event, matcher: typeof (g as any).matcher === "string" ? (g as any).matcher : "", type: h.type ?? "command", command: h.command, url: h.url, headers: h.headers, allowedEnvVars: h.allowedEnvVars, timeout: typeof h.timeout === "number" ? h.timeout : undefined, scope: l.scope });
+				}
+			}
+		}
+		if (ok) s.hooks.push(...hooks); else s.untrustedHooks.push(...hooks);
+		if (l.data.env && typeof l.data.env === "object") {
+			if (ok) Object.assign(s.env, Object.fromEntries(Object.entries(l.data.env).map(([k, v]) => [k, String(v)])));
+			else s.untrustedEnv.push(...Object.keys(l.data.env));
+		}
+		if (ok && typeof l.data.disableAllHooks === "boolean") disable = l.data.disableAllHooks;
+		// MCP approvals from a committed project file count only in a trusted folder
+		if (ok || l.scope === "local") {
+			if (l.data.enableAllProjectMcpServers === true) s.enableAllProjectMcpServers = true;
+			s.enabledMcpjsonServers.push(...asList(l.data.enabledMcpjsonServers));
+		}
+		s.disabledMcpjsonServers.push(...asList(l.data.disabledMcpjsonServers));
+	}
+	s.disableAllHooks = disable === true;
+	if (s.disableAllHooks) s.hooks = [];
+	return s;
+}
+
+// ------------------------------------------------------------------ tools
+// pi's tools under their Claude Code names (subagent is Claude's Agent, once Task)
+const TO_CLAUDE: Record<string, string> = { bash: "Bash", read: "Read", write: "Write", edit: "Edit", grep: "Grep", find: "Glob", ls: "LS", subagent: "Agent", workflow: "Workflow" };
+export const claudeToolName = (pi: string) => TO_CLAUDE[pi] ?? pi;
+const ALIASES: Record<string, string[]> = { Agent: ["Agent", "Task"] };
+const abs = (p: unknown, cwd: string) => { const s = String(p ?? "."); return isAbsolute(expandHome(s)) ? expandHome(s) : resolve(cwd, s); };
+const drop = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
+
+export function toClaudeInput(tool: string, input: any, cwd: string): Record<string, unknown> {
+	const i = input ?? {};
+	switch (tool) {
+		case "bash": return drop({ command: i.command, timeout: typeof i.timeout === "number" ? i.timeout * 1000 : undefined, description: "" });
+		case "read": return drop({ file_path: abs(i.path, cwd), offset: i.offset, limit: i.limit });
+		case "write": return { file_path: abs(i.path, cwd), content: i.content };
+		case "edit": {
+			const edits: any[] = Array.isArray(i.edits) ? i.edits : i.oldText !== undefined ? [{ oldText: i.oldText, newText: i.newText }] : [];
+			return drop({ file_path: abs(i.path, cwd), old_string: edits[0]?.oldText, new_string: edits[0]?.newText, replace_all: false,
+				edits: edits.length > 1 ? edits.map((e) => ({ old_string: e.oldText, new_string: e.newText })) : undefined });
+		}
+		case "grep": return drop({ pattern: i.pattern, path: i.path === undefined ? undefined : abs(i.path, cwd), glob: i.glob, "-i": i.ignoreCase, "-C": i.context, head_limit: i.limit, output_mode: "content" });
+		case "find": return drop({ pattern: i.pattern, path: i.path === undefined ? undefined : abs(i.path, cwd) });
+		case "ls": return { path: abs(i.path, cwd) };
+		case "subagent": return drop({ subagent_type: i.agent ?? i.tasks?.[0]?.agent ?? i.chain?.[0]?.agent, prompt: i.task ?? i.tasks?.[0]?.task ?? i.chain?.[0]?.task, description: "", tasks: i.tasks, chain: i.chain });
+		default: return { ...i };
+	}
+}
+// A hook's updatedInput, in Claude's names, back into pi's schema for the tool
+export function fromClaudeInput(tool: string, upd: any, orig: any): Record<string, unknown> {
+	const u = upd ?? {}; const o = orig ?? {};
+	const pick = (k: string, fallback: unknown) => (u[k] !== undefined ? u[k] : fallback);
+	switch (tool) {
+		case "bash": return drop({ command: pick("command", o.command), timeout: typeof u.timeout === "number" ? u.timeout / 1000 : o.timeout });
+		case "read": return drop({ path: pick("file_path", o.path), offset: pick("offset", o.offset), limit: pick("limit", o.limit) });
+		case "write": return { path: pick("file_path", o.path), content: pick("content", o.content) };
+		case "edit": {
+			let edits = o.edits;
+			if (Array.isArray(u.edits)) edits = u.edits.map((e: any) => ({ oldText: e.old_string, newText: e.new_string }));
+			else if (u.old_string !== undefined || u.new_string !== undefined) {
+				const first = { oldText: pick("old_string", o.edits?.[0]?.oldText ?? o.oldText), newText: pick("new_string", o.edits?.[0]?.newText ?? o.newText) };
+				edits = [first, ...(Array.isArray(o.edits) ? o.edits.slice(1) : [])];
+			}
+			return drop({ path: pick("file_path", o.path), edits });
+		}
+		case "grep": return drop({ pattern: pick("pattern", o.pattern), path: pick("path", o.path), glob: pick("glob", o.glob), ignoreCase: pick("-i", o.ignoreCase), literal: o.literal, context: pick("-C", o.context), limit: pick("head_limit", o.limit) });
+		case "find": return drop({ pattern: pick("pattern", o.pattern), path: pick("path", o.path), limit: o.limit });
+		case "ls": return drop({ path: pick("path", o.path), limit: o.limit });
+		case "subagent": return drop({ ...o, agent: u.subagent_type ?? o.agent, task: u.prompt ?? o.task });
+		default: return { ...o, ...u };
+	}
+}
+// tool_response in roughly Claude's shape for the tool
+export function toolResponse(tool: string, input: any, content: any[], isError: boolean): unknown {
+	const text = (content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text).join("\n");
+	const i = input ?? {};
+	switch (tool) {
+		case "bash": return { stdout: text, stderr: "", interrupted: false, isImage: false };
+		case "read": return { type: "text", file: { filePath: i.path, content: text } };
+		case "write": return { type: "create", filePath: i.path, content: i.content, success: !isError };
+		case "edit": return { filePath: i.path, oldString: i.edits?.[0]?.oldText, newString: i.edits?.[0]?.newText, replaceAll: false, success: !isError };
+		case "find": { const f = text.split("\n").filter(Boolean); return { filenames: f, numFiles: f.length }; }
+		default: return { content: text };
+	}
+}
+
+// --------------------------------------------------------------- matchers
+// Claude's rule: "", "*" or none = all; only letters, digits, _, -, spaces,
+// "," and "|" = an exact name or a list of them; anything else an unanchored regex
+export function matcherMatches(matcher: string | undefined, value: string | string[]): boolean {
+	const m = (matcher ?? "").trim(); const values = Array.isArray(value) ? value : [value];
+	if (m === "" || m === "*") return true;
+	if (/^[\w\s,|-]+$/.test(m)) { const names = m.split(/[|,]/).map((s) => s.trim()).filter(Boolean); return values.some((v) => names.includes(v)); }
+	try { const re = new RegExp(m); return values.some((v) => re.test(v)); } catch { return false; }
+}
+const toolNames = (claude: string) => ALIASES[claude] ?? [claude];
+const MATCHED: Record<string, boolean> = { PreToolUse: true, PostToolUse: true, PostToolUseFailure: true, SessionStart: true, SessionEnd: true, PreCompact: true, Notification: true, SubagentStart: true, SubagentStop: true };
+export function selectHooks(hooks: HookDef[], event: string, value?: string | string[]): HookDef[] {
+	const seen = new Set<string>(); const out: HookDef[] = [];
+	for (const h of hooks) {
+		if (h.event !== event) continue;
+		if (h.type !== "command" && h.type !== "http") continue;
+		if (MATCHED[event] && value !== undefined && !matcherMatches(h.matcher, value)) continue;
+		const key = `${h.type}\0${h.command ?? h.url}`;    // identical handlers run once
+		if (seen.has(key)) continue;
+		seen.add(key); out.push(h);
+	}
+	return out;
+}
+
+// ------------------------------------------------------------------ hooks
+export interface HookRun { hook: HookDef; code: number | null; stdout: string; stderr: string; timedOut?: boolean; error?: string }
+const DEFAULT_TIMEOUT: Record<string, number> = { UserPromptSubmit: 30 };
+export function runHook(hook: HookDef, input: Record<string, unknown>, opts: { cwd: string; signal?: AbortSignal; timeoutMs?: number }): Promise<HookRun> {
+	const ms = opts.timeoutMs ?? (hook.timeout ?? DEFAULT_TIMEOUT[hook.event] ?? 600) * 1000;
+	const body = JSON.stringify(input);
+	if (hook.type === "http") {
+		const headers: Record<string, string> = { "content-type": "application/json" };
+		for (const [k, v] of Object.entries(hook.headers ?? {})) headers[k] = String(v).replace(/\$\{?([A-Za-z_]\w*)\}?/g, (all, n) => ((hook.allowedEnvVars ?? []).includes(n) ? process.env[n] ?? "" : all));
+		const signals = [AbortSignal.timeout(ms), ...(opts.signal ? [opts.signal] : [])];
+		return fetch(String(hook.url), { method: "POST", headers, body, signal: AbortSignal.any(signals) })
+			.then(async (r) => ({ hook, code: r.ok ? 0 : 1, stdout: await r.text(), stderr: r.ok ? "" : `HTTP ${r.status}` }))
+			.catch((e) => ({ hook, code: null, stdout: "", stderr: "", error: e instanceof Error ? e.message : String(e), timedOut: /timeout/i.test(String(e)) }));
+	}
+	return new Promise((done) => {
+		const r: HookRun = { hook, code: null, stdout: "", stderr: "" };
+		let child: ReturnType<typeof spawn>;
+		try { child = spawn("sh", ["-c", String(hook.command ?? "")], { cwd: opts.cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: opts.cwd }, stdio: ["pipe", "pipe", "pipe"] }); }
+		catch (e) { r.error = (e as Error).message; done(r); return; }
+		const kill = () => { try { child.kill("SIGTERM"); } catch { /* gone */ } setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* gone */ } }, 2000).unref(); };
+		const timer = setTimeout(() => { r.timedOut = true; kill(); }, ms);
+		const onAbort = () => kill();
+		opts.signal?.addEventListener("abort", onAbort, { once: true });
+		child.stdout!.on("data", (d) => { if (r.stdout.length < 1_000_000) r.stdout += d.toString(); });
+		child.stderr!.on("data", (d) => { if (r.stderr.length < 100_000) r.stderr += d.toString(); });
+		child.stdin!.on("error", () => { /* the hook did not read its input */ });
+		child.stdin!.end(body);
+		child.on("error", (e) => { r.error = e.message; });
+		child.on("close", (code) => { clearTimeout(timer); opts.signal?.removeEventListener("abort", onAbort); r.code = r.timedOut ? null : code; done(r); });
+	});
+}
+
+export interface Outcome {
+	decision?: "allow" | "deny" | "ask"; reason?: string; block?: string; updatedInput?: Record<string, unknown>;
+	updatedOutput?: unknown; context: string[]; stop?: string; notices: string[];
+}
+// exit 2 blocks these (stderr to the model, or to the user for a prompt)
+const BLOCKING = new Set(["PreToolUse", "UserPromptSubmit", "Stop", "SubagentStop", "PreCompact"]);
+// plain stdout on exit 0 becomes context for these
+const STDOUT_CONTEXT = new Set(["UserPromptSubmit", "SessionStart"]);
+const RANK: Record<string, number> = { allow: 1, ask: 2, deny: 3 };
+export function interpret(event: string, runs: HookRun[]): Outcome {
+	const o: Outcome = { context: [], notices: [] };
+	const cmd = (r: HookRun) => short(String(r.hook.command ?? r.hook.url ?? ""), 60);
+	const decide = (d: string | undefined, reason: string | undefined) => {
+		if (!d || !RANK[d]) return;     // "defer" and unknown values leave the normal flow
+		if (!o.decision || RANK[d] > RANK[o.decision]) { o.decision = d as Outcome["decision"]; o.reason = reason; }
+	};
+	const block = (reason: string) => { if (o.block === undefined) o.block = reason; };
+	for (const r of runs) {
+		if (r.error || r.timedOut) { o.notices.push(`${event} hook ${r.timedOut ? "timed out" : `failed (${r.error})`}: ${cmd(r)}`); continue; }
+		const err = r.stderr.trim();
+		const out = r.stdout.trim();
+		let j: any;
+		if ((r.code === 0 || r.code === 2) && out.startsWith("{")) { try { j = JSON.parse(out); } catch { j = undefined; } }
+		if (r.code === 2) {
+			const why = err || "blocked by a hook";
+			if (event === "PreToolUse") decide("deny", why);
+			else if (BLOCKING.has(event)) block(why);
+			else if (event === "PostToolUse" || event === "PostToolUseFailure") o.context.push(why.slice(0, CAP));
+			else o.notices.push(`${event} hook: ${short(why)}`);
+		} else if (r.code !== 0) {
+			o.notices.push(`${event} hook failed with non-blocking status code ${r.code}: ${short(err.split("\n")[0] || cmd(r))}`);
+			continue;
+		}
+		if (j && typeof j === "object") {
+			if (j.continue === false) o.stop = String(j.stopReason ?? "stopped by a hook");
+			if (typeof j.systemMessage === "string" && j.systemMessage) o.notices.push(j.systemMessage.slice(0, CAP));
+			if (j.decision === "block") { if (event === "PreToolUse") decide("deny", j.reason); else block(String(j.reason ?? "blocked by a hook")); }
+			if (j.decision === "approve" && event === "PreToolUse") decide("allow", j.reason);
+			const h = j.hookSpecificOutput;
+			if (h && typeof h === "object") {
+				if (event === "PreToolUse") decide(h.permissionDecision, h.permissionDecisionReason);
+				if (h.updatedInput && typeof h.updatedInput === "object" && o.updatedInput === undefined && h.permissionDecision !== "deny") o.updatedInput = h.updatedInput;
+				if (h.updatedToolOutput !== undefined) o.updatedOutput = h.updatedToolOutput;
+				if (typeof h.additionalContext === "string" && h.additionalContext) o.context.push(h.additionalContext.slice(0, CAP));
+			}
+		} else if (r.code === 0 && out && STDOUT_CONTEXT.has(event)) o.context.push(out.slice(0, CAP));
+	}
+	if (o.decision === "deny") o.updatedInput = undefined;
+	return o;
+}
+
+// ------------------------------------------------------------ permissions
+// Simple commands of a bash line, wrappers stripped: deny/ask rules match
+// when any of them does, an allow rule only when all of them do.
+export function bashParts(cmd: string): string[] {
+	const out: string[] = []; let cur = ""; let q = "";
+	for (let i = 0; i < cmd.length; i++) {
+		const c = cmd[i];
+		if (q) { cur += c; if (c === "\\" && q === '"') { cur += cmd[++i] ?? ""; continue; } if (c === q) q = ""; continue; }
+		if (c === "'" || c === '"') { q = c; cur += c; continue; }
+		if (c === "\\") { cur += c + (cmd[i + 1] ?? ""); i++; continue; }
+		if (c === ";" || c === "\n" || c === "|" || (c === "&" && !/[<>]$/.test(cur) && cmd[i + 1] !== ">")) { out.push(cur); cur = ""; if ((c === "|" || c === "&") && cmd[i + 1] === c) i++; continue; }
+		cur += c;
+	}
+	out.push(cur);
+	return out.map((s) => s.trim().replace(/^[({]\s*/, "").replace(/\s*[)}]$/, "").replace(/\s+/g, " ")).map(stripWrappers).filter(Boolean);
+}
+function stripWrappers(s: string): string {
+	let prev = "";
+	while (prev !== s) { prev = s; s = s.replace(/^(?:timeout\s+(?:-\S+\s+)*\S+|time|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-\S+)*|command|builtin|noglob|xargs)\s+/, ""); }
+	return s;
+}
+export function bashPatternMatches(spec: string, command: string): boolean {
+	let p = spec.trim().replace(/:\*$/, " *");
+	const trailing = / \*$/.test(p);
+	if (trailing) p = p.slice(0, -2);
+	const re = "^" + p.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + (trailing ? "(?: .*)?" : "") + "$";
+	return new RegExp(re, "s").test(command);
+}
+function globRe(g: string): RegExp {
+	let s = "";
+	for (let i = 0; i < g.length; i++) {
+		const c = g[i];
+		if (c === "*" && g[i + 1] === "*") { if (g[i + 2] === "/") { s += "(?:.*/)?"; i += 2; } else { s += ".*"; i++; } }
+		else if (c === "*") s += "[^/]*";
+		else if (c === "?") s += "[^/]";
+		else s += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+	}
+	return new RegExp(`^${s}$`);
+}
+// gitignore-like: //abs, ~/home, /relative to the settings' project, else the cwd; a bare name matches at any depth
+export function pathPatternMatches(spec: string, base: string, cwd: string, path: string): boolean {
+	let p = spec.trim(); let root: string;
+	if (p.startsWith("//")) { root = "/"; p = p.slice(2); }
+	else if (p.startsWith("~/")) { root = home(); p = p.slice(2); }
+	else if (p.startsWith("/")) { root = base; p = p.slice(1); }
+	else { root = cwd; p = p.replace(/^\.\//, ""); if (!p.replace(/\/$/, "").includes("/")) p = `**/${p}`; }
+	const rel = relative(root, path);
+	if (rel.startsWith("..") || isAbsolute(rel)) return false;
+	const re = globRe(p.replace(/\/$/, ""));
+	const dir = p.endsWith("/**") ? globRe(p.slice(0, -3)) : null;   // dir/** covers the directory itself too
+	const parts = rel.split(sep);
+	for (let i = parts.length; i >= 1; i--) { const q = parts.slice(0, i).join("/"); if (re.test(q) || dir?.test(q)) return true; }   // the path, or a directory above it
+	return rel === "" && p === "**";
+}
+const READ_TOOLS = new Set(["Read", "Grep", "Glob", "LS"]);
+const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+const norm = (s: string) => s.replace(/-/g, "_");
+function toolMatches(rule: Rule, tool: string): boolean {
+	const t = rule.tool;
+	if (t.startsWith("mcp__")) {
+		if (!tool.startsWith("mcp__")) return false;
+		const r = norm(t); const n = norm(tool);
+		if (r.includes("*")) return globRe(r.replace(/\*/g, "**")).test(n) || n.startsWith(r.replace(/\*+$/, ""));
+		return n === r || n.startsWith(`${r}__`);
+	}
+	if (t.includes("*")) return globRe(t).test(tool);
+	if (t === "Edit" || t === "Write") return EDIT_TOOLS.has(tool);
+	if (t === "Read") return READ_TOOLS.has(tool);
+	return toolNames(t).includes(tool) || toolNames(tool).includes(t);
+}
+export function ruleMatches(rule: Rule, tool: string, input: any, cwd: string, all: boolean): boolean {
+	if (!toolMatches(rule, tool)) return false;
+	if (rule.spec === undefined) return true;
+	const spec = rule.spec;
+	if (tool === "Bash") { const parts = bashParts(String(input?.command ?? "")); return parts.length > 0 && (all ? parts.every((c) => bashPatternMatches(spec, c)) : parts.some((c) => bashPatternMatches(spec, c))); }
+	if (READ_TOOLS.has(tool) || EDIT_TOOLS.has(tool)) return pathPatternMatches(spec, rule.base, cwd, abs(input?.file_path ?? input?.path ?? cwd, cwd));
+	if (tool === "Agent") { const names = [input?.subagent_type, ...(input?.tasks ?? []).map((x: any) => x?.agent), ...(input?.chain ?? []).map((x: any) => x?.agent)].filter(Boolean); return names.some((n) => n === spec); }
+	if (tool === "Workflow") return input?.name === spec;
+	if (tool === "WebFetch" && spec.startsWith("domain:")) { try { const h = new URL(String(input?.url)).hostname; const d = spec.slice(7); return d === "*" || h === d || (d.startsWith("*.") && h.endsWith(d.slice(1))); } catch { return false; } }
+	return false;
+}
+// deny, then ask, then allow; first match wins
+export function permissionCheck(s: Pick<Settings, "allow" | "ask" | "deny">, tool: string, input: any, cwd: string): { decision: "deny" | "ask" | "allow" | "none"; rule?: string } {
+	for (const k of ["deny", "ask"] as const) { const r = s[k].find((x) => ruleMatches(x, tool, input, cwd, false)); if (r) return { decision: k, rule: r.raw }; }
+	const r = s.allow.find((x) => ruleMatches(x, tool, input, cwd, true));
+	return r ? { decision: "allow", rule: r.raw } : { decision: "none" };
+}
+
+// --------------------------------------------------------------- commands
+export interface Template { name: string; kind: "command" | "skill"; scope: "user" | "project"; file: string; dir: string; description: string; argumentHint?: string; argNames: string[]; userInvocable: boolean; body: string }
+function mdFiles(dir: string, depth = 0): string[] {
+	if (depth > 5 || !isDir(dir)) return [];
+	const out: string[] = [];
+	for (const e of readdirSync(dir).sort()) {
+		if (e.startsWith(".") || e === "node_modules") continue;
+		const p = join(dir, e);
+		if (isDir(p)) out.push(...mdFiles(p, depth + 1)); else if (e.endsWith(".md")) out.push(p);
+	}
+	return out;
+}
+function template(file: string, name: string, kind: Template["kind"], scope: Template["scope"]): Template | null {
+	const text = readText(file); if (text === undefined) return null;
+	const { fm, body } = parseFrontmatter(text);
+	const first = body.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+	const description = String(fm.description ?? "").trim() || first.replace(/^#+\s*/, "").slice(0, 80);
+	return { name, kind, scope, file, dir: dirname(file), description, argumentHint: fm["argument-hint"] ? String(fm["argument-hint"]) : undefined,
+		argNames: asList(fm.arguments), userInvocable: fm["user-invocable"] !== false, body };
+}
+// .claude/commands/<dir>/<name>.md is /<dir>:<name>; the nearest project wins, then the user's
+export function discoverCommands(cwd: string): Template[] {
+	const out = new Map<string, Template>();
+	const scan = (dir: string, scope: Template["scope"]) => {
+		for (const f of mdFiles(dir)) {
+			const name = relative(dir, f).replace(/\.md$/, "").split(sep).join(":");
+			if (out.has(name)) continue;
+			const t = template(f, name, "command", scope); if (t) out.set(name, t);
+		}
+	};
+	for (const d of projectDirs(cwd)) scan(join(d, ".claude", "commands"), "project");
+	scan(join(claudeDir(), "commands"), "user");
+	return [...out.values()];
+}
+// ~/.claude/skills/synced holds the skills claude.ai syncs for its own apps
+// (documents, browsers, computer use): about 15 KB of descriptions for tools
+// that are not here, so they stay out unless LETS_CODE_CLAUDE_SYNCED_SKILLS=1
+const synced = (d: string) => basename(d) === "synced" && dirname(d) === join(claudeDir(), "skills") && process.env.LETS_CODE_CLAUDE_SYNCED_SKILLS !== "1";
+export function skillDirs(cwd: string): string[] {
+	const user = join(claudeDir(), "skills");
+	const mine = isDir(user) ? readdirSync(user).sort().map((e) => join(user, e)).filter((d) => isDir(d) && !d.split(sep).pop()!.startsWith(".") && !synced(d)) : [];
+	return [...projectDirs(cwd).map((d) => join(d, ".claude", "skills")).filter(isDir), ...mine];
+}
+export function discoverSkills(cwd: string): Template[] {
+	const out = new Map<string, Template>();
+	const walk = (dir: string, scope: Template["scope"], depth: number) => {
+		if (depth > 4 || !isDir(dir) || synced(dir)) return;
+		const f = join(dir, "SKILL.md");
+		if (existsSync(f)) {
+			const t = template(f, "", "skill", scope);
+			if (t) { const { fm } = parseFrontmatter(readText(f) ?? ""); t.name = String(fm.name || basename(dir)); if (!out.has(t.name)) out.set(t.name, t); }
+			return;
+		}
+		for (const e of readdirSync(dir).sort()) if (!e.startsWith(".") && e !== "node_modules") walk(join(dir, e), scope, depth + 1);
+	};
+	for (const d of projectDirs(cwd)) walk(join(d, ".claude", "skills"), "project", 0);
+	walk(join(claudeDir(), "skills"), "user", 0);
+	return [...out.values()];
+}
+export function parseArgs(s: string): string[] {
+	const out: string[] = []; let cur = ""; let q = ""; let has = false;
+	for (const c of s) {
+		if (q) { if (c === q) q = ""; else cur += c; continue; }
+		if (c === '"' || c === "'") { q = c; has = true; continue; }
+		if (/\s/.test(c)) { if (cur || has) out.push(cur); cur = ""; has = false; continue; }
+		cur += c;
+	}
+	if (cur || has) out.push(cur);
+	return out;
+}
+// $ARGUMENTS, $ARGUMENTS[N] and $N (0-based), $name (frontmatter arguments),
+// ${CLAUDE_*} variables; arguments no placeholder took are appended
+export function substitute(body: string, rawArgs: string, t: Pick<Template, "argNames" | "dir">, vars: Record<string, string> = {}): string {
+	const args = parseArgs(rawArgs); let used = false;
+	let out = body.replace(/\\\$/g, "\u0000");
+	out = out.replace(/\$\{(CLAUDE_[A-Z_]+)\}/g, (all, n) => (n === "CLAUDE_SKILL_DIR" ? t.dir : vars[n] ?? all));
+	out = out.replace(/\$ARGUMENTS\[(\d+)\]/g, (_a, n) => { used = true; return args[Number(n)] ?? ""; });
+	out = out.replace(/\$ARGUMENTS\b/g, () => { used = true; return rawArgs.trim(); });
+	out = out.replace(/\$(\d+)\b/g, (_a, n) => { used = true; return args[Number(n)] ?? ""; });
+	if (t.argNames.length) out = out.replace(/\$([A-Za-z_][\w-]*)/g, (all, n) => { const i = t.argNames.indexOf(n); if (i < 0) return all; used = true; return args[i] ?? ""; });
+	out = out.replace(/\u0000/g, "$");
+	if (!used && rawArgs.trim()) out = `${out.trimEnd()}\n\nARGUMENTS: ${rawArgs.trim()}`;
+	return out;
+}
+const fenceFree = (s: string) => s.replace(/```[\s\S]*?(```|$)/g, (m) => " ".repeat(m.length)).replace(/`[^`\n]*`/g, (m) => " ".repeat(m.length));
+// !`cmd` (at a line start or after whitespace) and ```! blocks: run, output in place
+export async function runShellInjections(text: string, run: (cmd: string) => Promise<{ code: number; out: string }>): Promise<{ text: string; error?: string }> {
+	const jobs: { start: number; end: number; cmd: string }[] = [];
+	for (const m of text.matchAll(/```!\s*\n([\s\S]*?)\n```/g)) jobs.push({ start: m.index!, end: m.index! + m[0].length, cmd: m[1] });
+	for (const m of text.matchAll(/(^|[ \t\n])!`([^`\n]+)`/g)) { const s = m.index! + m[1].length; if (!jobs.some((j) => s >= j.start && s < j.end)) jobs.push({ start: s, end: m.index! + m[0].length, cmd: m[2] }); }
+	jobs.sort((a, b) => a.start - b.start);
+	let out = ""; let at = 0;
+	for (const j of jobs) {
+		const r = await run(j.cmd);
+		const searchMiss = r.code === 1 && /^\s*(grep|rg|egrep|fgrep|diff|cmp|test|\[)\b/.test(j.cmd);
+		if (r.code !== 0 && !searchMiss) return { text, error: `!\`${short(j.cmd, 60)}\` failed (exit ${r.code}): ${short(r.out.trim().split("\n").pop() ?? "", 120)}` };
+		out += text.slice(at, j.start) + r.out.trimEnd(); at = j.end;
+	}
+	return { text: out + text.slice(at) };
+}
+// @path references to files: the text stays, the files follow it
+export function fileReferences(text: string, cwd: string): string {
+	const files: string[] = [];
+	for (const m of fenceFree(text).matchAll(/(?:^|\s)@((?:\\ |[^\s])+)/g)) {
+		const raw = m[1].replace(/\\ /g, " ");
+		for (const cand of [raw, raw.replace(/[.,;:!?)\]'"]+$/, "")]) {
+			const p = abs(cand, cwd);
+			if (!files.includes(p) && readText(p) !== undefined) { files.push(p); break; }
+		}
+	}
+	if (!files.length) return text;
+	return `${text.trimEnd()}\n\n${files.map((f) => `<file path="${f}">\n${readText(f)}\n</file>`).join("\n\n")}`;
+}
+
+// ----------------------------------------------------------------- memory
+export interface ContextFile { path: string; content: string }
+function importsOf(content: string, file: string): string[] {
+	const out: string[] = [];
+	for (const m of fenceFree(content).matchAll(/(?:^|\s)@((?:\\ |[^\s])+)/g)) {
+		const raw = expandHome(m[1].replace(/\\ /g, " "));
+		for (const cand of [raw, raw.replace(/[.,;:!?)\]'"]+$/, "")]) {
+			const p = isAbsolute(cand) ? cand : resolve(dirname(file), cand);
+			if (readText(p) !== undefined) { out.push(p); break; }
+		}
+	}
+	return out;
+}
+// The context files of the session as Claude Code would have them: pi's own
+// list (kept, in order) with Claude's additions placed by directory, root
+// first, each followed by what it imports (up to 4 hops, each file once).
+// Imports leave the project and ~/.claude only in a trusted folder or from a
+// user-level file.
+export function claudeContextFiles(cwd: string, existing: ContextFile[], trusted: boolean): ContextFile[] {
+	const seen = new Set(existing.map((f) => real(f.path)));
+	const root = gitRoot(cwd) ?? resolve(cwd);
+	const dirs = ancestors(cwd).reverse();
+	const depthOf = (d: string) => { const i = dirs.indexOf(d); return i < 0 ? -1 : i; };
+	type E = ContextFile & { rank: number; claude: boolean; user: boolean };
+	const list: E[] = existing.map((f, i) => {
+		const d = dirname(resolve(f.path));
+		const rank = resolve(d) === resolve(agentDir()) ? -3 : depthOf(d) >= 0 ? depthOf(d) * 10 : 1e6 + i;
+		return { ...f, rank, claude: /^CLAUDE(\.local)?\.md$/i.test(basename(f.path)), user: rank === -3 };
+	});
+	const add = (path: string, rank: number, user: boolean) => {
+		if (seen.has(real(path))) return;
+		const text = readText(path); if (text === undefined) return;
+		seen.add(real(path)); list.push({ path, content: text, rank, claude: true, user });
+	};
+	const rules = (dir: string, rank: number, user: boolean) => {
+		for (const f of mdFiles(dir)) { const t = readText(f); if (t !== undefined && parseFrontmatter(t).fm.paths === undefined) add(f, rank, user); }
+	};
+	add(join(claudeDir(), "CLAUDE.md"), -2, true);
+	rules(join(claudeDir(), "rules"), -1, true);
+	dirs.forEach((d, i) => {
+		const own = existing.find((f) => dirname(resolve(f.path)) === d);
+		const cm = join(d, "CLAUDE.md");
+		// pi took AGENTS.md here; Claude reads CLAUDE.md (an identical one is not added twice)
+		if (own && !/^CLAUDE\.md$/i.test(basename(own.path)) && readText(cm) !== undefined && readText(cm)!.trim() !== own.content.trim()) add(cm, i * 10 + 1, false);
+		add(join(d, ".claude", "CLAUDE.md"), i * 10 + 2, false);
+		add(join(d, "CLAUDE.local.md"), i * 10 + 3, false);
+		if (under(d, root) || d === root) rules(join(d, ".claude", "rules"), i * 10 + 4, false);
+	});
+	list.sort((a, b) => a.rank - b.rank);
+	const out: ContextFile[] = [];
+	const expand = (f: E | ContextFile, user: boolean, hops: number) => {
+		if (hops >= 4) return;
+		for (const p of importsOf(f.content, f.path)) {
+			if (seen.has(real(p))) continue;
+			if (!user && !trusted && !under(real(p), real(root)) && !under(real(p), real(claudeDir()))) continue;
+			const text = readText(p); if (text === undefined) continue;
+			seen.add(real(p)); const e = { path: p, content: text }; out.push(e); expand(e, user, hops + 1);
+		}
+	};
+	for (const f of list) { out.push({ path: f.path, content: f.content }); if (f.claude) expand(f, f.user, 0); }
+	return out;
+}
+
+// -------------------------------------------------------------------- MCP
+export function expandVars(s: string, env: Record<string, string | undefined> = process.env): string {
+	return s.replace(/\$\{([A-Za-z_]\w*)(?::-([^}]*))?\}/g, (all, n, d) => (env[n] !== undefined && env[n] !== "" ? env[n]! : d !== undefined ? d : all));
+}
+export interface McpEntry { name: string; scope: "user" | "local" | "project"; config: Record<string, unknown> }
+export function toPiMcp(raw: any): Record<string, unknown> | string {
+	if (!raw || typeof raw !== "object") return "not an object";
+	const type = String(raw.type ?? (raw.url ? "http" : "stdio"));
+	const x = (v: unknown) => expandVars(String(v));
+	const map = (o: any) => (o && typeof o === "object" ? Object.fromEntries(Object.entries(o).map(([k, v]) => [k, x(v)])) : undefined);
+	let cfg: Record<string, unknown>;
+	if (type === "stdio") { if (!raw.command) return "no command"; cfg = drop({ type: "stdio", command: x(raw.command), args: Array.isArray(raw.args) ? raw.args.map(x) : undefined, env: map(raw.env) }); }
+	else if (type === "http" || type === "streamable-http") { if (!raw.url) return "no url"; cfg = drop({ type: "http", url: x(raw.url), headers: map(raw.headers) }); }
+	else return `transport ${type} is not supported by pi`;
+	if (typeof raw.timeout === "number") cfg.timeout = raw.timeout > 1000 ? Math.ceil(raw.timeout / 1000) : raw.timeout;
+	// pi runs a value starting with "!" as a command; Claude never does
+	const values = [cfg.command, ...((cfg.args as string[]) ?? []), ...Object.values((cfg.env as object) ?? {}), ...Object.values((cfg.headers as object) ?? {})];
+	if (values.some((v) => typeof v === "string" && v.startsWith("!"))) return "a value starts with '!'";
+	return cfg;
+}
+// local > project > user on a name clash; project servers need trust and Claude's approval
+export function claudeMcpServers(cwd: string, s: Settings, trusted: boolean, askedHere: boolean): { servers: McpEntry[]; skipped: string[] } {
+	const cj = readJson(claudeJsonPath()) ?? {};
+	const proj = cj.projects?.[real(cwd)] ?? cj.projects?.[resolve(cwd)] ?? {};
+	const servers = new Map<string, McpEntry>(); const skipped: string[] = [];
+	const add = (scope: McpEntry["scope"], all: any) => {
+		for (const [name, raw] of Object.entries(all && typeof all === "object" ? all : {})) {
+			if (servers.has(name)) continue;
+			const c = toPiMcp(raw);
+			if (typeof c === "string") { skipped.push(`${name} (${c})`); continue; }
+			servers.set(name, { name, scope, config: c });
+		}
+	};
+	add("local", proj.mcpServers);
+	const mj = readJson(join(cwd, ".mcp.json"))?.mcpServers;
+	if (mj && typeof mj === "object") {
+		const disabled = new Set([...s.disabledMcpjsonServers, ...asList(proj.disabledMcpjsonServers)]);
+		const enabled = new Set([...s.enabledMcpjsonServers, ...asList(proj.enabledMcpjsonServers)]);
+		const approved: Record<string, unknown> = {};
+		for (const [name, raw] of Object.entries(mj)) {
+			if (disabled.has(name)) continue;
+			if (!trusted) { skipped.push(`${name} (folder not trusted)`); continue; }
+			if (!(s.enableAllProjectMcpServers || enabled.has(name) || askedHere)) { skipped.push(`${name} (not approved in Claude Code)`); continue; }
+			approved[name] = raw;
+		}
+		add("project", approved);
+	}
+	add("user", cj.mcpServers);
+	return { servers: [...servers.values()], skipped };
+}
+
+// -------------------------------------------------------------- workflows
+export interface Workflow { name: string; description: string; file: string; scope: "user" | "project"; source: string }
+// export const meta = { ... } as its first statement: a plain literal, read without running the script
+export function parseWorkflow(src: string): { meta: any; body: string } | null {
+	const m = /export\s+const\s+meta\s*=\s*/.exec(src);
+	if (!m) return null;
+	let i = m.index + m[0].length; if (src[i] !== "{") return null;
+	let depth = 0; let q = ""; let j = i;
+	for (; j < src.length; j++) {
+		const c = src[j];
+		if (q) { if (c === "\\") j++; else if (c === q) q = ""; continue; }
+		if (c === '"' || c === "'" || c === "`") q = c;
+		else if (c === "/" && src[j + 1] === "/") { while (j < src.length && src[j] !== "\n") j++; }
+		else if (c === "/" && src[j + 1] === "*") { j = src.indexOf("*/", j + 2); if (j < 0) return null; j++; }
+		else if (c === "{") depth++;
+		else if (c === "}" && --depth === 0) break;
+	}
+	if (depth !== 0) return null;
+	let meta: any;
+	try { meta = vm.runInNewContext(`(${src.slice(i, j + 1)})`, Object.create(null), { timeout: 200 }); } catch { return null; }
+	if (!meta || typeof meta.name !== "string") return null;
+	return { meta, body: src.slice(0, m.index) + src.slice(j + 1).replace(/^\s*;/, "") };
+}
+export function discoverWorkflows(cwd: string, trusted: boolean): Workflow[] {
+	const out = new Map<string, Workflow>();
+	const scan = (dir: string, scope: Workflow["scope"]) => {
+		if (!isDir(dir)) return;
+		for (const f of readdirSync(dir).sort()) {
+			if (!f.endsWith(".js")) continue;
+			const src = readText(join(dir, f)); const p = src === undefined ? null : parseWorkflow(src);
+			if (!p || out.has(p.meta.name)) continue;
+			out.set(p.meta.name, { name: p.meta.name, description: String(p.meta.description ?? ""), file: join(dir, f), scope, source: src! });
+		}
+	};
+	if (trusted) for (const d of projectDirs(cwd)) scan(join(d, ".claude", "workflows"), "project");
+	scan(join(claudeDir(), "workflows"), "user");
+	return [...out.values()];
+}
+// enough JSON Schema for an agent's answer: type, required, properties, items, enum
+export function validate(v: any, s: any, at = "$"): string | null {
+	if (!s || typeof s !== "object") return null;
+	const types = Array.isArray(s.type) ? s.type : s.type ? [s.type] : [];
+	const typeOf = (x: any) => (x === null ? "null" : Array.isArray(x) ? "array" : Number.isInteger(x) ? "integer" : typeof x);
+	if (types.length && !types.some((t: string) => t === typeOf(v) || (t === "number" && typeof v === "number"))) return `${at} should be ${types.join("|")}`;
+	if (Array.isArray(s.enum) && !s.enum.some((e: any) => JSON.stringify(e) === JSON.stringify(v))) return `${at} should be one of ${JSON.stringify(s.enum)}`;
+	if (v && typeof v === "object" && !Array.isArray(v)) {
+		for (const k of s.required ?? []) if (!(k in v)) return `${at}.${k} is missing`;
+		for (const [k, sub] of Object.entries(s.properties ?? {})) if (k in v) { const e = validate(v[k], sub, `${at}.${k}`); if (e) return e; }
+	}
+	if (Array.isArray(v) && s.items) for (let i = 0; i < v.length; i++) { const e = validate(v[i], s.items, `${at}[${i}]`); if (e) return e; }
+	return null;
+}
+export function parseJsonReply(text: string): unknown {
+	const t = text.trim().replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
+	try { return JSON.parse(t); } catch { /* look inside */ }
+	const a = t.search(/[[{]/); const b = Math.max(t.lastIndexOf("}"), t.lastIndexOf("]"));
+	if (a >= 0 && b > a) { try { return JSON.parse(t.slice(a, b + 1)); } catch { /* none */ } }
+	return undefined;
+}
+export interface WorkflowRuntime {
+	runAgent(prompt: string, label: string, signal?: AbortSignal): Promise<{ text: string; ok: boolean }>;
+	concurrency: number; signal?: AbortSignal; onProgress?(line: string): void;
+}
+// The script runs in a vm context with agent / parallel / pipeline / phase /
+// log / args as globals, its body wrapped in an async function so a top-level
+// return is the result. Agents share one queue of `concurrency` slots.
+export async function runWorkflow(wf: { source: string; file?: string }, args: unknown, rt: WorkflowRuntime): Promise<{ result: unknown; agents: number }> {
+	const p = parseWorkflow(wf.source);
+	if (!p) throw new Error("not a workflow script (no `export const meta = { name, ... }`)");
+	let active = 0; let agents = 0; let phaseTitle = "";
+	const queue: (() => void)[] = [];
+	const acquire = () => new Promise<void>((r) => { if (active < rt.concurrency) { active++; r(); } else queue.push(() => { active++; r(); }); });
+	const release = () => { active--; queue.shift()?.(); };
+	const progress = (s: string) => rt.onProgress?.(s);
+	const agent = async (prompt: string, opts: any = {}) => {
+		if (rt.signal?.aborted) return null;
+		await acquire();
+		try {
+			if (rt.signal?.aborted) return null;
+			const label = String(opts?.label ?? `agent ${agents + 1}`);
+			agents++; progress(`${opts?.phase ?? phaseTitle ? `${opts?.phase ?? phaseTitle}: ` : ""}${label}`);
+			if (!opts?.schema) { const r = await rt.runAgent(String(prompt), label, rt.signal); return r.ok || r.text ? r.text : null; }
+			const ask = `${prompt}\n\nReply with only a JSON value (no prose, no code fence) that matches this JSON Schema:\n${JSON.stringify(opts.schema)}`;
+			let r = await rt.runAgent(ask, label, rt.signal);
+			let v = parseJsonReply(r.text); let err = v === undefined ? "the reply was not JSON" : validate(v, opts.schema);
+			if (err && !rt.signal?.aborted) {   // one retry, with the reason
+				agents++;
+				r = await rt.runAgent(`${ask}\n\nA previous answer was rejected (${err}):\n${r.text.slice(0, 2000)}\nReply again with only the JSON.`, label, rt.signal);
+				v = parseJsonReply(r.text); err = v === undefined ? "the reply was not JSON" : validate(v, opts.schema);
+			}
+			return err ? null : v;
+		} finally { release(); }
+	};
+	const settle = async (x: any) => { try { return await (typeof x === "function" ? x() : x); } catch { return null; } };
+	const parallel = (items: any, ...rest: any[]) => Promise.all((Array.isArray(items) ? items : [items, ...rest]).map(settle));
+	const pipeline = (items: any[], ...stages: any[]) => Promise.all((items ?? []).map((it: any, i: number) => settle(async () => { let v = it; for (const s of stages) v = await s(v, i); return v; })));
+	const phase = (t: string) => { phaseTitle = String(t); progress(`phase: ${phaseTitle}`); };
+	const log = (...m: unknown[]) => progress(m.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
+	const ctx = vm.createContext({ agent, parallel, pipeline, phase, log, args, console: { log, info: log, warn: log, error: log } });
+	const result = await vm.runInContext(`(async () => {\n${p.body}\n})()`, ctx, { filename: wf.file ?? `${p.meta.name}.js` });
+	return { result, agents };
+}
+// When a prompt asks for a workflow, judged on the user's words with code
+// removed, deterministic and strict, since a hit adds a prompt section:
+//   * its name with the word "workflow" ("run the review workflow"), as
+//     /<name>, or a name with - _ : in it ("deep-research") on its own;
+//   * or the request reads like its description: at least 3 shared content
+//     words (4+ letters, crude stemming), 40 % of the description's and
+//     20 % of the prompt's (so a long prompt does not match by chance).
+const STOP = new Set("about above after again also always based because been before being both cannot could does doing done each every from have having here into just like make many more most much must need only other over same should some such than that their them then there these they this those through under until very what when where which while will with within without would your yours please using used uses into onto".split(" "));
+const stem = (w: string) => w.replace(/(ies)$/, "y").replace(/(ing|ed|es|s)$/, "");
+const words = (s: string) => new Set((s.toLowerCase().match(/[a-z][a-z0-9]{3,}/g) ?? []).filter((w) => !STOP.has(w)).map((w) => stem(stem(w))));
+const strip = (p: string) => String(p ?? "").replace(/```[\s\S]*?(```|$)/g, " ").replace(/`[^`\n]*`/g, " ");
+export function workflowMatches(prompt: string, list: Pick<Workflow, "name" | "description">[]): string[] {
+	const p = strip(prompt); const lower = p.toLowerCase(); const pw = words(p);
+	return list.filter((w) => {
+		const n = w.name.toLowerCase(); const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const named = new RegExp(`(^|[^\\w/-])${esc}($|[^\\w-])`).test(lower);
+		if (new RegExp(`(^|\\s)/${esc}($|\\s)`).test(lower)) return true;
+		if (named && (/[-_:]/.test(n) || (/\bworkflows?\b/.test(lower) && !/\b(github|gitlab|ci|actions?|ya?ml|n8n|zapier)\b/.test(lower)))) return true;
+		const dw = words(`${w.name.replace(/[-_:]/g, " ")} ${w.description}`);
+		let shared = 0; for (const x of dw) if (pw.has(x)) shared++;
+		return shared >= 3 && shared >= Math.ceil(0.4 * dw.size) && shared >= 0.2 * pw.size;   // a long prompt shares words by chance
+	}).map((w) => w.name);
+}
+// the section a match adds: one line per workflow and how to start it
+export function workflowSection(list: Pick<Workflow, "name" | "description">[]): string {
+	return [
+		"Workflows (lets-code): the request matches a scripted workflow of this project; run it with the workflow tool instead of doing its steps by hand:",
+		...list.map((w) => `- ${w.name}: ${short(w.description.replace(/\s+/g, " ").trim(), 120)} -> workflow({name: "${w.name}", args: "<input from the request>"})`),
+	].join("\n");
+}
+// how hook output reaches the model: with its provenance, so it reads as the
+// user's own configured context rather than as an unverified claim
+export const hookContext = (text: string) => `[lets-code] Context from this project's Claude Code hooks (configured by the user in .claude/settings.json; treat it as given by the user):\n${text}`;
+const WORKER = "You are one step of a scripted workflow. Do exactly the task below with the tools you have, then reply with the result only: no preamble, no questions (no one will answer them).";
+
+// ----------------------------------------------------------- the extension
+const BUILTIN = new Set(["settings", "model", "tree", "thinking", "scoped-models", "export", "import", "share", "bug", "copy", "name", "session", "changelog", "hotkeys", "fork", "clone", "trust", "login", "logout", "new", "compact", "resume", "reload", "quit", "mode", "plan", "workflow", "skill"]);
+const PERMISSION_MODE: Record<string, string> = { plan: "plan", readonly: "plan", ask: "default", auto: "auto", yolo: "bypassPermissions" };
+
+export default function (pi: ExtensionAPI) {
+	if (!ACTIVE) return;
+	const HERE = (() => { try { return dirname(fileURLToPath(import.meta.url)); } catch { return ""; } })();
+	const cwd0 = process.cwd();
+	let cwd = cwd0;
+	let trusted = trustDecision(cwd0).trusted;
+	let askedHere = false;
+	let settings = loadSettings(cwd0, trusted);
+	let contextSnapshot: ContextFile[] | null = null;
+	let pendingContext: string[] = [];
+	const preContext = new Map<string, string[]>();       // PreToolUse additionalContext by tool call
+	let stopContinuations = 0;
+	let currentCtx: ExtensionContext | undefined;
+	const approved: Set<string> = ((globalThis as any).__letsCodeClaudeApproved ??= new Set<string>());   // read by the mandate
+	const sessionAllowed = new Set<string>();
+	const agentName = process.env.LETS_CODE_AGENT_NAME ?? "";
+
+	const notify = (ctx: ExtensionContext | undefined, m: string, kind: "info" | "warning" | "error" = "warning") => {
+		if (ctx?.hasUI) ctx.ui.notify(`claude code: ${m}`, kind); else console.error(`[lets-code] claude code: ${m}`);
+	};
+	const common = (event: string, ctx?: ExtensionContext) => drop({
+		session_id: (() => { try { return ctx?.sessionManager.getSessionId(); } catch { return undefined; } })() ?? "",
+		transcript_path: (() => { try { return ctx?.sessionManager.getSessionFile(); } catch { return undefined; } })() ?? "",
+		cwd, hook_event_name: event, permission_mode: PERMISSION_MODE[process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || ""] ?? "default",
+		...(DEPTH > 0 ? { agent_type: agentName } : {}),
+	});
+	async function fire(event: string, value: string | string[] | undefined, extra: Record<string, unknown>, ctx?: ExtensionContext, timeoutMs?: number): Promise<Outcome | null> {
+		const hooks = selectHooks(settings.hooks, event, value);
+		if (!hooks.length) return null;
+		const input = { ...common(event, ctx), ...extra };
+		const runs = await Promise.all(hooks.map((h) => runHook(h, input, { cwd, signal: ctx?.signal, timeoutMs })));
+		const o = interpret(event, runs);
+		for (const n of o.notices) notify(ctx, n);
+		return o;
+	}
+	const has = (event: string) => settings.hooks.some((h) => h.event === event);
+
+	// ---------------------------------------------------------- trust
+	function needsTrust(): string[] {
+		const all = loadSettings(cwd, true);
+		const project = (h: HookDef) => h.scope !== "user";
+		const what: string[] = [];
+		const hooks = all.hooks.filter(project);
+		if (hooks.length) what.push(`hooks:\n${[...new Set(hooks.map((h) => `  ${h.event}: ${short(String(h.command ?? h.url), 100)}`))].slice(0, 12).join("\n")}`);
+		const mcp = Object.keys(readJson(join(cwd, ".mcp.json"))?.mcpServers ?? {});
+		if (mcp.length) what.push(`MCP servers (.mcp.json): ${mcp.join(", ")}`);
+		const env = settingsLayers(cwd).filter((l) => l.scope !== "user").flatMap((l) => Object.keys(l.data.env ?? {}));
+		if (env.length) what.push(`env: ${env.join(", ")}`);
+		const shell = discoverCommands(cwd).filter((c) => c.scope === "project" && /(^|\s)!`|```!/.test(c.body));
+		if (shell.length) what.push(`commands that run shell: ${shell.map((c) => `/${c.name}`).join(", ")}`);
+		const agents = projectDirs(cwd).flatMap((d) => (isDir(join(d, ".claude", "agents")) ? readdirSync(join(d, ".claude", "agents")).filter((f) => f.endsWith(".md")) : []));
+		if (agents.length) what.push(`agents: ${agents.map((f) => f.replace(/\.md$/, "")).join(", ")}`);
+		const wf = discoverWorkflows(cwd, true).filter((w) => w.scope === "project");
+		if (wf.length) what.push(`workflows: ${wf.map((w) => w.name).join(", ")}`);
+		if (all.allow.some((r) => r.base === cwd || r.base === resolve(cwd))) what.push("allow rules");
+		return what;
+	}
+	async function settleTrust(ctx: ExtensionContext): Promise<void> {
+		const d = trustDecision(cwd);
+		trusted = d.trusted;
+		if (d.source !== "undecided") return;
+		const what = needsTrust();
+		if (!what.length) return;
+		if (!ctx.hasUI || DEPTH > 0) { notify(ctx, `project hooks, MCP servers and env skipped: ${cwd} is not trusted (trust it in Claude Code or pi, or start lets-code here interactively once).`); return; }
+		const choice = await ctx.ui.select(`Claude Code project in ${cwd}\n\nTrusting it lets lets-code run what its .claude/ folder sets up:\n${what.join("\n")}\n\nTrust this folder?`,
+			["Trust this folder", "Not now", "Never for this folder"]);
+		if (choice === "Trust this folder") { rememberTrust(cwd, true); trusted = true; askedHere = true; }
+		else if (choice === "Never for this folder") rememberTrust(cwd, false);
+	}
+
+	// ------------------------------------------------- commands and skills
+	function sendPrompt(text: string, ctx: any): Promise<void> | void {
+		if (!ctx.isIdle?.()) { pi.sendUserMessage(text, { deliverAs: "followUp" } as any); return; }
+		if (ctx.hasUI) { pi.sendUserMessage(text); return; }
+		// print and json mode end when the command returns: wait for the run it starts
+		return new Promise<void>((done) => {
+			const runs0 = waiting.runs; const t0 = Date.now(); waiting.blocked = false;
+			const tick = setInterval(async () => {
+				const started = waiting.runs > runs0;
+				if (started || waiting.blocked) { clearInterval(tick); waiting.blocked = false; if (started) await ctx.waitForIdle?.(); done(); }
+				else if (Date.now() - t0 > 120_000) { clearInterval(tick); done(); }
+			}, 100);
+			pi.sendUserMessage(text);
+		});
+	}
+	const waiting = { blocked: false, runs: 0 };
+	pi.on("agent_start", () => { waiting.runs++; });
+	async function expand(t: Template, args: string, ctx: ExtensionContext): Promise<string | null> {
+		let text = substitute(t.body, args, t, { CLAUDE_PROJECT_DIR: cwd, CLAUDE_SESSION_ID: String(common("x", ctx).session_id ?? "") });
+		if (/(^|\s)!`|```!/.test(text)) {
+			if (t.scope === "project" && !trusted) { notify(ctx, `/${t.name} runs shell commands; ${cwd} is not trusted, so it was not run.`); return null; }
+			const r = await runShellInjections(text, (cmd) => {
+				const p = permissionCheck(settings, "Bash", { command: cmd }, cwd);
+				if (p.decision === "deny") return Promise.resolve({ code: 126, out: `denied by ${p.rule}` });
+				return new Promise((done) => {
+					const c = spawn("sh", ["-c", cmd], { cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: cwd } }); let out = "";
+					c.stdout.on("data", (d) => { out += d; }); c.stderr.on("data", (d) => { out += d; });
+					const timer = setTimeout(() => c.kill("SIGKILL"), 120_000);
+					c.on("error", (e) => { clearTimeout(timer); done({ code: 127, out: e.message }); });
+					c.on("close", (code) => { clearTimeout(timer); done({ code: code ?? 1, out }); });
+				});
+			});
+			if (r.error) { notify(ctx, `/${t.name}: ${r.error}`, "error"); return null; }
+			text = r.text;
+		}
+		text = fileReferences(text, cwd);
+		if (t.kind === "skill") text = `<skill name="${t.name}" location="${t.file}">\nReferences are relative to ${t.dir}.\n\n${text.trim()}\n</skill>`;
+		return text;
+	}
+	const registered = new Set<string>();
+	const register = (name: string, description: string, handler: (args: string, ctx: any) => Promise<void>) => {
+		if (BUILTIN.has(name) || registered.has(name)) return;
+		registered.add(name);
+		pi.registerCommand(name, { description: short(description, 120), handler });
+	};
+	const skills = discoverSkills(cwd0);
+	const commands = discoverCommands(cwd0);
+	// workflows switch themselves on: the user's, and a project's unless the folder was refused
+	const refused = rememberedTrust(cwd0) === false && !trusted;
+	const workflows = DEPTH === 0 ? discoverWorkflows(cwd0, !refused) : [];
+	const matched = new Set<string>();
+	if (DEPTH === 0) {
+		for (const s of skills.filter((x) => x.userInvocable)) register(s.name, s.description, async (args, ctx) => { const t = await expand(s, args ?? "", ctx); if (t) await sendPrompt(t, ctx); });
+		for (const c of commands) register(c.name, `${c.description}${c.argumentHint ? ` ${c.argumentHint}` : ""}`, async (args, ctx) => {
+			const fresh = template(c.file, c.name, "command", c.scope) ?? c;   // read live
+			const t = await expand(fresh, args ?? "", ctx); if (t) await sendPrompt(t, ctx);
+		});
+	}
+
+	// ------------------------------------------------------------------ MCP
+	const registeredMcp = new Set<string>();
+	function registerMcp(ctx: ExtensionContext | undefined, entries: McpEntry[]) {
+		for (const e of entries) {
+			if (registeredMcp.has(e.name)) continue;
+			try { pi.registerMcpServer(e.name, e.config as any); registeredMcp.add(e.name); }
+			catch (err) { notify(ctx, `MCP server ${e.name} not registered: ${(err as Error).message}`); }
+		}
+	}
+	// user and local scope are the user's own: they register while extensions load
+	registerMcp(undefined, claudeMcpServers(cwd0, settings, false, false).servers.filter((e) => e.scope !== "project"));
+
+	// ------------------------------------------------------------ workflows
+	async function workflowRunner() {
+		const sub = await import(pathToFileURL(join(HERE, "subagents.ts")).href);
+		return async (prompt: string, label: string, signal?: AbortSignal) => {
+			const r = await sub.runAgent({ name: label.replace(/[^\w.-]+/g, "-").slice(0, 40) || "workflow", description: "", prompt: WORKER, source: "user", file: "" }, prompt, cwd, signal);
+			return { text: String(r.text ?? "").trim(), ok: r.exitCode === 0 };
+		};
+	}
+	function parseWfArgs(a: string): unknown { const s = (a ?? "").trim(); if (!s) return undefined; try { return JSON.parse(s); } catch { return s; } }
+	async function startWorkflow(name: string, rawArgs: string, signal: AbortSignal | undefined, progress: (l: string) => void): Promise<{ text: string; error: boolean }> {
+		const list = discoverWorkflows(cwd, trusted);
+		const wf = list.find((w) => w.name === name);
+		if (!wf) {
+			const untrusted = !trusted && discoverWorkflows(cwd, true).some((w) => w.name === name);
+			return { text: untrusted ? `Workflow "${name}" is a project workflow and ${cwd} is not trusted.` : `Unknown workflow "${name}". Workflows: ${list.map((w) => w.name).join(", ") || "none"}`, error: true };
+		}
+		const p = permissionCheck(settings, "Workflow", { name }, cwd);
+		if (p.decision === "deny") return { text: `Workflow "${name}" is denied by ${p.rule}.`, error: true };
+		try {
+			const { result, agents } = await runWorkflow(wf, parseWfArgs(rawArgs), { runAgent: await workflowRunner(), concurrency: CONCURRENCY, signal, onProgress: progress });
+			const body = typeof result === "string" ? result : result === undefined ? "(no result)" : JSON.stringify(result, null, 2);
+			return { text: `## workflow ${name} — ${signal?.aborted ? "stopped" : "done"}, ${agents} agent${agents === 1 ? "" : "s"}\n${body.length > 50_000 ? `${body.slice(0, 50_000)}\n[truncated at 50 KB]` : body}`, error: false };
+		} catch (e) { return { text: `Workflow "${name}" failed: ${(e as Error).message}`, error: true }; }
+	}
+	const workflowsOn = process.env.LETS_CODE_SUBAGENTS_ON === "1" && DEPTH < MAX_DEPTH && workflows.length > 0;
+	if (workflowsOn) {
+		pi.registerTool({
+			name: "workflow", label: "workflow",
+			description: "Run a project workflow script by name; without a name, lists them.",
+			parameters: Type.Object({ name: Type.Optional(Type.String()), args: Type.Optional(Type.String({ description: "input (JSON or text)" })) }),
+			async execute(_id: string, params: any, signal: AbortSignal | undefined, onUpdate: any) {
+				if (!params?.name) {
+					const list = discoverWorkflows(cwd, trusted);
+					return { content: [{ type: "text" as const, text: list.map((w) => `- ${w.name}: ${w.description}`).join("\n") || "No workflows." }] };
+				}
+				const r = await startWorkflow(params.name, params.args ?? "", signal, (line) => onUpdate?.({ content: [{ type: "text", text: line }] }));
+				return { content: [{ type: "text" as const, text: r.text }], isError: r.error };
+			},
+		} as any);
+		const runCommand = async (name: string, args: string, ctx: any) => {
+			const r = await startWorkflow(name, args, ctx.signal, (line) => { if (ctx.hasUI) ctx.ui.setStatus("claude-code", `workflow ${name}: ${short(line, 60)}`); });
+			if (ctx.hasUI) ctx.ui.setStatus("claude-code", undefined);
+			if (!ctx.hasUI) { process.stdout.write(`${r.text}\n`); return; }
+			pi.sendMessage({ customType: "claude-code-workflow", content: r.text, display: true }, { triggerTurn: false });
+		};
+		pi.registerCommand("workflow", {
+			description: "Run a Claude Code workflow: /workflow <name> [args]",
+			handler: async (args: string, ctx: any) => {
+				const [name, ...rest] = (args ?? "").trim().split(/\s+/);
+				if (!name) { const l = discoverWorkflows(cwd, trusted); const text = l.map((w) => `${w.name}: ${w.description}`).join("\n") || "No workflows."; if (ctx.hasUI) ctx.ui.notify(text, "info"); else process.stdout.write(`${text}\n`); return; }
+				await runCommand(name, rest.join(" "), ctx);
+			},
+		});
+		for (const w of workflows) register(w.name, `workflow: ${w.description}`, (args, ctx) => runCommand(w.name, args ?? "", ctx));
+	}
+
+	// ----------------------------------------------------------- lifecycle
+	pi.on("session_start", async (event: any, ctx: ExtensionContext) => {
+		cwd = ctx.cwd; currentCtx = ctx;
+		if (event?.reason !== "reload") await settleTrust(ctx);
+		process.env.LETS_CODE_CLAUDE_TRUST = trusted ? "1" : "0";   // for the subagents module and child processes
+		settings = loadSettings(cwd, trusted);                          // the session's snapshot
+		if (trusted && process.env.LETS_CODE_CLAUDE_ENV !== "all") {
+			for (const [k, v] of Object.entries(settings.env)) if (/^[A-Za-z_]\w*$/.test(k) && !/^(LETS_CODE_|PI_)/.test(k)) process.env[k] = v;
+			process.env.LETS_CODE_CLAUDE_ENV = "all";
+		}
+		// a bare tool name in deny takes the tool away, as in Claude Code
+		const gone = settings.deny.filter((r) => r.spec === undefined && !r.tool.includes("*")).map((r) => r.tool);
+		if (gone.length) { try { pi.setActiveTools(pi.getActiveTools().filter((t) => !gone.some((g) => toolNames(g).includes(claudeToolName(t)) || (g === "Edit" && t === "write")))); } catch { /* keep */ } }
+		contextSnapshot = null;
+		const mcp = claudeMcpServers(cwd, settings, trusted, askedHere);
+		registerMcp(ctx, mcp.servers.filter((e) => e.scope === "project"));
+		if (mcp.skipped.length && trusted) notify(ctx, `MCP servers skipped: ${mcp.skipped.join(", ")}`);
+		if (DEPTH > 0) {
+			const o = await fire("SubagentStart", agentName, { agent_id: String(process.pid), agent_type: agentName }, ctx);
+			if (o?.context.length) pendingContext.push(...o.context);
+			return;
+		}
+		if (event?.reason === "reload") return;
+		const source = ({ startup: "startup", new: "clear", resume: "resume", fork: "fork" } as Record<string, string>)[event?.reason] ?? "startup";
+		const o = await fire("SessionStart", source, { source, model: process.env.LETS_CODE_MODEL ?? "" }, ctx);
+		if (o?.context.length) pendingContext.push(...o.context);
+	});
+	pi.on("session_compact", async (_e: any, ctx: ExtensionContext) => {
+		if (DEPTH > 0) return;
+		const o = await fire("SessionStart", "compact", { source: "compact" }, ctx);
+		if (o?.context.length) pendingContext.push(...o.context);
+	});
+	pi.on("resources_discover", () => ({ skillPaths: skillDirs(cwd) }));
+	pi.on("session_before_compact", async (event: any, ctx: ExtensionContext) => {
+		if (!has("PreCompact")) return undefined;
+		const trigger = event?.reason === "manual" ? "manual" : "auto";
+		const o = await fire("PreCompact", trigger, { trigger, custom_instructions: event?.customInstructions ?? null }, ctx);
+		if (o?.block) { notify(ctx, `compaction blocked by a PreCompact hook: ${short(o.block)}`); return { cancel: true }; }
+		return undefined;
+	});
+	pi.on("session_shutdown", async (event: any, ctx: ExtensionContext) => {
+		if (DEPTH > 0 || event?.reason === "reload" || !has("SessionEnd")) return;
+		const reason = ({ quit: "prompt_input_exit", new: "clear", resume: "resume" } as Record<string, string>)[event?.reason] ?? "other";
+		await fire("SessionEnd", reason, { reason }, ctx, 1500);   // Claude's budget for these
+	});
+	pi.on("ui_prompt_start", (event: any) => {
+		if (!has("Notification")) return;
+		void fire("Notification", "permission_prompt", { notification_type: "permission_prompt", message: String(event?.title ?? "lets-code needs your input").split("\n")[0], title: "lets-code" }, currentCtx);
+	});
+
+	// ------------------------------------------------------------- prompts
+	pi.on("input", async (event: any, ctx: ExtensionContext) => {
+		currentCtx = ctx; stopContinuations = 0;
+		if (DEPTH > 0 || !has("UserPromptSubmit")) return undefined;
+		const o = await fire("UserPromptSubmit", undefined, { prompt: String(event?.text ?? "") }, ctx);
+		if (!o) return undefined;
+		if (o.block || o.stop) { notify(ctx, `prompt blocked by a UserPromptSubmit hook: ${short(o.block ?? o.stop ?? "")}`); waiting.blocked = true; return { action: "handled" }; }
+		pendingContext.push(...o.context);
+		return undefined;
+	});
+	pi.on("before_agent_start", async (event: any, ctx: ExtensionContext) => {
+		const opts = event?.systemPromptOptions;
+		const noContext = process.argv.includes("--no-context-files") || process.argv.includes("-nc");
+		if (opts && Array.isArray(opts.contextFiles) && !noContext) {
+			contextSnapshot ??= claudeContextFiles(ctx.cwd, opts.contextFiles, trusted);
+			opts.contextFiles = contextSnapshot.map((f) => ({ ...f }));
+		}
+		// a prompt that asks for a workflow adds its line, kept for the session (a section
+		// that comes and goes costs a change note each time it flips)
+		if (workflowsOn && opts?.sections && typeof opts.sections === "object") {
+			const list = discoverWorkflows(ctx.cwd, trusted);
+			for (const n of workflowMatches(event?.prompt ?? "", list)) matched.add(n);
+			const hit = list.filter((w) => matched.has(w.name));
+			if (hit.length) opts.sections.lets_code_workflows = workflowSection(hit);
+		}
+		if (!pendingContext.length) return undefined;
+		const text = pendingContext.join("\n\n"); pendingContext = [];
+		return { message: { customType: "claude-code-hook", content: hookContext(text), display: false } };
+	});
+
+	// --------------------------------------------------------------- tools
+	pi.on("tool_call", async (event: any, ctx: ExtensionContext) => {
+		currentCtx = ctx;
+		const tool = String(event.toolName); const name = claudeToolName(tool);
+		let ci = toClaudeInput(tool, event.input, ctx.cwd);
+		let hookAllow = false; let hookAsk: string | undefined;
+		const o = await fire("PreToolUse", toolNames(name), { tool_name: name, tool_input: ci, tool_use_id: event.toolCallId }, ctx);
+		if (o) {
+			if (o.stop) { notify(ctx, `stopped by a PreToolUse hook: ${short(o.stop)}`); ctx.abort(); return { block: true, reason: short(`PreToolUse hook stopped the session: ${o.stop}`) }; }
+			if (o.decision === "deny") return { block: true, reason: short(`PreToolUse hook: ${o.reason || "denied"}`) };
+			if (o.updatedInput) {
+				const next = fromClaudeInput(tool, { ...ci, ...o.updatedInput }, event.input);
+				for (const k of Object.keys(event.input ?? {})) if (!(k in next)) delete event.input[k];
+				Object.assign(event.input, next);
+				ci = toClaudeInput(tool, event.input, ctx.cwd);
+			}
+			if (o.context.length) preContext.set(event.toolCallId, o.context);
+			if (o.decision === "allow") hookAllow = true;
+			if (o.decision === "ask") hookAsk = o.reason || "a PreToolUse hook asks";
+		}
+		const p = permissionCheck(settings, name, ci, ctx.cwd);
+		if (p.decision === "deny") return { block: true, reason: short(`Claude Code permission rule ${p.rule} denies this call.`) };
+		if (p.decision === "ask" || hookAsk) {
+			const key = p.rule ?? `hook:${name}`;
+			if (!sessionAllowed.has(key)) {
+				const what = short(name === "Bash" ? String(ci.command ?? "") : String(ci.file_path ?? ci.path ?? JSON.stringify(ci)), 160);
+				if (!ctx.hasUI) return { block: true, reason: short(`${p.rule ? `Claude Code rule ${p.rule}` : hookAsk} needs approval and no one can be asked here.`) };
+				const choice = await ctx.ui.select(`claude code: ${p.rule ? `rule ${p.rule}` : hookAsk} asks before\n${name}: ${what}\n\nAllow?`, ["Allow once", "Allow for this session", "Deny"]);
+				if (choice === "Allow for this session") sessionAllowed.add(key);
+				else if (choice !== "Allow once") return { block: true, reason: short(`The user did not approve ${name}: ${what}`) };
+			}
+			approved.add(event.toolCallId);
+		} else if (p.decision === "allow" || hookAllow) approved.add(event.toolCallId);
+		return undefined;
+	});
+	pi.on("tool_result", async (event: any, ctx: ExtensionContext) => {
+		approved.delete(event.toolCallId);
+		const extra = preContext.get(event.toolCallId) ?? []; preContext.delete(event.toolCallId);
+		const tool = String(event.toolName); const name = claudeToolName(tool);
+		const failed = event.isError === true;
+		const ev = failed ? "PostToolUseFailure" : "PostToolUse";
+		let replace: unknown;
+		if (has(ev)) {
+			const ci = toClaudeInput(tool, event.input, ctx.cwd);
+			const text = (event.content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text).join("\n");
+			const o = await fire(ev, toolNames(name), { tool_name: name, tool_input: ci, tool_use_id: event.toolCallId, ...(failed ? { error: text.slice(0, CAP) } : { tool_response: toolResponse(tool, event.input, event.content, failed) }) }, ctx);
+			if (o) {
+				if (o.block) extra.push(o.block);
+				extra.push(...o.context);
+				replace = o.updatedOutput;
+				if (o.stop) { notify(ctx, `stopped by a ${ev} hook: ${short(o.stop)}`); ctx.abort(); }
+			}
+		}
+		if (!extra.length && replace === undefined) return undefined;
+		const base = replace !== undefined ? [{ type: "text", text: typeof replace === "string" ? replace : JSON.stringify(replace) }] : event.content ?? [];
+		return { content: [...base, ...(extra.length ? [{ type: "text", text: `\n[lets-code] ${ev} hook (configured by the user in .claude/settings.json):\n${extra.join("\n\n")}` }] : [])] };
+	});
+
+	// ---------------------------------------------------------------- stop
+	pi.on("agent_before_settle", async (event: any, ctx: ExtensionContext) => {
+		const ev = DEPTH > 0 ? "SubagentStop" : "Stop";
+		if (event?.continue || event?.outcome !== "completed" || !has(ev)) return undefined;
+		const msgs: any[] = event?.context?.llmMessages ?? event?.context?.contextMessages ?? [];
+		const last = [...msgs].reverse().find((m) => m?.role === "assistant");
+		const lastText = typeof last?.content === "string" ? last.content : (last?.content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text).join("\n");
+		const o = await fire(ev, DEPTH > 0 ? agentName : undefined, { stop_hook_active: stopContinuations > 0, last_assistant_message: lastText, ...(DEPTH > 0 ? { agent_id: String(process.pid), agent_type: agentName } : {}) }, ctx);
+		if (!o || o.stop || !o.block || stopContinuations >= 8) return undefined;
+		stopContinuations++;
+		return { entries: [...(event.entries ?? []), { type: "custom_message", customType: "claude-code-hook", content: `${ev} hook: ${o.block}`, display: true }], continue: true };
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+}
+
+# What the Claude Code adapter finds from here, for the launch line, and the
+# settings `env` it exports into pi's environment: the user's always, the
+# project's (.claude/settings.json, settings.local.json) when the folder is
+# trusted the way the extension decides it (Claude Code's record for the
+# folder or a parent in ~/.claude.json, pi's trust.json, lets-code's own
+# remembered answer). Sets CC_SUMMARY, empty when there is nothing.
+CC_SUMMARY=""
+claude_code_scan() {
+    local out
+    # shellcheck disable=SC2016
+    out="$(PI_AGENT_DIR="${PI_AGENT_DIR}" python3 -c '
+import json, os, re, shlex, sys
+cwd = os.path.realpath(sys.argv[1]); home = os.path.expanduser("~")
+cfg = os.environ.get("CLAUDE_CONFIG_DIR") or ""
+cdir = cfg or os.path.join(home, ".claude")
+cj_path = os.path.join(cfg, ".claude.json") if cfg else os.path.join(home, ".claude.json")
+agent = os.environ["PI_AGENT_DIR"]
+def rj(p):
+    try:
+        with open(p) as f: return json.load(f)
+    except Exception: return None
+def ups(d):
+    out = []
+    while True:
+        out.append(d); p = os.path.dirname(d)
+        if p == d: return out
+        d = p
+def nearest(m, pick):
+    if not isinstance(m, dict): return None
+    for d in ups(cwd):
+        if d in m:
+            v = pick(m[d])
+            if v is True or v is False: return v
+    return None
+cj = rj(cj_path) or {}
+trusted = (nearest(cj.get("projects"), lambda p: True if isinstance(p, dict) and p.get("hasTrustDialogAccepted") is True else None) is True
+    or nearest(rj(os.path.join(agent, "trust.json")), lambda v: v) is True
+    or nearest((rj(os.path.join(agent, "lets-code-state.json")) or {}).get("claudeCodeTrust"), lambda v: v) is True)
+git = next((d for d in ups(cwd) if os.path.exists(os.path.join(d, ".git"))), cwd)
+proj = []
+for d in ups(cwd):
+    proj.append(os.path.join(d, ".claude"))
+    if d == git: break
+def walk(d, depth=0):
+    if depth > 5 or not os.path.isdir(d): return []
+    out = []
+    for e in sorted(os.listdir(d)):
+        if e.startswith(".") or e == "node_modules": continue
+        p = os.path.join(d, e)
+        out += walk(p, depth + 1) if os.path.isdir(p) else [p]
+    return out
+commands = set()
+for d in proj + [cdir]:
+    base = os.path.join(d, "commands")
+    commands |= {os.path.relpath(f, base)[:-3] for f in walk(base) if f.endswith(".md")}
+skills = set()
+for d in proj + [cdir]:
+    skills |= {os.path.dirname(f) for f in walk(os.path.join(d, "skills")) if os.path.basename(f) == "SKILL.md"
+               and not (d == cdir and os.path.relpath(f, os.path.join(d, "skills")).startswith("synced" + os.sep) and os.environ.get("LETS_CODE_CLAUDE_SYNCED_SKILLS") != "1")}
+agents = set()
+for d in (proj if trusted else []) + [cdir]:
+    a = os.path.join(d, "agents")
+    if os.path.isdir(a): agents |= {f[:-3] for f in os.listdir(a) if f.endswith(".md")}
+workflows = set()
+for d in (proj if trusted else []) + [cdir]:
+    w = os.path.join(d, "workflows")
+    if os.path.isdir(w):
+        for f in os.listdir(w):
+            try:
+                if f.endswith(".js") and re.search(r"export\s+const\s+meta\s*=", open(os.path.join(w, f)).read()): workflows.add(f)
+            except Exception: pass
+def hooks(data):
+    n = 0
+    for groups in ((data or {}).get("hooks") or {}).values():
+        for g in groups if isinstance(groups, list) else []:
+            n += len([h for h in (g or {}).get("hooks") or [] if isinstance(h, dict) and h.get("type", "command") in ("command", "http")])
+    return n
+user = rj(os.path.join(cdir, "settings.json")) or {}
+layers = [rj(os.path.join(cwd, ".claude", n)) or {} for n in ("settings.json", "settings.local.json")]
+nhooks = 0 if user.get("disableAllHooks") is True else hooks(user)
+pending = 0
+for l in layers:
+    if trusted: nhooks += hooks(l)
+    else: pending += hooks(l) + len(l.get("env") or {})
+env = {}
+for l in [user] + (layers if trusted else []):
+    if isinstance(l.get("env"), dict): env.update({str(k): str(v) for k, v in l["env"].items()})
+mcp = set((cj.get("mcpServers") or {}).keys()) | set((((cj.get("projects") or {}).get(cwd) or {}).get("mcpServers") or {}).keys())
+pm = (rj(os.path.join(cwd, ".mcp.json")) or {}).get("mcpServers") or {}
+if pm and not trusted: pending += len(pm)
+counts = [(len(commands), "command"), (len(skills), "skill"), (len(agents), "agent"), (nhooks, "hook"), (len(mcp), "MCP server"), (len(workflows), "workflow")]
+parts = ["%d %s%s" % (n, w, "" if n == 1 else "s") for n, w in counts if n]
+line = ("claude code: " + ", ".join(parts)) if parts else ""
+if pending: line = (line or "claude code: nothing yet") + " (project hooks, MCP and env wait for trust)"
+print(line)
+for k, v in env.items():
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k) and not k.startswith(("LETS_CODE_", "PI_")):
+        print("export %s=%s" % (k, shlex.quote(v)))
+print("export LETS_CODE_CLAUDE_ENV=%s" % ("all" if trusted else "user"))
+' "${PWD}" 2>/dev/null)" || return 0
+    CC_SUMMARY="$(printf '%s\n' "${out}" | sed -n '1p')"
+    eval "$(printf '%s\n' "${out}" | sed -n '2,$p')"
+}
+
 # Sandbox: bash confined with @anthropic-ai/sandbox-runtime. The runtime is
 # an npm package installed next to the module (lets-code/sandbox/, a
 # directory of its own inside the lets-code extension);
@@ -5057,6 +6366,11 @@ run_setup() {  # run_setup [full|granular]
             echo "# ~/.pi/agent/agents. On by default; SUBAGENTS=false turns it off."
             echo "SUBAGENTS=\"${feat_subagents}\""
             echo ""
+            echo "# Claude Code adapter: .claude/ commands, skills, agents, hooks, permissions,"
+            echo "# MCP, workflows and CLAUDE.md work as in Claude Code. On by default;"
+            echo "# CLAUDE_CODE=false turns it off."
+            echo "CLAUDE_CODE=\"true\""
+            echo ""
             echo "# Optional features (off by default; 'lets-code setup full' turns them on)."
             echo "# MANDATE=true: modes plan/auto/ask/yolo and roles for subagents (MODE sets"
             echo "# the start mode, empty = auto)."
@@ -5258,7 +6572,7 @@ print("%s|%s|%s" % (d.get("id", ""), d.get("max_model_len") or d.get("context_le
 # never rewrite each other's backend.
 # Names that would shadow a lets-code option; pi's own options are checked
 # against `pi --help` at setup.
-PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard grounding no-grounding no-session-tag metrics no-metrics metrics-log rea no-rea mandate no-mandate subagents no-subagents sandbox no-sandbox verbose debug help preset"
+PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard grounding no-grounding no-session-tag metrics no-metrics metrics-log rea no-rea mandate no-mandate subagents no-subagents claude-code no-claude-code sandbox no-sandbox verbose debug help preset"
 preset_name_ok() {  # preset_name_ok <name> -> 0 when usable as --<name>
     case "$1" in ""|[!a-z0-9]*|*[!a-z0-9_-]*) return 1 ;; esac
     case " ${PRESET_RESERVED} " in *" $1 "*) return 1 ;; esac
@@ -5615,6 +6929,7 @@ TEMPLATE_EFFORT="auto"
 MANDATE="false"
 MODE=""
 SUBAGENTS="true"      # on by default; SUBAGENTS=false (config or env) or --no-subagents turns it off
+CLAUDE_CODE="true"    # on by default; CLAUDE_CODE=false (config or env) or --no-claude-code turns it off
 SANDBOX="false"
 REA="false"
 # shellcheck disable=SC1090
@@ -5647,6 +6962,7 @@ TEMPLATE_EFFORT="${LETS_CODE_TEMPLATE_EFFORT:-${TEMPLATE_EFFORT}}"
 MANDATE="${LETS_CODE_MANDATE:-${MANDATE}}"
 MODE="${LETS_CODE_MODE:-${MODE}}"
 SUBAGENTS="${LETS_CODE_SUBAGENTS:-${SUBAGENTS}}"
+CLAUDE_CODE="${LETS_CODE_CLAUDE_CODE:-${CLAUDE_CODE}}"
 SANDBOX="${LETS_CODE_SANDBOX:-${SANDBOX}}"
 REA="${LETS_CODE_REA:-${REA}}"
 
@@ -5697,6 +7013,8 @@ while [ $# -gt 0 ]; do
         --no-mandate) MANDATE=false; shift ;;
         --subagents) SUBAGENTS=true; shift ;;
         --no-subagents) SUBAGENTS=false; shift ;;
+        --claude-code) CLAUDE_CODE=true; shift ;;
+        --no-claude-code) CLAUDE_CODE=false; shift ;;
         --sandbox)  SANDBOX=true; shift ;;
         --no-sandbox) SANDBOX=false; shift ;;
         --rea)      REA=true
@@ -6080,6 +7398,16 @@ case "$(lc "${SUBAGENTS}")" in
         export LETS_CODE_SUBAGENTS_ON=1 LETS_CODE_MODEL="${MODEL}"
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }subagents: on" ;;
 esac
+# Claude Code adapter: the module, and what it finds here for the launch line
+unset LETS_CODE_CLAUDE_CODE_ON LETS_CODE_CLAUDE_TRUST LETS_CODE_CLAUDE_ENV LETS_CODE_AGENT_NAME
+case "$(lc "${CLAUDE_CODE}")" in
+    false|no|0|off) ;;
+    *)
+        pi_write_claudecode_extension
+        export LETS_CODE_CLAUDE_CODE_ON=1
+        claude_code_scan
+        FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }${CC_SUMMARY:-claude code: nothing here}" ;;
+esac
 case "$(lc "${SANDBOX}")" in
     true|yes|1|on)
         pi_write_sandbox_extension
@@ -6150,9 +7478,10 @@ banner() {
         # one color after the mark: model, (auto), host
         printf '%s✦ lets-code%s %s%s%s\n' "${a}${b}" "${r}" "${b}" "${line1}" "${r}"
         printf '  %s%s%s\n' "${d}" "${line2}" "${r}"
+        [ -z "${CC_SUMMARY}" ] || printf '  %s%s%s\n' "${d}" "${CC_SUMMARY}" "${r}"
         printf '  %s%s%s\n' "${d}" "${signoffs[$(( RANDOM % ${#signoffs[@]} ))]}" "${r}"
     else
-        log "${line1} · ${line2}"
+        log "${line1} · ${line2}${CC_SUMMARY:+ · ${CC_SUMMARY}}"
     fi
 }
 if [ "${VERBOSE}" = true ]; then

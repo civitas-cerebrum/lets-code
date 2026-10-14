@@ -148,6 +148,7 @@ async function load(env = {}) {
 	t("child cwd", c.cwd, work);
 	const r2 = await h.run({ agent: "worker", task: "x" });
 	t("worker inherits parent mode as role", calls().find((x) => /Task: x$/.test(x.argv.at(-1))).env.role, "ask");
+	t("agent without thinking runs at medium", (({ argv }) => argv[argv.indexOf("--thinking") + 1])(calls().find((x) => /Task: x$/.test(x.argv.at(-1)))), "medium");
 	t("unknown agent lists agents", (await h.run({ agent: "nope", task: "x" })).content[0].text.includes("- scout: finds things"), true);
 	t("no args lists agents, not an error", (await h.run({})).isError, false);
 	t("failure reported", (({ isError, content }) => [isError, /exit 3/.test(content[0].text) && /boom/.test(content[0].text)])(await h.run({ agent: "worker", task: "please fail" })), [true, true]);

@@ -4044,7 +4044,9 @@ interface RunResult { agent: string; task: string; text: string; exitCode: numbe
 function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSignal | undefined, onProgress?: (line: string) => void): Promise<RunResult> {
 	const args = ["--mode", "json", "-p", "--no-session"];
 	if (MODEL) args.push("--provider", process.env.LETS_CODE_PROVIDER || "lets-code", "--model", MODEL);
-	if (agent.thinking) args.push("--thinking", agent.thinking);
+	// medium unless the agent file says otherwise: without --thinking a child takes the level
+	// pi last saved in settings.json, i.e. whatever a session last switched to (xhigh included)
+	args.push("--thinking", agent.thinking || "medium");
 	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
 	for (const s of agent.skills ?? []) args.push("--skill", s);
 	const tmp = mkdtempSync(join(tmpdir(), "lets-code-agent-"));

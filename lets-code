@@ -203,7 +203,7 @@ tls_args_for() {
     esac
 }
 
-# Endpoint normalization. Accepts "192.168.0.114/vllm", "llm.example.com",
+# Endpoint normalization. Accepts "10.0.0.5/vllm", "llm.example.com",
 # "http://host:8000/v1", ... A missing scheme is filled in: IP addresses,
 # localhost, bare hostnames and *.local (mDNS) get http:// (no public cert
 # can exist for them); other domain names get https://. A trailing / or /v1

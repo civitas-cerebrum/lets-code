@@ -457,7 +457,9 @@ trusted. Calls: `{agent, task}`, `{tasks: [...]}` for parallel work (at most
 `LETS_CODE_SUBAGENT_CONCURRENCY` changes it), or `{chain: [...]}` with
 `{previous}` carrying the prior output. Each child is a `pi` process through
 the same provider and guards, with its own context, and cannot start
-children of its own. Output is capped at 50 KB per agent.
+children of its own. A child thinks at `medium` unless its agent file sets
+`thinking:`; a level switched to in a session does not carry over. Output is
+capped at 50 KB per agent.
 
 An agent type can also bring its own environment. These fields are
 optional; unknown fields are ignored:

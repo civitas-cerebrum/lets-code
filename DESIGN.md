@@ -206,6 +206,40 @@ subagent tool (a few tokens, in context anyway) replaces the skill entry
 `requires_env: LETS_CODE_REA_AGENT`, exported only by a launch with REA on,
 keeps the file on disk from listing it in sessions with REA off or manual.
 
+**Claude Code adapter.** On by default because it is inert without a
+`.claude/` folder, a CLAUDE.md or a `~/.claude`, and because a converted
+copy would go stale: every source is read where Claude Code keeps it, at
+each start. pi already loads a directory's `AGENTS.md` or `CLAUDE.md`, the
+first it finds; the adapter edits `contextFiles` in `before_agent_start`
+(the same list every turn, so the prompt never changes mid-session) to add
+what Claude reads and pi does not, in Claude's order, imports after the
+file that names them. Skills go to pi through `resources_discover`, so pi's
+own loader and prompt format apply; commands, skill and workflow names are
+`registerCommand`s whose handler expands the template and sends it as the
+prompt (in print mode it waits for the run, which ends the process
+otherwise). Hooks map onto pi's events one to one where pi has the moment:
+`tool_call` (PreToolUse; `updatedInput` mutates `event.input`, translated
+from Claude's argument names), `tool_result`, `input` (UserPromptSubmit;
+exit 2 returns `handled`), `before_agent_start` (their context as one
+custom message beside the prompt, labelled as the user's hook output: an
+unlabelled block read as an injection to a grounded model),
+`agent_before_settle` (Stop: `continue` with the reason as an entry, at most
+8 times per prompt, `stop_hook_active` after the first), `session_*`. Trust
+cannot come from pi's `isProjectTrusted()`, which is true for any folder
+without `.pi/` resources, so the adapter reads Claude's record, pi's
+`trust.json` and its own answer, and hands the decision to subagents
+through `LETS_CODE_CLAUDE_TRUST`. Permission rules are judged after the
+hooks, on the final input: deny and ask still apply after a hook's allow,
+as in Claude Code, and an allow only marks the call
+(`globalThis.__letsCodeClaudeApproved`) so the mandate does not ask again;
+the guards that run after it are unaffected. Workflow scripts run in a
+`node:vm` context, the body wrapped in an async function; each `agent()` is
+the subagents module's `runAgent` with a generic worker prompt, behind one
+queue of `LETS_CODE_SUBAGENT_CONCURRENCY` slots. The `workflow` tool is
+registered only where scripts exist, and its section joins the prompt only
+when a prompt matches a script (strict: 0 of 124 real prompts matched five
+sample workflows).
+
 ## Script layout
 
 The script is one file, built in order: header and logging; probing
@@ -219,6 +253,7 @@ extension source); the git guard (launch logic and extension source); the
 agent guard extension source; the
 optional features (`pi_write_mandate_extension`,
 `pi_write_subagent_extension`, `write_default_agents`,
+`pi_write_claudecode_extension`, `claude_code_scan`,
 `pi_write_sandbox_extension`, `mcp_import`, `pi_write_rea`, `mandate_init`);
 main.
 

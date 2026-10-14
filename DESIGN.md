@@ -206,10 +206,16 @@ subagent tool (a few tokens, in context anyway) replaces the skill entry
 `requires_env: LETS_CODE_REA_AGENT`, exported only by a launch with REA on,
 keeps the file on disk from listing it in sessions with REA off or manual.
 
-**Claude Code adapter.** On by default because it is inert without a
-`.claude/` folder, a CLAUDE.md or a `~/.claude`, and because a converted
-copy would go stale: every source is read where Claude Code keeps it, at
-each start. pi already loads a directory's `AGENTS.md` or `CLAUDE.md`, the
+**Claude Code adapter.** Automatic: the launcher switches it on only where
+the project's `.claude` (up to the git root) has hooks or workflow scripts,
+the parts that need the adapter to work at all; skills and commands alone
+leave the folder to pi. It then takes that project's `.claude` only. The
+user's `~/.claude` is opt-in (`CLAUDE_CODE=all`): taking it everywhere
+brought hooks and skills written for Claude Code into every folder, and
+claude.ai's synced skills, two copies of each, as pi skill conflicts. The
+home folder's `.claude` is never a project. No converted copy, because it
+would go stale: every source is read where Claude Code keeps it, at each
+start. pi already loads a directory's `AGENTS.md` or `CLAUDE.md`, the
 first it finds; the adapter edits `contextFiles` in `before_agent_start`
 (the same list every turn, so the prompt never changes mid-session) to add
 what Claude reads and pi does not, in Claude's order, imports after the

@@ -19,6 +19,7 @@ const HOME = join(work, "home"); const agentDir = join(HOME, ".pi", "agent"); co
 mkdirSync(join(agentDir, "extensions"), { recursive: true }); mkdirSync(claude, { recursive: true });
 process.env.HOME = HOME; process.env.PI_CODING_AGENT_DIR = agentDir; delete process.env.CLAUDE_CONFIG_DIR;
 process.env.LETS_CODE_CLAUDE_CODE_ON = "1";
+process.env.LETS_CODE_CLAUDE_SCOPE = "all";   // CLAUDE_CODE=all; the default (auto) is checked at the end
 for (const k of ["LETS_CODE_SUBAGENT_DEPTH", "LETS_CODE_CLAUDE_TRUST", "LETS_CODE_CLAUDE_ENV", "LETS_CODE_SUBAGENTS_ON"]) delete process.env[k];
 
 // "typebox" is provided by the pi host at runtime; a stand-in is enough here
@@ -196,7 +197,7 @@ t("matcher: Task matches the subagent tool (Agent alias)", m.matcherMatches("Tas
 	w(join(claude, "skills", "synced", "x", "SKILL.md"), "---\nname: synced-one\ndescription: d\nuser-invocable: false\n---\nx\n");
 	w(join(claude, "skills", "mine", "SKILL.md"), "---\ndescription: mine\nuser-invocable: false\n---\nx\n");
 	t("skills: project and user, name from frontmatter or dir; claude.ai's synced ones left out", m.discoverSkills(proj).map((s) => [s.name, s.scope, s.userInvocable]), [["deploy", "project", true], ["mine", "user", false]]);
-	t("skill dirs for pi (the user's one by one, without synced/)", m.skillDirs(proj), [join(work, "cmds", ".claude", "skills"), join(claude, "skills", "mine")]);
+	t("skill dirs for pi: each skill's own folder, without synced/", m.skillDirs(proj), [join(work, "cmds", ".claude", "skills", "deploy"), join(claude, "skills", "mine")]);
 	process.env.LETS_CODE_CLAUDE_SYNCED_SKILLS = "1";
 	t("synced skills on request", m.discoverSkills(proj).map((s) => s.name), ["deploy", "mine", "synced-one"]);
 	delete process.env.LETS_CODE_CLAUDE_SYNCED_SKILLS;
@@ -394,7 +395,7 @@ async function load(cwd, env = {}) {
 	t("command: $ARGUMENTS and !`cmd` expanded, sent as a prompt", x.sent.at(-1)?.[0], "Say hello to Ann. Branch: main\n");
 	await x.commands.tidy.handler("src", c);
 	t("skill as /name", x.sent.at(-1)?.[0], `<skill name="tidy" location="${join(proj, ".claude", "skills", "tidy", "SKILL.md")}">\nReferences are relative to ${join(proj, ".claude", "skills", "tidy")}.\n\nTidy src\n</skill>`);
-	t("resources_discover hands pi the skill dirs", (await x.emit("resources_discover", { cwd: proj, reason: "startup" }, c))?.skillPaths, [join(proj, ".claude", "skills")]);
+	t("resources_discover hands pi each skill folder", (await x.emit("resources_discover", { cwd: proj, reason: "startup" }, c))?.skillPaths, [join(proj, ".claude", "skills", "tidy")]);
 	t("workflow tool lists without a name", (await x.tools.workflow.execute("w", {}, undefined, undefined, c)).content[0].text, "- wf: demo");
 	const plain = { prompt: "fix the bug", systemPromptOptions: { contextFiles: [], sections: {} } };
 	await x.emit("before_agent_start", plain, c);
@@ -421,6 +422,30 @@ async function load(cwd, env = {}) {
 	await x.emit("session_start", { reason: "startup" }, x.ctx(null));
 	t("bare deny rules take the tools away", x.active(), ["read", "grep"]);
 	rmSync(join(claude, "settings.json"));
+}
+
+// --- auto (the default): the project's .claude only, never the user's own
+{
+	delete process.env.LETS_CODE_CLAUDE_SCOPE;
+	const proj = join(work, "auto"); mkdirSync(join(proj, ".git"), { recursive: true });
+	w(join(claude, "settings.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "u" }] }] }, env: { A: "user" } }));
+	w(join(claude, "skills", "mine", "SKILL.md"), "---\ndescription: mine\n---\nx\n");
+	w(join(claude, "skills", "synced", "a", "docs", "SKILL.md"), "---\nname: docs\ndescription: d\n---\nx\n");
+	w(join(claude, "skills", "synced", "b", "docs", "SKILL.md"), "---\nname: docs\ndescription: d\n---\nx\n");
+	w(join(claude, "commands", "hello.md"), "hi");
+	w(join(claude, "CLAUDE.md"), "USER MEMORY");
+	w(join(proj, ".claude", "skills", "dup", "SKILL.md"), "---\ndescription: d\n---\nx\n");
+	w(join(proj, ".claude", "skills", "own", "SKILL.md"), "---\ndescription: o\n---\nx\n");
+	w(join(agentDir, "skills", "dup", "SKILL.md"), "---\ndescription: pi's\n---\nx\n");
+	t("auto: no user settings (hooks, env, rules)", m.settingsLayers(proj).map((l) => l.scope), []);
+	t("auto: no user skills; a name pi has stays pi's", m.discoverSkills(proj).map((s) => s.name), ["own"]);
+	t("auto: skill dirs one by one, none duplicated", m.skillDirs(proj), [join(proj, ".claude", "skills", "own")]);
+	t("auto: no user commands", m.discoverCommands(proj).map((c) => c.name), []);
+	t("auto: no user CLAUDE.md", m.claudeContextFiles(proj, [], true).map((f) => f.content), []);
+	t("home folder: its .claude is the user's, not a project", [m.settingsLayers(HOME).length, m.discoverSkills(HOME).length, m.skillDirs(HOME).length, m.discoverCommands(HOME).length], [0, 0, 0, 0]);
+	process.env.LETS_CODE_CLAUDE_SCOPE = "all";
+	t("all, home folder: the user's skills once each, synced/ left out", m.skillDirs(HOME), [join(claude, "skills", "mine")]);
+	for (const p of [join(claude, "settings.json"), join(claude, "skills"), join(claude, "commands"), join(claude, "CLAUDE.md"), join(agentDir, "skills")]) rmSync(p, { recursive: true, force: true });
 }
 
 console.error = origError;

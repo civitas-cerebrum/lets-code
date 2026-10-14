@@ -6,6 +6,7 @@
 set -eu
 eval "$(sed -n '/^CC_SUMMARY=/p; /^claude_code_scan() {/,/^}$/p' "$(dirname "$0")/../lets-code")"
 fail=0
+export LETS_CODE_CLAUDE_SCOPE=all   # CLAUDE_CODE=all first; the default (auto) at the end
 check() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: got '$2', want '$3'"; fail=1; fi; }
 work="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/cc-scan.XXXXXX")" && pwd -P)"
 trap 'rm -rf "${work}"' EXIT
@@ -43,4 +44,22 @@ check "trusted by lets-code's remembered answer" "${PROJ_VAR:-}" "p"
 cd "${work}"; rm -rf "${HOME}/.claude" "${PI_AGENT_DIR}/lets-code-state.json"
 claude_code_scan
 check "nothing Claude-ish: no summary" "${CC_SUMMARY}" ""
+
+# auto (the default): needed only where the project's .claude has hooks or
+# workflows, and then with the project's parts alone
+unset LETS_CODE_CLAUDE_SCOPE USER_VAR PROJ_VAR
+mkdir -p "${HOME}/.claude/commands"; echo hi > "${HOME}/.claude/commands/hello.md"
+printf '{"env":{"USER_VAR":"u"},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"true"}]}]}}' > "${HOME}/.claude/settings.json"
+cd "${HOME}"; claude_code_scan
+check "auto, home folder with hooks in ~/.claude: not needed" "${CC_NEED}" 0
+check "auto: the user's env is not exported" "${USER_VAR:-}" ""
+cd "${proj}"; claude_code_scan
+check "auto, project with hooks and a workflow: needed" "${CC_NEED}" 1
+check "auto: the project's parts only" "${CC_SUMMARY}" "claude code: 1 command (project hooks, MCP and env wait for trust)"
+plain="${work}/plain"; mkdir -p "${plain}/.git" "${plain}/.claude/commands"; echo x > "${plain}/.claude/commands/x.md"
+cd "${plain}"; claude_code_scan
+check "auto, project with only commands: not needed" "${CC_NEED}" 0
+mkdir -p "${plain}/.claude/workflows"; echo "export const meta = { name: 'w' };" > "${plain}/.claude/workflows/w.js"
+claude_code_scan
+check "auto, a workflow appears: needed" "${CC_NEED}" 1
 exit "${fail}"

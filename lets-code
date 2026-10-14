@@ -55,7 +55,7 @@
 #                                ask | yolo | <role> (pi's own --mode is untouched)
 #   lets-code --no-mandate       launch without the mandate (modes) extension
 #   lets-code --subagents | --no-subagents   the subagent tool on/off (default on)
-#   lets-code --claude-code | --no-claude-code   the Claude Code adapter on/off
+#   lets-code --claude-code | --no-claude-code   Claude Code adapter with ~/.claude too / off (default: automatic where a project needs it)
 #                                (default on): .claude/ commands, skills, agents,
 #                                hooks, permissions, MCP, workflows, CLAUDE.md
 #   lets-code --sandbox | --no-sandbox       the OS sandbox on/off
@@ -137,7 +137,7 @@
 #                LETS_CODE_GIT_CHECKPOINTS (1|0),
 #                LETS_CODE_MANDATE (true|false), LETS_CODE_MODE, LETS_CODE_SUBAGENTS,
 #                LETS_CODE_SANDBOX (true|false), LETS_CODE_SUBAGENT_CONCURRENCY (2)
-#                LETS_CODE_CLAUDE_CODE (true|false)
+#                LETS_CODE_CLAUDE_CODE (auto|all|false)
 #                LETS_CODE_REA (true|manual|false)
 #                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_METRICS_LOG (<file>), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_GROUNDING (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
 #                LETS_CODE_WRAP_TURNS (6), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
@@ -4144,9 +4144,9 @@ export function discoverAgents(cwd: string, trusted: boolean): AgentDef[] {
 	if (CLAUDE) {   // after pi's: the nearest .claude/agents up to the git root, then the user's
 		if (process.env.LETS_CODE_CLAUDE_TRUST === "1") {
 			let d = resolve(cwd);
-			while (true) { scan(join(d, ".claude", "agents"), "project", true); if (existsSync(join(d, ".git")) || dirname(d) === d) break; d = dirname(d); }
+			while (true) { if (resolve(d, ".claude") !== resolve(claudeDir())) scan(join(d, ".claude", "agents"), "project", true); if (existsSync(join(d, ".git")) || dirname(d) === d) break; d = dirname(d); }
 		}
-		scan(join(claudeDir(), "agents"), "user", true);
+		if (process.env.LETS_CODE_CLAUDE_SCOPE === "all") scan(join(claudeDir(), "agents"), "user", true);
 	}
 	return [...out.values()];
 }
@@ -4460,6 +4460,12 @@ const home = () => process.env.HOME || homedir();
 // Claude Code's own override moves both ~/.claude and ~/.claude.json
 export const claudeDir = () => process.env.CLAUDE_CONFIG_DIR || join(home(), ".claude");
 export const claudeJsonPath = () => (process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, ".claude.json") : join(home(), ".claude.json"));
+// CLAUDE_CODE=all also brings the user's own ~/.claude (hooks, skills,
+// commands, agents, workflows, CLAUDE.md, MCP, env); the default (auto) only
+// the project's .claude, and only where it has hooks or workflows
+export const userScope = () => process.env.LETS_CODE_CLAUDE_SCOPE === "all";
+// a folder whose .claude is the user's own (the home folder) is not a project
+export const isUserClaude = (d: string) => resolve(d, ".claude") === resolve(claudeDir());
 const MAX_FILE = 256 * 1024;
 const CAP = 10_000;          // Claude's cap on one hook's context or message
 const short = (s: string, n = 190) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -4482,7 +4488,7 @@ function ancestors(dir: string, stop?: string): string[] {
 }
 export function gitRoot(cwd: string): string | undefined { return ancestors(cwd).find((d) => existsSync(join(d, ".git"))); }
 // project .claude dirs are looked up from cwd to the git root (cwd alone outside git)
-const projectDirs = (cwd: string) => ancestors(cwd, gitRoot(cwd) ?? resolve(cwd));
+const projectDirs = (cwd: string) => ancestors(cwd, gitRoot(cwd) ?? resolve(cwd)).filter((d) => !isUserClaude(d));
 const expandHome = (p: string) => (p === "~" ? home() : p.startsWith("~/") ? join(home(), p.slice(2)) : p);
 
 // A small YAML subset for frontmatter: key: value, quoted strings, inline
@@ -4571,9 +4577,11 @@ export function parseRule(raw: string, base: string): Rule | null {
 export function settingsLayers(cwd: string): { scope: "user" | "project" | "local"; file: string; data: any }[] {
 	const out: { scope: "user" | "project" | "local"; file: string; data: any }[] = [];
 	const add = (scope: "user" | "project" | "local", file: string) => { const d = readJson(file); if (d && typeof d === "object") out.push({ scope, file, data: d }); };
-	add("user", join(claudeDir(), "settings.json"));
-	add("project", join(cwd, ".claude", "settings.json"));
-	add("local", join(cwd, ".claude", "settings.local.json"));
+	if (userScope()) add("user", join(claudeDir(), "settings.json"));
+	if (!isUserClaude(cwd)) {
+		add("project", join(cwd, ".claude", "settings.json"));
+		add("local", join(cwd, ".claude", "settings.local.json"));
+	}
 	return out;
 }
 export function loadSettings(cwd: string, trusted: boolean): Settings {
@@ -4904,17 +4912,31 @@ export function discoverCommands(cwd: string): Template[] {
 		}
 	};
 	for (const d of projectDirs(cwd)) scan(join(d, ".claude", "commands"), "project");
-	scan(join(claudeDir(), "commands"), "user");
+	if (userScope()) scan(join(claudeDir(), "commands"), "user");
 	return [...out.values()];
 }
 // ~/.claude/skills/synced holds the skills claude.ai syncs for its own apps
 // (documents, browsers, computer use): about 15 KB of descriptions for tools
 // that are not here, so they stay out unless LETS_CODE_CLAUDE_SYNCED_SKILLS=1
 const synced = (d: string) => basename(d) === "synced" && dirname(d) === join(claudeDir(), "skills") && process.env.LETS_CODE_CLAUDE_SYNCED_SKILLS !== "1";
+// the names of the skills pi finds on its own (its folders and .agents/skills)
+export function piSkillNames(cwd: string): Set<string> {
+	const names = new Set<string>();
+	const walk = (dir: string, depth: number) => {
+		if (depth > 4 || !isDir(dir)) return;
+		const f = join(dir, "SKILL.md");
+		if (existsSync(f)) { names.add(String(parseFrontmatter(readText(f) ?? "").fm.name || basename(dir))); return; }
+		for (const e of readdirSync(dir).sort()) if (!e.startsWith(".") && e !== "node_modules") walk(join(dir, e), depth + 1);
+	};
+	walk(join(agentDir(), "skills"), 0);
+	walk(join(home(), ".agents", "skills"), 0);
+	walk(join(cwd, ".pi", "skills"), 0);
+	for (const d of ancestors(cwd, gitRoot(cwd) ?? resolve(cwd))) walk(join(d, ".agents", "skills"), 0);
+	return names;
+}
+// each skill's own folder, so pi loads exactly these (no name twice, none of pi's own)
 export function skillDirs(cwd: string): string[] {
-	const user = join(claudeDir(), "skills");
-	const mine = isDir(user) ? readdirSync(user).sort().map((e) => join(user, e)).filter((d) => isDir(d) && !d.split(sep).pop()!.startsWith(".") && !synced(d)) : [];
-	return [...projectDirs(cwd).map((d) => join(d, ".claude", "skills")).filter(isDir), ...mine];
+	return discoverSkills(cwd).map((t) => dirname(t.file));
 }
 export function discoverSkills(cwd: string): Template[] {
 	const out = new Map<string, Template>();
@@ -4929,8 +4951,9 @@ export function discoverSkills(cwd: string): Template[] {
 		for (const e of readdirSync(dir).sort()) if (!e.startsWith(".") && e !== "node_modules") walk(join(dir, e), scope, depth + 1);
 	};
 	for (const d of projectDirs(cwd)) walk(join(d, ".claude", "skills"), "project", 0);
-	walk(join(claudeDir(), "skills"), "user", 0);
-	return [...out.values()];
+	if (userScope()) walk(join(claudeDir(), "skills"), "user", 0);
+	const pis = piSkillNames(cwd);
+	return [...out.values()].filter((t) => !pis.has(t.name));
 }
 export function parseArgs(s: string): string[] {
 	const out: string[] = []; let cur = ""; let q = ""; let has = false;
@@ -5024,16 +5047,18 @@ export function claudeContextFiles(cwd: string, existing: ContextFile[], trusted
 	const rules = (dir: string, rank: number, user: boolean) => {
 		for (const f of mdFiles(dir)) { const t = readText(f); if (t !== undefined && parseFrontmatter(t).fm.paths === undefined) add(f, rank, user); }
 	};
-	add(join(claudeDir(), "CLAUDE.md"), -2, true);
-	rules(join(claudeDir(), "rules"), -1, true);
+	if (userScope()) {
+		add(join(claudeDir(), "CLAUDE.md"), -2, true);
+		rules(join(claudeDir(), "rules"), -1, true);
+	}
 	dirs.forEach((d, i) => {
 		const own = existing.find((f) => dirname(resolve(f.path)) === d);
 		const cm = join(d, "CLAUDE.md");
 		// pi took AGENTS.md here; Claude reads CLAUDE.md (an identical one is not added twice)
 		if (own && !/^CLAUDE\.md$/i.test(basename(own.path)) && readText(cm) !== undefined && readText(cm)!.trim() !== own.content.trim()) add(cm, i * 10 + 1, false);
-		add(join(d, ".claude", "CLAUDE.md"), i * 10 + 2, false);
+		if (!isUserClaude(d)) add(join(d, ".claude", "CLAUDE.md"), i * 10 + 2, false);
 		add(join(d, "CLAUDE.local.md"), i * 10 + 3, false);
-		if (under(d, root) || d === root) rules(join(d, ".claude", "rules"), i * 10 + 4, false);
+		if ((under(d, root) || d === root) && !isUserClaude(d)) rules(join(d, ".claude", "rules"), i * 10 + 4, false);
 	});
 	list.sort((a, b) => a.rank - b.rank);
 	const out: ContextFile[] = [];
@@ -5097,7 +5122,7 @@ export function claudeMcpServers(cwd: string, s: Settings, trusted: boolean, ask
 		}
 		add("project", approved);
 	}
-	add("user", cj.mcpServers);
+	if (userScope()) add("user", cj.mcpServers);
 	return { servers: [...servers.values()], skipped };
 }
 
@@ -5136,7 +5161,7 @@ export function discoverWorkflows(cwd: string, trusted: boolean): Workflow[] {
 		}
 	};
 	if (trusted) for (const d of projectDirs(cwd)) scan(join(d, ".claude", "workflows"), "project");
-	scan(join(claudeDir(), "workflows"), "user");
+	if (userScope()) scan(join(claudeDir(), "workflows"), "user");
 	return [...out.values()];
 }
 // enough JSON Schema for an agent's answer: type, required, properties, items, enum
@@ -5601,17 +5626,18 @@ TS
 # trusted the way the extension decides it (Claude Code's record for the
 # folder or a parent in ~/.claude.json, pi's trust.json, lets-code's own
 # remembered answer). Sets CC_SUMMARY, empty when there is nothing.
-CC_SUMMARY=""
+CC_SUMMARY=""; CC_NEED=0
 claude_code_scan() {
     local out
     # shellcheck disable=SC2016
-    out="$(PI_AGENT_DIR="${PI_AGENT_DIR}" python3 -c '
+    out="$(PI_AGENT_DIR="${PI_AGENT_DIR}" LC_SCOPE="${LETS_CODE_CLAUDE_SCOPE:-}" python3 -c '
 import json, os, re, shlex, sys
 cwd = os.path.realpath(sys.argv[1]); home = os.path.expanduser("~")
 cfg = os.environ.get("CLAUDE_CONFIG_DIR") or ""
 cdir = cfg or os.path.join(home, ".claude")
 cj_path = os.path.join(cfg, ".claude.json") if cfg else os.path.join(home, ".claude.json")
 agent = os.environ["PI_AGENT_DIR"]
+alls = os.environ.get("LC_SCOPE") == "all"   # CLAUDE_CODE=all: ~/.claude of the user too
 def rj(p):
     try:
         with open(p) as f: return json.load(f)
@@ -5636,8 +5662,10 @@ trusted = (nearest(cj.get("projects"), lambda p: True if isinstance(p, dict) and
 git = next((d for d in ups(cwd) if os.path.exists(os.path.join(d, ".git"))), cwd)
 proj = []
 for d in ups(cwd):
-    proj.append(os.path.join(d, ".claude"))
+    if os.path.realpath(os.path.join(d, ".claude")) != os.path.realpath(cdir): proj.append(os.path.join(d, ".claude"))
     if d == git: break
+users = [cdir] if alls else []
+local = os.path.realpath(os.path.join(cwd, ".claude")) != os.path.realpath(cdir)
 def walk(d, depth=0):
     if depth > 5 or not os.path.isdir(d): return []
     out = []
@@ -5647,19 +5675,23 @@ def walk(d, depth=0):
         out += walk(p, depth + 1) if os.path.isdir(p) else [p]
     return out
 commands = set()
-for d in proj + [cdir]:
+for d in proj + users:
     base = os.path.join(d, "commands")
     commands |= {os.path.relpath(f, base)[:-3] for f in walk(base) if f.endswith(".md")}
 skills = set()
-for d in proj + [cdir]:
+for d in proj + users:
     skills |= {os.path.dirname(f) for f in walk(os.path.join(d, "skills")) if os.path.basename(f) == "SKILL.md"
                and not (d == cdir and os.path.relpath(f, os.path.join(d, "skills")).startswith("synced" + os.sep) and os.environ.get("LETS_CODE_CLAUDE_SYNCED_SKILLS") != "1")}
 agents = set()
-for d in (proj if trusted else []) + [cdir]:
+for d in (proj if trusted else []) + users:
     a = os.path.join(d, "agents")
     if os.path.isdir(a): agents |= {f[:-3] for f in os.listdir(a) if f.endswith(".md")}
+def has_workflow(d):
+    w = os.path.join(d, "workflows")
+    try: return any(f.endswith(".js") and re.search(r"export\s+const\s+meta\s*=", open(os.path.join(w, f)).read()) for f in os.listdir(w))
+    except Exception: return False
 workflows = set()
-for d in (proj if trusted else []) + [cdir]:
+for d in (proj if trusted else []) + users:
     w = os.path.join(d, "workflows")
     if os.path.isdir(w):
         for f in os.listdir(w):
@@ -5672,8 +5704,10 @@ def hooks(data):
         for g in groups if isinstance(groups, list) else []:
             n += len([h for h in (g or {}).get("hooks") or [] if isinstance(h, dict) and h.get("type", "command") in ("command", "http")])
     return n
-user = rj(os.path.join(cdir, "settings.json")) or {}
-layers = [rj(os.path.join(cwd, ".claude", n)) or {} for n in ("settings.json", "settings.local.json")]
+user = (rj(os.path.join(cdir, "settings.json")) or {}) if alls else {}
+layers = [rj(os.path.join(cwd, ".claude", n)) or {} for n in ("settings.json", "settings.local.json")] if local else []
+# auto: the adapter is needed where the project brings hooks or workflows
+need = alls or any(hooks(l) for l in layers) or any(has_workflow(d) for d in proj)
 nhooks = 0 if user.get("disableAllHooks") is True else hooks(user)
 pending = 0
 for l in layers:
@@ -5682,7 +5716,7 @@ for l in layers:
 env = {}
 for l in [user] + (layers if trusted else []):
     if isinstance(l.get("env"), dict): env.update({str(k): str(v) for k, v in l["env"].items()})
-mcp = set((cj.get("mcpServers") or {}).keys()) | set((((cj.get("projects") or {}).get(cwd) or {}).get("mcpServers") or {}).keys())
+mcp = set((cj.get("mcpServers") or {}).keys() if alls else []) | set((((cj.get("projects") or {}).get(cwd) or {}).get("mcpServers") or {}).keys())
 pm = (rj(os.path.join(cwd, ".mcp.json")) or {}).get("mcpServers") or {}
 if pm and not trusted: pending += len(pm)
 counts = [(len(commands), "command"), (len(skills), "skill"), (len(agents), "agent"), (nhooks, "hook"), (len(mcp), "MCP server"), (len(workflows), "workflow")]
@@ -5690,13 +5724,16 @@ parts = ["%d %s%s" % (n, w, "" if n == 1 else "s") for n, w in counts if n]
 line = ("claude code: " + ", ".join(parts)) if parts else ""
 if pending: line = (line or "claude code: nothing yet") + " (project hooks, MCP and env wait for trust)"
 print(line)
+print("need=%d" % (1 if need else 0))
 for k, v in env.items():
     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k) and not k.startswith(("LETS_CODE_", "PI_")):
         print("export %s=%s" % (k, shlex.quote(v)))
 print("export LETS_CODE_CLAUDE_ENV=%s" % ("all" if trusted else "user"))
 ' "${PWD}" 2>/dev/null)" || return 0
     CC_SUMMARY="$(printf '%s\n' "${out}" | sed -n '1p')"
-    eval "$(printf '%s\n' "${out}" | sed -n '2,$p')"
+    CC_NEED="$(printf '%s\n' "${out}" | sed -n 's/^need=//p')"
+    [ "${CC_NEED}" = 1 ] || return 0
+    eval "$(printf '%s\n' "${out}" | sed -n '3,$p')"
 }
 
 # Sandbox: bash confined with @anthropic-ai/sandbox-runtime. The runtime is
@@ -6368,8 +6405,9 @@ run_setup() {  # run_setup [full|granular]
             echo ""
             echo "# Claude Code adapter: .claude/ commands, skills, agents, hooks, permissions,"
             echo "# MCP, workflows and CLAUDE.md work as in Claude Code. On by default;"
-            echo "# CLAUDE_CODE=false turns it off."
-            echo "CLAUDE_CODE=\"true\""
+            echo "# auto: only where a project's .claude has hooks or workflows (its own"
+            echo "# .claude only); all: also your ~/.claude; false: off."
+            echo "CLAUDE_CODE=\"auto\""
             echo ""
             echo "# Optional features (off by default; 'lets-code setup full' turns them on)."
             echo "# MANDATE=true: modes plan/auto/ask/yolo and roles for subagents (MODE sets"
@@ -6929,7 +6967,7 @@ TEMPLATE_EFFORT="auto"
 MANDATE="false"
 MODE=""
 SUBAGENTS="true"      # on by default; SUBAGENTS=false (config or env) or --no-subagents turns it off
-CLAUDE_CODE="true"    # on by default; CLAUDE_CODE=false (config or env) or --no-claude-code turns it off
+CLAUDE_CODE="auto"    # auto (default, also "true"): only where the project's .claude has hooks or workflows; all: also ~/.claude; false or --no-claude-code: off
 SANDBOX="false"
 REA="false"
 # shellcheck disable=SC1090
@@ -7013,7 +7051,7 @@ while [ $# -gt 0 ]; do
         --no-mandate) MANDATE=false; shift ;;
         --subagents) SUBAGENTS=true; shift ;;
         --no-subagents) SUBAGENTS=false; shift ;;
-        --claude-code) CLAUDE_CODE=true; shift ;;
+        --claude-code) CLAUDE_CODE=all; shift ;;
         --no-claude-code) CLAUDE_CODE=false; shift ;;
         --sandbox)  SANDBOX=true; shift ;;
         --no-sandbox) SANDBOX=false; shift ;;
@@ -7399,14 +7437,19 @@ case "$(lc "${SUBAGENTS}")" in
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }subagents: on" ;;
 esac
 # Claude Code adapter: the module, and what it finds here for the launch line
-unset LETS_CODE_CLAUDE_CODE_ON LETS_CODE_CLAUDE_TRUST LETS_CODE_CLAUDE_ENV LETS_CODE_AGENT_NAME
+# auto (default): on only where the project's .claude has hooks or workflows,
+# and then with the project's .claude alone; all: the user's ~/.claude too
+unset LETS_CODE_CLAUDE_CODE_ON LETS_CODE_CLAUDE_TRUST LETS_CODE_CLAUDE_ENV LETS_CODE_AGENT_NAME LETS_CODE_CLAUDE_SCOPE
 case "$(lc "${CLAUDE_CODE}")" in
     false|no|0|off) ;;
     *)
-        pi_write_claudecode_extension
-        export LETS_CODE_CLAUDE_CODE_ON=1
+        [ "$(lc "${CLAUDE_CODE}")" = all ] && export LETS_CODE_CLAUDE_SCOPE=all
         claude_code_scan
-        FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }${CC_SUMMARY:-claude code: nothing here}" ;;
+        if [ "${CC_NEED}" = 1 ]; then
+            pi_write_claudecode_extension
+            export LETS_CODE_CLAUDE_CODE_ON=1
+            FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }${CC_SUMMARY:-claude code: nothing here}"
+        fi ;;
 esac
 case "$(lc "${SANDBOX}")" in
     true|yes|1|on)

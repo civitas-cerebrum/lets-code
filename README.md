@@ -66,7 +66,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🛟 **Git guard** | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
 | 🧭 **Agent guard** | Default bash timeout, a nudge to run tests after untested edits, a wrap-up hint once they pass, and thinking that switches on only while the model struggles. |
 | 🧭 **Modes** (optional) | `plan` explores read-only and ends in a numbered plan, `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
-| 🤝 **Claude Code projects** (on by default) | A project or user set up for Claude Code works as it is: CLAUDE.md and its `@imports`, skills, `/commands`, agents, hooks, permission rules, MCP servers and workflow scripts, read live at each start. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
+| 🤝 **Claude Code projects** (automatic) | A project whose `.claude/` has hooks or workflow scripts works as it is: its hooks, workflows, skills, `/commands`, agents, permission rules, MCP servers and CLAUDE.md, read live at each start. Your own `~/.claude` stays out unless `CLAUDE_CODE=all`. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
@@ -109,7 +109,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--metrics-log <file>` | Append the footer's numbers to `<file>` as JSON lines, also without a UI (see [Metrics log](#metrics-log)) |
 | `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `yolo` or a role of yours |
 | `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
-| `--claude-code` / `--no-claude-code` | The Claude Code adapter (on by default; see [Claude Code projects](#claude-code-projects)) |
+| `--claude-code` / `--no-claude-code` | The Claude Code adapter with your `~/.claude` too (`CLAUDE_CODE=all`) / off; by default it switches on by itself where needed (see [Claude Code projects](#claude-code-projects)) |
 | `--sandbox` / `--no-sandbox` | The OS sandbox for bash |
 | `--verbose` | Show each probe and the full launch detail (API, output cap, guards, session tag) |
 
@@ -538,13 +538,26 @@ reaches the model. Off with `--no-session-tag` or `LETS_CODE_SESSION_TAG=false`.
 <details>
 <summary><b>Claude Code projects</b></summary>
 
-<a id="claude-code-projects"></a>A repo with a `.claude/` folder, a
-`CLAUDE.md` or a `~/.claude` of yours works in lets-code without edits:
-everything is read where Claude Code keeps it, at each start, and nothing is
-copied or converted. The launch line says what was found, e.g.
-`claude code: 12 commands, 4 skills, 1 agent, 2 hooks`; nothing when there is
-nothing. Off with `--no-claude-code`, `CLAUDE_CODE=false` in the config or
-`LETS_CODE_CLAUDE_CODE=false`.
+<a id="claude-code-projects"></a>A repo whose `.claude/` folder (from the
+working folder up to the git root) has hooks in its settings or workflow
+scripts works in lets-code without edits: the adapter switches on by itself
+there, reads that project's `.claude` where Claude Code keeps it, at each
+start, and copies or converts nothing. Anywhere else it does nothing at all,
+so a folder with only skills or commands, or your home folder, is left to
+pi alone. The launch line says what was found, e.g.
+`claude code: 2 commands, 1 skill, 2 hooks, 1 workflow`.
+
+Your own `~/.claude` (its hooks, skills, commands, agents, workflows,
+CLAUDE.md, MCP servers and env) is not taken over: it was written for Claude
+Code, not for this model, and claude.ai's synced skills there collide by
+name. `CLAUDE_CODE=all` (config or `LETS_CODE_CLAUDE_CODE=all`, or
+`--claude-code`) brings it in everywhere, as the table below describes. The
+home folder's `.claude` never counts as a project. Skills are handed to pi
+one folder each: a name pi already has (its own skills) or a second copy of
+a name is left out, so there are no skill conflicts. Off with
+`--no-claude-code` or `CLAUDE_CODE=false`.
+
+What is read (the `~/.claude` parts only with `CLAUDE_CODE=all`):
 
 | Claude Code | In lets-code |
 |---|---|

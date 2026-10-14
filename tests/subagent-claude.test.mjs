@@ -16,6 +16,7 @@ const work = realpathSync(mkdtempSync(join(tmpdir(), "subagent-claude-test-")));
 const HOME = join(work, "home"); const agentDir = join(HOME, ".pi", "agent");
 mkdirSync(join(agentDir, "agents"), { recursive: true });
 process.env.HOME = HOME; process.env.PI_CODING_AGENT_DIR = agentDir; delete process.env.CLAUDE_CONFIG_DIR;
+process.env.LETS_CODE_CLAUDE_SCOPE = "all";   // CLAUDE_CODE=all: the user's Claude agents too
 {
 	const nm = join(agentDir, "extensions", "node_modules", "typebox"); mkdirSync(nm, { recursive: true });
 	writeFileSync(join(nm, "package.json"), JSON.stringify({ name: "typebox", type: "module", main: "index.js" }));

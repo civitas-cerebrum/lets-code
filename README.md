@@ -99,7 +99,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--context <tok>` | Context window (default: discovered, else 128000) |
 | `--output-cap <tok>` | Max output tokens (default 32768) |
 | `--api <dialect>` | `openai-completions` (default), `openai-responses`, `anthropic-messages`, `google-generative-ai` |
-| `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`), `xhigh` (opt-in, 32k budget, also selectable in-session; see server setup), `adaptive[:<lvl>]` (medium, low once the tests pass, bursts up on struggle), or `auto[:<lvl>]` (off, bursts up on struggle); see [Choosing a thinking level](#choosing-a-thinking-level) |
+| `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`; a level picked in a session is where the next one starts, and this flag overrides it for one launch), `xhigh` (opt-in, 32k budget, also selectable in-session; see server setup), `adaptive[:<lvl>]` (medium, low once the tests pass, bursts up on struggle), or `auto[:<lvl>]` (off, bursts up on struggle); see [Choosing a thinking level](#choosing-a-thinking-level) |
 | `--vision` / `--no-vision` | Pin image input instead of probing |
 | `--insecure` | Skip TLS verification |
 | `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` / `--no-grounding` | Launch without a guard |
@@ -378,6 +378,14 @@ exit 0 plus "pass" is green, an `AssertionError` is red.
 
 <details>
 <summary><b>Choosing a thinking level</b></summary>
+
+The first session starts at `medium` (or `THINKING=` from the config).
+A level you pick in a session (Shift+Tab, `/thinking`) is remembered per
+model in `~/.pi/agent/lets-code-state.json` and the next session starts
+there; `--thinking-level` or `LETS_CODE_THINKING` decide for one launch
+without changing it. Subagents start at `medium` unless their agent file
+sets `thinking:`. With `auto` or `adaptive` the agent guard moves the level,
+so nothing is remembered.
 
 Measured October 2026 with pi against Qwen3.8-27B (local vLLM, and the same
 model on OpenRouter), on six Python tasks from easy to hard, scored by

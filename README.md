@@ -66,6 +66,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🛟 **Git guard** | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
 | 🧭 **Agent guard** | Default bash timeout, a nudge to run tests after untested edits, a wrap-up hint once they pass, and thinking that switches on only while the model struggles. |
 | 🧭 **Modes** (optional) | `plan` explores read-only and ends in a numbered plan, `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
+| 🤝 **Claude Code projects** (on by default) | A project or user set up for Claude Code works as it is: CLAUDE.md and its `@imports`, skills, `/commands`, agents, hooks, permission rules, MCP servers and workflow scripts, read live at each start. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
@@ -108,6 +109,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--metrics-log <file>` | Append the footer's numbers to `<file>` as JSON lines, also without a UI (see [Metrics log](#metrics-log)) |
 | `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `yolo` or a role of yours |
 | `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
+| `--claude-code` / `--no-claude-code` | The Claude Code adapter (on by default; see [Claude Code projects](#claude-code-projects)) |
 | `--sandbox` / `--no-sandbox` | The OS sandbox for bash |
 | `--verbose` | Show each probe and the full launch detail (API, output cap, guards, session tag) |
 
@@ -534,6 +536,60 @@ reaches the model. Off with `--no-session-tag` or `LETS_CODE_SESSION_TAG=false`.
 </details>
 
 <details>
+<summary><b>Claude Code projects</b></summary>
+
+<a id="claude-code-projects"></a>A repo with a `.claude/` folder, a
+`CLAUDE.md` or a `~/.claude` of yours works in lets-code without edits:
+everything is read where Claude Code keeps it, at each start, and nothing is
+copied or converted. The launch line says what was found, e.g.
+`claude code: 12 commands, 4 skills, 1 agent, 2 hooks`; nothing when there is
+nothing. Off with `--no-claude-code`, `CLAUDE_CODE=false` in the config or
+`LETS_CODE_CLAUDE_CODE=false`.
+
+| Claude Code | In lets-code |
+|---|---|
+| `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md` (from the folder up), `~/.claude/CLAUDE.md`, `.claude/rules/*.md` without `paths:` | Context files next to pi's own `AGENTS.md`/`CLAUDE.md`, in Claude's order; `@path` imports are followed (4 hops, each file once; outside the project only in a trusted folder) |
+| `.claude/skills/` (up to the git root), `~/.claude/skills/` | pi skills: name and description in the prompt, the body read on use; also `/<name> [args]` |
+| `.claude/commands/**/*.md`, `~/.claude/commands/` | `/<name>`, `/<dir>:<name>`; `$ARGUMENTS`, `$ARGUMENTS[N]`, `$N` (from 0), named `arguments`, `` !`cmd` `` and ```` ```! ```` blocks run first, `@file` attached; the project's wins over yours |
+| `.claude/agents/*.md`, `~/.claude/agents/` | Agents of the `subagent` tool; `tools`/`disallowedTools` mapped to pi's (`Glob` is `find`; tools pi lacks are dropped), `effort` is the thinking level, `permissionMode: plan` the readonly role; `model` and `color` are ignored. A pi agent of the same name wins |
+| `hooks` in `~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json` | Run on pi's events: PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, SessionStart (startup, resume, clear, compact, fork), Stop, SubagentStop (in subagents), SubagentStart, PreCompact, SessionEnd, Notification (when lets-code waits for an answer). Claude's stdin JSON (tool names and arguments in Claude's names, `transcript_path` is pi's session file), `sh -c` in the project with `CLAUDE_PROJECT_DIR`, in parallel, identical commands once, Claude's timeouts; exit 0 / 2 / other and the JSON output (`continue`, `decision`, `permissionDecision`, `updatedInput`, `additionalContext`, `updatedToolOutput`, `systemMessage`) as Claude defines them. `disableAllHooks` is honoured. A snapshot is taken at session start |
+| `permissions.allow` / `ask` / `deny` | deny blocks the call, ask asks you (blocks without a UI), allow skips the mandate's question; a bare tool name in deny removes the tool. `Bash(npm run test *)`, `Bash(git:*)`, `Read(./secrets/**)`, `Edit(/src/**)`, `//abs`, `~/`, `mcp__server`, `Agent(name)`. lets-code's guards and mandate denials still apply on top |
+| `.mcp.json`, `mcpServers` in `~/.claude.json` (user and local scope) | Registered with pi's MCP; `${VAR}` / `${VAR:-default}` expanded; `.mcp.json` servers need the folder trusted and Claude's approval (`enableAllProjectMcpServers`, `enabledMcpjsonServers`, `disabledMcpjsonServers`) or a yes to lets-code's question |
+| `.claude/workflows/*.js`, `~/.claude/workflows/` | A `workflow` tool and `/<name> [args]` / `/workflow <name>`; `agent()` (one child pi each, `schema` for JSON answers), `parallel()`, `pipeline()`, `phase()`, `log()`, `args`, at `LETS_CODE_SUBAGENT_CONCURRENCY` agents at a time. Needs subagents on |
+| `env` in the settings files | Exported into pi's environment at launch |
+
+Context cost: the adapter itself adds nothing to the prompt. What a project
+brings is what Claude Code would load too: its CLAUDE.md files and one line
+per skill. The `workflow` tool exists only where workflow scripts do (one
+short line), and a prompt that asks for a workflow (its name with "workflow",
+`/name`, or wording close to its description) adds a two-line section naming
+it, kept for the session. Hook output reaches the model only as Claude
+defines it. The skills claude.ai syncs into `~/.claude/skills/synced/` are
+left out (about 15 KB for tools that are not here;
+`LETS_CODE_CLAUDE_SYNCED_SKILLS=1` brings them in).
+
+**Trust.** Your own files (`~/.claude`, `~/.claude.json`) always count. A
+project's hooks, `.mcp.json` servers, settings `env`, allow rules, agents,
+workflows and the `` !`cmd` `` of its commands run only in a trusted folder:
+trusted in Claude Code (its trust dialog for the folder or a parent), in pi
+(`/trust`), or by your answer to lets-code's own question, asked once with
+the list of what would run and remembered in
+`~/.pi/agent/lets-code-state.json`. Without a UI an undecided folder's
+project parts are skipped with a one-line note. deny and ask rules apply
+everywhere; they only tighten.
+
+**Not supported:** hook types `prompt`, `agent` and `mcp_tool` (skipped),
+hooks in skill or agent frontmatter, the events pi has no moment for
+(PermissionRequest, PostToolBatch, the task, worktree, file and model-switch
+events, InstructionsLoaded, ConfigChange), `asyncRewake`, SSE and WebSocket
+MCP servers, `paths:`-scoped rules and lazily loaded subdirectory CLAUDE.md
+files, `WebFetch`/`WebSearch` (pi has no such tools), `defaultMode` and
+`additionalDirectories`, per-agent models (lets-code serves one), skill
+`context: fork`, managed (enterprise) settings, and plugins.
+
+</details>
+
+<details>
 <summary><b>MCP</b></summary>
 
 pi has MCP built in: `~/.pi/agent/mcp.json` and `.pi/mcp.json` use the same
@@ -622,7 +678,7 @@ Everything lets-code adds to pi is one extension,
 startup `[Extensions]`: an `index.ts` that loads one module per feature
 (`footer.ts`, `agent-guard.ts`, `git-guard.ts`, `memory-guard.ts`,
 `grounding.ts`, `backend.ts`, `session-tag.ts`, `mandate.ts`,
-`subagents.ts`, and `sandbox/` with its npm runtime). A module is written
+`subagents.ts`, `claude-code.ts`, and `sandbox/` with its npm runtime). A module is written
 when its feature is on and stays inert while it is off; one that fails to
 load is reported by name and the others still run. The per-feature
 directories (`footer/`, `agent-guard/`, ...) and `lets-code-*.ts` files
@@ -638,7 +694,7 @@ behind each decision are in [DESIGN.md](DESIGN.md).
 for the probes, endpoint parsing, the chat-template effort probe and the
 OpenRouter config, the move into the one extension, node tests for that
 extension's index, the git guard, checkpoints, agent guard, mandate,
-subagents and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
+subagents, the Claude Code adapter and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
 the memory guard. Releases are published to npm from GitHub releases.
 
 ## License

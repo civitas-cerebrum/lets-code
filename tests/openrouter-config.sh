@@ -24,6 +24,15 @@ PI_AGENT_DIR="$d/x32" pi_write_configs http://192.168.0.114/vllm/v1 openai-compl
 check "vllm cap 32768: xhigh unmapped" "$(j "$d/x32/models.json" "'xhigh' in m['thinkingLevelMap']")" False
 check "vllm cap 32768: other levels as before" "$(j "$d/x32/models.json" "json.dumps(m['thinkingLevelMap'])")" '{"minimal": "low", "low": "low", "medium": "medium", "high": "high"}'
 check "vllm cap 32768: no per-level sampling" "$(j "$d/x32/models.json" "'samplingParamsByThinkingLevel' in m")" False
+# unpinned cap: xhigh still offered, with its own output cap for xhigh requests only
+XHIGH_LEVEL_CAP=49152 PI_AGENT_DIR="$d/xl" pi_write_configs http://192.168.0.114/vllm/v1 openai-completions qwen 262144 32768 false true medium "$EM"
+check "vllm cap 32768 + level cap: xhigh mapped" "$(j "$d/xl/models.json" "m['thinkingLevelMap'].get('xhigh')")" xhigh
+check "vllm cap 32768 + level cap: xhigh request cap" "$(j "$d/xl/models.json" "json.dumps(m['samplingParamsByThinkingLevel'])")" '{"xhigh": {"thinking_token_budget": 32768, "max_tokens": 49152, "max_completion_tokens": 49152}}'
+check "vllm cap 32768 + level cap: maxTokens unchanged" "$(j "$d/xl/models.json" "m['maxTokens']")" 32768
+XHIGH_LEVEL_CAP=40959 PI_AGENT_DIR="$d/xs" pi_write_configs http://192.168.0.114/vllm/v1 openai-completions qwen 262144 32768 false true medium "$EM"
+check "vllm level cap 40959: too small for xhigh" "$(j "$d/xs/models.json" "'xhigh' in m['thinkingLevelMap']")" False
+XHIGH_LEVEL_CAP=49152 PI_AGENT_DIR="$d/xb" pi_write_configs http://192.168.0.114/vllm/v1 openai-completions qwen 262144 49152 false true xhigh "$EM"
+check "vllm cap 49152 + level cap: no request cap needed" "$(j "$d/xb/models.json" "json.dumps(m['samplingParamsByThinkingLevel'])")" '{"xhigh": {"thinking_token_budget": 32768}}'
 PI_AGENT_DIR="$d/x48" pi_write_configs http://192.168.0.114/vllm/v1 openai-completions qwen 262144 49152 false true xhigh "$EM"
 check "vllm cap 49152: xhigh mapped" "$(j "$d/x48/models.json" "m['thinkingLevelMap'].get('xhigh')")" xhigh
 check "vllm cap 49152: max unmapped" "$(j "$d/x48/models.json" "'max' in m['thinkingLevelMap']")" False

@@ -99,7 +99,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--context <tok>` | Context window (default: discovered, else 128000) |
 | `--output-cap <tok>` | Max output tokens (default 32768) |
 | `--api <dialect>` | `openai-completions` (default), `openai-responses`, `anthropic-messages`, `google-generative-ai` |
-| `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`), `xhigh` (opt-in, 32k budget, see server setup), `adaptive[:<lvl>]` (medium, low once the tests pass, bursts up on struggle), or `auto[:<lvl>]` (off, bursts up on struggle); see [Choosing a thinking level](#choosing-a-thinking-level) |
+| `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`), `xhigh` (opt-in, 32k budget, also selectable in-session; see server setup), `adaptive[:<lvl>]` (medium, low once the tests pass, bursts up on struggle), or `auto[:<lvl>]` (off, bursts up on struggle); see [Choosing a thinking level](#choosing-a-thinking-level) |
 | `--vision` / `--no-vision` | Pin image input instead of probing |
 | `--insecure` | Skip TLS verification |
 | `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` / `--no-grounding` | Launch without a guard |
@@ -228,16 +228,19 @@ With a reasoning parser, vLLM also enforces the per-level thinking budget
 pi sends (`thinking_token_budget`), so a model cannot think its way through
 the whole output cap.
 
-`xhigh` is opt-in (`--thinking-level xhigh` or `THINKING=xhigh`). pi on its
-own clamps it to `high` (same 16k budget, same template value); lets-code
-gives it a 32k thinking budget (through `samplingParamsByThinkingLevel`) and
-the template's `xhigh` effort value. That needs an output cap of at least
-40k (budget plus 8k of answer): with `xhigh` as the startup level and no
-pinned `OUTPUT_CAP`, the default cap rises to 48k (never above a quarter of
-the context, so windows under 160k keep `xhigh` clamped to `high`, with a
-note at launch). A pinned cap of 40k or more also enables `xhigh` for
-in-session switches. `max` stays clamped by pi: to `xhigh` when it is
-enabled, otherwise to `high`.
+`xhigh` is opt-in: start with it (`--thinking-level xhigh` or
+`THINKING=xhigh`) or pick it in the session. pi on its own clamps it to
+`high` (same 16k budget, same template value); lets-code gives it a 32k
+thinking budget (through `samplingParamsByThinkingLevel`) and the template's
+`xhigh` effort value. That needs an output cap of at least 40k (budget plus
+8k of answer). With no pinned `OUTPUT_CAP`, xhigh requests get a 48k cap of
+their own while the other levels keep the default, so `xhigh` can be picked
+at any startup level; with `xhigh` as the startup level the default cap
+itself rises to 48k. Either way never above a quarter of the context, so
+windows under 160k keep `xhigh` clamped to `high` (with a note at launch
+when it is the startup level). A pinned cap of 40k or more enables `xhigh`
+as well; a smaller pinned cap leaves it clamped. `max` stays clamped by pi:
+to `xhigh` when it is enabled, otherwise to `high`.
 
 Some chat templates carry their own effort control (Qwen3.8 takes
 `reasoning_effort`: `low`, `medium`, `xhigh`, default `xhigh`). At launch

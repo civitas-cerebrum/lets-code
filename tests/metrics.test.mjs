@@ -31,7 +31,7 @@ const HOME = homedir();
 let loads = 0;
 async function load(env, { hasUI = true, theme, providers = 1, branch = "main", level = "medium" } = {}) {
 	timers = [];
-	delete process.env.LETS_CODE_METRICS_ON; delete process.env.LETS_CODE_METRICS_LOG; delete process.env.LETS_CODE_SUBAGENT_DEPTH;
+	delete process.env.LETS_CODE_METRICS_ON; delete process.env.LETS_CODE_METRICS_LOG; delete process.env.LETS_CODE_SUBAGENT_DEPTH; delete process.env.LETS_CODE_METRICS_SAVE;
 	Object.assign(process.env, env);
 	const f = join(work, `metrics-${loads++}.ts`); writeFileSync(f, src);
 	const mod = await import(pathToFileURL(f).href);
@@ -114,6 +114,25 @@ try {
 	await x.cmd("loud");
 	t("/metrics bad argument warns", x.notes.at(-1), "usage: /metrics [on|off]");
 	t("/metrics completes on|off", x.commands.metrics.getArgumentCompletions("o").map((c) => c.value), ["on", "off"]);
+	t("no save file set: nothing written", existsSync(join(work, "lets-code-state.json")), false);
+
+	// the size picked with /metrics is saved for the next launch, other keys kept
+	{
+		const st = join(work, "lets-code-state.json");
+		writeFileSync(st, JSON.stringify({ thinkingLevels: { "lets-code/q": "low" } }));
+		const y = await load({ LETS_CODE_METRICS_ON: "0", LETS_CODE_METRICS_SAVE: st });
+		await y.cmd("");
+		t("/metrics saves full", JSON.parse(readFileSync(st, "utf8")), { thinkingLevels: { "lets-code/q": "low" }, metrics: true });
+		await y.cmd("off");
+		t("/metrics off saves minimal", JSON.parse(readFileSync(st, "utf8")).metrics, false);
+		writeFileSync(st, "not json");
+		await y.cmd("on");
+		t("unreadable file: started over", JSON.parse(readFileSync(st, "utf8")), { metrics: true });
+		rmSync(st);
+		const z = await load({ LETS_CODE_METRICS_ON: "0", LETS_CODE_METRICS_SAVE: st, LETS_CODE_SUBAGENT_DEPTH: "1" });
+		await z.cmd("on");
+		t("subagent: nothing saved", existsSync(st), false);
+	}
 
 	// METRICS=true starts full; cost, providers, thinking off, no branch, estimates
 	x = await load({ LETS_CODE_METRICS_ON: "1" }, { providers: 2, branch: null, level: "off" });

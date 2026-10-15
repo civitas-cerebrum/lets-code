@@ -1063,7 +1063,8 @@ mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
 # session's tokens/s with a spinner while a response streams, context use.
 # Full (/metrics): adds the directory and branch, model and thinking level,
 # cache reads and hit rate, cost, time to first token and output tokens.
-# Written on every launch; METRICS=true starts in the full size. With
+# Written on every launch; the size last picked with /metrics is where the
+# next session starts (METRICS=true until one is picked). With
 # LETS_CODE_METRICS_LOG (--metrics-log) it also appends the numbers to a JSON
 # lines file, with or without a UI. Inert outside a lets-code launch; draws
 # nothing without a UI. Rewritten when its content changes.
@@ -1078,7 +1079,8 @@ pi_write_metrics_extension() {
 // parts), in two sizes switched with /metrics:
 //   minimal (the default):
 //     ↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)
-//   full (/metrics, METRICS=true or --metrics):
+//   full (/metrics, METRICS=true or --metrics; the size picked with /metrics
+//   is saved to LETS_CODE_METRICS_SAVE and the next launch starts in it):
 //     ~/github/app (main)                              qwen3.8-27b • medium
 //     ↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012
 //     ⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out · done in 1m 23s
@@ -1123,7 +1125,7 @@ pi_write_metrics_extension() {
 //    subagent_calls, subagent_tasks, input_tokens, output_tokens, cached_tokens, depth, pid}
 //     at session shutdown (quit, /new, /resume, ...), totals for the session
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, isAbsolute, sep } from "node:path";
 import { homedir } from "node:os";
 
@@ -1254,6 +1256,17 @@ type Ctx = {
 };
 
 // one JSON line appended to the metrics log; never throws
+// the footer size picked with /metrics, kept for the next launch (other keys in the file stay)
+export function saveFull(file: string, full: boolean): void {
+	let doc: any = {};
+	try { doc = JSON.parse(readFileSync(file, "utf8")); } catch { /* missing or unreadable: start over */ }
+	if (!doc || typeof doc !== "object" || Array.isArray(doc)) doc = {};
+	if (doc.metrics === full) return;
+	doc.metrics = full;
+	const tmp = `${file}.${process.pid}.tmp`;
+	writeFileSync(tmp, JSON.stringify(doc, null, 2) + "\n", { mode: 0o600 });
+	renameSync(tmp, file);
+}
 export function appendRecord(file: string, rec: Record<string, unknown>): boolean {
 	if (!file) return false;
 	try {
@@ -1484,6 +1497,8 @@ export default function (pi: ExtensionAPI) {
 			const a = args.trim().toLowerCase();
 			if (a && a !== "on" && a !== "off") { ctx.ui.notify("usage: /metrics [on|off]", "warning"); return; }
 			full = a ? a === "on" : !full;
+			const save = process.env.LETS_CODE_METRICS_SAVE;
+			if (save && !(Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") > 0)) { try { saveFull(save, full); } catch { /* best effort */ } }
 			if (take(ctx) && !tuiRef) ui!.ui.setFooter?.(footer);
 			repaint();
 			ctx.ui.notify(full ? "Full footer" : "Minimal footer", "info");
@@ -6994,6 +7009,7 @@ GIT_GUARD="${LETS_CODE_GIT_GUARD:-${GIT_GUARD}}"
 AGENT_GUARD="${LETS_CODE_AGENT_GUARD:-${AGENT_GUARD}}"
 GROUNDING="${LETS_CODE_GROUNDING:-${GROUNDING}}"
 SESSION_TAG="${LETS_CODE_SESSION_TAG:-${SESSION_TAG}}"
+METRICS_PINNED="${LETS_CODE_METRICS:+1}"   # this launch's footer size given by env (or by flag, below)
 METRICS="${LETS_CODE_METRICS:-${METRICS}}"
 METRICS_LOG="${LETS_CODE_METRICS_LOG:-}"
 TEMPLATE_EFFORT="${LETS_CODE_TEMPLATE_EFFORT:-${TEMPLATE_EFFORT}}"
@@ -7041,8 +7057,8 @@ while [ $# -gt 0 ]; do
         --grounding) GROUNDING=true; shift ;;
         --no-grounding) GROUNDING=false; shift ;;
         --no-session-tag) SESSION_TAG=false; shift ;;
-        --metrics)  METRICS=true; shift ;;
-        --no-metrics) METRICS=false; shift ;;
+        --metrics)  METRICS=true; METRICS_PINNED=1; shift ;;
+        --no-metrics) METRICS=false; METRICS_PINNED=1; shift ;;
         --metrics-log) [ -n "${2:-}" ] || { log_error "--metrics-log requires a file."; exit 1; }
                     METRICS_LOG="$2"; shift 2 ;;
         --metrics-log=*) METRICS_LOG="${1#--metrics-log=}"; shift ;;
@@ -7404,7 +7420,20 @@ esac
 # optional features: mandate (modes/roles), subagents, sandbox, REA, metrics
 unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL LETS_CODE_REA_AGENT LETS_CODE_METRICS_ON
 FEAT_DESC=""
-# footer: minimal by default; METRICS=true starts with the full one
+# footer: minimal by default; METRICS=true starts with the full one. The
+# size last picked with /metrics is where the next launch starts, ahead of
+# METRICS= in the config; --metrics / --no-metrics / LETS_CODE_METRICS decide
+# for their launch without changing it.
+export LETS_CODE_METRICS_SAVE="${PI_AGENT_DIR}/lets-code-state.json"
+if [ -z "${METRICS_PINNED:-}" ]; then
+    case "$(LC_STATE="${LETS_CODE_METRICS_SAVE}" python3 -c 'import json,os
+try: v = json.load(open(os.environ["LC_STATE"])).get("metrics")
+except Exception: v = None
+print({True: "true", False: "false"}.get(v, ""))' 2>/dev/null)" in
+        true) METRICS=true ;;
+        false) METRICS=false ;;
+    esac
+fi
 pi_write_metrics_extension
 case "$(printf '%s' "${METRICS}" | tr '[:upper:]' '[:lower:]')" in
     true|yes|1|on) export LETS_CODE_METRICS_ON=1; FEAT_DESC="metrics: on" ;;

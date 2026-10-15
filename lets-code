@@ -60,6 +60,7 @@
 #                                hooks, permissions, MCP, workflows, CLAUDE.md
 #   lets-code --sandbox | --no-sandbox       the OS sandbox on/off
 #   lets-code --rea [manual] | --no-rea      REA reverse engineering on demand
+#   lets-code --termux | --no-termux         termux-device agent: phone tasks on Android (Termux)
 #                                (manual: only via /skill:reverse-engineering)
 #   lets-code --verbose ...      show endpoint probing
 #
@@ -138,7 +139,7 @@
 #                LETS_CODE_MANDATE (true|false), LETS_CODE_MODE, LETS_CODE_SUBAGENTS,
 #                LETS_CODE_SANDBOX (true|false), LETS_CODE_SUBAGENT_CONCURRENCY (2)
 #                LETS_CODE_CLAUDE_CODE (auto|all|false)
-#                LETS_CODE_REA (true|manual|false)
+#                LETS_CODE_REA (true|manual|false), LETS_CODE_TERMUX (true|false)
 #                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_METRICS_LOG (<file>), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_GROUNDING (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
 #                LETS_CODE_WRAP_TURNS (6), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
 #                LETS_CODE_BURST_TURNS (3), LETS_CODE_MAX_BURSTS (8), LETS_CODE_THINKING_REPLAY (all|<n>)
@@ -4235,9 +4236,11 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) =
 
 // The tool description, always in context, under 160 characters: the agent
 // names and the three call shapes. Their jobs are in orchestration().
+// the tool description: each agent with its job (so the model knows what is
+// there when it needs it), then the three call shapes
 export function agentsBlurb(agents: AgentDef[]): string {
-	const names = agents.map((a) => a.name).join(", ") || "none yet";
-	return `Agents (${names}), fresh contexts: brief fully. {agent,task} | {tasks:[..]} parallel | {chain:[..]}, {previous}=prior output`;
+	const jobs = agentJobs(agents) || "none yet";
+	return `Agents: ${jobs}. Fresh contexts: brief fully. {agent,task} | {tasks:[..]} parallel | {chain:[..]}, {previous}=prior output`;
 }
 // "name (job)" with the job cut to about 60 characters
 export function agentJobs(agents: AgentDef[]): string {
@@ -4415,6 +4418,109 @@ if there are none.
 MD
     log "subagents: starter agents written to ${dir} (scout, worker, reviewer)"
 }
+
+# Termux device agent (TERMUX=true, --termux): the termux-device agent of
+# the subagent tool, which does phone tasks on the Android device lets-code
+# runs on (launch an app, open a file in an app, fire an intent) with
+# recipes and traps verified on Termux. Listed only in a session launched
+# with it on (requires_env; the launch exports it), so off adds nothing to
+# context. A user's own agent of that name is left alone.
+write_termux_agent() {
+    local af="${PI_AGENT_DIR}/agents/termux-device.md" tmp
+    if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    mkdir -p "${PI_AGENT_DIR}/agents"
+    tmp="$(mktemp "${af}.XXXXXX")" || return 0
+    cat > "${tmp}" <<'MD'
+---
+# Written by lets-code (termux); regenerated on launch, edits are overwritten.
+# To keep your own version, delete this line: lets-code then leaves it alone.
+name: termux-device
+description: Phone tasks on this Android device (Termux), end to end: launch or bring an app to the front, open a file in an app, fire an intent. Give it the whole goal, not a check; don't run am, termux-open or dumpsys yourself first
+tools: bash, read
+requires_env: LETS_CODE_TERMUX_AGENT
+---
+
+You control this Android phone from Termux's shell (package com.termux, not
+rooted). Your uid is `id -u`. Use the recipes as given; do not experiment
+with what is listed under traps.
+
+## Golden rule
+- Use the plain `am` on PATH (`$PREFIX/bin/am`). It runs as com.termux and
+  passes the uid check.
+- Never use `/system/bin/am`. It fails with `SecurityException ...
+  package=com.android.shell does not belong to uid=<yours>`.
+- Every `am` call needs `--user 0`. Shell users default to user -2.
+
+## Recipes
+1. **Launch an app:** `am start --user 0 -n <pkg>/<Activity>`
+   - Success is rc=0 with only a `Starting: Intent {...}` line and no
+     `Error` line.
+   - `Warning: Activity not started, its current task has been brought to
+     the front` is also success: the task is in the foreground.
+2. **Control check (required before claiming a launch):** run the same
+   command against a fake component, e.g. `-n <pkg>/.DoesNotExist`. A live
+   system answers `Error type 3` / `Error: Activity class {...} does not
+   exist.` with rc=2. If your real command and the control give the same
+   output, you are not reaching the system.
+3. **Open a file in an app:** other apps cannot read `/data/data/com.termux`,
+   so copy the file first:
+   `cp <file> /sdcard/Download/`
+   `am start --user 0 -a android.intent.action.VIEW -d file:///sdcard/Download/<name> -t <mime> -p <pkg>`
+4. **Generic intent:** `am start --user 0 -a <ACTION> -d <uri> [-t <mime>] [-p <pkg> | -n <comp>]`.
+   content:// URIs start fine; whether the target app can read the URI
+   depends on the provider.
+5. **Find the handler or the main activity:**
+   `/system/bin/cmd package resolve-activity --user 0 -a <ACTION> [-c <CAT>] [-t <mime>] [-p <pkg>]`
+   (read-only; read `name=` and `packageName=`). For an app's launcher
+   activity: `-a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p <pkg>`.
+   Installed packages: `/system/bin/cmd package list packages | grep <word>`.
+6. **Evidence:** `logcat -c` before the action and `logcat -d` after; you
+   can read your own uid's logs.
+
+## Known apps (examples)
+- Files by Google: `com.google.android.apps.nbu.files`, main activity
+  `.home.HomeActivity`, PDF preview `.gateway.preview.PreviewActivity`
+- System document UI: `com.android.documentsui`
+
+## Traps (do not retry)
+- `termux-open` on files in `~` fails unless `allow-external-apps=true` is
+  set in `~/.termux/termux.properties`. That setting widens what other apps
+  can read: recommend it to the user only, never set it yourself. Copy the
+  file to /sdcard instead.
+- `termux-am` (socket am) is dead unless Termux's server is running. Don't
+  force-stop Termux to fix it.
+- `monkey` fails (`app_process: not found`).
+- `dumpsys window` and `dumpsys activity` return nothing (no permission).
+  Use the control check and logcat instead.
+- `termux-*` API commands (battery, clipboard, notifications, ...) need the
+  Termux:API app; if `command -v termux-battery-status` finds nothing or the
+  call hangs, it is not installed. Say so instead of retrying.
+- adb is usually not set up on the device itself.
+
+## Safety
+You may run the launch and open commands above, `cp` into /sdcard/Download,
+and read-only diagnostics. You must NOT install packages, change settings,
+force-stop or restart apps or the device, delete user files, or reboot. If
+the goal needs any of these, stop and report the exact command as a
+recommendation for the user.
+
+## Report format
+For each action:
+- **Command:** the exact command line
+- **rc:** the exit code
+- **Key line:** the decisive output line
+- **Verification:** `system-accepted` (rc=0, no error, and the control
+  check behaved differently), `foreground-confirmed` (the "brought to the
+  front" warning, or a fresh start with rc=0 plus a sane control), or
+  `on-screen-unverifiable` (anything less)
+
+Never say something is on screen without the control check or a fresh rc=0
+start. If a step failed, quote the error; don't paraphrase it.
+MD
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+}
+on_termux() { case "${PREFIX:-}" in */com.termux/*) return 0 ;; esac; [ -d /data/data/com.termux/files/usr ]; }
 
 # Claude Code adapter: a project or user set up for Claude Code works in pi
 # as it is, read at each start (CLAUDE.md and imports, skills, commands,
@@ -6434,6 +6540,8 @@ run_setup() {  # run_setup [full|granular]
             echo "MODE=\"${feat_mode}\""
             echo "SANDBOX=\"${feat_sandbox}\""
             echo "REA=\"${feat_rea}\""
+            echo "# TERMUX=true: the termux-device agent for phone tasks (Termux on Android)."
+            echo "TERMUX=\"false\""
             echo ""
             echo "# METRICS=true: start with the full footer (directory, model, cache, first"
             echo "# token, output) instead of the minimal one (--metrics; /metrics in pi)."
@@ -6625,7 +6733,7 @@ print("%s|%s|%s" % (d.get("id", ""), d.get("max_model_len") or d.get("context_le
 # never rewrite each other's backend.
 # Names that would shadow a lets-code option; pi's own options are checked
 # against `pi --help` at setup.
-PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard grounding no-grounding no-session-tag metrics no-metrics metrics-log rea no-rea mandate no-mandate subagents no-subagents claude-code no-claude-code sandbox no-sandbox verbose debug help preset"
+PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard grounding no-grounding no-session-tag metrics no-metrics metrics-log rea no-rea termux no-termux mandate no-mandate subagents no-subagents claude-code no-claude-code sandbox no-sandbox verbose debug help preset"
 preset_name_ok() {  # preset_name_ok <name> -> 0 when usable as --<name>
     case "$1" in ""|[!a-z0-9]*|*[!a-z0-9_-]*) return 1 ;; esac
     case " ${PRESET_RESERVED} " in *" $1 "*) return 1 ;; esac
@@ -6985,6 +7093,7 @@ SUBAGENTS="true"      # on by default; SUBAGENTS=false (config or env) or --no-s
 CLAUDE_CODE="auto"    # auto (default, also "true"): only where the project's .claude has hooks or workflows; all: also ~/.claude; false or --no-claude-code: off
 SANDBOX="false"
 REA="false"
+TERMUX="false"        # TERMUX=true (config or env) or --termux: the termux-device agent (Termux on Android)
 # shellcheck disable=SC1090
 [ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
 if [ -n "${PRESET}" ]; then
@@ -7019,6 +7128,7 @@ SUBAGENTS="${LETS_CODE_SUBAGENTS:-${SUBAGENTS}}"
 CLAUDE_CODE="${LETS_CODE_CLAUDE_CODE:-${CLAUDE_CODE}}"
 SANDBOX="${LETS_CODE_SANDBOX:-${SANDBOX}}"
 REA="${LETS_CODE_REA:-${REA}}"
+TERMUX="${LETS_CODE_TERMUX:-${TERMUX}}"
 
 HARNESS="pi"
 URL_OVERRIDE=""
@@ -7074,6 +7184,8 @@ while [ $# -gt 0 ]; do
         --rea)      REA=true
                     case "${2:-}" in manual) REA=manual; shift 2 ;; *) shift ;; esac ;;
         --no-rea)   REA=false; shift ;;
+        --termux)   TERMUX=true; shift ;;
+        --no-termux) TERMUX=false; shift ;;
         --verbose|--debug) VERBOSE=true; shift ;;
         -h|--help)  sed -n "3,$(grep -n '^# (auto-installed on request)\.$' "$0" | cut -d: -f1)p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          PASSTHROUGH+=("$1"); shift ;;
@@ -7464,6 +7576,18 @@ case "$(lc "${SUBAGENTS}")" in
         write_default_agents
         export LETS_CODE_SUBAGENTS_ON=1 LETS_CODE_MODEL="${MODEL}"
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }subagents: on" ;;
+esac
+# Termux device agent: opt-in, needs subagents and an Android device (Termux)
+unset LETS_CODE_TERMUX_AGENT
+case "$(lc "${TERMUX}")" in
+    true|yes|1|on)
+        if ! on_termux; then log "note: TERMUX=true but this is not Termux on Android; the termux-device agent is off."
+        elif [ "${LETS_CODE_SUBAGENTS_ON:-}" != 1 ]; then log "note: the termux-device agent needs subagents (SUBAGENTS=true); it is off."
+        else
+            write_termux_agent
+            export LETS_CODE_TERMUX_AGENT=1
+            FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }termux-device: on"
+        fi ;;
 esac
 # Claude Code adapter: the module, and what it finds here for the launch line
 # auto (default): on only where the project's .claude has hooks or workflows,

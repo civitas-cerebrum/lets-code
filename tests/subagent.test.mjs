@@ -246,7 +246,9 @@ async function load(env = {}) {
 	rmSync(join(agentDir, "agents", "re.md")); rmSync(join(agentDir, "agents", "slow.md"));
 
 	// the description budget with the starter agents plus reverse-engineer
-	t("description < 160 with scout, worker, reviewer, reverse-engineer", mod.agentsBlurb(["scout", "worker", "reviewer", "reverse-engineer"].map((name) => ({ name }))).length < 160, true);
+	const four = [["scout", "Fast read-only recon of a codebase; returns the files, line ranges and key code another agent needs"], ["worker", "General-purpose agent with full tools for a delegated change; isolated context"], ["reviewer", "Reviews a change for correctness and missed cases; reports findings, does not edit"], ["reverse-engineer", "Reverse engineers binaries, apps, APKs, firmware, websites"]].map(([name, description]) => ({ name, description }));
+	t("description names each agent with its job", ["scout (Fast read-only recon", "reviewer (Reviews a change", "reverse-engineer (Reverse engineers"].every((x) => mod.agentsBlurb(four).includes(x)), true);
+	t("description < 420 with the four default agents", mod.agentsBlurb(four).length < 420, true);
 
 	// the reverse-engineer file lets-code writes, as this extension reads it
 	const script = join(new URL(".", import.meta.url).pathname, "..", "lets-code");

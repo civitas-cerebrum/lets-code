@@ -9,7 +9,7 @@ eval "$(python3 - "${src}" <<'PY'
 import sys
 s = open(sys.argv[1]).read()
 i = s.find("\nREA_VERSION=")
-j = s.find("\n}\n", s.find("\npi_write_rea() {"))
+j = s.find("\n}\n", s.find("\nrea_write_agent() {"))
 sys.stdout.write(s[i:j + 3])
 PY
 )"
@@ -41,7 +41,7 @@ a="${REA_DIR}/agent"
 fail=0
 t() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1 -> $2 (want $3)"; fail=1; fi; }
 
-pi_write_rea on >/dev/null
+pi_write_rea on >/dev/null 2>&1
 t "ready"                          "${REA_NOTE}" ""
 t "installed once"                 "$(wc -l < "${NPM_LOG}" | tr -d ' ')" 1
 t "models linked"                  "$(readlink "${a}/models.json")" "${PI_AGENT_DIR}/models.json"
@@ -64,18 +64,27 @@ t "agent: REA's prompt"            "$([ -f "${PI_AGENT_DIR}/$(sed -n 's/^append_
 t "agent: REA's skill exists"      "$([ -d "${PI_AGENT_DIR}/$(sed -n 's/^skills: //p' "${af}")" ] && echo yes)" yes
 t "agent: requires the runtime"    "$([ -e "${PI_AGENT_DIR}/$(sed -n 's/^requires: //p' "${af}")" ] && echo yes)" yes
 t "agent: timeout 3600"            "$(grep '^timeout:' "${af}")" "timeout: 3600"
-surface() { ( unset LETS_CODE_REA_AGENT; LETS_CODE_SUBAGENTS_ON="$2"; rea_surface "$1"; echo "${REA_SURFACE}:${LETS_CODE_REA_AGENT:-}" ); }
+t "agent: a specialist"            "$(is_specialist_file "${af}" && echo yes)" yes
+t "agent: its setup script"        "$([ -x "${PI_AGENT_DIR}/$(sed -n 's/^setup: //p' "${af}")" ] && echo yes)" yes
+t "agent: brief template"          "$(sed -n 's/^  - \([a-z]*\).*/\1/p' "${af}" | tr '\n' ' ')" "target question purpose "
+t "agent: required fields"         "$(grep -c '^  - [a-z]* (required):' "${af}")" 2
+surface() { ( unset LETS_CODE_REA_AGENT; LETS_CODE_SUBAGENTS_ON="$2"; LETS_CODE_SPECIALISTS_ON="${3:-}"; rea_surface "$1"; echo "${REA_SURFACE}:${LETS_CODE_REA_AGENT:-}" ); }
+t "specialists on: specialist"     "$(surface on 1 1)" "specialist:"
 t "subagents on: agent, no skill"  "$(surface on 1)" "agent:1"
 t "subagents off: skill (rea/run)" "$(surface on '')" "skill:"
 t "manual: skill only, no agent"   "$(surface manual 1)" "skill:"
+t "manual: no specialist either"   "$(surface manual 1 1)" "skill:"
 rm -rf "${PI_AGENT_DIR}/agents"; mkdir -p "${PI_AGENT_DIR}/agents"
-printf -- '---\nname: reverse-engineer\ndescription: mine\n---\nmine\n' > "${af}"
-pi_write_rea on >/dev/null
+printf -- '---\nname: reverse-engineer\ndescription: mine\n---\nmine\nspecialist: true\n' > "${af}"
+pi_write_rea on >/dev/null 2>&1
 t "user's own file kept"           "$(grep -c 'description: mine' "${af}")" 1
 t "user's file: not ours"          "${REA_AGENT:-none}" none
 t "user's file: skill instead"     "$(surface on 1)" "skill:"
+t "user's file: not a specialist"  "$(surface on 1 1)" "skill:"
+printf -- '---\nname: reverse-engineer\ndescription: mine\nspecialist: true\n---\nmine\n' > "${af}"
+t "user's specialist: specialist"  "$(surface on 1 1)" "specialist:"
 rm -f "${af}"
-pi_write_rea on >/dev/null
+pi_write_rea on >/dev/null 2>&1
 t "agent rewritten after removal"  "$(grep -c '^# Written by lets-code' "${af}")" 1
 t "no temp files left"             "$(ls "${PI_AGENT_DIR}/agents" | tr '\n' ' ')" "reverse-engineer.md "
 
@@ -105,18 +114,31 @@ t "child gets the REA skill"       "$(grep -c '^arg=.*rea-agents/skills/reverse-
 t "child gets the task"            "$(grep -c '^arg=Task: explain search in /apps/notes$' "${PI_LOG}")" 1
 t "child has no session"           "$(grep -c '^arg=--no-session$' "${PI_LOG}")" 1
 
-# install fails: a note, no agent file
+# files (specialists on, not enabled): everything but the install
+rm -rf "${REA_DIR}" "${af}"; : > "${NPM_LOG}"
+pi_write_rea files >/dev/null
+t "files: no install"              "$(wc -l < "${NPM_LOG}" | tr -d ' ')" 0
+t "files: agent file, no agent dir" "$([ -e "${af}" ] && echo yes):$([ -e "${a}" ] && echo yes || echo no):${REA_AGENT}" "yes:no:1"
+t "files: setup script"            "$([ -x "${REA_DIR}/setup" ] && echo yes)" yes
+t "files: setup --no-install says not installed" "$(bash "${REA_DIR}/setup" --no-install >/dev/null 2>&1; echo $?)" 3
+bash "${REA_DIR}/setup" 2>/dev/null
+t "setup by itself installs"       "$([ -f "${REA_DIR}/runtime/node_modules/rea-agents/package.json" ] && [ -L "${a}/settings.json" ] && echo yes)" yes
+rm -f "${a}/settings.json"
+pi_write_rea files >/dev/null
+t "files: an installed one is refreshed" "$([ -L "${a}/settings.json" ] && echo yes):$(wc -l < "${NPM_LOG}" | tr -d ' ')" "yes:1"
+
+# install fails: a note; the agent file is there but hidden (requires)
 rm -rf "${REA_DIR}" "${af}"
 mkdir -p "${work}/badbin"; printf '#!/bin/sh\nexit 1\n' > "${work}/badbin/npm"; chmod +x "${work}/badbin/npm"
-PATH="${work}/badbin:${PATH}" pi_write_rea on >/dev/null
+PATH="${work}/badbin:${PATH}" pi_write_rea on >/dev/null 2>&1
 t "install fails -> note"          "$(echo "${REA_NOTE}" | grep -c 'install failed')" 1
-t "not installed -> no agent"      "$([ -e "${af}" ] && echo yes || echo no):${REA_AGENT:-}" "no:"
+t "not installed -> no runtime"    "$([ -e "${PI_AGENT_DIR}/$(sed -n 's/^requires: //p' "${af}")" ] && echo yes || echo no)" no
 
 # no npm: a note, nothing half-written
 rm -rf "${REA_DIR}"
 PATH="$(printf '%s' "${PATH}" | sed "s|${work}/bin:||")"
 if ! command -v npm >/dev/null 2>&1; then
-    pi_write_rea on >/dev/null
+    pi_write_rea on >/dev/null 2>&1
     t "no npm -> note"             "$(echo "${REA_NOTE}" | grep -c 'npm not found')" 1
 fi
 exit ${fail}

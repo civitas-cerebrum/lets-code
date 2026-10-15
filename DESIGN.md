@@ -206,6 +206,36 @@ subagent tool (a few tokens, in context anyway) replaces the skill entry
 `requires_env: LETS_CODE_REA_AGENT`, exported only by a launch with REA on,
 keeps the file on disk from listing it in sessions with REA off or manual.
 
+**Specialists.** Some subagents are only useful with knowledge a model
+guesses wrong (the Termux `am` that passes the uid check, REA's setup), and
+only useful when the caller says the right things (the user's goal
+verbatim; the artifact, the question, what the answer is for). Three
+choices follow. *Always known, cheap:* one tool whose snippet names the
+specialists usable on this machine and its three actions, about 30 tokens;
+jobs, states and templates come from `list` when the model needs them, so
+a specialist costs nothing until it is used, and a platform check keeps
+`termux-device` out of a Linux session. *Enabled on consent:* a specialist
+can install things (REA: npm, 160 MB) and run commands on a device, so the
+user enables it, through `ctx.ui.confirm` the first time a run needs it or
+`/specialist enable`; the model cannot, and without a UI the call is refused
+with the way to do it. The yes is remembered (`lets-code-state.json`,
+merge-safe like the thinking level and the trust answer), a no only for the
+session; a launch flag decides for its launch and is not written. *Templates:*
+a brief is an object of named fields, checked before anything runs (a
+missing required field returns the template, so a bad brief costs one short
+round trip instead of a wasted child), and rendered as one heading per field
+in the child's task. Metadata lives in the agent file's frontmatter
+(`specialist`, `job`, `brief`, `platform`, `setup`, `setup_note`), so one
+file is the whole specialist and a user's own is written the same way;
+`requires` and friends become "not set up" instead of hiding it, and
+`setup` is a script lets-code writes (REA's `rea/setup`, which the launch
+runs too). A run goes through the subagents module's `runAgent`, so
+progress, abort, timeouts, depth and concurrency are the same. Specialists
+are hidden from the `subagent` tool, whose description lists agents with
+their jobs, so nothing is listed twice; a call there is pointed at the
+specialist tool. With specialists off the files are plain agents again,
+gated by `requires_env` as before.
+
 **Claude Code adapter.** Automatic: the launcher switches it on only where
 the project's `.claude` (up to the git root) has hooks or workflow scripts,
 the parts that need the adapter to work at all; skills and commands alone

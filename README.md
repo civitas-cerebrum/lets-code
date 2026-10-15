@@ -70,8 +70,9 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
-| 📱 **Termux device** (optional) | On a phone running lets-code in Termux, a `termux-device` subagent does phone tasks end to end: launch or bring an app to the front, open a file in an app, fire an intent, with recipes and traps verified on Termux and a check that the launch really reached the system. `--termux` / `TERMUX=true`; nothing in context when off. |
-| 🔬 **REA** (optional) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: a `reverse-engineer` subagent (or a one-line skill with subagents off) hands the question to a separate pi that has REA's 170 tools, so they never enter your session. Zero tokens in `manual` mode. |
+| 🧑‍🔬 **Specialists** (on by default) | Subagents with their own knowledge behind one `specialist` tool that costs one line of context: the model sees their names, asks for a job and a brief template when it needs one, and runs them with a filled-in brief. You enable each one (a yes/no dialog the first time, remembered); one that needs an install gets it then. |
+| 📱 **Termux device** (specialist) | On a phone running lets-code in Termux, the `termux-device` specialist does phone tasks end to end: launch or bring an app to the front, open a file in an app, fire an intent, with recipes and traps verified on Termux and a check that the launch really reached the system. |
+| 🔬 **REA** (specialist) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: the `reverse-engineer` specialist (or a one-line skill with subagents off) hands the question to a separate pi that has REA's 170 tools, so they never enter your session. REA is installed when you enable it. Zero tokens in `manual` mode. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -110,6 +111,9 @@ lets-code --no-git-guard          # you know what you're doing
 | `--metrics-log <file>` | Append the footer's numbers to `<file>` as JSON lines, also without a UI (see [Metrics log](#metrics-log)) |
 | `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `yolo` or a role of yours |
 | `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
+| `--specialists` / `--no-specialists` | The `specialist` tool (on by default, needs subagents; see [Specialists](#specialists)) |
+| `--termux` / `--no-termux` | The `termux-device` specialist enabled / disabled for this launch (Termux only) |
+| `--rea [manual]` / `--no-rea` | The `reverse-engineer` specialist enabled (REA installed at launch) / disabled for this launch; `manual`: `/skill:reverse-engineering` only |
 | `--claude-code` / `--no-claude-code` | The Claude Code adapter with your `~/.claude` too (`CLAUDE_CODE=all`) / off; by default it switches on by itself where needed (see [Claude Code projects](#claude-code-projects)) |
 | `--sandbox` / `--no-sandbox` | The OS sandbox for bash |
 | `--verbose` | Show each probe and the full launch detail (API, output cap, guards, session tag) |
@@ -178,8 +182,10 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `TEMPLATE_EFFORT` | `off` skips the chat-template effort probe, `neutral` maps every level to the least-instruction value (see server setup). |
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS` | On by default; `false` turns the `subagent` tool off. |
+| `SPECIALISTS` | On by default (with subagents); `false` turns the `specialist` tool off, and `termux-device` and `reverse-engineer` are then plain agents of the `subagent` tool, listed only with `TERMUX` / `REA` on. |
 | `SANDBOX` | `true` turns the feature on. |
-| `REA` | `true` adds the `reverse-engineer` agent (the reverse-engineering skill with subagents off), `manual` makes it `/skill:reverse-engineering` only. |
+| `REA` | `true` enables the `reverse-engineer` specialist at every launch and installs REA then (the reverse-engineering skill with subagents off), `manual` makes it `/skill:reverse-engineering` only. Empty: decided in a session (see [Specialists](#specialists)). |
+| `TERMUX` | `true` enables the `termux-device` specialist at every launch (Termux on Android). Empty: decided in a session. |
 | `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with the latest request's cache hit rate, cost, and the latest response's time to first token and output tokens (two lines that keep their height: `↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012` and `⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out`; on a narrow terminal the cache shortens to its hit rate, then cost, cache, output and TTFT drop; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi, and the size picked there is remembered (`~/.pi/agent/lets-code-state.json`): later sessions start in it, ahead of `METRICS`; `--metrics` / `--no-metrics` / `LETS_CODE_METRICS` decide for one launch without changing it. tok/s counts from each response's first streamed token, so prompt processing is not in it. |
 
 Listing several endpoints lets one config follow you around:
@@ -488,7 +494,9 @@ Paths are relative to `~/.pi/agent`, or absolute under it (or under the
 project, for a trusted project's agent); a file that points anywhere else,
 or has a bad `timeout`, is ignored. A missing `agent_dir`, skill or
 `append_prompt` hides the agent like `requires` does. The
-`reverse-engineer` agent lets-code writes is the example:
+`reverse-engineer` agent lets-code writes is the example (its file also
+carries the fields that make it a specialist, see
+[Specialists](#specialists)):
 
 ```markdown
 ---
@@ -617,6 +625,94 @@ roles see every MCP call and can allow, ask or deny per server.
 </details>
 
 <details>
+<summary><b>Specialists</b></summary>
+
+A specialist is a subagent with knowledge of its own: standing instructions
+(recipes, traps, a report format), a brief template that says what its
+caller must tell it, and, where it needs one, a setup. lets-code ships two,
+`termux-device` (on Termux only) and `reverse-engineer` (anywhere), and you
+can add your own. They sit behind one tool, `specialist`, that costs one
+line in the context:
+
+```text
+specialist: experts (termux-device, reverse-engineer); list | enable | run
+```
+
+The rest comes on demand, from the tool itself:
+
+| Call | What it does |
+|---|---|
+| `{action: "list"}` | Each specialist with its job, its state and its brief template (`name: "<one>"` for one, with a sample call) |
+| `{action: "enable", name}` | Asks you, in a yes/no dialog, and runs the setup on yes. The model never enables one by itself; without a UI (`-p`) the call is refused with a note on how you enable it |
+| `{action: "run", name, brief}` | Runs it with the brief: `brief` is an object of the template's fields. A missing required field returns the template and nothing runs. Not enabled yet: the enable dialog first. `runs: [{name, brief}, ...]` runs several in parallel |
+
+The templates:
+
+| Specialist | Brief (* required) |
+|---|---|
+| `termux-device` | `goal`*: the user's goal, verbatim |
+| `reverse-engineer` | `target`*: absolute path or URL of the artifact; `question`*: what to find out; `purpose`: what the answer is for |
+
+A run is a subagent run (same runner, progress, abort, timeout, depth limit
+and `LETS_CODE_SUBAGENT_CONCURRENCY`): the child gets the specialist's
+instructions as its system prompt and the brief as its task, one heading per
+field, and its report comes back. Specialists are not listed in the
+`subagent` tool; calling one there points at `specialist`.
+
+**Enabled or not.** In order: what you decided in this session (the dialog,
+`/specialist`), what the launch says (`--termux`, `--rea`, `TERMUX=true`,
+`REA=true`; `--no-termux`, `--no-rea` or `LETS_CODE_TERMUX=false` /
+`LETS_CODE_REA=false` disable for the launch), what you decided before
+(remembered in `~/.pi/agent/lets-code-state.json` under `specialists`),
+otherwise off: the first run asks. A no is not asked again in that session
+and is not remembered. The launch's own choice is not remembered either.
+`TERMUX=false` / `REA=false` in the config file are what setup used to
+write by default, so they count as empty (the session decides).
+
+```text
+/specialist                     list them with their state
+/specialist enable <name>       enable (and set up) without a dialog; remembered
+/specialist disable <name>      remembered as disabled; a run asks again
+```
+
+**Your own.** Any agent file in `~/.pi/agent/agents` with `specialist: true`
+is one (a project's agent files never are). On top of the usual agent fields
+(`description`, `tools`, `thinking`, `role`, `agent_dir`, `skills`,
+`append_prompt`, `timeout`, `requires`; see [Subagents](#subagents)):
+
+| Field | Meaning |
+|---|---|
+| `specialist` | `true` |
+| `job` | One line for `list` (default: `description`) |
+| `brief` | The template, one `- name (required): hint` or `- name: hint` item per field (none: one required `task`) |
+| `platform` | `termux`, or Node platform names (`linux`, `darwin`); elsewhere it is not listed |
+| `setup` | A script under `~/.pi/agent`, run with bash once the specialist is enabled and what `agent_dir`, `skills`, `append_prompt` or `requires` names is missing. Progress on stderr, the reason on its last stdout line when it fails |
+| `setup_note` | What the setup does, shown in the dialog |
+
+```markdown
+---
+name: db-expert
+description: Answers questions about our Postgres schema and query plans
+tools: read, bash
+specialist: true
+brief:
+  - question (required): what to find out
+  - query: the SQL in question, verbatim
+---
+You know our database. Use psql read-only; ...
+```
+
+lets-code writes and updates its own two (files with the
+`# Written by lets-code` line). A file of yours by one of those names is
+left alone: it is a specialist if it says `specialist: true`, otherwise a
+plain agent of the `subagent` tool. With `SPECIALISTS=false`, or subagents
+off, there is no `specialist` tool and the two work as before: plain agents
+listed only with `TERMUX=true` / `REA=true`, and REA as a skill with
+subagents off.
+
+</details>
+
+<details>
 <summary><b>Termux device agent</b></summary>
 
 On Android, lets-code runs in Termux, and the model can reach the phone
@@ -625,23 +721,26 @@ model guesses wrong (which `am` works without root, `--user 0`, why
 `termux-open` fails on files in `~`, how to tell a real launch from a
 silent failure), so it is an agent type of its own:
 
+On Termux it is the specialist `termux-device` (see
+[Specialists](#specialists)): "open this PDF", "bring Spotify to the front"
+go to `specialist({action: "run", name: "termux-device", brief: {goal}})`
+with the user's goal verbatim, and the agent reports each command with its
+exit code and how far the result is verified. The first run asks you to
+enable it (remembered); to enable it for a launch instead:
+
 ```bash
 lets-code --termux         # or TERMUX=true in the config
 ```
 
-With subagents on, your session gets the agent `termux-device`: "open this
-PDF", "bring Spotify to the front" go to
-`subagent({agent: "termux-device", task})` with the whole goal, and the
-agent reports each command with its exit code and how far the result is
-verified. It may launch apps, open files (copied to `/sdcard/Download`,
-since other apps cannot read Termux's home) and run read-only checks; it
-never installs, changes settings, force-stops, deletes or reboots, and
-recommends the command instead. lets-code writes
-`~/.pi/agent/agents/termux-device.md` and keeps it current; it is listed
-only in sessions launched with `TERMUX=true`, so off costs nothing. A file
-of yours by that name (without the `# Written by lets-code` line) is left
-alone. Outside Termux, or with subagents off, the launch says so and the
-agent stays off.
+It may launch apps, open files (copied to `/sdcard/Download`, since other
+apps cannot read Termux's home) and run read-only checks; it never
+installs, changes settings, force-stops, deletes or reboots, and recommends
+the command instead. lets-code writes `~/.pi/agent/agents/termux-device.md`
+on every launch on Termux and keeps it current; elsewhere it is not listed.
+A file of yours by that name (without the `# Written by lets-code` line) is
+left alone. With specialists off it is a plain agent of the `subagent`
+tool, listed only in sessions launched with `TERMUX=true`; with subagents
+off the launch says so and it stays off.
 
 </details>
 
@@ -655,26 +754,32 @@ roughly 65k tokens of schemas even in its compact profile, too much to keep
 next to a local model's context. So lets-code never registers it in your
 session:
 
+With specialists on (the default), it is the specialist `reverse-engineer`
+(see [Specialists](#specialists)): its name in the `specialist` tool is all
+that sits in the context, and `specialist({action: "run", name:
+"reverse-engineer", brief: {target, question, purpose}})` (or several in
+`runs: [...]`) runs it with progress and in parallel, stopped after an
+hour. The first run asks you to enable it and then installs REA, with
+progress, in the running session; the answer is remembered, and later
+launches keep the install current. To enable it for a launch instead:
+
 ```bash
-lets-code --rea            # or REA=true in the config, or setup full
+lets-code --rea            # or REA=true in the config, or setup full; installs at launch
 lets-code --rea manual     # only when you type /skill:reverse-engineering
+lets-code --no-rea         # disabled for this launch
 ```
 
-With subagents on (the default), your session gets the agent
-`reverse-engineer`: its name in the `subagent` tool is all that sits in the
-context, and `subagent({agent: "reverse-engineer", task})` (or several in
-`tasks: [...]`) runs it with progress, in parallel and inside an
-orchestration like any other agent, stopped after an hour. lets-code
-writes `~/.pi/agent/agents/reverse-engineer.md` and keeps it current; it is
-listed only in sessions launched with REA on, and a file of yours by that
-name (without the `# Written by lets-code` line) is left alone, in which
-case the skill below is used instead.
+lets-code writes `~/.pi/agent/agents/reverse-engineer.md` and keeps it
+current. A file of yours by that name (without the `# Written by lets-code`
+line) is left alone: a specialist if it says `specialist: true`, otherwise
+the skill below is used with REA on. With specialists off it is a plain
+agent of the `subagent` tool, listed only in sessions launched with REA on.
 
-With subagents off, or a file of your own by that name, your session gets
-one skill, `reverse-engineering`: its name and a one-sentence description
-(nothing with `manual`, which always uses the skill). When a question
-depends on a built artifact, pi loads the skill and runs
-`~/.pi/agent/rea/run "<task>"`.
+With subagents off, or a plain file of your own by that name, a launch with
+REA on gives your session one skill, `reverse-engineering`: its name and a
+one-sentence description (nothing with `manual`, which always uses the
+skill). When a question depends on a built artifact, pi loads the skill and
+runs `~/.pi/agent/rea/run "<task>"`.
 
 Either way the child is a fresh pi with its own agent dir,
 `~/.pi/agent/rea/agent`. That dir links your models, auth, settings and
@@ -684,7 +789,8 @@ REA's tools in codemode and returns a short Answer / Evidence / Unknowns
 report; nothing else reaches your session.
 
 REA is pinned (`REA_VERSION` in the script) and installed with npm into
-`~/.pi/agent/rea/runtime` on first use, about 160 MB. Native analysis needs
+`~/.pi/agent/rea/runtime` by `~/.pi/agent/rea/setup` on first use, about
+160 MB. Native analysis needs
 an engine: add `GHIDRA_INSTALL_DIR` (or REA's IDA/Hopper variables) to the
 `env` of the `rea` entry in `~/.pi/agent/rea/agent/mcp.json`; lets-code
 keeps that env when it rewrites the file. The REA server runs outside the
@@ -721,7 +827,7 @@ Everything lets-code adds to pi is one extension,
 startup `[Extensions]`: an `index.ts` that loads one module per feature
 (`footer.ts`, `agent-guard.ts`, `git-guard.ts`, `memory-guard.ts`,
 `grounding.ts`, `backend.ts`, `session-tag.ts`, `mandate.ts`,
-`subagents.ts`, `claude-code.ts`, and `sandbox/` with its npm runtime). A module is written
+`subagents.ts`, `specialists.ts`, `claude-code.ts`, and `sandbox/` with its npm runtime). A module is written
 when its feature is on and stays inert while it is off; one that fails to
 load is reported by name and the others still run. The per-feature
 directories (`footer/`, `agent-guard/`, ...) and `lets-code-*.ts` files
@@ -737,7 +843,7 @@ behind each decision are in [DESIGN.md](DESIGN.md).
 for the probes, endpoint parsing, the chat-template effort probe and the
 OpenRouter config, the move into the one extension, node tests for that
 extension's index, the git guard, checkpoints, agent guard, mandate,
-subagents, the Claude Code adapter and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
+subagents, specialists, the Claude Code adapter and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
 the memory guard. Releases are published to npm from GitHub releases.
 
 ## License

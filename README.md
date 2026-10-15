@@ -70,6 +70,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
+| 📱 **Termux device** (optional) | On a phone running lets-code in Termux, a `termux-device` subagent does phone tasks end to end: launch or bring an app to the front, open a file in an app, fire an intent, with recipes and traps verified on Termux and a check that the launch really reached the system. `--termux` / `TERMUX=true`; nothing in context when off. |
 | 🔬 **REA** (optional) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: a `reverse-engineer` subagent (or a one-line skill with subagents off) hands the question to a separate pi that has REA's 170 tools, so they never enter your session. Zero tokens in `manual` mode. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
@@ -612,6 +613,35 @@ codemode so their schemas stay out of the context. `lets-code setup full`
 or `granular` imports servers it finds in `.mcp.json`,
 `~/.config/mcp/mcp.json`, `~/.claude.json` or `~/.cursor/mcp.json`. Mandate
 roles see every MCP call and can allow, ask or deny per server.
+
+</details>
+
+<details>
+<summary><b>Termux device agent</b></summary>
+
+On Android, lets-code runs in Termux, and the model can reach the phone
+itself through Android's `am`. Doing that reliably takes device knowledge a
+model guesses wrong (which `am` works without root, `--user 0`, why
+`termux-open` fails on files in `~`, how to tell a real launch from a
+silent failure), so it is an agent type of its own:
+
+```bash
+lets-code --termux         # or TERMUX=true in the config
+```
+
+With subagents on, your session gets the agent `termux-device`: "open this
+PDF", "bring Spotify to the front" go to
+`subagent({agent: "termux-device", task})` with the whole goal, and the
+agent reports each command with its exit code and how far the result is
+verified. It may launch apps, open files (copied to `/sdcard/Download`,
+since other apps cannot read Termux's home) and run read-only checks; it
+never installs, changes settings, force-stops, deletes or reboots, and
+recommends the command instead. lets-code writes
+`~/.pi/agent/agents/termux-device.md` and keeps it current; it is listed
+only in sessions launched with `TERMUX=true`, so off costs nothing. A file
+of yours by that name (without the `# Written by lets-code` line) is left
+alone. Outside Termux, or with subagents off, the launch says so and the
+agent stays off.
 
 </details>
 

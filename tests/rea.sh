@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Unit test for pi_write_rea: extracts the function from ./lets-code and runs
-# it against a scratch agent dir with a fake npm (installs a stub rea-agents)
-# and a fake pi (records how the runner starts the child).
+# it against a scratch agent dir with a fake npm (installs a stub rea-agents).
 set -eu
 src="$(dirname "$0")/../lets-code"
 PI_AGENT_DIR=/nonexistent     # REA_DIR is derived from it; set for real below
@@ -26,13 +25,8 @@ printf '{"version":"%s"}' "${v}" > node_modules/rea-agents/package.json
 touch node_modules/rea-agents/scripts/rea.mjs
 echo x >> "${NPM_LOG}"
 SH
-cat > "${work}/bin/pi" <<'SH'
-#!/bin/sh
-{ echo "dir=${PI_CODING_AGENT_DIR}"; echo "depth=${LETS_CODE_SUBAGENT_DEPTH}"; for a in "$@"; do echo "arg=${a}"; done; } > "${PI_LOG}"
-echo "## Answer"; echo "it works"
-SH
-chmod +x "${work}/bin/npm" "${work}/bin/pi"
-export PATH="${work}/bin:${PATH}" NPM_LOG="${work}/npm.log" PI_LOG="${work}/pi.log"
+chmod +x "${work}/bin/npm"
+export PATH="${work}/bin:${PATH}" NPM_LOG="${work}/npm.log"
 echo '{}' > "${work}/agent/models.json"; echo '{}' > "${work}/agent/settings.json"
 echo '{"mcpServers":{"other":{"command":"x"}}}' > "${work}/agent/mcp.json"
 PI_AGENT_DIR="${work}/agent"; REA_DIR="${PI_AGENT_DIR}/rea"
@@ -53,9 +47,9 @@ t "no self link"                   "$([ -e "${a}/rea" ] && echo yes || echo no)"
 t "child has only rea"             "$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["mcpServers"]))' "${a}/mcp.json")" rea
 t "compact schemas"                "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mcpServers"]["rea"]["env"]["REA_MCP_INPUT_SCHEMA_PROFILE"])' "${a}/mcp.json")" compact
 t "main mcp.json untouched"        "$(cat "${PI_AGENT_DIR}/mcp.json")" '{"mcpServers":{"other":{"command":"x"}}}'
-t "skill model-invocable"          "$(grep -c disable-model-invocation "${REA_DIR}/skill/reverse-engineering/SKILL.md")" 0
+t "no skill, no runner"            "$([ -e "${REA_DIR}/skill" ] || [ -e "${REA_DIR}/run" ] && echo yes || echo no)" no
 
-# the reverse-engineer agent type (shown only where the launch picks it)
+# the reverse-engineer expert
 af="${PI_AGENT_DIR}/agents/reverse-engineer.md"
 t "agent file written"             "$(grep -c '^# Written by lets-code' "${af}")" 1
 t "agent: in place"                "${REA_AGENT}" 1
@@ -64,25 +58,16 @@ t "agent: REA's prompt"            "$([ -f "${PI_AGENT_DIR}/$(sed -n 's/^append_
 t "agent: REA's skill exists"      "$([ -d "${PI_AGENT_DIR}/$(sed -n 's/^skills: //p' "${af}")" ] && echo yes)" yes
 t "agent: requires the runtime"    "$([ -e "${PI_AGENT_DIR}/$(sed -n 's/^requires: //p' "${af}")" ] && echo yes)" yes
 t "agent: timeout 3600"            "$(grep '^timeout:' "${af}")" "timeout: 3600"
-t "agent: a specialist"            "$(is_specialist_file "${af}" && echo yes)" yes
+t "agent: an expert"               "$(sed -n 's/^expert: //p' "${af}")" true
+t "agent: no launch gate"          "$(grep -c '^requires_env:' "${af}")" 0
 t "agent: its setup script"        "$([ -x "${PI_AGENT_DIR}/$(sed -n 's/^setup: //p' "${af}")" ] && echo yes)" yes
 t "agent: brief template"          "$(sed -n 's/^  - \([a-z]*\).*/\1/p' "${af}" | tr '\n' ' ')" "target question purpose "
 t "agent: required fields"         "$(grep -c '^  - [a-z]* (required):' "${af}")" 2
-surface() { ( unset LETS_CODE_REA_AGENT; LETS_CODE_SUBAGENTS_ON="$2"; LETS_CODE_SPECIALISTS_ON="${3:-}"; rea_surface "$1"; echo "${REA_SURFACE}:${LETS_CODE_REA_AGENT:-}" ); }
-t "specialists on: specialist"     "$(surface on 1 1)" "specialist:"
-t "subagents on: agent, no skill"  "$(surface on 1)" "agent:1"
-t "subagents off: skill (rea/run)" "$(surface on '')" "skill:"
-t "manual: skill only, no agent"   "$(surface manual 1)" "skill:"
-t "manual: no specialist either"   "$(surface manual 1 1)" "skill:"
 rm -rf "${PI_AGENT_DIR}/agents"; mkdir -p "${PI_AGENT_DIR}/agents"
-printf -- '---\nname: reverse-engineer\ndescription: mine\n---\nmine\nspecialist: true\n' > "${af}"
+printf -- '---\nname: reverse-engineer\ndescription: mine\n---\nmine\n' > "${af}"
 pi_write_rea on >/dev/null 2>&1
 t "user's own file kept"           "$(grep -c 'description: mine' "${af}")" 1
 t "user's file: not ours"          "${REA_AGENT:-none}" none
-t "user's file: skill instead"     "$(surface on 1)" "skill:"
-t "user's file: not a specialist"  "$(surface on 1 1)" "skill:"
-printf -- '---\nname: reverse-engineer\ndescription: mine\nspecialist: true\n---\nmine\n' > "${af}"
-t "user's specialist: specialist"  "$(surface on 1 1)" "specialist:"
 rm -f "${af}"
 pi_write_rea on >/dev/null 2>&1
 t "agent rewritten after removal"  "$(grep -c '^# Written by lets-code' "${af}")" 1
@@ -96,25 +81,15 @@ json.dump(d, open(sys.argv[1], "w"))
 PY
 rm "${a}/settings.json"; echo '{"x":1}' > "${a}/settings.json"
 rm "${PI_AGENT_DIR}/models.json"
-pi_write_rea manual >/dev/null
+mkdir -p "${REA_DIR}/skill/reverse-engineering"; : > "${REA_DIR}/run"   # what an earlier version wrote
+pi_write_rea on >/dev/null 2>&1
 t "user env kept"                  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mcpServers"]["rea"]["env"].get("GHIDRA_INSTALL_DIR"))' "${a}/mcp.json")" /opt/ghidra
 t "replaced file relinked"         "$(readlink "${a}/settings.json")" "${PI_AGENT_DIR}/settings.json"
 t "dangling link removed"          "$([ -L "${a}/models.json" ] && echo yes || echo no)" no
 t "no reinstall"                   "$(wc -l < "${NPM_LOG}" | tr -d ' ')" 1
-t "manual hides the skill"         "$(grep -c 'disable-model-invocation: true' "${REA_DIR}/skill/reverse-engineering/SKILL.md")" 1
+t "old skill and runner removed"   "$([ -e "${REA_DIR}/skill" ] || [ -e "${REA_DIR}/run" ] && echo yes || echo no)" no
 
-# the runner
-out="$(env -u LETS_CODE_REA_PROVIDER "${REA_DIR}/run" "x" 2>&1 || true)"
-t "runner needs lets-code env"     "$(echo "${out}" | grep -c 'launch pi through lets-code')" 1
-out="$(LETS_CODE_REA_PROVIDER=lets-code LETS_CODE_REA_MODEL=m LETS_CODE_SUBAGENT_DEPTH=0 "${REA_DIR}/run" "explain search in /apps/notes")"
-t "runner prints the report"       "$(echo "${out}" | tail -n 1)" "it works"
-t "child uses its own agent dir"   "$(grep '^dir=' "${PI_LOG}")" "dir=${a}"
-t "child is one level deeper"      "$(grep '^depth=' "${PI_LOG}")" "depth=1"
-t "child gets the REA skill"       "$(grep -c '^arg=.*rea-agents/skills/reverse-engineer-anything$' "${PI_LOG}")" 1
-t "child gets the task"            "$(grep -c '^arg=Task: explain search in /apps/notes$' "${PI_LOG}")" 1
-t "child has no session"           "$(grep -c '^arg=--no-session$' "${PI_LOG}")" 1
-
-# files (specialists on, not enabled): everything but the install
+# files (experts on, the expert dormant): everything but the install
 rm -rf "${REA_DIR}" "${af}"; : > "${NPM_LOG}"
 pi_write_rea files >/dev/null
 t "files: no install"              "$(wc -l < "${NPM_LOG}" | tr -d ' ')" 0

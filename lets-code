@@ -6,8 +6,7 @@
 #
 #   lets-code setup              interactive onboarding (start here)
 #   lets-code setup full         onboarding with every optional feature on
-#                                (mandate modes, subagents, sandbox, MCP import,
-#                                REA reverse engineering)
+#                                (mandate modes, subagents, sandbox, MCP import)
 #   lets-code setup granular     onboarding that asks about each feature
 #   lets-code setup preset [<name>]  onboarding for another backend (server,
 #                                token, model) saved as a named preset (asks
@@ -55,14 +54,12 @@
 #                                ask | yolo | <role> (pi's own --mode is untouched)
 #   lets-code --no-mandate       launch without the mandate (modes) extension
 #   lets-code --subagents | --no-subagents   the subagent tool on/off (default on)
-#   lets-code --specialists | --no-specialists   the specialist tool on/off (default on, needs subagents)
+#   lets-code --experts | --no-experts   the expert tool on/off (default on, needs subagents);
+#                                each expert is enabled in a session (/expert)
 #   lets-code --claude-code | --no-claude-code   Claude Code adapter with ~/.claude too / off (default: automatic where a project needs it)
 #                                (default on): .claude/ commands, skills, agents,
 #                                hooks, permissions, MCP, workflows, CLAUDE.md
 #   lets-code --sandbox | --no-sandbox       the OS sandbox on/off
-#   lets-code --rea [manual] | --no-rea      reverse-engineer specialist enabled / disabled for the launch
-#                                (manual: only via /skill:reverse-engineering)
-#   lets-code --termux | --no-termux         termux-device specialist (phone tasks on Android, Termux) enabled / disabled for the launch
 #   lets-code --verbose ...      show endpoint probing
 #
 # What it does at launch:
@@ -117,11 +114,11 @@
 #      bash confined with @anthropic-ai/sandbox-runtime (bubblewrap on
 #      Linux, Seatbelt on macOS); MCP — setup imports an existing .mcp.json
 #      or another client's config into pi's built-in MCP support;
-#      specialists (on by default) — a `specialist` tool for subagents with
-#      their own knowledge, each enabled by the user (a dialog, remembered):
-#      termux-device (phone tasks, on Termux) and reverse-engineer (REA's MCP
-#      server in a separate pi, so its tools never enter this session; with
-#      subagents off, a one-line skill).
+#      experts (on by default, with subagents) — an `expert` tool for
+#      subagents with their own knowledge, each dormant until the user
+#      enables it (a dialog or /expert enable, remembered): termux-device
+#      (phone tasks, on Termux) and reverse-engineer (REA's MCP server in a
+#      separate pi, so its tools never enter this session).
 #  10. Claude Code adapter (on by default): a project or user set up for
 #      Claude Code works as it is, read at each start: CLAUDE.md files and
 #      their @imports, .claude/skills, .claude/commands (/name), agents
@@ -142,7 +139,7 @@
 #                LETS_CODE_MANDATE (true|false), LETS_CODE_MODE, LETS_CODE_SUBAGENTS,
 #                LETS_CODE_SANDBOX (true|false), LETS_CODE_SUBAGENT_CONCURRENCY (2)
 #                LETS_CODE_CLAUDE_CODE (auto|all|false)
-#                LETS_CODE_SPECIALISTS (true|false), LETS_CODE_REA (true|manual|false), LETS_CODE_TERMUX (true|false)
+#                LETS_CODE_EXPERTS (true|false)
 #                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_METRICS_LOG (<file>), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_GROUNDING (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
 #                LETS_CODE_WRAP_TURNS (6), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
 #                LETS_CODE_BURST_TURNS (3), LETS_CODE_MAX_BURSTS (8), LETS_CODE_THINKING_REPLAY (all|<n>)
@@ -715,7 +712,7 @@ PY
 # feature off now stays inert, as each still checks its own switch. A
 # "lets-code" directory the user made (an extension there not written by
 # lets-code) is left alone and lets-code-ext is used instead.
-LC_EXT_FEATURES="agent-guard backend claude-code footer git-guard grounding mandate memory-guard sandbox session-tag specialists subagents thinking"
+LC_EXT_FEATURES="agent-guard backend claude-code footer git-guard grounding mandate memory-guard sandbox session-tag experts subagents thinking"
 LC_EXT_ROOT=""
 LC_ACTIVE=""    # the features whose module this launch wrote, i.e. the ones on
 lc_written() {  # lc_written <file>: true when lets-code wrote <file>
@@ -811,7 +808,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // pi's load order when they were separate extensions (alphabetical)
-export const FEATURES = ["agent-guard", "backend", "claude-code", "footer", "git-guard", "grounding", "mandate", "memory-guard", "sandbox", "session-tag", "specialists", "subagents", "thinking"];
+export const FEATURES = ["agent-guard", "backend", "claude-code", "footer", "git-guard", "grounding", "mandate", "memory-guard", "sandbox", "session-tag", "experts", "subagents", "thinking"];
 
 export function moduleFile(dir: string, name: string): string | undefined {
 	return [join(dir, `${name}.ts`), join(dir, name, "index.ts")].find((f) => existsSync(f));
@@ -1284,7 +1281,7 @@ export function outcome(stopReason: string): "completed" | "interrupted" | "erro
 	return stopReason === "aborted" ? "interrupted" : stopReason === "error" ? "error" : "completed";
 }
 // tool calls in an assistant message, and the subagent tool's calls and tasks
-// (a specialist run counts as one, with its runs as tasks)
+// (an expert run counts as one, with its runs as tasks)
 export function toolCounts(content: unknown): { tools: number; subagents: number; tasks: number } {
 	const c = { tools: 0, subagents: 0, tasks: 0 };
 	if (!Array.isArray(content)) return c;
@@ -1292,7 +1289,7 @@ export function toolCounts(content: unknown): { tools: number; subagents: number
 		if (p?.type !== "toolCall") continue;
 		c.tools++;
 		const a = p.arguments ?? {};
-		if (p.name === "specialist" && a.action === "run") { c.subagents++; c.tasks += (Array.isArray(a.runs) && a.runs.length) || 1; continue; }
+		if (p.name === "expert" && a.action === "run") { c.subagents++; c.tasks += (Array.isArray(a.runs) && a.runs.length) || 1; continue; }
 		if (p.name !== "subagent") continue;
 		c.subagents++;
 		c.tasks += (Array.isArray(a.tasks) && a.tasks.length) || (Array.isArray(a.chain) && a.chain.length) || 1;
@@ -3694,7 +3691,7 @@ const BUILTIN: Manifest = {
 			bash: { "*": "allow", privileged: "ask", destructive: "ask", "package-install": "ask", "network-exec": "ask" },
 		},
 		plan: {
-			label: "plan", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "codemode", "subagent", "specialist", "list_mcp_resources", "read_mcp_resource"],
+			label: "plan", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "codemode", "subagent", "expert", "list_mcp_resources", "read_mcp_resource"],
 			write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: ["*"], network: "off",
 			prompt: "Plan mode: explore the code and run read-only commands only; edits, writes and installs are refused. Finish with a numbered list under the heading \"Plan:\" that another agent could follow, then stop. The user decides when to execute it.",
 		},
@@ -3978,8 +3975,8 @@ export default function (pi: ExtensionAPI) {
 			}
 			return undefined;
 		}
-		if (name === "subagent" || (name === "specialist" && input.action === "run")) {
-			const agents = (name === "specialist" ? [input.name, ...(Array.isArray(input.runs) ? input.runs : []).map((r: any) => r?.name)]
+		if (name === "subagent" || (name === "expert" && input.action === "run")) {
+			const agents = (name === "expert" ? [input.name, ...(Array.isArray(input.runs) ? input.runs : []).map((r: any) => r?.name)]
 				: [input.agent, ...(input.tasks ?? []).map((t: any) => t?.agent), ...(input.chain ?? []).map((t: any) => t?.agent)]).filter(Boolean) as string[];
 			const bad = agents.find((a) => !mayDispatch(role, a));
 			if (bad) { log("deny", { key: "dispatch", what: bad }); return { block: true, reason: short(`mandate(${roleName}): this role may not start the '${bad}' agent (allowed: ${(role.dispatch ?? ["*"]).join(", ")}).`) }; }
@@ -4064,11 +4061,11 @@ pi_write_subagent_extension() {
 //   requires_env   an environment variable that must be set (not 0), else hidden
 // A missing agent_dir, skill or append_prompt hides the agent too.
 //
-// A file in ~/.pi/agent/agents that says `specialist: true` is a specialist
-// (its own fields: job, use_for, platform, setup, setup_note, brief; see the
-// specialists module). With specialists on (LETS_CODE_SPECIALISTS_ON=1) it is
-// not listed here and a call to it is pointed at the specialist tool; with
-// them off it is an agent like any other.
+// A file in ~/.pi/agent/agents that says `expert: true` is an expert
+// (its own fields: job, use_for, keywords, platform, setup, setup_note, brief; see the
+// experts module). It is never listed here (its name stays taken); with
+// experts on (LETS_CODE_EXPERTS_ON=1) a call to it is pointed at the expert
+// tool, with them off it is simply unknown.
 //
 // With the Claude Code adapter on (LETS_CODE_CLAUDE_CODE_ON=1), Claude Code
 // agent files count too: ~/.claude/agents, and .claude/agents from the
@@ -4094,7 +4091,7 @@ const OUTPUT_CAP = 50 * 1024;
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const MODEL = process.env.LETS_CODE_MODEL || "";
 const CLAUDE = process.env.LETS_CODE_CLAUDE_CODE_ON === "1";
-const SPECIALISTS = process.env.LETS_CODE_SPECIALISTS_ON === "1";
+const EXPERTS = process.env.LETS_CODE_EXPERTS_ON === "1";
 const claudeDir = () => process.env.CLAUDE_CONFIG_DIR || join(process.env.HOME || homedir(), ".claude");
 // Claude Code's tool names -> pi's; Task/Agent go too (a child starts no children)
 export const CLAUDE_TOOLS: Record<string, string> = { Bash: "bash", Read: "read", Write: "write", Edit: "edit", MultiEdit: "edit", NotebookEdit: "edit", Grep: "grep", Glob: "find", LS: "ls" };
@@ -4111,14 +4108,14 @@ export function claudeTools(names: string[]): string[] {
 
 export interface AgentDef {
 	name: string; description: string; tools?: string[]; thinking?: string; role?: string; prompt: string; source: "user" | "project"; file: string;
-	agentDir?: string; skills?: string[]; appendPrompt?: string; timeout?: number; specialist?: SpecialistMeta;
+	agentDir?: string; skills?: string[]; appendPrompt?: string; timeout?: number; expert?: ExpertMeta;
 }
-// A specialist's own fields. brief: the template its caller fills in, one
+// An expert's own fields. brief: the template its caller fills in, one
 // field per block-list item, "name (required): hint" or "name: hint" (none
 // given: one required field, task). ready: everything the file names exists
 // (agent_dir, skills, append_prompt, requires), i.e. its setup has run.
 export interface BriefField { name: string; required: boolean; hint: string }
-export interface SpecialistMeta { job: string; useFor?: string; brief: BriefField[]; platform?: string; setup?: string; setupNote?: string; ready: boolean }
+export interface ExpertMeta { job: string; useFor?: string; keywords?: string; brief: BriefField[]; platform?: string; setup?: string; setupNote?: string; ready: boolean }
 export const MAX_TIMEOUT = 24 * 3600;
 
 // A path named in an agent file, resolved and checked lexically: relative to
@@ -4132,7 +4129,7 @@ export function agentPath(p: string, roots: string[]): string | null {
 // null when the file is not a usable agent: bad name, a field that does not
 // validate, or an environment it needs that is missing here (hidden).
 // ungated: a missing path or requires_env does not hide the file (a
-// specialist is listed as not set up instead; see SpecialistMeta.ready).
+// expert is listed as not set up instead; see ExpertMeta.ready).
 export function parseAgentFile(text: string, file: string, source: "user" | "project", projectRoot?: string, claude = false, ungated = false): AgentDef | null {
 	const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
 	const fm: Record<string, string> = {}; const items: Record<string, string[]> = {}; let body = text;
@@ -4169,7 +4166,7 @@ export function parseAgentFile(text: string, file: string, source: "user" | "pro
 		if (fm.timeout) { const s = Number(fm.timeout); if (!/^\d+$/.test(fm.timeout) || s < 1 || s > MAX_TIMEOUT) return null; a.timeout = s; }
 		if (fm.requires && !existsSync(path("requires")) && !missing()) return null;
 		if (fm.requires_env) { if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(fm.requires_env)) return null; const v = process.env[fm.requires_env]; if ((!v || v === "0") && !ungated) return null; }
-		if (/^(true|yes|on)$/i.test(fm.specialist ?? "")) {
+		if (/^(true|yes|on)$/i.test(fm.expert ?? "")) {
 			const brief: BriefField[] = [];
 			for (const it of items.brief ?? []) {
 				const b = /^([A-Za-z_][\w-]*)\s*(\(required\))?\s*:\s*(.*)$/.exec(it.replace(/^["']|["']$/g, ""));
@@ -4177,37 +4174,37 @@ export function parseAgentFile(text: string, file: string, source: "user" | "pro
 				brief.push({ name: b[1], required: !!b[2], hint: b[3].trim() });
 			}
 			if (!brief.length) brief.push({ name: "task", required: true, hint: "the whole task, standing alone" });
-			a.specialist = { job: (fm.job || a.description).replace(/\s+/g, " ").trim(), useFor: fm.use_for?.replace(/\s+/g, " ").trim().slice(0, 80) || undefined, brief, platform: fm.platform || undefined, setup: fm.setup ? path("setup") : undefined, setupNote: fm.setup_note || undefined, ready };
+			a.expert = { job: (fm.job || a.description).replace(/\s+/g, " ").trim(), useFor: fm.use_for?.replace(/\s+/g, " ").trim().slice(0, 100) || undefined, keywords: fm.keywords?.replace(/\s+/g, " ").trim().slice(0, 40) || undefined, brief, platform: fm.platform || undefined, setup: fm.setup ? path("setup") : undefined, setupNote: fm.setup_note || undefined, ready };
 		}
 	} catch { return null; }   // a path outside the allowed roots
 	return a;
 }
-// where a specialist can run: termux (Termux on Android), or Node platform
+// where an expert can run: termux (Termux on Android), or Node platform
 // names (linux, darwin, ...); none = everywhere
 export function platformOk(p?: string): boolean {
 	if (!p) return true;
 	if (p === "termux") return /\/com\.termux\//.test(process.env.PREFIX ?? "") || existsSync("/data/data/com.termux/files/usr");
 	return p.split(/[,\s]+/).includes(process.platform);
 }
-// The specialists usable here: files in ~/.pi/agent/agents (never a
-// project's) that say `specialist: true` and fit this platform, parsed
+// The experts usable here: files in ~/.pi/agent/agents (never a
+// project's) that say `expert: true` and fit this platform, parsed
 // ungated, so one whose setup has not run is listed as not set up.
-export function discoverSpecialists(): AgentDef[] {
+export function discoverExperts(): AgentDef[] {
 	const dir = join(AGENT_DIR, "agents"); const out: AgentDef[] = [];
 	if (!existsSync(dir)) return out;
 	for (const f of readdirSync(dir).sort()) {
 		if (!f.endsWith(".md")) continue;
-		try { const a = parseAgentFile(readFileSync(join(dir, f), "utf8"), join(dir, f), "user", undefined, false, true); if (a?.specialist && platformOk(a.specialist.platform) && !out.some((x) => x.name === a.name)) out.push(a); } catch { /* skip bad file */ }
+		try { const a = parseAgentFile(readFileSync(join(dir, f), "utf8"), join(dir, f), "user", undefined, false, true); if (a?.expert && platformOk(a.expert.platform) && !out.some((x) => x.name === a.name)) out.push(a); } catch { /* skip bad file */ }
 	}
 	return out;
 }
 export function discoverAgents(cwd: string, trusted: boolean): AgentDef[] {
 	const out = new Map<string, AgentDef>();
-	// with specialists on, the user's specialist files belong to the specialist tool (their names stay taken)
-	const taken = new Set<string>(SPECIALISTS ? discoverSpecialists().map((a) => a.name) : []);
+	// the user's expert files belong to the expert tool (their names stay taken)
+	const taken = new Set<string>(discoverExperts().map((a) => a.name));
 	const scan = (dir: string, source: "user" | "project", claude = false) => {
 		if (!existsSync(dir)) return;
-		for (const f of readdirSync(dir).sort()) { if (!f.endsWith(".md")) continue; try { const a = parseAgentFile(readFileSync(join(dir, f), "utf8"), join(dir, f), source, cwd, claude); if (a && !out.has(a.name) && !taken.has(a.name) && !(SPECIALISTS && source === "user" && a.specialist)) out.set(a.name, a); } catch { /* skip bad file */ } }
+		for (const f of readdirSync(dir).sort()) { if (!f.endsWith(".md")) continue; try { const a = parseAgentFile(readFileSync(join(dir, f), "utf8"), join(dir, f), source, cwd, claude); if (a && !out.has(a.name) && !taken.has(a.name) && !(source === "user" && a.expert)) out.set(a.name, a); } catch { /* skip bad file */ } }
 	};
 	if (trusted) { scan(join(cwd, ".pi", "agents"), "project"); scan(join(cwd, ".agents", "agents"), "project"); }
 	scan(join(AGENT_DIR, "agents"), "user");
@@ -4361,8 +4358,8 @@ export default function (pi: ExtensionAPI) {
 			const agents = discoverAgents(ctx.cwd, ctx.isProjectTrusted);
 			const list = agents.map((a) => `- ${a.name}: ${a.description || "(no description)"}`).join("\n") || "(none: add ~/.pi/agent/agents/<name>.md)";
 			const find = (n: string) => agents.find((a) => a.name === n);
-			const missing = (n: string) => SPECIALISTS && discoverSpecialists().some((s) => s.name === n)
-				? { content: [{ type: "text" as const, text: `"${n}" is a specialist: use specialist({action: "run", name: "${n}", brief}) (action "list" shows its brief template).` }], isError: true }
+			const missing = (n: string) => EXPERTS && discoverExperts().some((s) => s.name === n)
+				? { content: [{ type: "text" as const, text: `"${n}" is an expert: use expert({action: "run", name: "${n}", brief}) (action "list" shows its brief template).` }], isError: true }
 				: { content: [{ type: "text" as const, text: `Unknown agent "${n}". Agents:\n${list}` }], isError: true };
 			const progress = (line: string) => onUpdate?.({ content: [{ type: "text", text: line }] });
 			if (params.tasks?.length) {
@@ -4410,39 +4407,42 @@ TS
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
 
-# Specialists: subagents with their own knowledge (termux-device,
-# reverse-engineer, your own), behind one small tool, `specialist`. Each is
-# an agent file with `specialist: true`; the user enables one (a dialog, or
-# /specialist enable), its setup runs then, and the choice is remembered.
-pi_write_specialists_extension() {
+# Experts: subagents with their own knowledge (termux-device,
+# reverse-engineer, your own), behind one small tool, `expert`. Each is
+# an agent file with `expert: true`; the user enables one (a dialog, or
+# /expert enable), its setup runs then, and the choice is remembered.
+pi_write_experts_extension() {
     local dir f tmp
-    lc_ext_module specialists; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
-    tmp="$(mktemp "${dir}/.specialists.XXXXXX")"
+    lc_ext_module experts; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.experts.XXXXXX")"
     cat > "${tmp}" <<'TS'
-// Written by lets-code (specialists); regenerated on launch, edits are overwritten.
-// Active only in a pi launched by lets-code with subagents and specialists
-// on (LETS_CODE_SPECIALISTS_ON=1, LETS_CODE_SUBAGENTS_ON=1). A specialist is
+// Written by lets-code (experts); regenerated on launch, edits are overwritten.
+// Active only in a pi launched by lets-code with subagents and experts
+// on (LETS_CODE_EXPERTS_ON=1, LETS_CODE_SUBAGENTS_ON=1). An expert is
 // a subagent with its own knowledge: an agent file in ~/.pi/agent/agents
-// (never a project's) with `specialist: true` and
+// (never a project's) with `expert: true` and
 //   job         one line on what it does (default: its description)
 //   use_for     a few words on the tasks it takes, in the always-on line
+//   keywords    two or three words that stand in for use_for once there are
+//               many experts (default: its first words)
 //   platform    where it can run: termux, or Node platform names; else hidden
 //   setup       a script (path under ~/.pi/agent) run once it is enabled,
 //               when what the file names (agent_dir, requires, ...) is missing
 //   setup_note  what that setup does, shown in the enable dialog
 //   brief       the template its caller fills in, one block-list item per
 //               field: "name (required): hint" or "name: hint"
-// One tool, `specialist`, costs a line in context: the names usable here,
-// each with its use_for, and the three actions (names alone were not enough:
-// a model did a phone task by hand next to a tool listing termux-device). list gives each one's job, state and template; enable
-// asks the USER (a dialog; the model never enables one by itself, and
-// without a UI it is refused with a note); run checks the brief against the
-// template, asks to enable first when needed, and dispatches through the
-// subagents module's runner (same progress, abort, timeout, depth and
-// concurrency). Whether one is enabled: this session's decision, else the
-// launch's (LETS_CODE_SPECIALISTS_LAUNCH, from --termux / --rea and the
-// like), else the remembered one (lets-code-state.json, key specialists),
-// else off. /specialist list | enable <name> | disable <name>.
+// One tool, `expert`, costs a line in context: the names usable here, each
+// with its use_for, and the three actions (names alone were not enough: a
+// model did a phone task by hand next to a tool listing termux-device).
+// list gives each one's job, state and template; enable asks the USER (a
+// dialog; the model never enables one by itself, and without a UI it is
+// refused with a note); run checks the brief against the template, asks to
+// enable first when needed, and dispatches through the subagents module's
+// runner (same progress, abort, timeout, depth and concurrency). Every
+// expert is dormant until the user says yes (the dialog, /expert enable);
+// that is remembered (lets-code-state.json, key experts), and
+// /expert disable makes it dormant again. A dormant one costs its entry in
+// the line and nothing else: its setup runs on enable.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -4451,39 +4451,31 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Type } from "typebox";
 
-const ACTIVE = process.env.LETS_CODE_SPECIALISTS_ON === "1" && process.env.LETS_CODE_SUBAGENTS_ON === "1";
+const ACTIVE = process.env.LETS_CODE_EXPERTS_ON === "1" && process.env.LETS_CODE_SUBAGENTS_ON === "1";
 const DEPTH = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
 const MAX_DEPTH = Number(process.env.LETS_CODE_SUBAGENT_MAX_DEPTH ?? "1") || 1;
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-// the launch's own switch for the specialists lets-code ships
-const LAUNCH_HINT: Record<string, string> = { "termux-device": "--termux (TERMUX=true)", "reverse-engineer": "--rea (REA=true)" };
 const SETUP_TIMEOUT = 15 * 60 * 1000;
 
 interface Field { name: string; required: boolean; hint: string }
-interface Spec { name: string; description: string; file: string; specialist: { job: string; useFor?: string; brief: Field[]; setup?: string; setupNote?: string; ready: boolean } }
+interface Spec { name: string; description: string; file: string; expert: { job: string; useFor?: string; keywords?: string; brief: Field[]; setup?: string; setupNote?: string; ready: boolean } }
 
 // ------------------------------------------------------------------ state
 export const statePath = () => join(AGENT_DIR, "lets-code-state.json");
 function readState(): any { try { const s = JSON.parse(readFileSync(statePath(), "utf8")); return s && typeof s === "object" ? s : {}; } catch { return {}; } }
 export function remembered(): Record<string, boolean> {
-	const s = readState().specialists; const out: Record<string, boolean> = {};
+	const s = readState().experts; const out: Record<string, boolean> = {};
 	if (s && typeof s === "object") for (const [k, v] of Object.entries(s)) if (typeof v === "boolean") out[k] = v;
 	return out;
 }
 export function remember(name: string, on: boolean): void {
 	try {   // merge-safe: other keys of the file stay
 		const p = statePath(); const s = readState();
-		s.specialists = { ...(s.specialists && typeof s.specialists === "object" ? s.specialists : {}), [name]: on };
+		s.experts = { ...(s.experts && typeof s.experts === "object" ? s.experts : {}), [name]: on };
 		mkdirSync(dirname(p), { recursive: true });
 		const tmp = `${p}.${process.pid}.tmp`; writeFileSync(tmp, JSON.stringify(s, null, 2) + "\n", { mode: 0o600 }); renameSync(tmp, p);
 	} catch { /* never fatal */ }
-}
-// "termux-device=1 reverse-engineer=0": what this launch decided
-export function launchDecisions(v = process.env.LETS_CODE_SPECIALISTS_LAUNCH ?? ""): Record<string, boolean> {
-	const out: Record<string, boolean> = {};
-	for (const kv of v.split(/[\s,]+/)) { const m = /^([\w.-]+)=([01])$/.exec(kv); if (m) out[m[1]] = m[2] === "1"; }
-	return out;
 }
 
 // ------------------------------------------------------------------ brief
@@ -4500,19 +4492,19 @@ export function missingFields(fields: Field[], brief: Record<string, unknown> | 
 // field the caller added
 export function renderBrief(s: Spec, brief: Record<string, unknown>): string {
 	const head = (n: string) => n.replace(/[_-]+/g, " ").replace(/^./, (c) => c.toUpperCase());
-	const names = [...s.specialist.brief.map((f) => f.name), ...Object.keys(brief).filter((k) => !s.specialist.brief.some((f) => f.name === k))];
+	const names = [...s.expert.brief.map((f) => f.name), ...Object.keys(brief).filter((k) => !s.expert.brief.some((f) => f.name === k))];
 	const parts = names.map((n) => [n, value(brief[n])]).filter(([, v]) => v).map(([n, v]) => `## ${head(n)}\n${v}`);
-	return `Brief for the ${s.name} specialist.\n\n${parts.join("\n\n")}`;
+	return `Brief for the ${s.name} expert.\n\n${parts.join("\n\n")}`;
 }
 export function template(s: Spec, full = false): string {
-	if (!full) return s.specialist.brief.map((f) => `${f.name}${f.required ? "*" : ""} (${f.hint || "no hint"})`).join("; ");
-	const example = `{${s.specialist.brief.map((f) => `${f.name}: "..."`).join(", ")}}`;
-	return [...s.specialist.brief.map((f) => `- ${f.name}${f.required ? " (required)" : ""}: ${f.hint || "no hint"}`),
-		`Call: specialist({action: "run", name: "${s.name}", brief: ${example}})`].join("\n");
+	if (!full) return s.expert.brief.map((f) => `${f.name}${f.required ? "*" : ""} (${f.hint || "no hint"})`).join("; ");
+	const example = `{${s.expert.brief.map((f) => `${f.name}: "..."`).join(", ")}}`;
+	return [...s.expert.brief.map((f) => `- ${f.name}${f.required ? " (required)" : ""}: ${f.hint || "no hint"}`),
+		`Call: expert({action: "run", name: "${s.name}", brief: ${example}})`].join("\n");
 }
 
 // ------------------------------------------------------------------ setup
-// runs the specialist's setup script with bash; progress lines (stderr) go
+// runs the expert's setup script with bash; progress lines (stderr) go
 // to onLine, the last stdout line is the note when it fails
 export function runSetup(script: string, onLine: (l: string) => void, signal?: AbortSignal): Promise<{ ok: boolean; note: string }> {
 	return new Promise((resolve) => {
@@ -4529,63 +4521,76 @@ export function runSetup(script: string, onLine: (l: string) => void, signal?: A
 	});
 }
 
-// the always-on line: who takes which tasks, and the actions
+// The always-on line: who takes which tasks, and the actions. Each entry is
+// the name and its use_for; past LINE_BUDGET characters (about a dozen
+// experts) the entries shrink to their keywords, or the first
+// USE_FOR_SHORT words of use_for, so twenty stay under 400 tokens with the
+// schema; list has the rest.
+export const LINE_BUDGET = 900;
+export const USE_FOR_SHORT = 4;
 export function snippet(specs: Spec[]): string {
-	const who = specs.map((s) => (s.specialist.useFor ? `${s.name} (${s.specialist.useFor})` : s.name)).join("; ");
-	return `specialist: experts; give them their tasks instead of doing those yourself: ${who}. list | enable | run`;
+	const line = (short: boolean) => {
+		const who = specs.map((s) => {
+			let u = s.expert.useFor ?? "";
+			if (short && s.expert.keywords) u = s.expert.keywords;
+			else if (short) { const w = u.split(/\s+/); if (w.length > USE_FOR_SHORT) u = `${w.slice(0, USE_FOR_SHORT).join(" ").replace(/[,;:]$/, "")}…`; }
+			return u ? `${s.name} (${u})` : s.name;
+		}).join("; ");
+		return `expert: these tasks go to the expert named, not done by hand, even quick ones: ${who}. Actions: list | enable | run`;
+	};
+	const full = line(false);
+	return full.length <= LINE_BUDGET ? full : line(true);
 }
 
 export default async function (pi: ExtensionAPI) {
 	if (!ACTIVE || DEPTH >= MAX_DEPTH) return;   // a child gets no tool (it cannot start children)
 	const sub = await import(pathToFileURL(join(HERE, "subagents.ts")).href);
-	const discover = (): Spec[] => sub.discoverSpecialists();
+	const discover = (): Spec[] => sub.discoverExperts();
 	const known = discover();
 	if (!known.length) return;   // none usable here: no tool, no tokens
-	const launch = launchDecisions();
-	const session = new Map<string, boolean>();   // decided in this session (dialog, /specialist)
+	const session = new Map<string, boolean>();   // decided in this session (dialog, /expert)
 	const declined = new Set<string>();            // said no in this session: not asked again
-	const enabled = (n: string) => session.has(n) ? session.get(n)! : n in launch ? launch[n] : remembered()[n] === true;
+	const enabled = (n: string) => session.has(n) ? session.get(n)! : remembered()[n] === true;
 	const find = (n: string) => discover().find((s) => s.name === n);
-	const unknown = (n: string) => `Unknown specialist "${n}". Specialists: ${discover().map((s) => s.name).join(", ") || "none"}.`;
-	const howTo = (n: string) => `/specialist enable ${n}${LAUNCH_HINT[n] ? `, or launch with ${LAUNCH_HINT[n]}` : ""}`;
+	const unknown = (n: string) => `Unknown expert "${n}". Experts: ${discover().map((s) => s.name).join(", ") || "none"}.`;
+	const howTo = (n: string) => `/expert enable ${n}`;
 	function stateOf(s: Spec): string {
-		const on = enabled(s.name); const ready = s.specialist.ready;
+		const on = enabled(s.name); const ready = s.expert.ready;
 		if (on) return ready ? "enabled" : "enabled, not set up (run sets it up)";
 		// worded so the model runs it (the dialog is the question) instead of asking in chat
-		if (declined.has(s.name)) return `disabled: the user declined it in this session (they can: ${howTo(s.name)})`;
+		if (declined.has(s.name)) return `dormant: the user declined it in this session (they can: ${howTo(s.name)})`;
 		const ask = "just run it: the user gets a yes/no dialog to enable it";
-		return ready || !s.specialist.setup ? `disabled, ${ask}` : `not set up, ${ask}, then it ${s.specialist.setupNote || "runs its setup"}`;
+		return ready || !s.expert.setup ? `dormant, ${ask}` : `dormant, ${ask}, then it ${s.expert.setupNote || "runs its setup"}`;
 	}
 	function listText(name?: string): string {
 		const specs = discover();
 		if (name) {
 			const s = specs.find((x) => x.name === name); if (!s) return unknown(name);
-			return `${s.name}: ${s.specialist.job}\nState: ${stateOf(s)}\nBrief:\n${template(s, true)}`;
+			return `${s.name}: ${s.expert.job}\nState: ${stateOf(s)}\nBrief:\n${template(s, true)}`;
 		}
-		return [`Specialists (brief: * = required; run: {action: "run", name, brief: {field: value}}):`,
-			...specs.map((s) => `- ${s.name}: ${s.specialist.job} [${stateOf(s)}]\n  brief: ${template(s)}`)].join("\n");
+		return [`Experts (brief: * = required; run: {action: "run", name, brief: {field: value}}):`,
+			...specs.map((s) => `- ${s.name}: ${s.expert.job} [${stateOf(s)}]\n  brief: ${template(s)}`)].join("\n");
 	}
 	// enabled and set up -> null; else why not. consent: the user asked for it
-	// (/specialist enable), so no dialog. Only the user's yes is remembered;
-	// one enabled by the launch stays the launch's.
+	// (/expert enable), so no dialog. The user's yes is remembered.
 	async function ensure(name: string, ctx: ExtensionContext, progress: (l: string) => void, consent: boolean, signal?: AbortSignal): Promise<string | null> {
 		let s = find(name); if (!s) return unknown(name);
 		const yesNow = consent || !enabled(name);
 		if (!enabled(name) && !consent) {
-			if (declined.has(name)) return `The user declined the ${name} specialist in this session; they can enable it with ${howTo(name)}.`;
-			if (!ctx.hasUI) return `The ${name} specialist is not enabled, and only the user can enable it: ${howTo(name)}.`;
-			const setup = !s.specialist.ready && s.specialist.setup ? `\nSetup: ${s.specialist.setupNote || "runs its setup script"}.` : "";
-			const yes = await ctx.ui.confirm(`Enable the ${name} specialist?`, `${s.specialist.job}${setup}\nlets-code remembers the answer yes; /specialist disable ${name} undoes it.`);
-			if (!yes) { declined.add(name); return `The user declined to enable the ${name} specialist.`; }
+			if (declined.has(name)) return `The user declined the ${name} expert in this session; they can enable it with ${howTo(name)}.`;
+			if (!ctx.hasUI) return `The ${name} expert is not enabled, and only the user can enable it: ${howTo(name)}.`;
+			const setup = !s.expert.ready && s.expert.setup ? `\nSetup: ${s.expert.setupNote || "runs its setup script"}.` : "";
+			const yes = await ctx.ui.confirm(`Enable the ${name} expert?`, `${s.expert.job}${setup}\nlets-code remembers the answer yes; /expert disable ${name} undoes it.`);
+			if (!yes) { declined.add(name); return `The user declined to enable the ${name} expert.`; }
 		}
-		if (!s.specialist.ready) {
-			if (!s.specialist.setup) return `The ${name} specialist is not set up: a path ${s.file} names is missing.`;
-			progress(`${name}: setting up (${s.specialist.setupNote || "its setup script"}) ...`);
-			if (ctx.hasUI) ctx.ui.notify(`Setting up the ${name} specialist: ${s.specialist.setupNote || "running its setup"} ...`, "info");
-			const r = await runSetup(s.specialist.setup, (l) => progress(`${name} setup: ${l}`), signal);
+		if (!s.expert.ready) {
+			if (!s.expert.setup) return `The ${name} expert is not set up: a path ${s.file} names is missing.`;
+			progress(`${name}: setting up (${s.expert.setupNote || "its setup script"}) ...`);
+			if (ctx.hasUI) ctx.ui.notify(`Setting up the ${name} expert: ${s.expert.setupNote || "running its setup"} ...`, "info");
+			const r = await runSetup(s.expert.setup, (l) => progress(`${name} setup: ${l}`), signal);
 			s = find(name);
-			if (!r.ok || !s?.specialist.ready) return `Setting up the ${name} specialist failed: ${r.note || "it is still not ready"}.`;
-			if (ctx.hasUI) ctx.ui.notify(`The ${name} specialist is set up.`, "info");
+			if (!r.ok || !s?.expert.ready) return `Setting up the ${name} expert failed: ${r.note || "it is still not ready"}.`;
+			if (ctx.hasUI) ctx.ui.notify(`The ${name} expert is set up.`, "info");
 		}
 		if (yesNow) { declined.delete(name); session.set(name, true); remember(name, true); }
 		return null;
@@ -4593,8 +4598,8 @@ export default async function (pi: ExtensionAPI) {
 	const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], isError });
 	const Brief = (o = {}) => Type.Object({}, { additionalProperties: true, ...o });
 	pi.registerTool({
-		name: "specialist",
-		label: "specialist",
+		name: "expert",
+		label: "expert",
 		// always in context: names in the snippet, actions here; jobs, states and templates come from list
 		description: "Subagents with their own knowledge. list: jobs, states, brief templates. run: {name, brief}, or runs:[..] in parallel; brief fully; the first run of one asks the user (a dialog) to enable it. enable: the dialog alone.",
 		promptSnippet: snippet(known),
@@ -4619,7 +4624,7 @@ export default async function (pi: ExtensionAPI) {
 			if (action === "enable") {
 				if (!params.name) return text(`Give the name. ${listText()}`, true);
 				const why = await ensure(params.name, ctx, progress, false, signal);
-				return why ? text(why, true) : text(`The ${params.name} specialist is enabled.`);
+				return why ? text(why, true) : text(`The ${params.name} expert is enabled.`);
 			}
 			if (action !== "run") return text(`action is list, enable or run. ${listText()}`, true);
 			const runs: { name: string; brief: unknown }[] = Array.isArray(params.runs) && params.runs.length ? params.runs : params.name ? [{ name: params.name, brief: params.brief }] : [];
@@ -4629,7 +4634,7 @@ export default async function (pi: ExtensionAPI) {
 			// the brief first, so the user is not asked for a run that cannot start
 			for (const r of runs) {
 				const s = find(r.name); if (!s) return text(unknown(r.name), true);
-				const b = asBrief(r.brief); const miss = missingFields(s.specialist.brief, b);
+				const b = asBrief(r.brief); const miss = missingFields(s.expert.brief, b);
 				if (!b || miss.length) return text(`Nothing ran: the brief for ${s.name} ${b ? `lacks ${miss.join(", ")}` : "must be an object of the template's fields"}. Template:\n${template(s, true)}`, true);
 			}
 			for (const n of [...new Set(runs.map((r) => r.name))]) {   // one dialog at a time
@@ -4640,8 +4645,8 @@ export default async function (pi: ExtensionAPI) {
 			return text(results.map(sub.render).join("\n\n"), results.every((r: any) => r.exitCode !== 0));
 		},
 	});
-	pi.registerCommand("specialist", {
-		description: "Specialists: /specialist [list] | enable <name> | disable <name>",
+	pi.registerCommand("expert", {
+		description: "Experts: /expert [list] | enable <name> | disable <name>",
 		getArgumentCompletions: (prefix: string) => {
 			const words = prefix.split(/\s+/);
 			// a word typed out in full offers nothing, so Enter runs the command
@@ -4652,12 +4657,12 @@ export default async function (pi: ExtensionAPI) {
 			const [verb = "list", name] = (args ?? "").trim().split(/\s+/).filter(Boolean);
 			const say = (m: string, type: "info" | "warning" | "error" = "info") => (ctx.hasUI ? ctx.ui.notify(m, type) : console.log(m));
 			if (verb === "list") return say(listText(name));
-			if ((verb !== "enable" && verb !== "disable") || !name) return say("Usage: /specialist [list] | enable <name> | disable <name>", "warning");
+			if ((verb !== "enable" && verb !== "disable") || !name) return say("Usage: /expert [list] | enable <name> | disable <name>", "warning");
 			if (!find(name)) return say(unknown(name), "warning");
-			if (verb === "disable") { session.set(name, false); remember(name, false); return say(`The ${name} specialist is disabled (remembered).`); }
-			const why = await ensure(name, ctx, (l) => ctx.ui?.setStatus?.("specialist", l), true);
-			ctx.ui?.setStatus?.("specialist", undefined);
-			say(why ?? `The ${name} specialist is enabled (remembered).`, why ? "error" : "info");
+			if (verb === "disable") { session.set(name, false); remember(name, false); return say(`The ${name} expert is dormant again (remembered).`); }
+			const why = await ensure(name, ctx, (l) => ctx.ui?.setStatus?.("expert", l), true);
+			ctx.ui?.setStatus?.("expert", undefined);
+			say(why ?? `The ${name} expert is enabled (remembered).`, why ? "error" : "info");
 		},
 	});
 }
@@ -4731,14 +4736,11 @@ MD
     log "subagents: starter agents written to ${dir} (scout, worker, reviewer)"
 }
 
-# Termux device specialist: termux-device does phone tasks on the Android
+# Termux device expert: termux-device does phone tasks on the Android
 # device lets-code runs on (launch an app, open a file in an app, fire an
-# intent) with recipes and traps verified on Termux. With specialists on it
-# is written on every launch on Termux and reached through the specialist
-# tool (TERMUX=true / --termux enables it for the launch); with specialists
-# off it is an agent of the subagent tool, listed only in a session
-# launched with TERMUX=true (requires_env; the launch exports it). A user's
-# own agent of that name is left alone.
+# intent) with recipes and traps verified on Termux. Written on every
+# launch on Termux with experts on, reached through the expert tool, dormant
+# until the user enables it. A user's own agent of that name is left alone.
 write_termux_agent() {
     local af="${PI_AGENT_DIR}/agents/termux-device.md" tmp
     if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
@@ -4751,9 +4753,9 @@ write_termux_agent() {
 name: termux-device
 description: Phone tasks on this Android device (Termux), end to end: launch or bring an app to the front, open a file in an app, fire an intent. Give it the whole goal, not a check; don't run am, termux-open or dumpsys yourself first
 tools: bash, read
-requires_env: LETS_CODE_TERMUX_AGENT
-specialist: true
-use_for: phone tasks on this device: launch or bring up apps, open files in apps, intents
+expert: true
+use_for: phone tasks: open or bring up apps, open files in apps, intents
+keywords: phone, apps, intents
 platform: termux
 brief:
   - goal (required): the user's goal, verbatim
@@ -6438,49 +6440,28 @@ PY
 
 # REA (https://github.com/morluto/rea): reverse engineering on demand. REA is
 # one MCP server with ~170 tools (~65k tokens of input schemas even in its
-# compact profile), so it is never registered in the main session. With
-# specialists on, the main session gets the specialist reverse-engineer
-# (agents/reverse-engineer.md, through the specialist tool); with subagents
-# on and specialists off, the same file as an agent of the subagent tool;
-# otherwise one skill line (none with REA=manual) whose skill runs
-# ${REA_DIR}/run. Either way the child is a fresh pi whose own agent dir
+# compact profile), so it is never registered in the main session: it is
+# the expert reverse-engineer (agents/reverse-engineer.md, through the
+# expert tool), whose child is a fresh pi with its own agent dir that
 # registers REA, so its tools, its own skill and the raw evidence stay in
 # that child and only the report comes back. The child agent dir links
-# everything of ~/.pi/agent (models, auth, settings, extensions, so the same
-# provider and guards apply) except mcp.json and skills. REA is pinned and
-# installed by ${REA_DIR}/setup, at launch with REA on or once the user
-# enables the specialist in a session.
+# everything of ~/.pi/agent (models, auth, settings, extensions, so the
+# same provider and guards apply) except mcp.json and skills. REA is pinned
+# and installed by ${REA_DIR}/setup once the user enables the expert, and
+# kept current by later launches.
 REA_VERSION="6.4.0"
 REA_DIR="${PI_AGENT_DIR}/rea"
-# What the main session gets, after pi_write_rea. With specialists on and
-# the reverse-engineer file a specialist (ours, or a user's own that says
-# `specialist: true`): the specialist, enabled for this launch, and no skill
-# line. With subagents on, specialists off and our agent file: the agent
-# (LETS_CODE_REA_AGENT lists it in the subagent tool). Otherwise (subagents
-# off, REA=manual, a user's own plain agent file of that name): the skill,
-# which runs ${REA_DIR}/run by bash.
-rea_surface() {  # rea_surface <on|manual>; sets REA_SURFACE (specialist|agent|skill)
-    REA_SURFACE=skill
-    [ "$1" = on ] || return 0
-    if [ "${LETS_CODE_SPECIALISTS_ON:-}" = 1 ] && is_specialist_file "${PI_AGENT_DIR}/agents/reverse-engineer.md"; then
-        REA_SURFACE=specialist
-    elif [ "${REA_AGENT:-}" = 1 ] && [ "${LETS_CODE_SUBAGENTS_ON:-}" = 1 ]; then
-        REA_SURFACE=agent; export LETS_CODE_REA_AGENT=1
-    fi
-    return 0
-}
-is_specialist_file() {  # is_specialist_file <agent file>: its frontmatter says specialist: true
-    [ -f "$1" ] && awk 'NR == 1 && $0 != "---" { exit 1 } NR > 1 && $0 == "---" { exit 1 } /^specialist:[[:space:]]*(true|yes|on)[[:space:]]*$/ { found = 1; exit 0 } END { exit !found }' "$1"
-}
-# pi_write_rea <on|manual|files>: writes the runner, the skill, the setup
-# script and the agent file; on and manual also run the setup (install when
-# missing, then the child's agent dir), files only refreshes the agent dir
-# of an installed REA (the specialist installs it once enabled). Sets
-# REA_NOTE (empty = ready) and REA_AGENT (1 = the agent file is ours).
+# pi_write_rea <on|files>: writes the setup script, the child's standing
+# instructions and the agent file; on also runs the setup (install when
+# missing or another version, then the child's agent dir), files only
+# refreshes the agent dir of an installed REA. Sets REA_NOTE (empty =
+# ready) and REA_AGENT (1 = the agent file is ours).
 pi_write_rea() {
     local invoke="$1" rc
     REA_NOTE=""; REA_AGENT=""
-    mkdir -p "${REA_DIR}/skill/reverse-engineering"
+    mkdir -p "${REA_DIR}"
+    # the runner and skill earlier versions wrote (REA without subagents, REA=manual)
+    rm -rf "${REA_DIR}/skill" "${REA_DIR}/run"
 
     # 1. the setup: the pinned REA package (first run, or when REA_VERSION
     # changes), then the child's agent dir: links to the main one, minus MCP
@@ -6545,7 +6526,7 @@ SH
     } > "${REA_DIR}/setup"
     chmod 755 "${REA_DIR}/setup"
 
-    # 2. the runner and the child's standing instructions
+    # 2. the child's standing instructions
     cat > "${REA_DIR}/prompt.md" <<'MD'
 You are the reverse-engineering agent of a lets-code session. Another agent
 gave you one task and will see only your final message.
@@ -6568,59 +6549,11 @@ REA tool that produced each.
 ## Unknowns
 What could not be established and why (missing engine, obfuscation, ...).
 MD
-    cat > "${REA_DIR}/run" <<'SH'
-#!/usr/bin/env bash
-# Written by lets-code (REA); regenerated on launch, edits are overwritten.
-# run "<task>": one reverse-engineering task in a fresh pi with REA's MCP
-# server and skill; prints its final report (50 KB cap).
-set -u
-here="$(cd "$(dirname "$0")" && pwd)"
-[ $# -gt 0 ] || { echo "usage: ${here}/run \"<task>\"" >&2; exit 2; }
-: "${LETS_CODE_REA_PROVIDER:?not set; launch pi through lets-code with REA on}"
-: "${LETS_CODE_REA_MODEL:?not set; launch pi through lets-code with REA on}"
-log="$(mktemp "${TMPDIR:-/tmp}/lets-code-rea.XXXXXX")"
-out="$(PI_CODING_AGENT_DIR="${here}/agent" LETS_CODE_SUBAGENT_DEPTH=$(( ${LETS_CODE_SUBAGENT_DEPTH:-0} + 1 )) \
-    pi -p --no-session --provider "${LETS_CODE_REA_PROVIDER}" --model "${LETS_CODE_REA_MODEL}" \
-    --skill "${here}/runtime/node_modules/rea-agents/skills/reverse-engineer-anything" \
-    --append-system-prompt "${here}/prompt.md" "Task: $*" </dev/null 2>"${log}")"
-rc=$?
-printf '%s\n' "${out}" | head -c 51200
-if [ ${rc} -ne 0 ] || [ -z "${out}" ]; then
-    echo "[rea] child pi exited ${rc}; stderr tail (full log: ${log}):"; tail -n 20 "${log}"
-    exit $(( rc == 0 ? 1 : rc ))
-fi
-rm -f "${log}"
-SH
-    chmod 755 "${REA_DIR}/run"
-
-    # 3. the one line the main session pays for (none when manual)
-    {
-        echo "---"
-        echo "name: reverse-engineering"
-        echo "description: Reverse engineer shipped software with REA (binaries, Electron/JS apps, .NET, APKs, firmware, websites) when a question depends on a built artifact rather than source. Runs in an isolated agent."
-        [ "${invoke}" = "manual" ] && echo "disable-model-invocation: true"
-        echo "---"
-        echo ""
-        echo "Hand the whole question to the isolated REA agent with one bash call,"
-        echo "timeout 3600 (analysis can take many minutes):"
-        echo ""
-        echo "    ${REA_DIR}/run \"<task>\""
-        echo ""
-        echo "The task must stand alone: absolute path or URL of the target, what to"
-        echo "find out, and what the answer is for. The agent does not see this"
-        echo "conversation. It replies with Answer / Evidence / Unknowns; use that, and"
-        echo "run it again with a narrower task to dig further. Do not call REA or"
-        echo "npx rea-agents yourself."
-    } > "${REA_DIR}/skill/reverse-engineering/SKILL.md"
-
-    # 4. the same child as a specialist (the specialist tool) or, with
-    # specialists off, an agent type of the subagent tool, listed only in a
-    # session launched with REA on (requires_env; the launch exports it) and
-    # hidden while the runtime is missing. A user's own agent of that name is
-    # left alone (REA_AGENT stays empty).
+    # 3. the expert; a user's own agent of that name is left alone
+    # (REA_AGENT stays empty)
     rea_write_agent
 
-    # 5. install (on, manual) or refresh an installed one (files)
+    # 4. install (on) or refresh an installed one (files)
     if [ "${invoke}" = files ]; then
         bash "${REA_DIR}/setup" --no-install >/dev/null 2>&1 || true
         return 0
@@ -6645,9 +6578,9 @@ skills: rea/runtime/node_modules/rea-agents/skills/reverse-engineer-anything
 append_prompt: rea/prompt.md
 timeout: 3600
 requires: rea/runtime/node_modules/rea-agents/package.json
-requires_env: LETS_CODE_REA_AGENT
-specialist: true
-use_for: how shipped binaries, apps, APKs, firmware or websites work
+expert: true
+use_for: reverse engineering: what a compiled binary, app, APK, firmware or minified script does
+keywords: reverse engineering
 job: Reverse engineers shipped software (binaries, Electron/JS apps, .NET, APKs, firmware, websites) with REA, when a question depends on a built artifact rather than source; up to an hour
 setup: rea/setup
 setup_note: installs REA with npm into ~/.pi/agent/rea (about 160 MB, a minute or two)
@@ -6827,9 +6760,9 @@ run_setup() {  # run_setup [full|granular]
 
     # 5b. optional features: off in the default setup, all on with 'full',
     #     one question each with 'granular'
-    local feat_mandate="false" feat_mode="" feat_subagents="true" feat_sandbox="false" feat_mcp="no" feat_rea="false" feat_metrics="false"
+    local feat_mandate="false" feat_mode="" feat_subagents="true" feat_sandbox="false" feat_mcp="no" feat_metrics="false"
     case "${profile}" in
-        full) feat_mandate="true"; feat_subagents="true"; feat_sandbox="true"; feat_mcp="yes"; feat_rea="true"; feat_metrics="true" ;;
+        full) feat_mandate="true"; feat_subagents="true"; feat_sandbox="true"; feat_mcp="yes"; feat_metrics="true" ;;
         granular)
             echo ""
             echo "Optional features (each can be changed later in ${CONFIG_FILE}):"
@@ -6843,8 +6776,6 @@ run_setup() {  # run_setup [full|granular]
             read -r reply; case "${reply}" in y|Y) feat_sandbox="true" ;; esac
             printf "  MCP — import servers from .mcp.json and other clients' configs into pi? [y/N] "
             read -r reply; case "${reply}" in y|Y) feat_mcp="yes" ;; esac
-            printf "  REA — reverse engineering on demand, run in a separate agent (~160 MB)? [y/N/manual] "
-            read -r reply; case "${reply}" in y|Y) feat_rea="true" ;; m|manual) feat_rea="manual" ;; esac
             printf "  Metrics — tokens/s and time to first token in pi's footer? [y/N] "
             read -r reply; case "${reply}" in y|Y) feat_metrics="true" ;; esac ;;
     esac
@@ -6908,18 +6839,12 @@ run_setup() {  # run_setup [full|granular]
             echo "MODE=\"${feat_mode}\""
             echo "SANDBOX=\"${feat_sandbox}\""
             echo ""
-            echo "# Specialists: subagents with their own knowledge (termux-device on"
-            echo "# Termux, reverse-engineer) behind one 'specialist' tool; each is enabled"
-            echo "# by you in a session (remembered) or below. On by default (with"
-            echo "# subagents); SPECIALISTS=false turns the tool off."
-            echo "SPECIALISTS=\"true\""
-            echo "# REA=true: the reverse-engineer specialist enabled at every launch (REA,"
-            echo "# ~160 MB, installed at launch); manual: only through"
-            echo "# /skill:reverse-engineering, zero context; empty: decided in a session."
-            echo "REA=\"$([ "${feat_rea}" = false ] || echo "${feat_rea}")\""
-            echo "# TERMUX=true: the termux-device specialist enabled at every launch"
-            echo "# (Termux on Android); empty: decided in a session."
-            echo "TERMUX=\"\""
+            echo "# Experts: subagents with their own knowledge (termux-device on"
+            echo "# Termux, reverse-engineer) behind one 'expert' tool. Each is dormant"
+            echo "# until you enable it in a session (a dialog, or /expert enable;"
+            echo "# remembered). On by default (with subagents); EXPERTS=false turns"
+            echo "# the tool off."
+            echo "EXPERTS=\"true\""
             echo ""
             echo "# METRICS=true: start with the full footer (directory, model, cache, first"
             echo "# token, output) instead of the minimal one (--metrics; /metrics in pi)."
@@ -7056,10 +6981,6 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
     fi
     [ "${feat_subagents}" = "true" ] && write_default_agents
     [ "${feat_mcp}" = "yes" ] && mcp_import yes
-    if [ "${feat_rea}" != "false" ]; then
-        if [ "${feat_rea}" = "manual" ]; then pi_write_rea manual; else pi_write_rea on; fi
-        log "rea: ${REA_NOTE:-ready (${REA_DIR}); native binaries also need Ghidra, IDA or Hopper, see its docs}"
-    fi
     if [ "${feat_mandate}" = "true" ]; then
         log "mandate: modes plan/auto/ask/yolo on (start mode: ${feat_mode:-auto}); /mode and alt+m switch, 'lets-code mandate init' writes a project manifest"
     fi
@@ -7111,7 +7032,7 @@ print("%s|%s|%s" % (d.get("id", ""), d.get("max_model_len") or d.get("context_le
 # never rewrite each other's backend.
 # Names that would shadow a lets-code option; pi's own options are checked
 # against `pi --help` at setup.
-PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard grounding no-grounding no-session-tag metrics no-metrics metrics-log rea no-rea termux no-termux mandate no-mandate subagents no-subagents specialists no-specialists claude-code no-claude-code sandbox no-sandbox verbose debug help preset"
+PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard grounding no-grounding no-session-tag metrics no-metrics metrics-log mandate no-mandate subagents no-subagents experts no-experts claude-code no-claude-code sandbox no-sandbox verbose debug help preset"
 preset_name_ok() {  # preset_name_ok <name> -> 0 when usable as --<name>
     case "$1" in ""|[!a-z0-9]*|*[!a-z0-9_-]*) return 1 ;; esac
     case " ${PRESET_RESERVED} " in *" $1 "*) return 1 ;; esac
@@ -7470,9 +7391,8 @@ MODE=""
 SUBAGENTS="true"      # on by default; SUBAGENTS=false (config or env) or --no-subagents turns it off
 CLAUDE_CODE="auto"    # auto (default, also "true"): only where the project's .claude has hooks or workflows; all: also ~/.claude; false or --no-claude-code: off
 SANDBOX="false"
-SPECIALISTS="true"    # on by default (with subagents); SPECIALISTS=false or --no-specialists turns the specialist tool off
-REA=""                # true: the reverse-engineer specialist enabled for the launch (REA installed); manual: /skill:reverse-engineering only
-TERMUX=""             # true: the termux-device specialist enabled for the launch (Termux on Android)
+EXPERTS="true"        # on by default (with subagents); EXPERTS=false or --no-experts turns the expert tool off
+TERMUX=""; REA=""     # no longer switches: read only to migrate TERMUX=true / REA=true (see lc_migrate_expert_switches)
 # shellcheck disable=SC1090
 [ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
 if [ -n "${PRESET}" ]; then
@@ -7481,11 +7401,6 @@ if [ -n "${PRESET}" ]; then
     . "${CONFIG_FILE}"
     PROVIDER_ID="lets-code-${PRESET}"
 fi
-# TERMUX/REA false in a config file is the default setup wrote for years,
-# not a decision: it leaves the specialist to the session (the remembered
-# state). false from the environment or a flag disables it for the launch.
-case "$(printf '%s' "${TERMUX}" | tr '[:upper:]' '[:lower:]')" in false|no|0|off) TERMUX="" ;; esac
-case "$(printf '%s' "${REA}" | tr '[:upper:]' '[:lower:]')" in false|no|0|off) REA="" ;; esac
 ENDPOINTS="${LETS_CODE_ENDPOINTS:-${ENDPOINTS}}"
 TOKEN="${LETS_CODE_TOKEN:-${TOKEN}}"
 CA_PATH="${LETS_CODE_CA:-${CA_PATH}}"
@@ -7509,11 +7424,9 @@ TEMPLATE_EFFORT="${LETS_CODE_TEMPLATE_EFFORT:-${TEMPLATE_EFFORT}}"
 MANDATE="${LETS_CODE_MANDATE:-${MANDATE}}"
 MODE="${LETS_CODE_MODE:-${MODE}}"
 SUBAGENTS="${LETS_CODE_SUBAGENTS:-${SUBAGENTS}}"
-SPECIALISTS="${LETS_CODE_SPECIALISTS:-${SPECIALISTS}}"
+EXPERTS="${LETS_CODE_EXPERTS:-${EXPERTS}}"
 CLAUDE_CODE="${LETS_CODE_CLAUDE_CODE:-${CLAUDE_CODE}}"
 SANDBOX="${LETS_CODE_SANDBOX:-${SANDBOX}}"
-REA="${LETS_CODE_REA:-${REA}}"
-TERMUX="${LETS_CODE_TERMUX:-${TERMUX}}"
 
 HARNESS="pi"
 URL_OVERRIDE=""
@@ -7562,17 +7475,12 @@ while [ $# -gt 0 ]; do
         --no-mandate) MANDATE=false; shift ;;
         --subagents) SUBAGENTS=true; shift ;;
         --no-subagents) SUBAGENTS=false; shift ;;
-        --specialists) SPECIALISTS=true; shift ;;
-        --no-specialists) SPECIALISTS=false; shift ;;
+        --experts) EXPERTS=true; shift ;;
+        --no-experts) EXPERTS=false; shift ;;
         --claude-code) CLAUDE_CODE=all; shift ;;
         --no-claude-code) CLAUDE_CODE=false; shift ;;
         --sandbox)  SANDBOX=true; shift ;;
         --no-sandbox) SANDBOX=false; shift ;;
-        --rea)      REA=true
-                    case "${2:-}" in manual) REA=manual; shift 2 ;; *) shift ;; esac ;;
-        --no-rea)   REA=false; shift ;;
-        --termux)   TERMUX=true; shift ;;
-        --no-termux) TERMUX=false; shift ;;
         --verbose|--debug) VERBOSE=true; shift ;;
         -h|--help)  sed -n "3,$(grep -n '^# (auto-installed on request)\.$' "$0" | cut -d: -f1)p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          PASSTHROUGH+=("$1"); shift ;;
@@ -7964,46 +7872,63 @@ case "$(lc "${SUBAGENTS}")" in
         export LETS_CODE_SUBAGENTS_ON=1 LETS_CODE_MODEL="${MODEL}"
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }subagents: on" ;;
 esac
-# Specialists (on by default, need subagents): the specialist tool. What
-# the launch decides for one (TERMUX, REA: true or an explicit false from
-# the environment or a flag) goes in LETS_CODE_SPECIALISTS_LAUNCH, ahead of
-# the remembered state for this launch only.
-unset LETS_CODE_SPECIALISTS_ON LETS_CODE_SPECIALISTS_LAUNCH
-SPEC_LAUNCH=""
-case "$(lc "${SPECIALISTS}")" in
-    true|yes|1|on)
-        if [ "${LETS_CODE_SUBAGENTS_ON:-}" = 1 ]; then
-            pi_write_specialists_extension
-            export LETS_CODE_SPECIALISTS_ON=1
-            FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }specialists: on"
-        fi ;;
-esac
 # remembered: true, false or empty (never decided), from lets-code-state.json
-lc_specialist_remembered() {
+lc_expert_remembered() {
     LC_STATE="${PI_AGENT_DIR}/lets-code-state.json" python3 -c 'import json,os,sys
-try: v = (json.load(open(os.environ["LC_STATE"])).get("specialists") or {}).get(sys.argv[1])
+try: v = (json.load(open(os.environ["LC_STATE"])).get("experts") or {}).get(sys.argv[1])
 except Exception: v = None
 print({True: "true", False: "false"}.get(v, ""))' "$1" 2>/dev/null
 }
-# Termux device: needs subagents and an Android device (Termux)
-unset LETS_CODE_TERMUX_AGENT
-case "$(lc "${TERMUX}")" in true|yes|1|on) termux=on ;; false|no|0|off) termux=off ;; *) termux="" ;; esac
-if ! on_termux; then
-    [ "${termux}" = on ] && log "note: TERMUX=true but this is not Termux on Android; the termux-device specialist is off."
-elif [ "${LETS_CODE_SPECIALISTS_ON:-}" = 1 ]; then
-    write_termux_agent
-    case "${termux}" in
-        on)  SPEC_LAUNCH="${SPEC_LAUNCH} termux-device=1"; FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }termux-device: on" ;;
-        off) SPEC_LAUNCH="${SPEC_LAUNCH} termux-device=0" ;;
-    esac
-elif [ "${termux}" = on ]; then
-    if [ "${LETS_CODE_SUBAGENTS_ON:-}" != 1 ]; then log "note: the termux-device agent needs subagents (SUBAGENTS=true); it is off."
-    else
-        write_termux_agent
-        export LETS_CODE_TERMUX_AGENT=1
-        FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }termux-device: on"
-    fi
-fi
+# TERMUX=true / REA=true (the switches of earlier versions) in the config or
+# a preset: remembered once as the expert enabled, unless the state already
+# has a decision for it; after that the key is not read. false, empty and
+# REA=manual mean nothing now (a dormant expert costs only its list entry).
+lc_migrate_expert_switches() {
+    local pair var name
+    for pair in TERMUX:termux-device REA:reverse-engineer; do
+        var="${pair%%:*}"; name="${pair#*:}"
+        case "$(lc "${!var:-}")" in true|yes|1|on) ;; *) continue ;; esac
+        if LC_STATE="${PI_AGENT_DIR}/lets-code-state.json" python3 - "${name}" <<'PY' 2>/dev/null
+import json, os, sys
+p = os.environ["LC_STATE"]
+try: s = json.load(open(p))
+except Exception: s = {}
+if not isinstance(s, dict): s = {}
+e = s.get("experts") if isinstance(s.get("experts"), dict) else {}
+if sys.argv[1] in e: sys.exit(1)
+e[sys.argv[1]] = True; s["experts"] = e
+tmp = p + ".tmp"
+with open(tmp, "w") as f: json.dump(s, f, indent=2); f.write("\n")
+os.chmod(tmp, 0o600); os.replace(tmp, p)
+PY
+        then log "note: ${var}=true in ${CONFIG_FILE} is now remembered as the ${name} expert enabled (/expert disable makes it dormant); ${var} is no longer read, remove it."
+        fi
+    done
+}
+# Experts (on by default, need subagents): the expert tool and the experts
+# lets-code ships. Every expert is dormant until the user enables it in a
+# session (a dialog or /expert enable, remembered in lets-code-state.json);
+# a dormant one is listed and costs nothing else: REA is installed only
+# once enabled, and an enabled one is kept current here.
+unset LETS_CODE_EXPERTS_ON LETS_CODE_TERMUX_AGENT
+lc_migrate_expert_switches
+case "$(lc "${EXPERTS}")" in
+    true|yes|1|on)
+        if [ "${LETS_CODE_SUBAGENTS_ON:-}" != 1 ]; then
+            log "note: experts need subagents (SUBAGENTS=true); none are available in this session."
+        else
+            pi_write_experts_extension
+            export LETS_CODE_EXPERTS_ON=1
+            on_termux && write_termux_agent
+            if [ "$(lc_expert_remembered reverse-engineer)" = true ]; then
+                pi_write_rea on
+                [ -z "${REA_NOTE}" ] || log "note: rea: ${REA_NOTE}"
+            else
+                pi_write_rea files
+            fi
+            FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }experts: on"
+        fi ;;
+esac
 # Claude Code adapter: the module, and what it finds here for the launch line
 # auto (default): on only where the project's .claude has hooks or workflows,
 # and then with the project's .claude alone; all: the user's ~/.claude too
@@ -8025,36 +7950,6 @@ case "$(lc "${SANDBOX}")" in
         export LETS_CODE_SANDBOX_ON=1
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }sandbox: on${SB_NOTE:+ (${SB_NOTE})}" ;;
 esac
-# REA: the skill reaches pi by --skill, so a pi started without lets-code
-# (or with REA off) does not carry it. With specialists on, REA unset
-# installs nothing unless the specialist is remembered as enabled (then the
-# launch keeps it current); its files are written so it can be listed and
-# enabled in a session.
-case "$(lc "${REA}")" in true|yes|1|on) rea_invoke=on ;; manual) rea_invoke=manual ;; false|no|0|off) rea_invoke=off ;; *) rea_invoke="" ;; esac
-if [ "${LETS_CODE_SPECIALISTS_ON:-}" = 1 ] && [ -z "${rea_invoke}" ] && [ "$(lc_specialist_remembered reverse-engineer)" = true ]; then
-    pi_write_rea on
-    if [ -z "${REA_NOTE}" ]; then FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }rea: on (specialist, remembered)"
-    else log "note: rea: ${REA_NOTE}"; fi
-elif [ "${LETS_CODE_SPECIALISTS_ON:-}" = 1 ] && { [ -z "${rea_invoke}" ] || [ "${rea_invoke}" = off ]; }; then
-    pi_write_rea files
-    [ "${rea_invoke}" = off ] && SPEC_LAUNCH="${SPEC_LAUNCH} reverse-engineer=0"
-elif [ -n "${rea_invoke}" ] && [ "${rea_invoke}" != off ]; then
-    pi_write_rea "${rea_invoke}"
-    if [ -z "${REA_NOTE}" ]; then
-        export LETS_CODE_REA_PROVIDER="${PROVIDER_ID}" LETS_CODE_REA_MODEL="${MODEL}"
-        rea_surface "${rea_invoke}"
-        if [ "${REA_SURFACE}" = specialist ]; then rea_invoke="on (specialist)"; SPEC_LAUNCH="${SPEC_LAUNCH} reverse-engineer=1"
-        elif [ "${REA_SURFACE}" = agent ]; then rea_invoke="on (agent)"
-        elif [ ${#PASSTHROUGH[@]} -eq 0 ]; then PASSTHROUGH=(--skill "${REA_DIR}/skill/reverse-engineering")
-        else PASSTHROUGH=(--skill "${REA_DIR}/skill/reverse-engineering" "${PASSTHROUGH[@]}"); fi
-        FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }rea: ${rea_invoke}"
-    else
-        FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }rea: off (${REA_NOTE})"
-    fi
-    # manual: the skill only; the specialist stays off for this launch
-    [ "${rea_invoke}" = manual ] && [ "${LETS_CODE_SPECIALISTS_ON:-}" = 1 ] && SPEC_LAUNCH="${SPEC_LAUNCH} reverse-engineer=0"
-fi
-[ -z "${SPEC_LAUNCH}" ] || export LETS_CODE_SPECIALISTS_LAUNCH="${SPEC_LAUNCH# }"
 
 # The launch banner: what is running where, in two lines on a terminal
 # (color unless NO_COLOR, and a sign-off), one plain line when piped or

@@ -185,56 +185,71 @@ files of other clients without overwriting names pi already has.
 **REA.** The case MCP cannot cover cheaply: REA's 170 tools and 14 KB skill.
 In pi, any server in `mcp.json` adds a `mcp_servers` prompt line, turns on
 codemode and spawns the server in every session, and pi reads only the user
-and project `mcp.json`. So the main session gets a skill through `--skill`
-(name + description in the prompt; `disable-model-invocation` for manual),
-and the skill runs a child `pi -p --no-session` with
-`PI_CODING_AGENT_DIR=~/.pi/agent/rea/agent`: symlinks to every entry of the
-main agent dir except `mcp.json`, `mcp-auth.json`, `skills` and `sessions`,
-plus its own `mcp.json` with REA alone (compact schemas, user env kept).
-The child inherits the `LETS_CODE_*` environment, so the same provider,
-guards and mandate role apply; `LETS_CODE_SUBAGENT_DEPTH` + 1 keeps the
-subagent tool out of it. The package is pinned and npm-installed like the
-sandbox runtime; output is capped at 50 KB like a subagent's.
+and project `mcp.json`. So REA lives only in a child: the expert
+`reverse-engineer` (`agents/reverse-engineer.md`, written by lets-code) runs
+`pi` with `PI_CODING_AGENT_DIR=~/.pi/agent/rea/agent`: symlinks to every
+entry of the main agent dir except `mcp.json`, `mcp-auth.json`, `skills`
+and `sessions`, plus its own `mcp.json` with REA alone (compact schemas,
+user env kept). Agent files may name an `agent_dir`, `skills`, an
+`append_prompt` file, a `timeout` and a `requires` path, all checked
+lexically to stay under the agent dir (or a trusted project). The child
+inherits the `LETS_CODE_*` environment, so the same provider, guards and
+mandate role apply; `LETS_CODE_SUBAGENT_DEPTH` + 1 keeps the subagent tool
+out of it. The package is pinned and npm-installed by `rea/setup` when the
+user enables the expert; output is capped at 50 KB like a subagent's. The
+skill earlier versions used without subagents (and `REA=manual`) is gone:
+a dormant expert costs only its entry in the expert line.
 
-With subagents on, the same child is the agent type `reverse-engineer`
-(`agents/reverse-engineer.md`, written by lets-code): agent files may name
-an `agent_dir`, `skills`, an `append_prompt` file, a `timeout`, and gates
-(`requires` a path, `requires_env` a variable), all paths checked lexically
-to stay under the agent dir (or a trusted project). Its name in the
-subagent tool (a few tokens, in context anyway) replaces the skill entry
-(name, sentence and path, ~65 tokens), and it gains progress, parallel tasks and orchestration.
-`requires_env: LETS_CODE_REA_AGENT`, exported only by a launch with REA on,
-keeps the file on disk from listing it in sessions with REA off or manual.
-
-**Specialists.** Some subagents are only useful with knowledge a model
+**Experts.** Some subagents are only useful with knowledge a model
 guesses wrong (the Termux `am` that passes the uid check, REA's setup), and
 only useful when the caller says the right things (the user's goal
-verbatim; the artifact, the question, what the answer is for). Three
-choices follow. *Always known, cheap:* one tool whose snippet names the
-specialists usable on this machine and its three actions, about 30 tokens;
-jobs, states and templates come from `list` when the model needs them, so
-a specialist costs nothing until it is used, and a platform check keeps
-`termux-device` out of a Linux session. *Enabled on consent:* a specialist
-can install things (REA: npm, 160 MB) and run commands on a device, so the
-user enables it, through `ctx.ui.confirm` the first time a run needs it or
-`/specialist enable`; the model cannot, and without a UI the call is refused
-with the way to do it. The yes is remembered (`lets-code-state.json`,
-merge-safe like the thinking level and the trust answer), a no only for the
-session; a launch flag decides for its launch and is not written. *Templates:*
-a brief is an object of named fields, checked before anything runs (a
-missing required field returns the template, so a bad brief costs one short
-round trip instead of a wasted child), and rendered as one heading per field
-in the child's task. Metadata lives in the agent file's frontmatter
-(`specialist`, `job`, `brief`, `platform`, `setup`, `setup_note`), so one
-file is the whole specialist and a user's own is written the same way;
-`requires` and friends become "not set up" instead of hiding it, and
-`setup` is a script lets-code writes (REA's `rea/setup`, which the launch
-runs too). A run goes through the subagents module's `runAgent`, so
-progress, abort, timeouts, depth and concurrency are the same. Specialists
-are hidden from the `subagent` tool, whose description lists agents with
-their jobs, so nothing is listed twice; a call there is pointed at the
-specialist tool. With specialists off the files are plain agents again,
-gated by `requires_env` as before.
+verbatim; the artifact, the question, what the answer is for). Four
+choices follow.
+
+*Always known, short:* one tool whose line names the experts usable on this
+machine, each with a few-word `use_for`, and the three actions; jobs,
+states and templates come from `list`. Names alone were tried first and
+failed: asked to bring an app to the front, the model ran `am` itself
+(about 400k tokens) next to a tool listing `termux-device`. The entry is
+kept to the name and a few words because there may be tens of experts:
+past 900 characters the line switches to each expert's `keywords` (or the
+first words of `use_for`), so the whole tool stays under 400 tokens at 20
+experts (200 at 2, 260 at 6, 385 at 20; vLLM's tokenizer). A platform check
+keeps `termux-device` out of a Linux session. A routing test in print mode
+(prompts that should go to an expert without naming it, near-misses such
+as "list files in Downloads" or "explain what am start does", and
+unrelated ones) found termux-device 6 of 6 and no false trigger in 15;
+reverse-engineer took the questions that need it and left one-command ones
+(`--version`, `ldd`, `file`) to the model, which is the cheaper answer.
+Saying "even quick ones" in the line raised it from 1 to 2-3 of 6 with
+no new false triggers.
+
+*Dormant until the user says yes:* an expert can install things (REA: npm,
+160 MB) and run commands on a device, so only the user enables it, through
+`ctx.ui.confirm` the first time a run needs it (or the model proposes
+`enable`) or `/expert enable`; the model cannot, and without a UI the call
+is refused with the way to do it. The yes is remembered
+(`lets-code-state.json`, merge-safe like the thinking level and the trust
+answer), a no only for the session. There is one switch for the feature
+and none per expert: a flag and a config key per expert would not scale
+past a handful. The old per-expert keys (`TERMUX=true`, `REA=true`) are
+migrated once into the remembered state and then ignored.
+
+*Templates:* a brief is an object of named fields, checked before anything
+runs (a missing required field returns the template, so a bad brief costs
+one short round trip instead of a wasted child), and rendered as one
+heading per field in the child's task.
+
+*One file per expert:* metadata lives in the agent file's frontmatter
+(`expert`, `use_for`, `keywords`, `job`, `brief`, `platform`, `setup`,
+`setup_note`), so a user's own is written the same way; `requires` and
+friends make a dormant expert "not set up" instead of hiding it, and
+`setup` is a script (REA's `rea/setup`, which later launches run too to
+keep an enabled one current). A run goes through the subagents module's
+`runAgent`, so progress, abort, timeouts, depth and concurrency are the
+same. Expert files are never listed in the `subagent` tool, whose
+description lists agents with their jobs, so nothing is listed twice; a
+call there is pointed at the expert tool.
 
 **Claude Code adapter.** Automatic: the launcher switches it on only where
 the project's `.claude` (up to the git root) has hooks or workflow scripts,

@@ -1516,7 +1516,9 @@ TS
 # Grounding guard: a short system-prompt section that has pi look facts up
 # with its tools instead of guessing them (file contents, paths, names,
 # versions, config, command output), invent nothing, say what it could not
-# verify and report results as they are; and a block, once per file, on
+# verify, not take an empty grep for absence, back "the system accepted it"
+# with a control that must fail, and report results as they are; and a
+# block, once per file, on
 # overwriting an existing file the session has not read. Inert unless
 # LETS_CODE_GROUNDING_ON=1. Rewritten when its content changes.
 pi_write_grounding_extension() {
@@ -1530,7 +1532,10 @@ pi_write_grounding_extension() {
 //   * a short system-prompt section: facts about the project and machine
 //     (file contents, paths, names, versions, config, command output) are
 //     looked up with tools, not guessed; nothing is invented; what could
-//     not be checked is said; results are reported as they are;
+//     not be checked is said; an empty grep is not absence (the phone
+//     that "had no mail app": Gmail is com.google.android.gm); an accepted
+//     action is shown against a control that must fail; results are
+//     reported as they are;
 //   * overwriting an existing file the session has not read (read tool,
 //     or a bash command naming it) is blocked once, with a pointer to read
 //     it first; writing it again goes through, so a deliberate overwrite is
@@ -1547,6 +1552,8 @@ export const SECTION = [
 	"- Never invent identifiers, paths, URLs, numbers or command output. If something you need does not exist, say so instead of making it up.",
 	"- Read a file before you change or overwrite it, and look at what you are about to delete before you delete it.",
 	"- When you cannot verify something, say plainly what you could not check and why. Do not present a guess as a fact.",
+	"- An empty grep is not absence: before saying something is missing or not installed, check in a way that finds it under any name (grep \"mail\" misses Gmail, com.google.android.gm; ask the system who handles the role).",
+	"- rc=0 is not success: to claim the system accepted an action, also run a control that must fail (a nonexistent target) and show that it answers differently.",
 	"- Report results as they are: if a command failed or a test is red, say so with the relevant output; if you skipped a step, say that.",
 ].join("\n");
 

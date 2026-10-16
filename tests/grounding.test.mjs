@@ -45,6 +45,9 @@ try {
 	t("prompt section added", Object.keys(ev.systemPromptOptions.sections), ["other", "lets_code_grounding"]);
 	t("prompt section text", ev.systemPromptOptions.sections.lets_code_grounding, x.mod.SECTION);
 	t("prompt: look, don't guess", x.mod.SECTION.includes("Look, don't guess."), true);
+	t("prompt: an empty grep is not absence", /An empty grep is not absence.*com\.google\.android\.gm.*who handles the role/.test(x.mod.SECTION), true);
+	t("prompt: accepted needs a control that must fail", /rc=0 is not success.*control that must fail/.test(x.mod.SECTION), true);
+	t("prompt: one line per rule", x.mod.SECTION.split("\n").every((l, i) => i === 0 || l.startsWith("- ")), true);
 	t("no sections: no crash", await x.handlers.before_agent_start({}), undefined);
 
 	// overwrite of an unread existing file: blocked once, then allowed

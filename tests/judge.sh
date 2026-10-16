@@ -45,7 +45,7 @@ t "agent file written"             "$(grep -c '^# Written by lets-code' "${af}")
 t "agent: in place"                "${JUDGE_AGENT}" 1
 t "agent: prompt exists"           "$([ -f "${PI_AGENT_DIR}/$(sed -n 's/^append_prompt: //p' "${af}")" ] && echo yes)" yes
 t "agent: read and run, no edit"   "$(sed -n 's/^tools: //p' "${af}")" "read, bash, grep, find, ls"
-t "agent: the verify role"         "$(sed -n 's/^role: //p' "${af}")" verify
+t "agent: the reviewer role"       "$(sed -n 's/^role: //p' "${af}")" reviewer
 t "agent: an expert"               "$(sed -n 's/^expert: //p' "${af}")" true
 t "agent: everywhere (no platform)" "$(grep -c '^platform:' "${af}")" 0
 t "agent: nothing to set up"       "$(grep -c -E '^(setup|setup_note|requires|agent_dir):' "${af}")" 0

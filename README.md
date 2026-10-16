@@ -419,7 +419,7 @@ the harness live outside this repo.
 With `MANDATE=true` every session runs under a **role**: a scope that says
 which tools, paths, kinds of bash command, MCP servers and agents are
 allowed, asked about or denied. The four built-in roles are the modes (two
-more, `readonly` and `verify`, are for subagents):
+more, `readonly` and `reviewer`, are for subagents):
 
 | Mode | What changes |
 |---|---|
@@ -444,10 +444,15 @@ command group (`readonly`, `git-write`, `build`, `package-install`,
 section, and extra `protected` paths. `.git`, `.env`, keys and certificates
 are protected in every mode but `yolo`.
 
-`verify`, the acceptance judge's role, runs tests and commands but writes
-only under the temp dir (no edit or write tool, redirects and `sed -i`
-elsewhere refused), and refuses git writes (`checkout`, `stash`, `commit`,
-...), package installs, recursive deletes, `sudo` and remote shells.
+`reviewer`, the role of the starter `reviewer` agent and of the acceptance
+judge, runs tests and commands but writes only under the temp dir (no edit
+or write tool, redirects and `sed -i` elsewhere refused), and refuses git
+writes (`checkout`, `stash`, `commit`, ...), package installs, recursive
+deletes, `sudo` and remote shells. A role of the same name in your
+`~/.pi/agent/mandate.json` is merged over it like any built-in: the fields
+you set win, the others stay as built in (to change it completely, set
+each field, or give your role another name). A project's `.pi/mandate.json`
+may only tighten it.
 
 </details>
 
@@ -471,8 +476,10 @@ Investigate quickly and report ...
 ```
 
 `tools` limits the child's tools, `thinking` sets its level, `role` picks its
-mandate role (`readonly` is a built-in without the planning prompt; `verify`
-also runs tests, for judges). Project
+mandate role (`readonly` is a built-in without the planning prompt;
+`reviewer` also runs tests). The starter `reviewer` agent uses `reviewer`;
+one written by an earlier version with `role: readonly` is updated on
+launch unless you edited it. Project
 agents in `.pi/agents/` or `.agents/agents/` are used once the project is
 trusted. Calls: `{agent, task}`, `{tasks: [...]}` for parallel work (at most
 2 at a time by default, since one GPU serves every agent;
@@ -707,7 +714,7 @@ no PASS without executed evidence. ACCEPT only when every criterion
 passes, else REJECT with the smallest list of what is missing, plus what
 the claim relies on outside the criteria. It has `read, bash, grep, find,
 ls` and no edit or write; `acceptance-judge/bin/scratch-copy` makes the
-throwaway copies under the temp dir, and with `MANDATE=true` the `verify`
+throwaway copies under the temp dir, and with `MANDATE=true` the `reviewer`
 role enforces that. Nothing is installed. For a panel, the model can run
 the same brief two or three times with `runs:` (two at a time) and accept
 only if every judge does. A plain code review stays with `reviewer`, and

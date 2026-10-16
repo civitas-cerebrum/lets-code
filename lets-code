@@ -3629,8 +3629,9 @@ pi_write_mandate_extension() {
 //
 // Manifest: ~/.pi/agent/mandate.json (global, full authority) and
 // .pi/mandate.json (project, may only tighten; read when the project is
-// trusted). Built-in roles: plan, auto, ask, yolo, and readonly and verify
-// for subagents.
+// trusted). Built-in roles: plan, auto, ask, yolo, and readonly and reviewer
+// for subagents. A global role of a built-in's name is merged over it (the
+// fields it sets win); a project's may only tighten it.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -3698,10 +3699,11 @@ const BUILTIN: Manifest = {
 		},
 		// read-only without the planning instructions: for scouts and reviewers
 		readonly: { label: "readonly", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "list_mcp_resources", "read_mcp_resource"], write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: [], network: "off" },
-		// a judge's: runs tests and commands, writes only under the temp dir,
-		// never changes the work's git state, installs nothing (acceptance-judge)
-		verify: {
-			label: "verify", tools: ["read", "grep", "find", "ls", "bash", "tool_search"], write: [tmpdir()], external: "deny", mcp: "deny", dispatch: [], network: "on",
+		// reviewers' and judges': runs tests and commands, writes only under the
+		// temp dir, never changes the work's git state, installs nothing (the
+		// reviewer agent, acceptance-judge)
+		reviewer: {
+			label: "reviewer", tools: ["read", "grep", "find", "ls", "bash", "tool_search"], write: [tmpdir()], external: "deny", mcp: "deny", dispatch: [], network: "on",
 			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
 		},
 		yolo: { label: "yolo", bypass: true, network: "on", dispatch: ["*"], mcp: "allow" },
@@ -4725,9 +4727,33 @@ TS
 }
 
 # Three starter agents, written only when the user has none yet (agents
-# lets-code maintains itself, such as reverse-engineer, do not count).
+# lets-code maintains itself, such as reverse-engineer, do not count). The
+# reviewer of earlier versions (role: readonly, which refuses the tests it is
+# told to run) is moved to the reviewer role when the file is still exactly
+# as lets-code wrote it; an edited one is the user's and stays as it is.
+starter_reviewer() {
+    cat <<'MD'
+---
+name: reviewer
+description: Reviews a change for correctness and missed cases; reports findings, does not edit
+tools: read, grep, find, ls, bash
+role: reviewer
+---
+Review the change named in the task: read the diff and the code around it,
+run the existing tests, and look for bugs, missed edge cases and unclear
+behaviour. Do not edit files.
+
+Output: a numbered list of findings, most serious first, each with the
+file and line, what is wrong, and how to fix it. End with "No findings"
+if there are none.
+MD
+}
 write_default_agents() {
     local dir="${PI_AGENT_DIR}/agents" e
+    if [ -f "${dir}/reviewer.md" ] && [ "$(cat "${dir}/reviewer.md")" = "$(starter_reviewer | sed 's/^role: reviewer$/role: readonly/')" ]; then
+        starter_reviewer > "${dir}/reviewer.md"
+        log "subagents: ${dir}/reviewer.md moved to the reviewer role (it can run the tests now)"
+    fi
     if [ -d "${dir}" ]; then
         for e in "${dir}"/* "${dir}"/.[!.]*; do
             [ -e "${e}" ] || continue
@@ -4771,21 +4797,7 @@ What changed, in two or three sentences.
 ## Notes
 Anything the main agent must know (open questions, things not done).
 MD
-    cat > "${dir}/reviewer.md" <<'MD'
----
-name: reviewer
-description: Reviews a change for correctness and missed cases; reports findings, does not edit
-tools: read, grep, find, ls, bash
-role: readonly
----
-Review the change named in the task: read the diff and the code around it,
-run the existing tests, and look for bugs, missed edge cases and unclear
-behaviour. Do not edit files.
-
-Output: a numbered list of findings, most serious first, each with the
-file and line, what is wrong, and how to fix it. End with "No findings"
-if there are none.
-MD
+    starter_reviewer > "${dir}/reviewer.md"
     log "subagents: starter agents written to ${dir} (scout, worker, reviewer)"
 }
 
@@ -8497,7 +8509,7 @@ judge_write_agent() {
 name: acceptance-judge
 description: Adversarial check of a piece of work against its acceptance criteria; a verdict per criterion with evidence
 tools: read, bash, grep, find, ls
-role: verify
+role: reviewer
 append_prompt: acceptance-judge/prompt.md
 timeout: 1800
 expert: true

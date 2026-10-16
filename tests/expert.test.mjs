@@ -279,7 +279,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 }
 
 // the acceptance judge as lets-code writes it (judge_write_agent): ready with
-// no setup, on every platform, read-and-run tools only, under the verify role
+// no setup, on every platform, read-and-run tools only, under the reviewer role
 {
 	const sub = await import(pathToFileURL(join(ext, "subagents.ts")).href);
 	const lc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lets-code"), "utf8");
@@ -296,7 +296,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	rmSync(join(agentDir, "acceptance-judge"), { recursive: true, force: true });
 	t("judge: every platform", [a?.expert?.platform, sub.platformOk(a?.expert?.platform)], [undefined, true]);
 	t("judge: read and run, no edit or write", a?.tools, ["read", "bash", "grep", "find", "ls"]);
-	t("judge: the verify role", a?.role, "verify");
+	t("judge: the reviewer role", a?.role, "reviewer");
 	t("judge: use_for whole in the line", a?.expert?.useFor, body.match(/^use_for: (.*)$/m)[1]);
 }
 

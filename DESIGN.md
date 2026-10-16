@@ -297,9 +297,13 @@ controls per kind of check), from achilles main @ 6384b5f and the review
 roles of `release/0.2.0` @ d85fb1f and `contrib/achilles-lessons` @ 90e62c4.
 Achilles' verifier may run only the test runner, which is too narrow for
 an arbitrary project, and lets-code's `readonly` role denies test runners,
-so the judge gets a role of its own, `verify`: any command, writes only
-under the temp dir, no git writes, installs, recursive deletes or remote
-shells. The mandate is off by default, so the instructions and
+so the judge runs under a new built-in role, `reviewer`: any command, writes
+only under the temp dir, no git writes, installs, recursive deletes or remote
+shells. The starter `reviewer` agent moved to it from `readonly`, which
+refused the tests its instructions ask it to run: one role for every agent
+that judges work without changing it. A user's global role of that name
+merges over it field by field, as for every built-in, so a manifest written
+before it existed keeps what it set. The mandate is off by default, so the instructions and
 `scratch-copy` (a copy of the work or of a revision as its own git repo,
 dependencies linked, never touching the original) carry it there. No
 setup and no platform limit: it needs only pi's tools. A panel is the

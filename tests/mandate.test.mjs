@@ -127,27 +127,45 @@ const blocked = (r) => r?.block === true;
 	t("readonly: cannot dispatch", blocked(await h.call(d, "subagent", { agent: "worker", task: "x" })), true);
 }
 
-// --- verify: a judge's role: runs tests, writes only under the temp dir,
+// --- reviewer: reviewers' and judges' role: runs tests, writes only under the temp dir,
 // leaves the work's git state and dependencies alone
 {
 	// the role's temp dir is outside the project here (these projects sit in the real one)
 	const tmpWas = process.env.TMPDIR; const scratch = join(work, "judge-tmp"); mkdirSync(scratch); process.env.TMPDIR = scratch;
-	const h = await load({ LETS_CODE_ROLE: "verify", LETS_CODE_SUBAGENT_DEPTH: "1" }); const d = repo(); await h.start(d);
-	t("verify: edit tool not available", blocked(await h.call(d, "edit", { path: join(d, "src", "a.txt") })), true);
-	t("verify: test runner passes", await h.call(d, "bash", { command: "npm test 2>&1 | tail -n 20" }), undefined);
-	t("verify: pytest passes", await h.call(d, "bash", { command: "python3 -m pytest -q tests" }), undefined);
-	t("verify: output to the temp dir passes", await h.call(d, "bash", { command: `node app.js > ${join(scratch, "out.txt")}` }), undefined);
-	t("verify: output into the work blocked", blocked(await h.call(d, "bash", { command: "node app.js > out.txt" })), true);
-	t("verify: sed -i in the work blocked", blocked(await h.call(d, "bash", { command: "sed -i 's/a/b/' src/a.txt" })), true);
-	t("verify: sed -i in a temp copy passes", await h.call(d, "bash", { command: `sed -i 's/a/b/' ${join(scratch, "copy", "a.txt")}` }), undefined);
-	t("verify: git checkout blocked", blocked(await h.call(d, "bash", { command: "git checkout main" })), true);
-	t("verify: git stash blocked", blocked(await h.call(d, "bash", { command: "git stash" })), true);
-	t("verify: git diff passes", await h.call(d, "bash", { command: "git diff HEAD~1 -- src" }), undefined);
-	t("verify: npm install blocked", blocked(await h.call(d, "bash", { command: "npm install left-pad" })), true);
-	t("verify: rm -rf blocked", blocked(await h.call(d, "bash", { command: "rm -rf src" })), true);
-	t("verify: cannot dispatch", blocked(await h.call(d, "subagent", { agent: "worker", task: "x" })), true);
-	t("verify: no prompt section", (() => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), []);
+	const h = await load({ LETS_CODE_ROLE: "reviewer", LETS_CODE_SUBAGENT_DEPTH: "1" }); const d = repo(); await h.start(d);
+	t("reviewer: edit tool not available", blocked(await h.call(d, "edit", { path: join(d, "src", "a.txt") })), true);
+	t("reviewer: test runner passes", await h.call(d, "bash", { command: "npm test 2>&1 | tail -n 20" }), undefined);
+	t("reviewer: pytest passes", await h.call(d, "bash", { command: "python3 -m pytest -q tests" }), undefined);
+	t("reviewer: output to the temp dir passes", await h.call(d, "bash", { command: `node app.js > ${join(scratch, "out.txt")}` }), undefined);
+	t("reviewer: output into the work blocked", blocked(await h.call(d, "bash", { command: "node app.js > out.txt" })), true);
+	t("reviewer: sed -i in the work blocked", blocked(await h.call(d, "bash", { command: "sed -i 's/a/b/' src/a.txt" })), true);
+	t("reviewer: sed -i in a temp copy passes", await h.call(d, "bash", { command: `sed -i 's/a/b/' ${join(scratch, "copy", "a.txt")}` }), undefined);
+	t("reviewer: git checkout blocked", blocked(await h.call(d, "bash", { command: "git checkout main" })), true);
+	t("reviewer: git stash blocked", blocked(await h.call(d, "bash", { command: "git stash" })), true);
+	t("reviewer: git diff passes", await h.call(d, "bash", { command: "git diff HEAD~1 -- src" }), undefined);
+	t("reviewer: npm install blocked", blocked(await h.call(d, "bash", { command: "npm install left-pad" })), true);
+	t("reviewer: rm -rf blocked", blocked(await h.call(d, "bash", { command: "rm -rf src" })), true);
+	t("reviewer: cannot dispatch", blocked(await h.call(d, "subagent", { agent: "worker", task: "x" })), true);
+	t("reviewer: no prompt section", (() => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), []);
 	if (tmpWas === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = tmpWas;
+}
+
+// --- a user's global role named reviewer merges over the built-in: the
+// fields it sets win, the rest stays; a project may only tighten it
+{
+	writeFileSync(join(agentDir, "mandate.json"), JSON.stringify({ roles: { reviewer: { bash: { "git-write": "allow" }, tools: ["read", "bash", "subagent"], dispatch: ["worker"] } } }));
+	const tmpWas = process.env.TMPDIR; process.env.TMPDIR = join(work, "judge-tmp");   // outside the project
+	const h = await load({ LETS_CODE_ROLE: "reviewer", LETS_CODE_SUBAGENT_DEPTH: "1" }); const d = repo(); await h.start(d);
+	if (tmpWas === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = tmpWas;
+	t("user's reviewer: its git rule wins", await h.call(d, "bash", { command: "git stash" }), undefined);
+	t("user's reviewer: its dispatch wins", await h.call(d, "subagent", { agent: "worker", task: "x" }), undefined);
+	t("user's reviewer: built-in install rule kept", blocked(await h.call(d, "bash", { command: "pip install requests" })), true);
+	t("user's reviewer: its tools win (edit still out)", blocked(await h.call(d, "edit", { path: join(d, "src", "a.txt") })), true);
+	t("user's reviewer: built-in temp-dir write scope kept", blocked(await h.call(d, "bash", { command: "node app.js > out.txt" })), true);
+	mkdirSync(join(d, ".pi")); writeFileSync(join(d, ".pi", "mandate.json"), JSON.stringify({ roles: { reviewer: { bash: { build: "deny" } } } }));
+	const p = await load({ LETS_CODE_ROLE: "reviewer", LETS_CODE_SUBAGENT_DEPTH: "1" }); await p.start(d);
+	t("project reviewer: can tighten (tests denied)", blocked(await p.call(d, "bash", { command: "npm test" })), true);
+	rmSync(join(agentDir, "mandate.json"));
 }
 
 // --- yolo bypasses everything

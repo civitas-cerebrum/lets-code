@@ -220,18 +220,45 @@ a child's session a widget above the editor draws what the file does not
 hold yet: the message on its way, running tools and steers not yet taken,
 with pi's exported `UserMessageComponent`, `AssistantMessageComponent` and
 `ToolExecutionComponent` (with the built-in tools' renderers; a plain
-renderer takes over if they fail). When the child's file grows, the
-session is opened again (at most every `LETS_CODE_SUBAGENT_REFRESH_MS`,
-1000 by default; a switch measured 60 to 120 ms), so pi's own view catches
-up and the widget keeps only the part on its way. Matching what the file
-holds: user and assistant messages by count, tool calls by `toolCallId`;
-a call pi already draws as pending shows in the widget only once its
-output streams.
+renderer takes over if they fail). Each event the child completes is then
+added to the chat in-process: `pi.sendMessage` of a custom message
+(`lets-code-subagent-message`, `triggerTurn: false`, so it is appended to
+the open session and pi adds it to the chat at once, as it adds a message
+in the main session), drawn by a `registerMessageRenderer` renderer with
+the same components (their own spacer line dropped: pi's message box puts
+one), in order, up to the first event still on its way; the widget leaves
+out what was added (and its first spacer: pi puts one above the widgets),
+so moving a message from the widget to the chat moves nothing on screen.
+The first version reopened the session (`switchSession`) after each
+completed message instead; each reopen redrew the whole chat, which made
+the view jump on the phone and showed pi's own footer between the reloads.
+Now the session is opened only when the user switches; frames taken every
+0.5 s while a child streamed showed no jump and no screen clear at 70 and
+120 columns. The copy the TUI opens stops before an assistant message
+whose tool calls have no results yet (pi would draw them pending and never
+hear the end); the rest comes in as above. Matching what the file holds:
+user and assistant messages by count, tool calls by `toolCallId`.
+
+Commands in a child's session run in the TUI as in the main session. pi's
+own commands that read the open session (`/copy`, `/export`, `/share`,
+`/session`) would see the copy without the messages added since it
+opened, so a key hook (`onTerminalInput`, Enter) holds them, opens a fresh
+copy and submits them again (`tui.handleTerminalInput`); that is the one
+reload, and it happens when the user acts. `/name` goes to the child
+(`set_session_name`), `/resume` is submitted in the main session (from the
+copy, pi would list the runs dir), `/new` is cancelled in
+`session_before_switch` and a new main session started instead,
+`/fork`/`/clone` are cancelled in `session_before_fork` with a note. A
+mandate `/mode` acts on the main session: children register no mode
+commands, their role is fixed. `/subagents` alone always opens the picker:
+its argument completions appear only once a letter is typed (pi 0.87 takes
+Enter for a highlighted completion, which turned `/subagents ` into a
+subcommand).
 
 One writer: the child process owns its session file, and pi appends to
 whatever session it has open (a model or thinking change, a `!` record),
-so the TUI opens a copy, `<run>.view.jsonl`, copied again at each refresh;
-what pi appends to the copy is dropped with it. The agent guard still
+so the TUI opens a copy, `<run>.view.jsonl`, made when the session is
+opened; what pi appends to the copy stays there. The agent guard still
 skips its thinking-level reset and the Claude Code adapter its
 SessionStart/SessionEnd hooks for such a switch. When a turn the user
 started in a child ends, its reply goes to the main session as a custom

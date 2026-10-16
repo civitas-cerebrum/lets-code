@@ -134,6 +134,8 @@ t("status labels", runs.map(v.statusLabel), ["done", "running", "running", "fail
 	const done = { ...live, status: "done", ended: now, events: live.events.map((e) => ({ ...e, done: true })) };
 	const full = v.loadedOf(entries([{ role: "user" }, { role: "assistant" }, { role: "toolResult", toolCallId: "c1" }, { role: "assistant" }, { role: "toolResult", toolCallId: "c2" }, { role: "toolResult", toolCallId: "c3" }, { role: "assistant" }]));
 	t("live: a finished run whose file has it all draws nothing", v.liveLines(done, full, { width: 120, now }), []);
+	const shown = new WeakSet(live.events.slice(0, 7));
+	t("live: what is already in the chat is not drawn again", v.liveLines(live, file0, { width: 120, now, added: shown }).map(strip).filter((l) => /Task: look|hmm|first the sleep|calc\.py/.test(l)).length, 0);
 }
 
 // --- the transcript: pi's components when they load, else the plain lines

@@ -552,12 +552,21 @@ tools, role, instructions and model):
   role.
 - <kbd>Esc</kbd> aborts its turn, as in the main session; the process stays,
   so you can go on.
-- `!` and `!!` run in the child's process and land in its session (pi
-  first shows a placeholder line, then the real output once the session
-  refreshes). `/model` and the thinking level (<kbd>Shift</kbd>+<kbd>Tab</kbd>)
-  are passed on to the child. `/compact` compacts the child's session (pi
-  then also says its own compaction was cancelled: the TUI shows a copy of
-  the child's file and never compacts that).
+- `!` and `!!` run in the child's process and land in its session; pi
+  shows the output as for any `!` command.
+- **Slash commands** work as in the main session. Those that concern the
+  conversation act on the child: `/model` and the thinking level
+  (<kbd>Shift</kbd>+<kbd>Tab</kbd>, `/thinking`) are passed on to it,
+  `/compact` compacts its session (pi also says its own compaction of the
+  copy it shows was cancelled), `/name` names its session; `/copy`,
+  `/export`, `/share` and `/session` read its session as it is now (the
+  view is caught up first). `/new` starts a new main session and `/resume`
+  lists the main sessions, as from the main session; `/fork` and `/clone`
+  say to go back first (they would fork the copy). The rest (`/subagents`
+  and its subcommands, `/metrics`, `/experts`, `/settings`, `/model`'s
+  picker, `/hotkeys`, `/reload`, ...) behave exactly as in the main
+  session. A `/mode` or `/plan` there sets the main session's mode: a
+  subagent's role is fixed by its agent file.
 - A dialog the child's guards open (the mandate asking before a command)
   appears here with the agent's name in front.
 - When a turn you started in a child ends, its reply is added to the main
@@ -568,14 +577,16 @@ tools, role, instructions and model):
 Children go when the main session ends (quit, `/new`, `/resume` of another
 session), when their run is pruned, or after resting as above.
 
-How live a running child's session is: pi shows the messages the child has
-completed (a child writes a message to its session file when the message is
-done), and below them, above the input, the message on its way, token by
-token, and a running tool with its output as it streams, drawn with the
-same components, plus a line with the child's clock and tokens. Each time
-the child completes a message the session is opened again (about once a
-second at most, which takes some 60 to 120 ms), so pi's own view catches
-up; when the child ends, its session is complete.
+How live a running child's session is: as live as the main session. The
+message on its way (thinking, text, tool calls token by token, a tool's
+output as it streams) is drawn above the input as pi draws a streaming
+message, with the same components, plus a line with the child's clock and
+tokens; each message the child completes (its replies, tool results, your
+prompts and steers) is then added to the chat in place, as pi adds one.
+The session is never reloaded while you are in it, so nothing jumps or
+scrolls back. Switching into or out of a child's session is a session
+switch like `/resume`: pi redraws the screen then, and shows its own
+footer for a moment while it loads the session.
 
 Switching away from the main session while a call is running does not stop
 its children: the call goes on in the background (the tool call shows

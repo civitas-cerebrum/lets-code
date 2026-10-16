@@ -152,11 +152,11 @@ async function load(env = {}) {
 	const f = join(agentDir, "extensions", `subagent-${loads++}.ts`); writeFileSync(f, src);
 	const mod = await import(pathToFileURL(f).href);
 	let tool = null; const handlers = {}, tools = [], commands = {}, shortcuts = {};
-	const sent = [], userSent = [];
+	const sent = [], userSent = [], renderers = {};
 	mod.default({ registerTool: (d) => { tool = d; tools.push(d); }, on(ev, h) { handlers[ev] = h; return () => {}; },
 		registerCommand: (name, d) => { commands[name] = d; }, registerShortcut: (key, d) => { shortcuts[key] = d; },
-		sendMessage: (m, o) => { sent.push([m, o]); }, sendUserMessage: (m, o) => { userSent.push([m, o]); } });
-	return { mod, tool, tools, commands, shortcuts, handlers, sent, userSent, run: (params, cwd = work, trusted = true) => tool.execute("id", params, undefined, undefined, { cwd, isProjectTrusted: trusted }) };
+		sendMessage: (m, o) => { sent.push([m, o]); }, sendUserMessage: (m, o) => { userSent.push([m, o]); }, registerMessageRenderer: (k, f) => { renderers[k] = f; } });
+	return { mod, tool, tools, commands, shortcuts, handlers, sent, userSent, renderers, run: (params, cwd = work, trusted = true) => tool.execute("id", params, undefined, undefined, { cwd, isProjectTrusted: trusted }) };
 }
 
 // --- what the model is told: agents and call shapes in the tool; the method once asked for
@@ -363,7 +363,7 @@ async function load(env = {}) {
 	const h = await load({});
 	const { mod } = h;
 	t("view: a /subagents command and the alt+s shortcut", [typeof h.commands.subagents?.handler, typeof h.shortcuts["alt+s"]?.handler], ["function", "function"]);
-	t("view: no new tool and no prompt hook (zero context)", [h.tools.map((x) => x.name), Object.keys(h.handlers).sort()], [["subagent"], ["before_agent_start", "input", "model_select", "session_before_compact", "session_shutdown", "session_start", "thinking_level_select", "user_bash"]]);
+	t("view: no new tool and no prompt hook (zero context)", [h.tools.map((x) => x.name), Object.keys(h.handlers).sort()], [["subagent"], ["before_agent_start", "input", "model_select", "session_before_compact", "session_before_fork", "session_before_switch", "session_shutdown", "session_start", "thinking_level_select", "user_bash"]]);
 	t("view: nothing about it in the tool's text", /subagents to (watch|switch)|\/subagents|alt\+s|session/.test(JSON.stringify([h.tool.description, h.tool.promptSnippet, h.tool.promptGuidelines, h.tool.parameters])), false);
 	const sections = {};
 	await h.handlers.before_agent_start({ prompt: "fix the typo", systemPromptOptions: { sections } }, { getContextUsage: () => ({ percent: 1 }) });
@@ -522,7 +522,7 @@ async function load(env = {}) {
 	// the reports wait while the run's session is open
 	for (let i = 0; i < 200 && reg().runs.some((r) => /stream d[12]/.test(r.task) && r.status === "running"); i++) await new Promise((r) => setTimeout(r, 20));
 	t("detach: the runs finished on their own", reg().runs.filter((r) => /stream d[12]/.test(r.task)).map((r) => r.status), ["done", "done"]);
-	t("detach: the report waits while another session is open", [h.sent.length, (reg().pending ?? []).length, /1 report waiting/.test(statuses.at(-1)?.[1] ?? "")], [0, 1, true]);
+	t("detach: the report waits while another session is open", [h.sent.filter(([m]) => m?.customType === "lets-code-subagents").length, (reg().pending ?? []).length, /1 report waiting/.test(statuses.at(-1)?.[1] ?? "")], [0, 1, true]);
 	// back: alt+s sends /subagents back as a command; the command switches home and the report goes out
 	await h.shortcuts["alt+s"].handler({});
 	t("alt+s in a run's session: sends /subagents back as a command", h.userSent.at(-1), ["/subagents back", { expandPromptTemplates: true }]);
@@ -530,7 +530,8 @@ async function load(env = {}) {
 	await h.commands.subagents.handler("back", ctxFor());
 	await new Promise((r) => setTimeout(r, 120));
 	t("back: the main session's file", switched.at(-1)[0], home);
-	t("back: the report continues the main session as a message", [h.sent.length, h.sent[0]?.[0]?.customType, /^Reports of the subagent call that went on in the background:/.test(h.sent[0]?.[0]?.content ?? ""), /## worker[\s\S]*## scout/.test(h.sent[0]?.[0]?.content ?? ""), h.sent[0]?.[1]], [1, "lets-code-subagents", true, true, { triggerTurn: true, deliverAs: "followUp" }]);
+	const reps = h.sent.filter(([m]) => m?.customType === "lets-code-subagents");
+	t("back: the report continues the main session as a message", [reps.length, reps[0]?.[0]?.customType, /^Reports of the subagent call that went on in the background:/.test(reps[0]?.[0]?.content ?? ""), /## worker[\s\S]*## scout/.test(reps[0]?.[0]?.content ?? ""), reps[0]?.[1]], [1, "lets-code-subagents", true, true, { triggerTurn: true, deliverAs: "followUp" }]);
 	t("back: prompts are the user's again", await h.handlers.input({ text: "hello", source: "interactive" }, { ui }), undefined);
 	let ok = true; try { h.handlers.user_bash({ command: "ls" }); } catch { ok = false; }
 	t("back: ! commands too", ok, true);
@@ -550,6 +551,19 @@ async function load(env = {}) {
 	await call3;
 	t("/subagents stop <name> stops that run", f1.status, "aborted");
 	t("/subagents <unknown> says so", (await h.commands.subagents.handler("nobody", ctxFor()), /No run "nobody"/.test(notes.at(-1)?.[1] ?? "")), true);
+	// /subagents' completions never turn a bare /subagents into a subcommand
+	t("completions: none for /subagents and /subagents with a space", [mod.subcommandCompletions(""), mod.subcommandCompletions(" ")], [null, null]);
+	t("completions: a typed letter offers the subcommand", [mod.subcommandCompletions("t")?.map((c) => c.value), mod.subcommandCompletions("toggle"), mod.subcommandCompletions("st")?.map((c) => c.value)], [["toggle"], null, ["stop"]]);
+	const toggledBefore = JSON.parse(readFileSync(stateFile, "utf8")).subagentsFooter;
+	await h.commands.subagents.handler("", { hasUI: true, ui: { ...ui, custom: async () => undefined } });
+	await h.commands.subagents.handler(" ", { hasUI: true, ui: { ...ui, custom: async () => undefined } });
+	t("bare /subagents opens the picker and never toggles the footer", JSON.parse(readFileSync(stateFile, "utf8")).subagentsFooter, toggledBefore);
+	// the copy pi opens stops before a reply whose tool calls have no results yet
+	const L = (o) => JSON.stringify(o);
+	const file = [L({ type: "session" }), L({ type: "message", message: { role: "user", content: "t" } }), L({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "a" }] } }), L({ type: "message", message: { role: "toolResult", toolCallId: "a" } }),
+		L({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "b" }, { type: "toolCall", id: "c" }] } }), L({ type: "message", message: { role: "toolResult", toolCallId: "b" } })].join("\n") + "\n";
+	t("view copy: cut before the reply with a call still running", mod.viewLines(file).length, 4);
+	t("view copy: whole when every call has its result", mod.viewLines(file + L({ type: "message", message: { role: "toolResult", toolCallId: "c" } }) + "\n").length, 7);
 	// /subagents toggle: the footer list, remembered in the state file (other keys kept)
 	await h.commands.subagents.handler("toggle", ctxFor());
 	t("toggle: on, remembered next to the other keys", JSON.parse(readFileSync(stateFile, "utf8")), { metrics: true, subagentsFooter: true });
@@ -610,6 +624,28 @@ async function load(env = {}) {
 	const ho = await ph;
 	t("Esc: the turn is stopped, the process stays to go on", [hr.status, /stopped by the user/.test(ho.content[0].text), mod.childOf(hr).alive], ["aborted", true, true]);
 	t("Esc at rest: left to pi", termHandler("\x1b"), undefined);
+	// no reloads: the child's completed messages are added to its session's chat in-process, in order
+	const added = h.sent.filter(([m]) => m?.customType === "lets-code-subagent-message");
+	t("in-process: the run's completed messages added to the chat, quietly", [added.length >= 2, added[0]?.[0]?.details?.ev?.t, added[0]?.[0]?.details?.ev?.text, added.every(([, o]) => o?.triggerTurn === false)], [true, "user", "hang about", true]);
+	t("in-process: the stopped reply follows the task", added.at(-1)?.[0]?.details?.ev?.t, "assistant");
+	const before = added.length;
+	{ await h.handlers.input({ text: "and then", source: "interactive" }, { ui }); }
+	await wait(() => hr.status === "done" && hr.events.some((e) => e.t === "user" && e.text === "and then"));
+	await wait(() => h.sent.filter(([m]) => m?.customType === "lets-code-subagent-message").length >= before + 3);
+	const later = h.sent.filter(([m]) => m?.customType === "lets-code-subagent-message").slice(before).map(([m]) => m.details.ev);
+	t("in-process: the user's prompt, the tool and the child's reply follow, each once", [later.map((e) => e.t), later[0]?.text, later[2]?.blocks?.[0]?.text], [["user", "tool", "assistant"], "and then", "Result for: and then"]);
+	// a turn the user stops before it says anything is not reported to the main session
+	const pend0 = (reg().pending ?? []).length, sent0 = h.sent.filter(([m]) => m?.customType === "lets-code-subagents").length;
+	await h.handlers.input({ text: "hang on a bit", source: "interactive" }, { ui });
+	await wait(() => hr.status === "running");
+	termHandler("\x1b");
+	await wait(() => hr.status === "aborted");
+	await new Promise((r) => setTimeout(r, 100));
+	t("a stopped turn with no reply: no report to the main session", [(reg().pending ?? []).length, h.sent.filter(([m]) => m?.customType === "lets-code-subagents").length], [pend0, sent0]);
+	const rend = h.renderers["lets-code-subagent-message"];
+	const rcomp = rend?.(added[0][0], { expanded: false }, { fg: (_c, x) => x, bg: (_c, x) => x, bold: (x) => x });
+	const rl = rcomp?.render(70) ?? [];
+	t("in-process: drawn with the message components, without its own spacer line on top, within the width", [typeof rend, rl.some((l) => /hang about/.test(l)), rl.length > 0 && rl[0] !== "", rl.every((l) => l.replace(/\x1b\[[0-9;]*m|\x1b\][^\x07]*\x07/g, "").length <= 70)], ["function", true, true, true]);
 
 	// a prompt in its session at rest: a new turn of the child
 	const inp = await h.handlers.input({ text: "next step", source: "interactive" }, { ui });
@@ -623,7 +659,7 @@ async function load(env = {}) {
 	h.handlers.thinking_level_select({ level: "high" });
 	const comp = h.handlers.session_before_compact({ reason: "manual", customInstructions: "keep it short" });
 	await wait(() => ["bash", "set_model", "set_thinking_level", "compact"].every((k) => cmds().some((c) => c.type === k && c.pid === cpid)));
-	t("! in a child's session: runs in the child", [/own process/.test(b?.result?.output ?? ""), cmds().some((c) => c.type === "bash" && c.command === "ls -la" && c.pid === cpid)], [true, true]);
+	t("! in a child's session: runs in the child", [/ran: ls -la/.test((await b)?.result?.output ?? ""), cmds().some((c) => c.type === "bash" && c.command === "ls -la" && c.pid === cpid)], [true, true]);
 	t("/model, thinking, /compact: passed on to the child; the copy is never compacted", [cmds().some((c) => c.type === "set_model" && c.modelId === "other-model"), cmds().some((c) => c.type === "set_thinking_level" && c.level === "high"), cmds().some((c) => c.type === "compact"), comp?.cancel], [true, true, true, true]);
 	await h.handlers.session_start({ reason: "resume" }, { hasUI: true, ui, sessionManager: sm(home, "sess-r") });
 

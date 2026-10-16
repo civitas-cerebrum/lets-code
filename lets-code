@@ -4568,7 +4568,11 @@ export class Child {
 	send(cmd: Record<string, unknown>): Promise<any> {
 		if (!this.alive) return Promise.resolve({ success: false, error: `${this.rec.agent} is not running` });
 		const id = `lc${++this.seq}`;
-		return new Promise((res) => { this.waiting.set(id, res); this.write({ ...cmd, id }); });
+		this.hold(true);   // an answer is due: keep it referenced until it comes
+		return new Promise((res) => {
+			this.waiting.set(id, (v: any) => { if (!this.waiting.size && !this.turn) this.hold(false); res(v); });
+			this.write({ ...cmd, id });
+		});
 	}
 	handle(line: string): void {
 		if (!line.trim()) return;
@@ -4753,6 +4757,7 @@ export function runAgent(agent: AgentDef, task: string, cwd: string, signal: Abo
 export const CONTINUED_HEAD = (agent: string) => `${agent} (a subagent the user went on with in its own session) replied:`;
 export function reportContinuation(rec: RunRecord, r: RunResult): void {
 	if (!rec.home) return;
+	if (r.stopped && !r.text.trim()) return;   // the user stopped it before it said anything: nothing to tell
 	const reg = registry() as any;
 	const reply = r.text.trim() || (r.stopped ? "(stopped by the user)" : r.stderr.trim() ? `(no reply; ${r.stderr.trim().slice(-300)})` : "(no reply)");
 	(reg.pending ??= []).push({ home: rec.home, text: `${CONTINUED_HEAD(rec.agent)}\n\n${cap(reply)}`, isError: r.exitCode !== 0, quiet: true });
@@ -4836,23 +4841,26 @@ export function orchestration(agents: AgentDef[]): string {
 // its session, /model and the thinking level are passed on to it, /compact
 // compacts its session. The TUI itself never writes to a child's file: the
 // child is that file's one writer, so the TUI opens a copy of it
-// (<run id>.view.jsonl, copied again at each refresh), and whatever pi
-// appends to the copy (a model or thinking change, a ! command's record)
-// is dropped with it.
+// (<run id>.view.jsonl, made when the session is opened), and whatever pi
+// appends to the copy (a model or thinking change, a ! command's record,
+// the messages below) stays in the copy.
 //
-// How live: pi reads a session file when it opens it, and the child writes
-// each message once it is complete. So pi's own view holds the completed
-// messages, and the message on its way (thinking, text and tool calls token
-// by token, a tool's output as it streams, steers not yet taken) is drawn
-// under them in a widget above the editor, with pi's own message and tool
-// components, from the child's event stream. Each time the child's file
-// grows, the session is opened again (at most every REFRESH_MS), so pi's
-// view catches up and the widget keeps only what is still on its way.
+// How live, and without reloading: pi reads a session file when it opens
+// it. The copy holds what the child had completed then (cut before an
+// assistant message whose tool calls have no results yet). From then on,
+// each message the child completes (its replies, tool results, the user's
+// own prompts and steers) is added to the chat in-process, as a custom
+// message drawn with pi's own message and tool components
+// (registerMessageRenderer), the way pi adds a message in the main session;
+// the session is never reopened while you look at it, so nothing jumps.
+// The message on its way (thinking, text and tool calls token by token, a
+// tool's output as it streams, steers not yet taken) is drawn below the
+// chat in a widget above the editor, as pi draws a streaming message.
 //
-// switchSession exists on a command's ctx only: the shortcut and the
-// refresh send the command (/subagents, /subagents back, /subagents
-// refresh) with pi.sendUserMessage, which pi runs as a command; an input
-// hook drops the text should it ever get further.
+// switchSession exists on a command's ctx only: the shortcut sends the
+// command (/subagents, /subagents back) with pi.sendUserMessage, which pi
+// runs as a command; an input hook drops the text should it ever get
+// further.
 //
 // Detaching: pi aborts the turn in flight before it replaces the session.
 // A subagent or expert call in that turn would stop its children, so when
@@ -4864,8 +4872,8 @@ export function orchestration(agents: AgentDef[]): string {
 export const VIEW_KEY = (process.env.LETS_CODE_SUBAGENT_KEY ?? "alt+s").trim().toLowerCase();
 const keyOn = (key = VIEW_KEY) => !!key && key !== "none";
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const REFRESH_MS = Math.max(200, Number(process.env.LETS_CODE_SUBAGENT_REFRESH_MS ?? "1000") || 1000);
 export const CUSTOM_TYPE = "lets-code-subagents";
+export const VIEW_MSG = "lets-code-subagent-message";   // a child's message added to its session's chat
 // the footer line while something runs
 export function hintText(n: number, key = VIEW_KEY): string {
 	if (!n) return "";
@@ -4878,6 +4886,30 @@ export function markerText(r: { agent: string; status: string; exitCode?: number
 	const st = r.status === "failed" ? (r.exitCode ? `failed (exit ${r.exitCode})` : "failed") : ({ running: "running", done: "done", aborted: "stopped", timeout: "timed out" } as Record<string, string>)[r.status] ?? r.status;
 	return `subagent ${r.agent} · ${st} · ${back}`;
 }
+// /subagents' argument completions: none until a letter is typed, so Enter on
+// "/subagents" or "/subagents " opens the picker and never takes a suggestion
+export const SUBCOMMANDS = ["toggle", "back", "stop"];
+export function subcommandCompletions(prefix: string): { value: string; label: string }[] | null {
+	const p = String(prefix ?? "").trimStart();
+	if (!p.trim() || /\s/.test(p.trim())) return null;
+	const out = SUBCOMMANDS.filter((a) => a.startsWith(p.trim()) && a !== p.trim()).map((a) => ({ value: a, label: a }));
+	return out.length ? out : null;
+}
+// The copy of a child's session file the TUI opens: up to (not including) an
+// assistant message whose tool calls have no results yet, so pi never draws a
+// pending call it will not hear the end of; the live part has the rest.
+export function viewLines(text: string): string[] {
+	const lines = text.split("\n").filter((l) => l.trim());
+	const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return undefined; } });
+	const results = new Set<string>();
+	let cut = lines.length;
+	for (let i = parsed.length - 1; i >= 0; i--) {
+		const m = parsed[i]?.type === "message" ? parsed[i].message : undefined;
+		if (m?.role === "toolResult" && m.toolCallId) results.add(String(m.toolCallId));
+		if (m?.role === "assistant" && Array.isArray(m.content) && m.content.some((c: any) => c?.type === "toolCall" && !results.has(String(c.id)))) cut = i;
+	}
+	return lines.slice(0, cut);
+}
 // /subagents <arg>: a number (its row in the picker, the main session is 0) or an agent name
 export function pickRun(runs: RunRecord[], arg: string, ordered: (r: RunRecord[]) => RunRecord[]): RunRecord | undefined {
 	const rs = ordered(runs); const a = arg.trim();
@@ -4889,6 +4921,8 @@ export function pickRun(runs: RunRecord[], arg: string, ordered: (r: RunRecord[]
 export function isChildSession(p: string): boolean {
 	return !!p && p.startsWith(`${runsRoot()}${sep}`) && /\.(pi|view)\.jsonl$/.test(p);
 }
+// commands that read the session itself (see the key hook in a child's session)
+export const READS_SESSION = /^\/(copy|export|share|session)(\s|$)/;
 export const viewFile = (sessionFile: string) => sessionFile.replace(/\.pi\.jsonl$/, ".view.jsonl");
 export function detachNote(names: string[]): string {
 	return `Still running in the background (the user opened a subagent's session, which ended this turn): ${names.join(", ") || "the runs of this call"}. Their reports follow in a message when they finish; do not start them again.`;
@@ -4902,14 +4936,15 @@ interface ViewState {
 	current: string;                     // the session file open now
 	viewing?: string;                    // the run whose session is open
 	loaded?: any;                        // what that session held when it opened (view.loadedOf)
-	loadedSize?: number;                 // the size of the child's file then
-	picker: boolean; lastRefresh: number; refreshTimer?: ReturnType<typeof setTimeout>;
+	added?: WeakSet<object>; addedCount?: number;   // the run's events added to the chat since
+	resubmit?: string; passOnce?: boolean;   // a command to run again once the copy is caught up
+	picker: boolean;
 	footer: boolean;
 }
 type Reg = Registry & { status?: (r?: RunRecord) => void; view?: ViewState; pending?: Pending[]; switching?: boolean; pi?: any; ui?: any };
 export function viewState(reg = registry()): ViewState {
 	const r = reg as Reg;
-	return (r.view ??= { home: "", homeId: "", current: "", picker: false, lastRefresh: 0, footer: readFooterOn() });
+	return (r.view ??= { home: "", homeId: "", current: "", picker: false, footer: readFooterOn() });
 }
 // /subagents toggle: remembered in lets-code-state.json (key subagentsFooter), as /metrics is
 export const stateFile = () => process.env.LETS_CODE_METRICS_SAVE || process.env.LETS_CODE_STATE_FILE || join(AGENT_DIR, "lets-code-state.json");
@@ -4971,11 +5006,14 @@ export function flushPending(): void {
 }
 
 const isTui = (ctx: any) => !!ctx?.hasUI && (!ctx.mode || ctx.mode === "tui");
-let view: any;   // subagent-view.ts, once loaded
-const loadView = async () => (view ??= await import(pathToFileURL(join(HERE, "subagent-view.ts")).href));
-let deps: any;
-const loadDeps = async () => { const v = await loadView(); return (deps ??= await v.piDeps()); };
-const sizeOf = (f?: string) => { try { return f ? statSync(f).size : -1; } catch { return -1; } };
+// subagent-view.ts and pi's parts, loaded once per process (on globalThis):
+// a session switch loads this module again, and the footer list and the
+// chat messages must draw from the first frame, not after an import
+const VG = Symbol.for("lets-code.subagent-view");
+const vg = () => ((globalThis as any)[VG] ??= {} as { view?: any; deps?: any });
+let view: any = vg().view, deps: any = vg().deps;
+const loadView = async () => (view ??= vg().view ??= await import(pathToFileURL(join(HERE, "subagent-view.ts")).href));
+const loadDeps = async () => { const v = await loadView(); return (deps ??= vg().deps ??= await v.piDeps()); };
 
 function setupSessions(pi: ExtensionAPI) {
 	const api = pi as any;
@@ -4996,7 +5034,7 @@ function setupSessions(pi: ExtensionAPI) {
 		if (inChild()) {
 			text = markerText(viewed());
 			const waiting = (reg.pending ?? []).filter((p) => p.home === vs.home).length;
-			if (waiting) text += ` · ${waiting} report${waiting === 1 ? "" : "s"} waiting in the main session`;
+			if (waiting) text += ` · ${waiting} report${waiting === 1 ? "" : "s"} waiting`;
 		} else if (!vs.footer) text = hintText(running);
 		if (text === lastStatus) return;
 		lastStatus = text;
@@ -5020,9 +5058,9 @@ function setupSessions(pi: ExtensionAPI) {
 		if (!r || !view || !inChild()) { try { reg.ui.setWidget("subagent-live", undefined); } catch { /* none */ } return; }
 		try {
 			reg.ui.setWidget("subagent-live", (tui: any, th: any) => {
-				liveTui = tui; transcript = new view.Transcript(deps, th?.fg ? th : theme(), tui);
+				liveTui = tui; (reg as any).tui = tui; transcript = new view.Transcript(deps, th?.fg ? th : theme(), tui);
 				return {
-					render: (w: number) => { const x = viewed(); return x ? view.liveLines(x, vs.loaded ?? view.loadedOf([]), { width: w, now: Date.now(), transcript, theme: th?.fg ? th : theme(), deps, queued: (reg as any).children?.get(x.id)?.queued }) : []; },
+					render: (w: number) => { const x = viewed(); return x ? view.liveLines(x, vs.loaded ?? view.loadedOf([]), { width: w, now: Date.now(), transcript, theme: th?.fg ? th : theme(), deps, queued: (reg as any).children?.get(x.id)?.queued, added: vs.added }) : []; },
 					invalidate: () => transcript?.clear(),
 					dispose: () => { if (liveTui === tui) liveTui = undefined; },
 				};
@@ -5031,15 +5069,40 @@ function setupSessions(pi: ExtensionAPI) {
 	};
 	// the view's command, sent from places without a command ctx
 	const command = (args: string) => { try { (reg.pi ?? pi).sendUserMessage(`/subagents${args ? ` ${args}` : ""}`, { expandPromptTemplates: true }); } catch (e) { notify(`subagents: ${e instanceof Error ? e.message : String(e)}`, "error"); } };
-	// open the session again once the child's file has grown
-	const maybeRefresh = () => {
+	// the run's completed messages, added to the chat as they come (in order:
+	// up to the first one still on its way, which the widget draws)
+	const addDone = () => {
 		const r = viewed();
-		if (!r?.sessionFile || !inChild() || vs.picker || vs.refreshTimer || sizeOf(r.sessionFile) === vs.loadedSize) return;
-		const wait = Math.max(50, vs.lastRefresh + REFRESH_MS - Date.now());
-		vs.refreshTimer = setTimeout(() => { vs.refreshTimer = undefined; const x = viewed(); if (x?.sessionFile && inChild() && !vs.picker && sizeOf(x.sessionFile) !== vs.loadedSize) command("refresh"); }, wait);
-		(vs.refreshTimer as any).unref?.();
+		if (!r || !inChild() || !view || !vs.loaded || !vs.added) return;
+		let n = 0;
+		for (const ev of view.tailEvents(r, vs.loaded)) {
+			if (vs.added.has(ev)) continue;
+			if ((ev.t === "assistant" || ev.t === "tool") && !ev.done) break;
+			vs.added.add(ev); n++; vs.addedCount = (vs.addedCount ?? 0) + 1;
+			try { (reg.pi ?? pi).sendMessage({ customType: VIEW_MSG, content: "", display: true, details: { ev: JSON.parse(JSON.stringify(ev)), cwd: r.cwd } }, { triggerTurn: false }); } catch { /* a stale pi: the next session_start adds it */ vs.added.delete(ev); break; }
+		}
+		if (n) repaint();
 	};
-	const onRuns = () => { status(); repaint(); maybeRefresh(); if (!inChild()) flushPending(); };
+	const onRuns = () => { addDone(); status(); repaint(); if (!inChild()) flushPending(); };
+	// a child's message in its session's chat: pi's own components, one spacer as pi puts between messages
+	api.registerMessageRenderer?.(VIEW_MSG, (message: any, opts: any, th: any) => {
+		const ev = message?.details?.ev;
+		if (!ev || !view) return undefined;
+		const tr = new view.Transcript(deps ?? view.plainDeps(), th?.fg ? th : theme(), { requestRender: () => repaint() });
+		const flags = { expanded: !!opts?.expanded, thinking: false };
+		let memo: { w: number; lines: string[] } | undefined;
+		return {
+			render: (w: number) => {
+				if (memo?.w === w) return memo.lines;
+				const lines = tr.event(ev, { cwd: message.details.cwd }, w, flags);
+				// the component's own spacer goes (pi's message box puts one); its padding stays
+				let i = 0; while (i < lines.length && lines[i] === "") i++;
+				memo = { w, lines: lines.slice(i) };
+				return memo.lines;
+			},
+			invalidate: () => { memo = undefined; tr.clear(); },
+		};
+	});
 	// one listener per process: a reload or a switch loads this module again and replaces the old one's
 	if (reg.status) reg.listeners.delete(reg.status);
 	reg.status = onRuns; reg.listeners.add(onRuns);
@@ -5057,38 +5120,83 @@ function setupSessions(pi: ExtensionAPI) {
 			vs.viewing = r?.id ?? basename(file).replace(/\.(pi|view)\.jsonl$/, "");
 		} else {
 			vs.home = file; vs.homeId = String(sm?.getSessionId?.() ?? "");
-			vs.viewing = undefined; vs.loadedSize = undefined;
+			vs.viewing = undefined; vs.added = undefined;
 			useSession(vs.homeId);
 		}
 		if (clock) { clearInterval(clock); clock = undefined; }
 		if (isTui(ctx)) {
 			try { await loadDeps(); } catch { /* the view's parts did not load: no picker, no live part */ }
 			if (view) vs.loaded = view.loadedOf(isChildSession(file) ? (sm?.getEntries?.() ?? []) : []);
+			if (isChildSession(file)) { vs.added = new WeakSet(); vs.addedCount = 0; }
 			applyFooter(); applyLive();
 			// Esc in a child's session aborts the child's turn, as Esc does in the main session
 			if (isChildSession(file) && typeof ctx.ui.onTerminalInput === "function") {
 				try {
+					const key = (data: string, k: string) => (deps?.matchesKey ?? ((d: string, x: string) => (x === "escape" ? d === "\x1b" : d === "\r")))(data, k);
 					ctx.ui.onTerminalInput((data: string) => {
-						if (!inChild() || vs.picker || !(deps?.matchesKey ?? ((d: string) => d === "\x1b"))(data, "escape")) return undefined;
-						const r = viewed();
-						if (r?.status !== "running") return undefined;
-						childOf(r).abort(true);
-						notify(`Stopping ${r.agent}'s turn.`, "warning");
-						return { consume: true };
+						if (!inChild() || vs.picker) return undefined;
+						if (key(data, "escape")) {
+							const r = viewed();
+							if (r?.status !== "running") return undefined;
+							childOf(r).abort(true);   // as Esc in the main session: no message, the turn shows as aborted
+							return { consume: true };
+						}
+						if (!key(data, "enter")) return undefined;
+						if (vs.passOnce) { vs.passOnce = false; return undefined; }   // the held command, sent again
+						const text = String(reg.ui?.getEditorText?.() ?? "").trim();
+						// /name names the child's session (pi would name only the copy)
+						const nm = /^\/name(?:\s+([\s\S]*))?$/.exec(text);
+						if (nm && nm[1]?.trim()) {
+							const r = viewed();
+							if (r) { try { reg.ui.setEditorText(""); } catch { /* keep going */ } void forward({ type: "set_session_name", name: nm[1].trim() }, `session named "${nm[1].trim()}"`); return { consume: true }; }
+						}
+						// commands that read the session itself (/copy, /export, ...) see the
+						// messages added since it opened only once the copy is made again: a
+						// command is the user acting, so the copy is made again first and the
+						// command then runs on it
+						// /resume lists the sessions of the session that is open: from a
+						// child's, that would be the runs; it opens in the main session
+						if (/^\/resume$/.test(text) && !vs.resubmit) {
+							try { reg.ui.setEditorText(""); } catch { /* keep going */ }
+							vs.resubmit = text; command("back");
+							return { consume: true };
+						}
+						if (READS_SESSION.test(text) && (vs.addedCount ?? 0) > 0 && !vs.resubmit) {
+							vs.resubmit = text;
+							command("refresh");
+							return { consume: true };
+						}
+						return undefined;
 					});
 				} catch { /* no key hook here */ }
 			}
-			// the clocks of running runs move once a second; a child's file is watched
-			clock = setInterval(() => { if (reg.runs.some((x) => x.status === "running") && (vs.footer || inChild())) repaint(); if (inChild()) maybeRefresh(); }, 1000);
+			// a command held for this session (the copy caught up, or the main session open) runs now, as typed
+			if (vs.resubmit) {
+				const again = vs.resubmit; vs.resubmit = undefined;
+				setTimeout(() => { try { reg.ui?.setEditorText?.(again); vs.passOnce = true; (reg as any).tui?.handleTerminalInput?.("\r"); } catch { /* the user can press enter */ } finally { vs.passOnce = false; } }, 30);
+			}
+			// the clocks of running runs move once a second
+			clock = setInterval(() => { if (reg.runs.some((x) => x.status === "running") && (vs.footer || inChild())) repaint(); }, 1000);
 			(clock as any).unref?.();
-			maybeRefresh();
+			addDone();
 		}
 		status();
 		if (!isChildSession(file)) setTimeout(flushPending, 50);
 	});
+	// /new in a child's session starts a new main session, as in the main
+	// session; /fork and /clone (and /tree's branching) would fork the copy
+	pi.on("session_before_switch", (event: any) => {
+		if (!inChild() || event?.reason !== "new") return undefined;
+		command("new");
+		return { cancel: true };
+	});
+	pi.on("session_before_fork", () => {
+		if (!inChild()) return undefined;
+		notify("/fork and /clone work on the main session: alt+s or /subagents back first.", "warning");
+		return { cancel: true };
+	});
 	pi.on("session_shutdown", (event: any) => {
 		if (clock) { clearInterval(clock); clock = undefined; }
-		if (vs.refreshTimer) { clearTimeout(vs.refreshTimer); vs.refreshTimer = undefined; }
 		// the main session ends (quit, /new, /resume elsewhere): its children go; our own switches and /reload keep them
 		if (!reg.switching && event?.reason !== "reload") killChildren();
 	});
@@ -5110,13 +5218,15 @@ function setupSessions(pi: ExtensionAPI) {
 		return { action: "handled" };
 	});
 	// ! and !! in a child's session run in the child (and land in its session);
-	// pi records what this returns in the copy it has open, which the next refresh replaces
-	pi.on("user_bash", (event: any) => {
+	// pi draws the result as for any ! command and records it in its copy
+	pi.on("user_bash", async (event: any) => {
 		if (!inChild()) return undefined;
 		const r = viewed(), c = r && childOf(r);
 		if (!r || !c || !(c.alive || c.start())) return { result: { output: `${r?.agent ?? "the subagent"} could not start: ${c?.stderr ?? ""}`, exitCode: 1, cancelled: false, truncated: false } };
-		void c.send({ type: "bash", command: String(event?.command ?? ""), excludeFromContext: !!event?.excludeFromContext }).then(() => { maybeRefresh(); });
-		return { result: { output: `(runs in ${r.agent}'s own process; its output shows in its session in a moment)`, exitCode: 0, cancelled: false, truncated: false } };
+		const res = await c.send({ type: "bash", command: String(event?.command ?? ""), excludeFromContext: !!event?.excludeFromContext });
+		const d = res?.data ?? {};
+		if (!res?.success) return { result: { output: String(res?.error ?? "failed"), exitCode: 1, cancelled: false, truncated: false } };
+		return { result: { output: String(d.output ?? ""), exitCode: typeof d.exitCode === "number" ? d.exitCode : 0, cancelled: !!d.cancelled, truncated: !!d.truncated, fullOutputPath: d.fullOutputPath } };
 	});
 	// /model, the thinking level and /compact in a child's session act on the child
 	const forward = async (cmd: Record<string, unknown>, what: string) => {
@@ -5125,7 +5235,6 @@ function setupSessions(pi: ExtensionAPI) {
 		if (!c.alive && !c.start()) { notify(`${r.agent} could not start: ${c.stderr}`, "error"); return; }
 		const res = await c.send(cmd);
 		notify(res?.success ? `${r.agent}: ${what}` : `${r.agent}: ${res?.error ?? `${what} failed`}`, res?.success ? "info" : "error");
-		maybeRefresh();
 	};
 	pi.on("model_select", (event: any) => {
 		if (!inChild() || !event?.model) return;
@@ -5142,15 +5251,14 @@ function setupSessions(pi: ExtensionAPI) {
 	});
 
 	// switch the TUI to a session file; a call in flight detaches (see above)
-	const switchTo = async (ctx: any, file: string, refresh = false): Promise<boolean> => {
+	const switchTo = async (ctx: any, file: string, refresh = false, then?: (ctx: any) => unknown): Promise<boolean> => {
 		if (!file) return false;
 		if (file === vs.current && !refresh) return true;
 		if (!existsSync(file)) { notify(isChildSession(file) ? "That run has not written its session yet; try again in a moment." : "The main session has no file yet.", "warning"); return false; }
 		if (typeof ctx?.switchSession !== "function") { notify("Switching needs the /subagents command.", "warning"); return false; }
-		if (refresh) vs.lastRefresh = Date.now();
 		reg.switching = true;
 		try {
-			const r = await ctx.switchSession(file, { withSession: async () => { reg.switching = false; } });
+			const r = await ctx.switchSession(file, { withSession: async (n: any) => { reg.switching = false; await then?.(n); } });
 			if (r?.cancelled) { notify("Switch cancelled.", "warning"); return false; }
 			return true;
 		} catch (e) {
@@ -5162,7 +5270,7 @@ function setupSessions(pi: ExtensionAPI) {
 	const switchToRun = async (ctx: any, r: RunRecord, refresh = false) => {
 		if (!r.sessionFile || !existsSync(r.sessionFile)) { notify("That run has no session file (it predates this version).", "warning"); return; }
 		const copy = viewFile(r.sessionFile);
-		try { const size = sizeOf(r.sessionFile); copyFileSync(r.sessionFile, copy); chmodSync(copy, 0o600); vs.loadedSize = size; }
+		try { writeFileSync(copy, viewLines(readFileSync(r.sessionFile, "utf8")).join("\n") + "\n", { mode: 0o600 }); chmodSync(copy, 0o600); }
 		catch (e) { notify(`Could not open that session: ${e instanceof Error ? e.message : String(e)}`, "error"); return; }
 		await switchTo(ctx, copy, refresh);
 	};
@@ -5172,8 +5280,8 @@ function setupSessions(pi: ExtensionAPI) {
 		return rs.map((r: RunRecord, i: number) => `${i + 1}. ${view?.MARK?.[r.status] ?? r.status} ${r.agent} — ${view ? view.statusLabel(r) : r.status}, ${view ? view.elapsed(view.runMs(r, Date.now())) : ""}, ↑${r.input} ↓${r.output}: ${view ? view.summary(r.task).slice(0, 80) : r.task.slice(0, 80)}`).join("\n");
 	};
 	api.registerCommand?.("subagents", {
-		description: "Subagent sessions: /subagents picks one to switch into; back | <n | agent> | stop <n | agent> | toggle (footer list)",
-		getArgumentCompletions: (prefix: string) => ["back", "toggle", "stop"].filter((a) => a.startsWith(prefix.trim()) && a !== prefix.trim()).map((a) => ({ value: a, label: a })),
+		description: "Subagent sessions: /subagents opens the picker; /subagents toggle: the footer list; back; stop <n|agent>; <n|agent> switches",
+		getArgumentCompletions: (prefix: string) => subcommandCompletions(prefix),
 		handler: async (args: string, ctx: any) => {
 			const a = String(args ?? "").trim();
 			try { await loadDeps(); } catch { /* plain */ }
@@ -5198,6 +5306,11 @@ function setupSessions(pi: ExtensionAPI) {
 				return;
 			}
 			if (a === "refresh") { const r = viewed(); if (inChild() && r) await switchToRun(ctx, r, true); return; }
+			if (a === "new") {   // /new typed in a child's session: a new main session
+				if (!inChild()) return;
+				await switchTo(ctx, vs.home, false, async (n: any) => { await n?.newSession?.(); });
+				return;
+			}
 			if (a) {
 				const r = pickRun(reg.runs, a, view?.order ?? ((x: RunRecord[]) => x));
 				if (!r) return say(`No run "${a}". /subagents lists them.`, "warning");
@@ -5214,7 +5327,7 @@ function setupSessions(pi: ExtensionAPI) {
 			} catch (e) {
 				return say(`subagents: ${e instanceof Error ? e.message : String(e)}`, "error");
 			} finally { vs.picker = false; }
-			if (!row) { maybeRefresh(); return; }
+			if (!row) return;
 			if (row.kind === "main") { if (inChild()) await switchTo(ctx, vs.home); return; }
 			const r = reg.runs.find((x) => x.id === row.id);
 			if (r && r.id !== vs.viewing) await switchToRun(ctx, r);
@@ -5720,12 +5833,16 @@ export class Transcript {
 
 // The live widget of a run's session: the part on its way, then one line
 // while the run works (its clock and tokens: the session file has neither).
-export function liveLines(r: Run, loaded: Loaded, o: { width: number; now: number; transcript?: Transcript; theme?: Theme; deps?: Deps; flags?: Flags; queued?: string[] }): string[] {
+export function liveLines(r: Run, loaded: Loaded, o: { width: number; now: number; transcript?: Transcript; theme?: Theme; deps?: Deps; flags?: Flags; queued?: string[]; added?: { has(e: object): boolean } }): string[] {
 	if (!r) return [];
 	const th = o.theme ?? ident, deps = o.deps ?? plainDeps(), W = Math.max(20, o.width);
-	const flags = o.flags ?? { expanded: false, thinking: true };
-	const evs = tailEvents(r, loaded);
+	const flags = o.flags ?? { expanded: false, thinking: false };   // thinking collapsed, as pi shows it
+	// what is already in the chat (added there as it completed) is not drawn again
+	const evs = tailEvents(r, loaded).filter((e) => !o.added?.has(e));
 	const out = o.transcript ? o.transcript.lines(evs, r, W, flags) : evs.flatMap((ev, i) => [...(i ? [""] : []), ...plainEvent(ev, W, flags, th, deps)]);
+	// pi puts a spacer above the widgets, as it puts one above each chat message:
+	// the first message's own spacer goes, so moving it to the chat moves nothing
+	while (out.length && out[0] === "") out.shift();
 	// steers sent and not yet taken (pi shows the main session's the same way, under the chat)
 	for (const q of o.queued ?? []) out.push(...plainWrap(`Steering: ${q}`, W - 1).map((l) => th.fg("dim", l)));
 	if (r.status === "running") out.push("", cutTo(`${th.fg("accent", "●")} ${th.fg("dim", `${r.agent} working · ${elapsed(runMs(r, o.now))} · ${io(r)} · live`)}`, W, deps));

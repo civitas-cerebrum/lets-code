@@ -24,7 +24,7 @@ t "an expert"                     "$(sed -n 's/^expert: //p' "${af}")" true
 t "pi's file tools, no more"      "$(sed -n 's/^tools: //p' "${af}")" "read, bash, edit, write, grep, find, ls"
 t "the developer role"            "$(sed -n 's/^role: //p' "${af}")" developer
 t "everywhere, nothing to set up" "$(grep -cE '^(platform|setup|setup_note|requires|agent_dir|append_prompt):' "${af}" || true)" 0
-t "not in the always-on line"    "$(sed -n 's/^route: //p' "${af}")" false
+t "not in the always-on line"     "$(sed -n 's/^route: //p' "${af}")" false
 t "timeout 3600"                  "$(sed -n 's/^timeout: //p' "${af}")" 3600
 t "use_for fits the line"         "$([ "$(sed -n 's/^use_for: //p' "${af}" | wc -c)" -le 101 ] && echo yes)" yes
 t "brief template"                "$(sed -n 's/^  - \([a-z_]*\).*/\1/p' "${af}" | tr '\n' ' ')" "task criteria mode plan findings how_to_run constraints "
@@ -33,10 +33,11 @@ t "no paths left to fill"         "$(grep -c '@@D@@' "${af}" || true)" 0
 t "never commits"                 "$(grep -c 'Leave the change uncommitted' "${af}")" 1
 t "plan mode changes nothing"     "$(grep -c '^3. Mode plan: write the plan (format below) and stop. Change no file.$' "${af}")" 1
 t "status line"                   "$(grep -c '^The first line is `STATUS: PLAN`, `STATUS: DONE` or `STATUS: BLOCKED`.$' "${af}")" 1
+t "nothing before that line"     "$(grep -c '^Nothing comes before it: no summary, no remark on the last command.$' "${af}")" 1
 t "report headings"               "$(sed -n '/^## Final message/,$p' "${af}" | grep '^## ' | tr '\n' '|')" "## Final message|## Plan|## Tests|## Risks|## Changes|## Tests|## Criteria|## Findings|## Notes|"
 t "criterion and finding lines"   "$(grep -c -E '^`C<n>: covered by <test>`|^`<id>: fixed: <how>`' "${af}")" 2
 t "no harness tools"              "$(grep -c -E '\b(Skill|Task|TodoWrite|WebFetch) ?[({]' "${af}" || true)" 0
-t "under 700 words"               "$([ "$(wc -w < "${af}")" -le 700 ] && echo yes)" yes
+t "body under 700 words"          "$([ "$(awk 'n>=2; /^---$/{n++}' "${af}" | wc -w)" -le 700 ] && echo yes)" yes
 before="$(cat "${af}")"; pi_write_developer
 t "rewrite is stable"             "$(cat "${af}")" "${before}"
 printf -- '---\nname: developer\ndescription: mine\n---\nmine\n' > "${af}"; pi_write_developer

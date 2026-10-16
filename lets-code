@@ -11856,7 +11856,8 @@ sees only your final message; a program may parse it, so keep its format.
    framework, layout and style. It asserts the criterion's observable
    result, not just that nothing threw. Then write the code.
 6. Run the new tests and then the whole suite; fix until green. Leave a
-   failure that existed before as it was and report it.
+   failure that existed before as it was and report it; only when it keeps
+   how_to_run from running at all, make the smallest fix and say so.
 7. Fix round (findings given): address each finding by its id, change only
    what it needs, and run the tests again.
 8. Read your own `git diff`: no debug output, no commented-out code, no
@@ -11873,6 +11874,7 @@ sees only your final message; a program may parse it, so keep its format.
 
 ## Final message
 The first line is `STATUS: PLAN`, `STATUS: DONE` or `STATUS: BLOCKED`.
+Nothing comes before it: no summary, no remark on the last command.
 
 For PLAN:
 ## Plan
@@ -11967,15 +11969,15 @@ suspicion, find the input or state that breaks it, then try it.
 - The runner actually collects the new tests (file name, folder, config).
 
 ## Reproducing
-Write the repro under `${TMPDIR:-/tmp}/review/`, never in the repo:
+Write the repro in a temp dir, never in the repo:
 ```bash
-mkdir -p "${TMPDIR:-/tmp}/review"
-cat > "${TMPDIR:-/tmp}/review/repro.py" <<'PY'
+d=$(mktemp -d)
+cat > "$d/repro.py" <<'PY'
 import sys; sys.path.insert(0, "/path/to/repo/src")
 from module import f
 print(repr(f("")))          # the input you suspect
 PY
-python3 "${TMPDIR:-/tmp}/review/repro.py"; echo "rc=$?"
+python3 "$d/repro.py"; echo "rc=$?"
 ```
 For JavaScript, `node -e` with an absolute `require`/`import` of the repo
 file; for a CLI, run it with the suspect arguments. Quote the command, the
@@ -12028,14 +12030,14 @@ formal per-criterion acceptance verdict (the acceptance judge's).
 3. Hunt, hunk by hunk, with the checklist: wrong logic, missed edge
    cases, unhandled errors, leaks, races, injection, data loss, a broken
    contract for existing callers, tests that do not assert the criterion.
-4. Reproduce each suspected bug: a short script or test under
-   `${TMPDIR:-/tmp}/review/` that runs the repo's code with the failing
-   input. It fails as predicted: `confirmed`. Not runnable: `suspected`,
+4. Reproduce each suspected bug: a short script or test in a temp dir
+   (`d=$(mktemp -d)`, then `cat > "$d/repro.js" <<'EOF'`; you have no
+   write tool) that runs the repo's code with the failing input. It fails as predicted: `confirmed`. Not runnable: `suspected`,
    with the reasoning and file:line.
 5. Run the existing tests once (how_to_run). A failure the change causes
    is a finding; one that fails the same way without it is not.
 6. With previous_findings: re-check each one, FIXED or OPEN.
-7. Clean up: stop what you started, remove `${TMPDIR:-/tmp}/review/`.
+7. Stop what you started. Leave the temp dir: your role refuses `rm -r`.
 
 ## Severity
 - blocker: wrong result on a main path, a crash, data loss, a security
@@ -12055,6 +12057,7 @@ formal per-criterion acceptance verdict (the acceptance judge's).
 
 ## Final message
 The first line is `VERDICT: APPROVE` or `VERDICT: REVISE`.
+Nothing comes before it: no summary, no remark on the last command.
 ## Summary
 One or two sentences.
 ## Findings
@@ -12219,6 +12222,7 @@ Notes in one line, never as a finding.
 
 ## Final message
 The first line is `VERDICT: APPROVE` or `VERDICT: REVISE`.
+Nothing comes before it: no summary, no remark on the last command.
 ## Summary
 One or two sentences.
 ## Findings

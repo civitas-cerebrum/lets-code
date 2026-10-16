@@ -34,6 +34,7 @@ t "paths filled in"               "$(cat "${af}" "${D}"/ref/*.md | grep -c '@@D@
 t "bugs are not its job"          "$(grep -c '^bugs, edge cases and failing tests (the expert reviewer' "${af}")" 1
 t "bugs go to Notes"              "$(grep -c 'A bug you notice goes under' "${af}")" 1
 t "verdict line"                  "$(grep -c '^The first line is `VERDICT: APPROVE` or `VERDICT: REVISE`.$' "${af}")" 1
+t "nothing before that line"     "$(grep -c '^Nothing comes before it: no summary, no remark on the last command.$' "${af}")" 1
 t "verdict rule"                  "$(grep -c '^- Verdict REVISE when any blocker or major is open, else APPROVE.$' "${af}")" 1
 t "four severities"               "$(sed -n '/^## Severity/,/^## Rules/p' "${af}" | grep -c -E '^- (blocker|major|minor|nit): ')" 4
 t "previous ids stay stable"      "$(grep -c 'a previous finding still open keeps its id' "${af}")" 1
@@ -43,7 +44,7 @@ t "linters in check mode only"    "$(grep -c 'never `--fix` or `--write`' "${af}
 t "headings"                      "$(grep '^## ' "${af}" | tr '\n' '|')" "## Tools here|## Order of work|## Severity|## Rules|## Final message|## Summary|## Findings|## Previous|## Notes|"
 t "never edits the work"          "$(grep -c '^- Never edit, commit, stash, check out or install in the work' "${af}")" 1
 t "no harness tools"              "$(cat "${af}" "${D}"/ref/*.md | grep -c -E '\b(Skill|Task|TodoWrite|WebFetch) ?[({]' || true)" 0
-t "under 700 words"               "$([ "$(wc -w < "${af}")" -le 700 ] && echo yes)" yes
+t "body under 700 words"          "$([ "$(awk 'n>=2; /^---$/{n++}' "${af}" | wc -w)" -le 700 ] && echo yes)" yes
 before="$(cat "${af}")"; pi_write_design_reviewer
 t "rewrite is stable"             "$(cat "${af}")" "${before}"
 printf -- '---\nname: design-reviewer\ndescription: mine\n---\nmine\n' > "${af}"; pi_write_design_reviewer

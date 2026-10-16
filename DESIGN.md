@@ -556,6 +556,19 @@ characters, under the 900 where entries shrink to keywords; no dispatch
 rule. The bodies (about 750 to 820 tokens each) and the two checklists
 (730 and 870) reach only the child.
 
+A live run of each on the toy repo (thinking low, `--mandate`): the expert
+reviewer confirmed both seeded bugs (31 days instead of 30, rounding to
+nearest instead of down) as blockers with a reproduction each, plus the
+missing tests, and said REVISE; the design reviewer flagged the inlined
+discount table against the plan's module layout and the missing test
+file, and passed both bugs on under Notes; the developer followed the plan
+(a new module, one test per criterion, 5 of 5 passing), left the change
+uncommitted and reported each criterion's test. The first line came first
+in two of three runs once the prompt said nothing may precede it; the
+third put one sentence before `VERDICT:`, and finding lines come wrapped
+in backticks, so the engine looks for the first `^STATUS:` / `^VERDICT:`
+line and strips backticks rather than trusting the first line.
+
 **Claude Code adapter.** Automatic: the launcher switches it on only where
 the project's `.claude` (up to the git root) has hooks or workflow scripts,
 the parts that need the adapter to work at all; skills and commands alone

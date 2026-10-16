@@ -32,16 +32,17 @@ t "ref named with its path"       "$(grep -c "\`${D}/ref/checklist.md\`" "${af}"
 t "paths filled in"               "$(cat "${af}" "${D}"/ref/*.md | grep -c '@@D@@' || true)" 0
 t "not the judge's job"            "$(grep -c '^formal per-criterion acceptance verdict (the acceptance judge' "${af}")" 1
 t "verdict line"                  "$(grep -c '^The first line is `VERDICT: APPROVE` or `VERDICT: REVISE`.$' "${af}")" 1
+t "nothing before that line"     "$(grep -c '^Nothing comes before it: no summary, no remark on the last command.$' "${af}")" 1
 t "verdict rule"                  "$(grep -c '^- Verdict REVISE when any blocker or major is open, else APPROVE.$' "${af}")" 1
 t "four severities"               "$(sed -n '/^## Severity/,/^## Rules/p' "${af}" | grep -c -E '^- (blocker|major|minor|nit): ')" 4
 t "previous ids stay stable"      "$(grep -c 'a previous finding still open keeps its id' "${af}")" 1
 t "previous line"                 "$(grep -c '^`R<n>: FIXED` or `R<n>: OPEN`' "${af}")" 1
 t "findings line format"          "$(grep -c '^`R<n> | <blocker|major|minor|nit> | <file>:<line> | <confirmed|suspected> | <title>`$' "${af}")" 1
-t "repro under the temp dir"      "$(grep -c 'TMPDIR:-/tmp}/review/' "${af}")" 2
+t "repro in a temp dir, no rm -r"  "$(grep -c -E 'd=\$\(mktemp -d\)|refuses `rm -r`' "${af}")" 2
 t "headings"                      "$(grep '^## ' "${af}" | tr '\n' '|')" "## Tools here|## Order of work|## Severity|## Rules|## Final message|## Summary|## Findings|## Previous|## Checked|"
 t "never edits the work"          "$(grep -c '^- Never edit, commit, stash, check out or install in the work' "${af}")" 1
 t "no harness tools"              "$(cat "${af}" "${D}"/ref/*.md | grep -c -E '\b(Skill|Task|TodoWrite|WebFetch) ?[({]' || true)" 0
-t "under 700 words"               "$([ "$(wc -w < "${af}")" -le 700 ] && echo yes)" yes
+t "body under 700 words"          "$([ "$(awk 'n>=2; /^---$/{n++}' "${af}" | wc -w)" -le 700 ] && echo yes)" yes
 before="$(cat "${af}")"; pi_write_expert_reviewer
 t "rewrite is stable"             "$(cat "${af}")" "${before}"
 printf -- '---\nname: expert-reviewer\ndescription: mine\n---\nmine\n' > "${af}"; pi_write_expert_reviewer

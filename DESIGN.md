@@ -171,12 +171,19 @@ child registers no tool, so it pays nothing for it); 50 KB output cap.
 **Subagent sessions (`/subagents`).** Each child writes a real pi session
 file (`--session`, created empty and 0600 first; pi writes its header into
 an empty file) under `lets-code-runs/<session>/`, outside pi's session
-store, so `/resume` and `-c` never list it. The picker (`ctx.ui.custom` in
-place of the editor) and `/subagents <n|name>` switch the TUI into it with
-the command ctx's `switchSession`, as `/resume` does, so pi itself draws
-it; `/subagents back` (or the key) switches back. The shortcut ctx has no
-`switchSession`, so the key sends the command with `pi.sendUserMessage(...,
-{ expandPromptTemplates: true })`, which pi runs as a command; an `input`
+store, so `/resume` and `-c` never list it. The footer navigator and
+`/subagents <n|name>` switch the TUI into it with the command ctx's
+`switchSession`, as `/resume` does, so pi itself draws it. The navigator
+is the footer list (a block the footer module draws, or a widget below
+the editor without it): `◂ main` and the runs. A terminal input hook
+(`onTerminalInput`) gives it the keys on alt+s and while it has them takes
+↑ ↓ enter x esc; any other key gives them back and goes to the editor. It
+acts only while pi's editor is the focused component, so a selector or a
+dialog keeps its keys. The list has the same height with and without the
+keys (its last line is the keys line either way). The hook has no
+`switchSession`, so a switch sends the command (`/subagents back`,
+`/subagents id:<run>`) with `pi.sendUserMessage(..., {
+expandPromptTemplates: true })`, which pi runs as a command; an `input`
 hook drops the text should it ever reach the model.
 
 Children are interactive: each is a pi in `--mode rpc` (the `Child`
@@ -250,10 +257,23 @@ copy, pi would list the runs dir), `/new` is cancelled in
 `session_before_switch` and a new main session started instead,
 `/fork`/`/clone` are cancelled in `session_before_fork` with a note. A
 mandate `/mode` acts on the main session: children register no mode
-commands, their role is fixed. `/subagents` alone always opens the picker:
+commands, their role is fixed. `/subagents` alone always opens the navigator:
 its argument completions appear only once a letter is typed (pi 0.87 takes
 Enter for a highlighted completion, which turned `/subagents ` into a
 subcommand).
+
+pi's keys: pi applies its toggles to the chat's components (Ctrl+O calls
+`setExpanded` on every expandable message, which pi's custom message
+boxes pass to the renderer; Ctrl+T calls `setHideThinkingBlock` only on its
+`AssistantMessageComponent`s), so the child's added messages and the live
+part read the state themselves: tool output from `ui.getToolsExpanded()`
+and pi's per-message expanded flag, hidden thinking from pi's setting
+(`pi.getSettings()` on pi 1.0, `settings.json` on 0.87, and the toggle
+key itself so the change shows at once). Keys whose effect is the child's
+go to the child: Esc (`abort`), the follow-up key (the next prompt is sent
+as `followUp`), the dequeue key (`clear_queue`, back into the editor),
+copy (the view catches up first). The bindings are read from
+`<agent dir>/keybindings.json` over pi's defaults.
 
 One writer: the child process owns its session file, and pi appends to
 whatever session it has open (a model or thinking change, a `!` record),

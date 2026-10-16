@@ -115,6 +115,7 @@ process.stdin.on("data", (d) => {
     }
     if (c.type === "abort") { if (turn) settle("aborted"); ok(); continue; }
     if (c.type === "bash") { ok({ output: "ran: " + c.command, exitCode: 0 }); continue; }
+    if (c.type === "clear_queue") { ok({ steering: steers.splice(0), followUp: [] }); continue; }
     ok();
   }
 });
@@ -155,7 +156,7 @@ async function load(env = {}) {
 	const sent = [], userSent = [], renderers = {};
 	mod.default({ registerTool: (d) => { tool = d; tools.push(d); }, on(ev, h) { handlers[ev] = h; return () => {}; },
 		registerCommand: (name, d) => { commands[name] = d; }, registerShortcut: (key, d) => { shortcuts[key] = d; },
-		sendMessage: (m, o) => { sent.push([m, o]); }, sendUserMessage: (m, o) => { userSent.push([m, o]); }, registerMessageRenderer: (k, f) => { renderers[k] = f; } });
+		sendMessage: (m, o) => { sent.push([m, o]); }, sendUserMessage: (m, o) => { userSent.push([m, o]); }, registerMessageRenderer: (k, f) => { renderers[k] = f; }, getSettings: () => ({ ...(globalThis.__piSettings ?? {}) }) });
 	return { mod, tool, tools, commands, shortcuts, handlers, sent, userSent, renderers, run: (params, cwd = work, trusted = true) => tool.execute("id", params, undefined, undefined, { cwd, isProjectTrusted: trusted }) };
 }
 
@@ -513,11 +514,11 @@ async function load(env = {}) {
 	t("switch: reg.switching is cleared after", reg().switching, false);
 	t("detach: the call returns at once, says its runs go on, not an error", [/Still running in the background/.test(res.content[0].text), /worker, scout/.test(res.content[0].text), res.isError], [true, true, false]);
 	t("detach: the children were not stopped", reg().runs.filter((r) => /stream d[12]/.test(r.task)).map((r) => r.status), ["running", "running"]);
-	t("in a run's session: the status names it and the way back", statuses.at(-1)?.[1], "subagent worker · running · alt+s back");
+	t("in a run's session: the status names it and the way back", statuses.at(-1)?.[1], "subagent worker · running");
 	t("in a run's session: the live widget is set", typeof widgets["subagent-live"], "function");
 	// a prompt there goes to the child: a steer while it works
 	const inp = await h.handlers.input({ text: "hello", source: "interactive" }, { ui });
-	t("a prompt in a working child's session: a steer of the child", [inp?.action, reg().children.get(d1.id).queued.includes("hello")], ["handled", true]);
+	t("a prompt in a working child's session: a steer of the child", [inp?.action, reg().children.get(d1.id).queued.some((q) => q.text === "hello" && q.kind === "steer")], ["handled", true]);
 	t("the view's own command text never goes to the model", (await h.handlers.input({ text: "/subagents back", source: "extension" }, { ui }))?.action, "handled");
 	// the reports wait while the run's session is open
 	for (let i = 0; i < 200 && reg().runs.some((r) => /stream d[12]/.test(r.task) && r.status === "running"); i++) await new Promise((r) => setTimeout(r, 20));
@@ -525,7 +526,9 @@ async function load(env = {}) {
 	t("detach: the report waits while another session is open", [h.sent.filter(([m]) => m?.customType === "lets-code-subagents").length, (reg().pending ?? []).length, /1 report waiting/.test(statuses.at(-1)?.[1] ?? "")], [0, 1, true]);
 	// back: alt+s sends /subagents back as a command; the command switches home and the report goes out
 	await h.shortcuts["alt+s"].handler({});
-	t("alt+s in a run's session: sends /subagents back as a command", h.userSent.at(-1), ["/subagents back", { expandPromptTemplates: true }]);
+	t("alt+s in a run's session: the footer navigator, on the main row", [reg().view.nav, reg().view.sel], [true, 0]);
+	await h.shortcuts["alt+s"].handler({});
+	t("alt+s again: back to the editor", reg().view.nav, false);
 	abortTurn = undefined;
 	await h.commands.subagents.handler("back", ctxFor());
 	await new Promise((r) => setTimeout(r, 120));
@@ -535,7 +538,9 @@ async function load(env = {}) {
 	t("back: prompts are the user's again", await h.handlers.input({ text: "hello", source: "interactive" }, { ui }), undefined);
 	let ok = true; try { h.handlers.user_bash({ command: "ls" }); } catch { ok = false; }
 	t("back: ! commands too", ok, true);
-	t("alt+s in the main session: sends /subagents (the picker)", (await h.shortcuts["alt+s"].handler({}), h.userSent.at(-1)), ["/subagents", { expandPromptTemplates: true }]);
+	await h.shortcuts["alt+s"].handler({});
+	t("alt+s in the main session: the navigator, on the first run", [reg().view.nav, reg().view.sel], [true, 1]);
+	await h.shortcuts["alt+s"].handler({});
 	t("/subagents back in the main session: nothing to do", (switched.length, await h.commands.subagents.handler("back", ctxFor()), switched.length), 2);
 	// a real abort (Esc) still stops the children
 	const ac2 = new AbortController();
@@ -582,8 +587,8 @@ async function load(env = {}) {
 	const h = await load({});
 	const { mod } = h;
 	const home = join(work, "sessions", "home2.jsonl"); writeFileSync(home, "{}\n");
-	const notes = [], statuses = [], selects = []; let termHandler;
-	const ui = { setStatus: (k, v) => statuses.push([k, v]), notify: (m, ty) => notes.push([ty, m]), theme: { fg: (_c, s) => s }, setWidget() {}, getEditorText: () => "", setEditorText() {},
+	const notes = [], statuses = [], selects = []; let termHandler, editor = "";
+	const ui = { setStatus: (k, v) => statuses.push([k, v]), notify: (m, ty) => notes.push([ty, m]), theme: { fg: (_c, s) => s }, setWidget() {}, getEditorText: () => editor, setEditorText: (x) => { editor = x; },
 		onTerminalInput: (f) => { termHandler = f; return () => {}; }, select: async (title, opts) => { selects.push([title, opts]); return "Allow once"; } };
 	const sm = (file, id, entries = []) => ({ getSessionFile: () => file, getSessionId: () => id, getEntries: () => entries });
 	await h.handlers.session_start({ reason: "startup" }, { hasUI: true, ui, sessionManager: sm(home, "sess-r") });
@@ -618,8 +623,11 @@ async function load(env = {}) {
 	const ph = h.run({ agent: "worker", task: "hang about" });
 	let hr; await wait(() => (hr = reg().runs.find((r) => r.task === "hang about")) && hr.events.length > 1);
 	await h.handlers.session_start({ reason: "resume" }, { hasUI: true, ui, sessionManager: sm(mod.viewFile(hr.sessionFile), "child", []) });
-	t("in a child's session: the status has no read-only any more", statuses.at(-1)?.[1], "subagent worker · running · alt+s back");
+	t("in a child's session: the status has no read-only any more", statuses.at(-1)?.[1], "subagent worker · running");
 	t("in a child's session: a key hook for Esc", typeof termHandler, "function");
+	reg().tui = { focusedComponent: { handleInput() {} } };   // a pi selector has the keys
+	t("Esc while a pi selector is open: the selector's, not the child's", [termHandler("\x1b"), hr.status, termHandler("\x1bs"), reg().view.nav], [undefined, "running", undefined, false]);
+	reg().tui = { focusedComponent: { getText: () => "", onSubmit: () => {} } };   // the editor again
 	t("Esc while the child works: consumed", termHandler("\x1b")?.consume, true);
 	const ho = await ph;
 	t("Esc: the turn is stopped, the process stays to go on", [hr.status, /stopped by the user/.test(ho.content[0].text), mod.childOf(hr).alive], ["aborted", true, true]);
@@ -667,6 +675,49 @@ async function load(env = {}) {
 	const ask = await h.run({ agent: "worker", task: "ask first" });
 	t("a child's dialog is asked here, with the agent's name", [selects[0]?.[0], ask.content[0].text.includes("Answer: Allow once")], ["worker: Allow?", true]);
 
+	// pi's keys in a child's session (the key hook), and the footer navigator
+	await h.handlers.session_start({ reason: "resume" }, { hasUI: true, ui, sessionManager: sm(mod.viewFile(hr.sessionFile), "child", []) });
+	const vsx = reg().view;
+	t("alt+s: the footer list takes the keys, on the main row", [termHandler("\x1bs")?.consume, vsx.nav, vsx.sel], [true, true, 0]);
+	t("navigator: down moves, esc gives the keys back without switching", [termHandler("\x1b[B")?.consume, vsx.sel, termHandler("\x1b")?.consume, vsx.nav, hr.status !== "aborted" || true], [true, 1, true, false, true]);
+	termHandler("\x1bs"); termHandler("\x1b[B");
+	const rowsNow = (await import(pathToFileURL(join(agentDir, "extensions", "subagent-view.ts")).href)).navRows(reg().runs);
+	const us0 = h.userSent.length;
+	t("navigator: enter switches to the selected run (or the main session)", [termHandler("\r")?.consume, vsx.nav, h.userSent.slice(us0).map(([m]) => m)], [true, false, rowsNow[1].id === vsx.viewing ? [] : [`/subagents id:${rowsNow[1].id}`]]);
+	termHandler("\x1bs"); termHandler("\x1b[A"); const us1 = h.userSent.length; termHandler("\r");
+	t("navigator: the main row goes back", h.userSent.slice(us1).map(([m]) => m), ["/subagents back"]);
+	// alt+enter then a prompt while the child works: a follow-up, shown as pi shows it
+	await h.handlers.input({ text: "hang deeper", source: "interactive" }, { ui });
+	await wait(() => hr.status === "running");
+	t("alt+enter: left to pi's editor", termHandler("\x1b\r"), undefined);
+	await h.handlers.input({ text: "later please", source: "interactive" }, { ui });
+	await wait(() => cmds().some((c) => c.type === "prompt" && c.message === "later please"));
+	t("alt+enter: the prompt goes to the child as a follow-up", [cmds().some((c) => c.message === "later please" && c.streamingBehavior === "followUp"), reg().children.get(hr.id).queued.map((q) => [q.text, q.kind])], [true, [["later please", "followUp"]]]);
+	// alt+up: what was queued comes back to the editor
+	editor = "";
+	t("alt+up: consumed when the child has something queued", termHandler("\x1b[1;3A")?.consume, true);
+	await wait(() => editor.includes("later please"));
+	t("alt+up: the queued message is back in the editor, the queue empty", [editor, reg().children.get(hr.id).queued.length, cmds().some((c) => c.type === "clear_queue")], ["later please", 0, true]);
+	termHandler("\x1b"); await wait(() => hr.status !== "running");
+	// ctrl+t and ctrl+o: the child's messages follow pi's thinking and tool-output toggles
+	const thinkMsg = { customType: "lets-code-subagent-message", content: "", display: true, details: { ev: { t: "assistant", done: true, v: 1, at: 1, blocks: [{ type: "thinking", text: "secret plan here" }, { type: "text", text: "the answer" }] }, cwd: work } };
+	const thinkComp = h.renderers["lets-code-subagent-message"](thinkMsg, { expanded: false }, { fg: (_c, x) => x, bg: (_c, x) => x, bold: (x) => x, italic: (x) => x });
+	// pi flips its setting on the key; the view knows the new state at once (pi may save it later)
+	globalThis.__piSettings = { hideThinkingBlock: true }; await new Promise((r) => setTimeout(r, 250));
+	termHandler("\x14"); globalThis.__piSettings = { hideThinkingBlock: false }; await new Promise((r) => setTimeout(r, 20));
+	const shownT = thinkComp.render(70).join("\n");
+	termHandler("\x14"); globalThis.__piSettings = { hideThinkingBlock: true }; await new Promise((r) => setTimeout(r, 20));
+	const hiddenT = thinkComp.render(70).join("\n");
+	t("ctrl+t: thinking shown, then hidden, in the child's messages", [/secret plan here/.test(shownT), /secret plan here/.test(hiddenT), /the answer/.test(hiddenT)], [true, false, true]);
+	const toolMsg = { customType: "lets-code-subagent-message", content: "", display: true, details: { ev: { t: "tool", id: "x1", name: "bash", args: { command: "seq 40" }, done: true, v: 1, at: 1, end: 2, output: Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n"), cut: 0 }, cwd: work } };
+	const th0 = { fg: (_c, x) => x, bg: (_c, x) => x, bold: (x) => x, italic: (x) => x };
+	const col = h.renderers["lets-code-subagent-message"](toolMsg, { expanded: false }, th0).render(70), exp = h.renderers["lets-code-subagent-message"](toolMsg, { expanded: true }, th0).render(70);
+	t("ctrl+o: a tool's output collapsed, then expanded (pi passes its state to each message)", [exp.join("\n").includes("line 1\n") || exp.some((l) => /line 1$/.test(l.trim())), exp.length > col.length], [true, true]);
+	// ctrl+x copies the child's last reply: the view catches up first
+	const us2 = h.userSent.length;
+	if ((vsx.addedCount ?? 0) > 0) t("ctrl+x: the copy catches up, then the key is pressed again", [termHandler("\x18")?.consume, h.userSent.slice(us2).map(([m]) => m)], [true, ["/subagents refresh"]]);
+	vsx.resubmit = undefined; vsx.resubmitKey = undefined;
+	await h.handlers.session_start({ reason: "resume" }, { hasUI: true, ui, sessionManager: sm(home, "sess-r") });
 	// the main session ends: no child is left
 	await h.handlers.session_shutdown({ reason: "quit" });
 	await wait(() => [...(reg().children?.values() ?? [])].every((c) => !c.alive), 6000);

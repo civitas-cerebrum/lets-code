@@ -524,27 +524,34 @@ requires: rea/runtime/node_modules/rea-agents/package.json
 ```
 
 **Subagent sessions.** Every subagent and expert run is a real pi
-session of its own, and you can switch the TUI into it. `/subagents` (or
-<kbd>Alt</kbd>+<kbd>S</kbd>) opens a picker in place of the input: the main
-session, then the runs, running first, then finished ones, newest first.
-Each row shows a status mark (`●` running, `✓` done, `✗` failed or timed
-out, `■` stopped), the agent, the task, the elapsed time and the tokens.
-<kbd>Enter</kbd> switches into that run's session the way `/resume` does, so
-pi draws it like any session: the task, thinking, text, tool calls and their
-results, with pi's own keys (<kbd>Ctrl</kbd>+<kbd>O</kbd> and the rest).
-<kbd>x</kbd> (twice) stops a running child; the others in the call go on.
-`/subagents 2` or `/subagents scout` switches straight to a run.
+session of its own, and you can switch the TUI into it. The footer lists
+the sessions: `◂ main` (the main session) first, then the runs, running
+first, then finished ones, newest first; each row shows a status mark (`●`
+running, `✓` done, `✗` failed or timed out, `■` stopped), the agent, the
+task (wide terminals), the elapsed time and the tokens, and `▸` marks the
+session that is open. <kbd>Alt</kbd>+<kbd>S</kbd> (or `/subagents`) hands the
+keys to that list: <kbd>↑</kbd>/<kbd>↓</kbd> select, <kbd>Enter</kbd> switches
+to the selected session the way `/resume` does (so pi draws it like any
+session), <kbd>x</kbd> twice stops a running child (the others in the call go
+on), <kbd>Esc</kbd> gives the keys back to the editor. The list keeps its
+height while it has the keys, so nothing moves. In a subagent's session the
+list is always there (it is the way back: <kbd>Alt</kbd>+<kbd>S</kbd>,
+<kbd>Enter</kbd> on `◂ main`); in the main session it shows when
+`/subagents toggle` put it there, or while it has the keys.
+`/subagents back`, `/subagents 2` or `/subagents scout` switch directly.
 
-In a subagent's session the status line says so, for example `subagent
-scout · running · alt+s back`, and <kbd>Alt</kbd>+<kbd>S</kbd> or
-`/subagents back` returns to the main session; `/subagents` from there
-picks another run. The session works like the main one, through the
-child's own process (each child is a pi in RPC mode, with the agent's
-tools, role, instructions and model):
+In a subagent's session the status line says whose it is, for example
+`subagent scout · running`. The session works like the main one, through
+the child's own process (each child is a pi in RPC mode, with the agent's
+tools, role, instructions and model), and pi's keys work on its messages
+as on the main session's (<kbd>Ctrl</kbd>+<kbd>T</kbd> thinking blocks,
+<kbd>Ctrl</kbd>+<kbd>O</kbd> tool output, and the rest):
 
 - **Typing while it works** steers it, as <kbd>Enter</kbd> does while the
   main session streams: the message waits under the chat (`Steering: …`)
-  and goes in after the current tool calls.
+  and goes in after the current tool calls. <kbd>Alt</kbd>+<kbd>Enter</kbd> queues a follow-up
+  instead, and <kbd>Alt</kbd>+<kbd>Up</kbd> brings what is queued back to the
+  editor, as in the main session.
 - **Typing while it rests** (done, stopped, or after a restart) starts its
   next turn. A child that has rested `LETS_CODE_SUBAGENT_IDLE_S` seconds
   (300) has exited; its process starts again on the same session file with
@@ -595,10 +602,9 @@ are done their report is sent to the main session as a message that
 continues it, as soon as you are back there. A plain stop
 (<kbd>Esc</kbd>) still stops them.
 
-`/subagents toggle` adds the session's runs to the footer, one line each
-(running first; mark, name, task on wide terminals, elapsed time, tokens;
-condensed on narrow ones), and is remembered for the next launch like
-`/metrics`. While a run is going and the footer list is off, the status
+`/subagents toggle` shows the list in the main session's footer too
+(condensed on narrow terminals), and is remembered for the next launch
+like `/metrics`. While a run is going and the footer list is off, the status
 says `2 subagents running · alt+s or /subagents to switch`. None of this
 costs context: nothing in it reaches the model (the requests of the main
 session and of its children are the same byte for byte).

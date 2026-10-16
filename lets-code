@@ -4571,6 +4571,35 @@ export default async function (pi: ExtensionAPI) {
 		return [`Experts (brief: * = required; run: {action: "run", name, brief: {field: value}}):`,
 			...specs.map((s) => `- ${s.name}: ${s.expert.job} [${stateOf(s)}]\n  brief: ${template(s)}`)].join("\n");
 	}
+	// /expert for the user: one aligned line per expert with a state mark, the
+	// details (brief fields, setup) only for one named expert. listText above
+	// is the model's view, worded for the tool; this one is for reading.
+	function menuText(name?: string): string {
+		const specs = discover();
+		const mark = (s: Spec) => (enabled(s.name) ? "●" : "○");
+		const state = (s: Spec) => {
+			if (enabled(s.name)) return s.expert.ready ? "enabled" : "enabled, sets up on its first run";
+			if (declined.has(s.name)) return "dormant, declined in this session";
+			return s.expert.setup && !s.expert.ready ? `dormant, on enable: ${s.expert.setupNote || "runs its setup"}` : "dormant";
+		};
+		const cut = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1).replace(/[\s,;:]+\S*$/, "")}…` : t);
+		if (name) {
+			const s = specs.find((x) => x.name === name); if (!s) return unknown(name);
+			const w = Math.max(...s.expert.brief.map((f) => f.name.length), 4);
+			return [`${mark(s)} ${s.name} · ${state(s)}`, `  ${s.expert.job}`, "", "  Brief",
+				...s.expert.brief.map((f) => `    ${f.name.padEnd(w)}  ${f.required ? "required" : "        "}  ${f.hint || ""}`.trimEnd()),
+				"", `  /expert ${enabled(s.name) ? "disable" : "enable"} ${s.name}`].join("\n");
+		}
+		if (!specs.length) return "No experts are usable here.";
+		const w = Math.max(...specs.map((x) => x.name.length));
+		return ["Experts  (● enabled  ○ dormant)",
+			...specs.flatMap((s) => {
+				const line = `  ${mark(s)} ${s.name.padEnd(w)}  ${cut(s.expert.job, 64)}`;
+				const st = state(s);
+				return st === "enabled" || st === "dormant" ? [line] : [line, `${" ".repeat(w + 6)}${cut(st, 64)}`];
+			}),
+			"", "  /expert <name> for details · /expert enable|disable <name>"].join("\n");
+	}
 	// enabled and set up -> null; else why not. consent: the user asked for it
 	// (/expert enable), so no dialog. The user's yes is remembered.
 	async function ensure(name: string, ctx: ExtensionContext, progress: (l: string) => void, consent: boolean, signal?: AbortSignal): Promise<string | null> {
@@ -4646,18 +4675,19 @@ export default async function (pi: ExtensionAPI) {
 		},
 	});
 	pi.registerCommand("expert", {
-		description: "Experts: /expert [list] | enable <name> | disable <name>",
+		description: "Experts: /expert [list] | <name> | enable <name> | disable <name>",
 		getArgumentCompletions: (prefix: string) => {
 			const words = prefix.split(/\s+/);
 			// a word typed out in full offers nothing, so Enter runs the command
-			if (words.length <= 1) return ["list", "enable", "disable"].filter((v) => v.startsWith(words[0] ?? "") && v !== words[0]).map((v) => ({ value: v, label: v }));
+			if (words.length <= 1) return ["list", "enable", "disable", ...discover().map((s) => s.name)].filter((v) => v.startsWith(words[0] ?? "") && v !== words[0]).map((v) => ({ value: v, label: v }));
 			return discover().map((s) => s.name).filter((n) => n.startsWith(words[1] ?? "") && n !== words[1]).map((n) => ({ value: `${words[0]} ${n}`, label: n }));
 		},
 		handler: async (args: string, ctx: any) => {
 			const [verb = "list", name] = (args ?? "").trim().split(/\s+/).filter(Boolean);
 			const say = (m: string, type: "info" | "warning" | "error" = "info") => (ctx.hasUI ? ctx.ui.notify(m, type) : console.log(m));
-			if (verb === "list") return say(listText(name));
-			if ((verb !== "enable" && verb !== "disable") || !name) return say("Usage: /expert [list] | enable <name> | disable <name>", "warning");
+			if (verb === "list") return say(menuText(name));
+			if (find(verb) && !name) return say(menuText(verb));
+			if ((verb !== "enable" && verb !== "disable") || !name) return say("Usage: /expert [list] | <name> | enable <name> | disable <name>", "warning");
 			if (!find(name)) return say(unknown(name), "warning");
 			if (verb === "disable") { session.set(name, false); remember(name, false); return say(`The ${name} expert is dormant again (remembered).`); }
 			const why = await ensure(name, ctx, (l) => ctx.ui?.setStatus?.("expert", l), true);

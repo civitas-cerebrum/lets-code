@@ -522,6 +522,39 @@ requires: rea/runtime/node_modules/rea-agents/package.json
 ---
 ```
 
+**Watching a subagent.** `/subagents` (or <kbd>Alt</kbd>+<kbd>S</kbd>)
+opens a full-screen view of the session's subagent and expert runs. Running
+runs come first, then finished ones, newest first. Each row shows a status
+mark (`●` running, `✓` done, `✗` failed or timed out, `■` stopped), the
+agent, the task, the elapsed time and the tokens. While a run is going, the
+footer says `2 subagents running · alt+s or /subagents to watch`. Pick a
+run to see its conversation as the main view would draw it: the task,
+thinking, text, tool calls with their results collapsed, and the final
+report. It streams while the child works and follows the end unless you
+scroll up. The header shows the agent, status, elapsed time, tokens and
+the tool call the run belongs to. `/subagents 2` or `/subagents scout`
+opens a run directly. The view is read-only and costs no context: nothing
+in it reaches the model.
+
+| Key | In the view |
+|---|---|
+| <kbd>Esc</kbd> / <kbd>q</kbd> | back to the session |
+| <kbd>←</kbd> <kbd>→</kbd>, <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd>, <kbd>Alt</kbd>+<kbd>S</kbd> | previous / next run |
+| <kbd>↑</kbd> <kbd>↓</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd> <kbd>Home</kbd> <kbd>End</kbd> | scroll (<kbd>End</kbd> follows the end again) |
+| <kbd>t</kbd> | show or hide thinking |
+| <kbd>o</kbd> / <kbd>Ctrl</kbd>+<kbd>O</kbd> | expand or collapse tool output |
+| <kbd>l</kbd> | the list (<kbd>↑</kbd> <kbd>↓</kbd> pick, <kbd>Enter</kbd> open) |
+| <kbd>x</kbd> | stop this running child (asks first; the others in the call go on) |
+
+`LETS_CODE_SUBAGENT_KEY` picks another key (pi's key syntax, e.g.
+`ctrl+alt+w`), and `none` turns the key off. Transcripts are kept in memory
+for the session and in `~/.pi/agent/lets-code-runs/<session id>/`, one
+JSON file per run (mode 0600), so a finished run reopens after `/reload`, a
+restart with `-c`, or `/resume`. They hold only what the child printed, with
+tool output cut to its first and last few thousand characters and long
+arguments shortened. The newest 30 runs of a session
+(`LETS_CODE_SUBAGENT_KEEP_RUNS`) and the newest 20 sessions stay on disk.
+
 </details>
 
 <details>

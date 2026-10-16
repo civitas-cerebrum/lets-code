@@ -4783,109 +4783,862 @@ MD
 }
 
 # Termux device expert: termux-device does phone tasks on the Android
-# device lets-code runs on (launch an app, open a file in an app, fire an
-# intent) with recipes and traps verified on Termux. Written on every
-# launch on Termux with experts on, reached through the expert tool, dormant
-# until the user enables it. A user's own agent of that name is left alone.
+# device lets-code runs on: launch an app, open a file in an app, fire an
+# intent, prepare (and, once the user confirms, send) a message, and where a
+# shell-uid channel exists (Shizuku's rish, or adb to the phone itself) read
+# the screen and tap and type. Its knowledge: the agent file, helpers in
+# termux/bin (probe: which tiers this phone has, read-only; ui: the screen
+# as text, tap, type; uitext.py: the uiautomator XML parser) and references
+# in termux/ref, read on demand (tiers and setup steps, screen, messaging).
+# Written on every launch on Termux with experts on, reached through the
+# expert tool, dormant until the user enables it. A user's own agent of that
+# name is left alone (and no helpers are written for it).
 write_termux_agent() {
-    local af="${PI_AGENT_DIR}/agents/termux-device.md" tmp
+    local af="${PI_AGENT_DIR}/agents/termux-device.md" t="${PI_AGENT_DIR}/termux" tmp
     if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    termux_write_knowledge "${t}" || return 0
     mkdir -p "${PI_AGENT_DIR}/agents"
     tmp="$(mktemp "${af}.XXXXXX")" || return 0
-    cat > "${tmp}" <<'MD'
+    sed "s|@@T@@|${t}|g" > "${tmp}" <<'MD'
 ---
 # Written by lets-code (termux); regenerated on launch, edits are overwritten.
 # To keep your own version, delete this line: lets-code then leaves it alone.
 name: termux-device
-description: Phone tasks on this Android device (Termux), end to end: launch or bring an app to the front, open a file in an app, fire an intent. Give it the whole goal, not a check; don't run am, termux-open or dumpsys yourself first
+description: Phone tasks on this Android device (Termux), end to end: launch or bring an app to the front, open a file in an app, fire an intent, prepare or send a message, read or tap the screen where set up. Give it the whole goal, not a check; don't run am, termux-open or dumpsys yourself first
 tools: bash, read
 expert: true
-use_for: phone tasks: open or bring up apps, open files in apps, intents
-keywords: phone, apps, intents
+use_for: phone tasks: apps, files, intents, messages; screen/taps once set up
+keywords: phone, apps, messages
 platform: termux
 brief:
   - goal (required): the user's goal, verbatim
+  - confirmed: leave out unless the user approved the exact final step you reported (app, recipient, text); then yes, plus that step
 ---
 
 You control this Android phone from Termux's shell (package com.termux, not
-rooted). Your uid is `id -u`. Use the recipes as given; do not experiment
-with what is listed under traps.
+rooted). Helpers are in `@@T@@/bin`; references in `@@T@@/ref`: read the
+one a step needs, when it needs it.
+
+## First: what this phone allows
+Run `@@T@@/bin/probe` (read-only, a few seconds). It reports:
+- **tier 0 intents** (always): launch apps, open files, pre-filled
+  messages and compose screens. You cannot see the screen; the user taps
+  the final button.
+- **tier 1 termux-api**: contacts, clipboard, notifications, SMS, dialogs
+  on the phone. Still no screen.
+- **tier 2 shell** (Shizuku's rish, or adb to the phone itself): read the
+  screen, tap, type, with `@@T@@/bin/ui`. See `ref/screen.md`.
+
+Use the lowest tier that does the job. When the goal needs a tier that is
+missing, do what the present tiers allow (a pre-fill the user finishes) and
+give the user the unlock step from `ref/tiers.md`, with its trade-off.
+Messages, mail, calls: `ref/messaging.md`.
 
 ## Golden rule
-- Use the plain `am` on PATH (`$PREFIX/bin/am`). It runs as com.termux and
-  passes the uid check.
-- Never use `/system/bin/am`. It fails with `SecurityException ...
-  package=com.android.shell does not belong to uid=<yours>`.
-- Every `am` call needs `--user 0`. Shell users default to user -2.
+- Use the plain `am` on PATH (`$PREFIX/bin/am`); it runs as com.termux.
+  Never `/system/bin/am` (`SecurityException ... com.android.shell does not
+  belong to uid`). Every `am` call needs `--user 0`.
 
-## Recipes
-1. **Launch an app:** `am start --user 0 -n <pkg>/<Activity>`
-   - Success is rc=0 with only a `Starting: Intent {...}` line and no
-     `Error` line.
-   - `Warning: Activity not started, its current task has been brought to
-     the front` is also success: the task is in the foreground.
-2. **Control check (required before claiming a launch):** run the same
-   command against a fake component, e.g. `-n <pkg>/.DoesNotExist`. A live
-   system answers `Error type 3` / `Error: Activity class {...} does not
-   exist.` with rc=2. If your real command and the control give the same
-   output, you are not reaching the system.
-3. **Open a file in an app:** other apps cannot read `/data/data/com.termux`,
-   so copy the file first:
-   `cp <file> /sdcard/Download/`
+## Recipes (tier 0)
+1. **Launch an app:** `am start --user 0 -n <pkg>/<Activity>`. Success is
+   rc=0 with only a `Starting: Intent {...}` line, or the warning that the
+   task was brought to the front.
+2. **Control check (required before claiming a launch):** the same command
+   against `-n <pkg>/.DoesNotExist` must answer `Error type 3`. If your
+   real command and the control print the same, you are not reaching the
+   system.
+3. **Open a file in an app:** other apps cannot read `/data/data/com.termux`:
+   `cp <file> /sdcard/Download/` then
    `am start --user 0 -a android.intent.action.VIEW -d file:///sdcard/Download/<name> -t <mime> -p <pkg>`
-4. **Generic intent:** `am start --user 0 -a <ACTION> -d <uri> [-t <mime>] [-p <pkg> | -n <comp>]`.
-   content:// URIs start fine; whether the target app can read the URI
-   depends on the provider.
-5. **Find the handler or the main activity:**
-   `/system/bin/cmd package resolve-activity --user 0 -a <ACTION> [-c <CAT>] [-t <mime>] [-p <pkg>]`
-   (read-only; read `name=` and `packageName=`). For an app's launcher
-   activity: `-a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p <pkg>`.
-   Installed packages: `/system/bin/cmd package list packages | grep <word>`.
-6. **Evidence:** `logcat -c` before the action and `logcat -d` after; you
-   can read your own uid's logs.
-
-## Known apps (examples)
-- Files by Google: `com.google.android.apps.nbu.files`, main activity
-  `.home.HomeActivity`, PDF preview `.gateway.preview.PreviewActivity`
-- System document UI: `com.android.documentsui`
+   (Files by Google: `com.google.android.apps.nbu.files`, PDF preview
+   `.gateway.preview.PreviewActivity`.)
+4. **Generic intent:** `am start --user 0 -a <ACTION> -d <uri> [-t <mime>] [-p <pkg> | -n <comp>] [--es <key> <value>]`
+5. **Find a handler or main activity (read-only):**
+   `/system/bin/cmd package resolve-activity --user 0 -a <ACTION> [-c <CAT>] [-d <uri>] [-t <mime>] [-p <pkg>]`
+   (read `name=`, `packageName=`; `ResolverActivity` means the user will
+   be asked to choose). Packages: `/system/bin/cmd package list packages | grep <word>`.
+6. **Evidence:** `logcat -c` before, `logcat -d` after (your uid's logs only).
 
 ## Traps (do not retry)
-- `termux-open` on files in `~` fails unless `allow-external-apps=true` is
-  set in `~/.termux/termux.properties`. That setting widens what other apps
-  can read: recommend it to the user only, never set it yourself. Copy the
-  file to /sdcard instead.
-- `termux-am` (socket am) is dead unless Termux's server is running. Don't
-  force-stop Termux to fix it.
-- `monkey` fails (`app_process: not found`).
-- `dumpsys window` and `dumpsys activity` return nothing (no permission).
-  Use the control check and logcat instead.
-- `termux-*` API commands (battery, clipboard, notifications, ...) need the
-  Termux:API app; if `command -v termux-battery-status` finds nothing or the
-  call hangs, it is not installed. Say so instead of retrying.
-- adb is usually not set up on the device itself.
+- Without tier 2, `screencap`, `uiautomator`, `input`, `content` and
+  `dumpsys` fail (no rights, or `app_process` not found). Do not try them;
+  the probe already knows.
+- `termux-*` API commands hang when the Termux:API app is missing, even if
+  the commands are installed. Trust the probe's tier 1 line.
+- `termux-open` on files in `~` fails unless `allow-external-apps=true`
+  (recommend only, never set it). `termux-am` is dead unless Termux's
+  server runs. `monkey` fails.
+
+## Consent: sending, calling, posting, paying, deleting
+These reach other people or cannot be undone. Never do the final step
+(tap Send/Call/Pay, `termux-sms-send`, `termux-telephony-call`) unless the
+brief's `confirmed` field approves this exact step. Otherwise prepare
+everything up to it, stop, and report `awaiting-confirmation` with the
+app, the recipient as shown on screen, and the exact text, so the caller
+can ask the user. On a confirmed run, first check the screen still shows
+that recipient and text, then `ui tap ... --confirmed`, then re-dump to
+verify. At tier 0 and 1 the user taps the final button; say so.
+
+## Privacy
+The screen, contacts and notifications are private. Read only what the
+goal needs (`ui dump <word>` filters), and never copy chats, other
+contacts or notifications into your report beyond the one item the task
+is about.
 
 ## Safety
-You may run the launch and open commands above, `cp` into /sdcard/Download,
+You may run the commands above, the helpers, `cp` into /sdcard/Download,
 and read-only diagnostics. You must NOT install packages, change settings,
-force-stop or restart apps or the device, delete user files, or reboot. If
-the goal needs any of these, stop and report the exact command as a
-recommendation for the user.
+enable developer options or wireless debugging, pair adb, grant
+permissions, force-stop or restart apps, delete user files, or reboot. If
+the goal needs any of these, stop and give the user the exact steps (from
+`ref/tiers.md` where they are written).
 
 ## Report format
-For each action:
+First line: `tiers: <the probe's tiers line>`. Then for each action:
 - **Command:** the exact command line
 - **rc:** the exit code
 - **Key line:** the decisive output line
-- **Verification:** `system-accepted` (rc=0, no error, and the control
-  check behaved differently), `foreground-confirmed` (the "brought to the
-  front" warning, or a fresh start with rc=0 plus a sane control), or
-  `on-screen-unverifiable` (anything less)
-
-Never say something is on screen without the control check or a fresh rc=0
-start. If a step failed, quote the error; don't paraphrase it.
+- **Verification:** `screen-verified` (a fresh `ui dump` shows the expected
+  state), `system-accepted` (rc=0, no error, and the control check behaved
+  differently), `foreground-confirmed` (the "brought to the front" warning,
+  or a fresh start with rc=0 plus a sane control), `awaiting-confirmation`
+  (prepared; the final step is the user's), or `on-screen-unverifiable`
+End with what the user must do next, if anything (tap Send, confirm, a
+setup step). Quote errors; don't paraphrase them.
 MD
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+}
+termux_write_knowledge() {
+    local t="$1" f
+    mkdir -p "${t}/bin" "${t}/ref" || return 1
+    cat > "${t}/bin/probe" <<'SH'
+#!/usr/bin/env bash
+# Written by lets-code (termux); regenerated on launch, edits are overwritten.
+# probe: which channels this phone gives the termux-device expert, read-only
+# (it starts nothing but adb's local server when adb is installed):
+#   tier 0 intents       am as com.termux: apps, files, pre-filled messages
+#   tier 1 termux-api    the Termux:API app + pkg termux-api: contacts, clipboard, SMS, dialogs
+#   tier 2 shell         Shizuku's rish or adb to the phone itself: screen, taps, typing
+# One "key: value" line each, then tiers: (those present) and, without tier 2, next:.
+set -u
+here="$(cd "$(dirname "$0")" && pwd)"
+syscmd="${TERMUX_PROBE_SYSCMD:-/system/bin/cmd}"
+ref="$(cd "${here}/.." && pwd)/ref/tiers.md"
+
+ver="$(getprop ro.build.version.release 2>/dev/null)"; sdk="$(getprop ro.build.version.sdk 2>/dev/null)"
+uid="$(id -u)"
+echo "android: ${ver:-?} (sdk ${sdk:-?}); uid ${uid}$([ "${uid}" = 0 ] && echo ', root' || echo ', not rooted'); termux from ${TERMUX_APK_RELEASE:-unknown source}"
+
+pk="$(timeout 15 "${syscmd}" package list packages 2>/dev/null | tr -d '\r' | sed -n 's/^package://p')"
+has() { printf '%s\n' "${pk}" | grep -qx "$1"; }
+if [ -z "${pk}" ]; then
+    echo "apps: unreadable (cmd package list packages gave nothing)"
+else
+    apps=""
+    for pair in whatsapp:com.whatsapp whatsapp-business:com.whatsapp.w4b telegram:org.telegram.messenger signal:org.thoughtcrime.securesms messages:com.google.android.apps.messaging gmail:com.google.android.gm messenger:com.facebook.orca; do
+        has "${pair#*:}" && apps="${apps:+${apps}, }${pair%%:*}"
+    done
+    echo "apps: ${apps:-no known messaging app}"
+fi
+
+# tier 0: the control check (a component that does not exist must be refused)
+o="$(timeout 20 am start --user 0 -n com.termux/.LetsCodeProbeNoSuchActivity 2>&1)"
+case "${o}" in
+    *"Error type 3"*|*"does not exist"*) t0=1; echo "tier 0 intents: yes (am reaches the system)" ;;
+    *) t0=0; echo "tier 0 intents: no (am did not answer the control check: $(printf '%s' "${o}" | tail -n 1))" ;;
+esac
+
+# tier 1: the app and the commands, both
+t1=0
+api_cli=0; command -v termux-toast >/dev/null 2>&1 && api_cli=1
+if [ -z "${pk}" ]; then api_app="?"; elif has com.termux.api; then api_app=1; else api_app=0; fi
+case "${api_app}${api_cli}" in
+    11) t1=1; echo "tier 1 termux-api: yes (app and commands; each permission is asked on first use)" ;;
+    10) echo "tier 1 termux-api: no (the Termux:API app is installed, the commands are not: pkg install termux-api)" ;;
+    01) echo "tier 1 termux-api: no (the termux-* commands are installed but the Termux:API app is not: they hang, do not call them)" ;;
+    "?1") echo "tier 1 termux-api: unknown (commands installed; the app could not be checked: they hang without it)" ;;
+    *) echo "tier 1 termux-api: no (neither the Termux:API app nor pkg termux-api)" ;;
+esac
+
+# tier 2: a shell-uid channel that answers
+t2=0
+e="$(mktemp "${TMPDIR:-/tmp}/lc-probe.XXXXXX")"
+ch="$(bash "${here}/ui" channel 2>"${e}")"; why="$(cat "${e}")"; rm -f "${e}"
+if [ -n "${ch}" ] && [ "${ch}" != none ]; then
+    t2=1; echo "tier 2 shell: yes, via ${ch} (ui dump, ui tap, ui type)"
+else
+    echo "tier 2 shell: no (${why:-no channel})"
+fi
+if [ -n "${pk}" ]; then
+    has moe.shizuku.privileged.api && echo "shizuku: installed" || echo "shizuku: not installed"
+fi
+
+tiers=""; for n in 0 1 2; do v="t${n}"; [ "${!v}" = 1 ] && tiers="${tiers:+${tiers} }${n}"; done
+echo "tiers: ${tiers:-none}"
+if [ "${t2}" = 0 ]; then
+    echo "next: screen, taps and typing need tier 2 (Shizuku + rish, or adb over wireless debugging); contacts and clipboard need tier 1. Steps and trade-offs: ${ref}"
+fi
+exit 0
+SH
+    cat > "${t}/bin/ui" <<'SH'
+#!/usr/bin/env bash
+# Written by lets-code (termux); regenerated on launch, edits are overwritten.
+# ui: the screen and input of this phone, through a shell-uid channel
+# (Shizuku's rish, or adb connected to the phone itself over wireless
+# debugging). Without one every command but `xml` exits 3 and says so.
+#   ui channel                 the channel in use: "rish <path>", "adb <serial>" or "none"
+#   ui dump [<word>] [--all] [--full] [--max N]
+#                              the screen as text, one line per node (uitext.py)
+#   ui tap <text> | --id <id> | --desc <d> | <x> <y>  [--nth N] [--confirmed]
+#                              taps the match's center (its clickable parent);
+#                              a final step (send, call, pay, post, ...) needs --confirmed
+#   ui type <text>             types into the focused field (ASCII only)
+#   ui key <back|home|enter|del|tab|search|paste|recent|<code>>
+#   ui swipe <up|down|left|right>
+#   ui top                     the resumed activity
+#   ui shot <file.png>         a screenshot (heavy: last resort)
+#   ui sh '<command>'          any command as the shell user
+#   ui xml <file> [dump args]  parse a dump already on disk
+set -u
+here="$(cd "$(dirname "$0")" && pwd)"
+dumpf="${TMPDIR:-/tmp}/lets-code-ui.xml"
+final_re='(^|[^a-z])(send|gönder|call|voice call|video call|pay|post|publish|tweet|reply all|place order|buy|order now|checkout|confirm payment|transfer|delete|submit)([^a-z]|$)'
+
+find_rish() {
+    local r
+    for r in "$(command -v rish 2>/dev/null)" "${HOME}/rish" "${HOME}/bin/rish" "${PREFIX:-/nonexistent}/bin/rish"; do
+        [ -n "${r}" ] && [ -f "${r}" ] && { echo "${r}"; return 0; }
+    done
+    return 1
+}
+channel() {   # prints the channel, or "none" (exit 3) with the reasons on stderr
+    if [ -n "${TERMUX_UI_CHANNEL:-}" ]; then echo "${TERMUX_UI_CHANNEL}"; return 0; fi
+    local r o why="" s devs bad
+    if r="$(find_rish)"; then
+        o="$(timeout 10 sh "${r}" -c 'id -u' </dev/null 2>&1 | tr -d '\r' | tail -n 1)"
+        case "${o}" in 2000|0) echo "rish ${r}"; return 0 ;; esac
+        why="rish (${r}) did not answer as shell: ${o:-no output} (is Shizuku started, and Termux allowed in it?)"
+    else
+        why="rish: not found"
+    fi
+    if command -v adb >/dev/null 2>&1; then
+        devs="$(timeout 10 adb devices 2>/dev/null | tr -d '\r' | awk 'NR > 1 && $2 == "device" { print $1 }')"
+        bad="$(timeout 10 adb devices 2>/dev/null | tr -d '\r' | awk 'NR > 1 && ($2 == "unauthorized" || $2 == "offline") { print $1 "=" $2 }' | tr '\n' ' ')"
+        for s in $(printf '%s\n' ${devs} | grep -E '^(localhost|127\.0\.0\.1)' ; printf '%s\n' ${devs} | grep -vE '^(localhost|127\.0\.0\.1)'); do
+            o="$(timeout 10 adb -s "${s}" shell 'id -u' </dev/null 2>/dev/null | tr -d '\r')"
+            [ "${o}" = 2000 ] && { echo "adb ${s}"; return 0; }
+        done
+        why="${why}; adb: no connected device${bad:+ (${bad% })} (Wireless debugging on, then adb connect localhost:<port>)"
+    else
+        why="${why}; adb: not installed (pkg install android-tools)"
+    fi
+    echo none; echo "${why}" >&2; return 3
+}
+CH=""
+need() {
+    [ -n "${CH}" ] && return 0
+    local e why; e="$(mktemp "${TMPDIR:-/tmp}/lc-ui.XXXXXX")"
+    CH="$(channel 2>"${e}")"; why="$(cat "${e}")"; rm -f "${e}"
+    [ "${CH}" != none ] && [ -n "${CH}" ] && return 0
+    echo "no shell channel (screen, taps and typing need Shizuku's rish or adb to this phone; see ref/tiers.md): ${why}" >&2
+    exit 3
+}
+run() {   # run '<command>' as the shell user
+    need
+    case "${CH}" in
+        rish\ *) timeout "${UI_TIMEOUT:-30}" sh "${CH#rish }" -c "$1" </dev/null ;;
+        adb\ *)  timeout "${UI_TIMEOUT:-30}" adb -s "${CH#adb }" shell "$1" </dev/null ;;
+        *) echo "unknown channel: ${CH}" >&2; return 3 ;;
+    esac
+}
+fetch() {   # the current screen into ${dumpf}; one retry (animations make uiautomator fail)
+    local i
+    need
+    for i in 1 2; do
+        run 'uiautomator dump /data/local/tmp/lc-ui.xml >/dev/null 2>&1; cat /data/local/tmp/lc-ui.xml 2>/dev/null; rm -f /data/local/tmp/lc-ui.xml' > "${dumpf}" 2>/dev/null
+        grep -q '</hierarchy>' "${dumpf}" 2>/dev/null && return 0
+        sleep 1
+    done
+    echo "uiautomator dump failed twice (screen locked, a video or animation playing, or a secure window)" >&2
+    return 4
+}
+q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }   # quote for the remote sh
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "${cmd}" in
+    channel) channel ;;
+    sh) [ $# -ge 1 ] || { echo "usage: ui sh '<command>'" >&2; exit 2; }; run "$*" ;;
+    xml) [ $# -ge 1 ] || { echo "usage: ui xml <file> [dump args]" >&2; exit 2; }
+        f="$1"; shift; python3 "${here}/uitext.py" dump "${f}" "$@" ;;
+    dump)
+        args=(); word=""
+        while [ $# -gt 0 ]; do case "$1" in --max) args+=("$1" "${2:-80}"); shift 2 ;; --*) args+=("$1"); shift ;; *) word="$1"; shift ;; esac; done
+        fetch || exit $?
+        python3 "${here}/uitext.py" dump "${dumpf}" ${word:+--grep "${word}"} "${args[@]+"${args[@]}"}" ;;
+    tap)
+        confirmed=""; nth=""; mode=""; want=""; xy=()
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --confirmed) confirmed=1; shift ;;
+                --nth) nth="${2:-}"; shift 2 ;;
+                --id|--desc|--text) mode="$1"; want="${2:-}"; shift 2 ;;
+                *) if [[ "$1" =~ ^[0-9]+$ ]] && [ -z "${mode}" ]; then xy+=("$1"); else mode=--any; want="$1"; fi; shift ;;
+            esac
+        done
+        if [ ${#xy[@]} -eq 2 ] && [ -z "${mode}" ]; then
+            x="${xy[0]}"; y="${xy[1]}"; what="point ${x},${y}"
+            if [ -z "${confirmed}" ] && fetch 2>/dev/null; then
+                what="$(python3 "${here}/uitext.py" at "${dumpf}" "${x}" "${y}" | sed 1d)"
+            fi
+        else
+            [ -n "${mode}" ] || { echo "usage: ui tap <text> | --id <id> | --desc <d> | <x> <y> [--nth N] [--confirmed]" >&2; exit 2; }
+            fetch || exit $?
+            out="$(python3 "${here}/uitext.py" find "${dumpf}" "${mode}" "${want}" ${nth:+--nth "${nth}"})"; rc=$?
+            [ ${rc} -eq 0 ] || { echo "${out}"; exit ${rc}; }
+            x="$(printf '%s\n' "${out}" | sed -n '1s/ .*//p')"; y="$(printf '%s\n' "${out}" | sed -n '1s/.* //p')"
+            what="$(printf '%s\n' "${out}" | sed 1d)"
+        fi
+        # the final step of an outward action is the user's: only with --confirmed
+        own="$(printf '%s\n' "${what}" | sed -E 's/~"[^"]*"//g' | tr 'A-Z' 'a-z')"
+        if [ -z "${confirmed}" ] && printf '%s\n' "${own}" | grep -qE "${final_re}"; then
+            printf '%s\n' "${what}"
+            echo "not tapped: this looks like a final step (send, call, pay, post, delete, ...). Stop and report it as awaiting confirmation; tap it with --confirmed only once the user approved this exact step."
+            exit 6
+        fi
+        run "input tap ${x} ${y}" || exit $?
+        printf 'tapped %s,%s\n%s\n' "${x}" "${y}" "${what}" ;;
+    type)
+        [ $# -ge 1 ] || { echo "usage: ui type <text>" >&2; exit 2; }
+        text="$*"
+        if printf '%s' "${text}" | LC_ALL=C grep -q '[^ -~]'; then
+            echo "not typed: input text takes ASCII only. Use a pre-fill intent (EXTRA_TEXT / ?text=), or termux-clipboard-set then ui key paste (needs Termux:API)." >&2
+            exit 4
+        fi
+        enc="$(printf '%s' "${text}" | sed 's/ /%s/g')"
+        run "input text $(q "${enc}")" && echo "typed ${#text} chars" ;;
+    key)
+        [ $# -ge 1 ] || { echo "usage: ui key <name|code>" >&2; exit 2; }
+        case "$1" in
+            back) k=4 ;; home) k=3 ;; enter) k=66 ;; del) k=67 ;; tab) k=61 ;; search) k=84 ;;
+            paste) k=279 ;; recent) k=187 ;; up) k=19 ;; down) k=20 ;; left) k=21 ;; right) k=22 ;;
+            *) [[ "$1" =~ ^[0-9]+$ ]] || [[ "$1" =~ ^KEYCODE_[A-Z0-9_]+$ ]] || { echo "unknown key: $1" >&2; exit 2; }; k="$1" ;;
+        esac
+        run "input keyevent ${k}" && echo "key ${1}" ;;
+    swipe)
+        size="$(run 'wm size' | tr -d '\r' | sed -n 's/.*: *\([0-9]*\)x\([0-9]*\).*/\1 \2/p' | tail -n 1)"
+        w="${size% *}"; h="${size#* }"; [ -n "${w}" ] && [ -n "${h}" ] || { w=1080; h=2400; }
+        cx=$((w / 2)); cy=$((h / 2)); dy=$((h / 3)); dx=$((w / 3))
+        case "${1:-}" in   # "up" scrolls the content up: the finger moves up
+            up)    c="${cx} $((cy + dy)) ${cx} $((cy - dy))" ;;
+            down)  c="${cx} $((cy - dy)) ${cx} $((cy + dy))" ;;
+            left)  c="$((cx + dx)) ${cy} $((cx - dx)) ${cy}" ;;
+            right) c="$((cx - dx)) ${cy} $((cx + dx)) ${cy}" ;;
+            *) echo "usage: ui swipe <up|down|left|right>" >&2; exit 2 ;;
+        esac
+        run "input swipe ${c} 300" && echo "swiped ${1}" ;;
+    top) run 'dumpsys activity activities' | tr -d '\r' | grep -m 1 -E 'topResumedActivity|mResumedActivity|ResumedActivity' | sed 's/^ *//' ;;
+    shot)
+        [ $# -ge 1 ] || { echo "usage: ui shot <file.png>" >&2; exit 2; }
+        need
+        case "${CH}" in
+            adb\ *) timeout 30 adb -s "${CH#adb }" exec-out screencap -p > "$1" ;;
+            *) run 'screencap -p' > "$1" ;;
+        esac
+        [ -s "$1" ] && echo "screenshot: $1 ($(wc -c < "$1") bytes)" || { echo "screencap failed" >&2; exit 4; } ;;
+    ""|-h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//' ;;
+    *) echo "unknown: ${cmd} (ui --help)" >&2; exit 2 ;;
+esac
+SH
+    cat > "${t}/bin/uitext.py" <<'PY'
+#!/usr/bin/env python3
+# Written by lets-code (termux); regenerated on launch, edits are overwritten.
+"""uitext: a uiautomator dump (XML) as short text lines, and node lookup.
+
+  uitext.py dump <xml> [--all] [--full] [--max N] [--grep WORD]
+  uitext.py find <xml> (--text S | --desc S | --id S | --any S) [--nth N]
+  uitext.py at <xml> <x> <y>
+
+dump prints a header and one line per node worth seeing (it has text or a
+description, or it can be clicked, typed into or scrolled; --all: every
+visible node):
+  #<n> <Class> "<text>" desc="<d>" id=<id> @<x>,<y> [click,edit,scroll,...]
+"~" before the text marks a label taken from the node's children.
+find matches exact (case-insensitive) first, then substring, and prints
+  <x> <y>            the center to tap: the node's, or its nearest clickable
+                     ancestor's when the node itself is not clickable
+  node: <line>
+  target: <line>
+at prints the same for the smallest clickable node under a point.
+exit 1: no match; 2: several (listed; pick one with --nth N); 3: bad dump.
+"""
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+BOUNDS = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+CUT = 60
+
+
+def load(path):
+    data = open(path, "rb").read()
+    start = data.find(b"<hierarchy")
+    end = data.rfind(b"</hierarchy>")
+    if start < 0 or end < 0:
+        print("no UI hierarchy in the dump (uiautomator failed: screen not idle or locked, or no shell rights)")
+        sys.exit(3)
+    try:
+        root = ET.fromstring(data[start:end + len(b"</hierarchy>")])
+    except ET.ParseError as e:
+        print(f"unreadable dump: {e}")
+        sys.exit(3)
+    nodes = []
+
+    def walk(e, parent):
+        for c in e:
+            if c.tag != "node":
+                walk(c, parent)
+                continue
+            n = dict(c.attrib)
+            m = BOUNDS.match(n.get("bounds", ""))
+            n["_b"] = tuple(map(int, m.groups())) if m else (0, 0, 0, 0)
+            n["_parent"], n["_kids"], n["_i"] = parent, [], len(nodes)
+            nodes.append(n)
+            if parent is not None:
+                parent["_kids"].append(n)
+            walk(c, n)
+
+    walk(root, None)
+    return nodes
+
+
+def visible(n):
+    x1, y1, x2, y2 = n["_b"]
+    return x2 > x1 and y2 > y1
+
+
+def true(n, k):
+    return n.get(k) == "true"
+
+
+def short(s, full):
+    s = " ".join((s or "").split())
+    return s if full or len(s) <= CUT else s[:CUT - 1] + "…"
+
+
+def child_texts(n, out):
+    for k in n["_kids"]:
+        t = k.get("text") or k.get("content-desc")
+        if t and visible(k):
+            out.append(t)
+        child_texts(k, out)
+    return out
+
+
+def editable(n):
+    c = n.get("class", "")
+    return c.endswith("EditText") or c.endswith("AutoCompleteTextView")
+
+
+def flags(n):
+    f = []
+    if true(n, "clickable") or true(n, "long-clickable"):
+        f.append("click")
+    if editable(n):
+        f.append("edit")
+    if true(n, "scrollable"):
+        f.append("scroll")
+    if true(n, "checkable"):
+        f.append("checked" if true(n, "checked") else "unchecked")
+    if true(n, "selected"):
+        f.append("selected")
+    if true(n, "focused"):
+        f.append("focus")
+    if n.get("enabled") == "false":
+        f.append("off")
+    return f
+
+
+def center(n):
+    x1, y1, x2, y2 = n["_b"]
+    return (x1 + x2) // 2, (y1 + y2) // 2
+
+
+def line(n, full=False):
+    cls = n.get("class", "").rsplit(".", 1)[-1] or "node"
+    parts = [f"#{n['_i']}", cls]
+    text = n.get("text") or ""
+    if true(n, "password") and text:
+        text = "•" * min(len(text), 8)
+    if text:
+        parts.append('"%s"' % short(text, full))
+    desc = n.get("content-desc") or ""
+    if desc and desc != text:
+        parts.append('desc="%s"' % short(desc, full))
+    if not text and not desc and (true(n, "clickable") or true(n, "long-clickable")):
+        kids = child_texts(n, [])
+        if kids:
+            parts.append('~"%s"' % short(" / ".join(kids[:3]), full))
+    rid = n.get("resource-id") or ""
+    if rid:
+        parts.append("id=" + rid.split(":id/", 1)[-1])
+    x, y = center(n)
+    parts.append(f"@{x},{y}")
+    f = flags(n)
+    if f:
+        parts.append("[" + ",".join(f) + "]")
+    return " ".join(parts)
+
+
+def useful(n):
+    return bool(n.get("text") or n.get("content-desc") or flags(n) and set(flags(n)) & {"click", "edit", "scroll"})
+
+
+def arg(args, name, default=None):
+    if name in args:
+        i = args.index(name)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return default
+
+
+def dump(nodes, args):
+    full, every = "--full" in args, "--all" in args
+    maxn = int(arg(args, "--max", "80"))
+    grep = (arg(args, "--grep") or "").casefold()
+    shown = [n for n in nodes if visible(n) and (every or useful(n))]
+    lines = [line(n, full) for n in shown]
+    if grep:
+        lines = [s for s in lines if grep in s.casefold()]
+    root = nodes[0] if nodes else None
+    pkg = root.get("package", "?") if root else "?"
+    size = "%dx%d" % (root["_b"][2], root["_b"][3]) if root else "?"
+    print(f"screen: {pkg} {size}, {len(lines)} of {len(nodes)} nodes" + (f" matching {grep!r}" if grep else ""))
+    for s in lines[:maxn]:
+        print(s)
+    if len(lines) > maxn:
+        print(f"... {len(lines) - maxn} more (narrow it: ui dump <word>)")
+
+
+def target(n):
+    t = n
+    while t is not None and not (true(t, "clickable") or true(t, "long-clickable")):
+        t = t["_parent"]
+    return t or n
+
+
+def find(nodes, args):
+    modes = [m for m in ("--text", "--desc", "--id", "--any") if m in args]
+    if len(modes) != 1:
+        print("find needs one of --text, --desc, --id, --any")
+        sys.exit(3)
+    mode, want = modes[0], (arg(args, modes[0]) or "").casefold()
+    nth = arg(args, "--nth")
+
+    def fields(n):
+        rid = n.get("resource-id") or ""
+        if mode == "--id":
+            return [rid, rid.split(":id/", 1)[-1]]
+        if mode == "--text":
+            return [n.get("text") or ""]
+        if mode == "--desc":
+            return [n.get("content-desc") or ""]
+        return [n.get("text") or "", n.get("content-desc") or ""]
+
+    cand = [n for n in nodes if visible(n)]
+    hits = [n for n in cand if want in [f.casefold().strip() for f in fields(n)]]
+    if not hits and mode != "--id":
+        hits = [n for n in cand if any(want in f.casefold() for f in fields(n) if f)]
+    # one entry per tap target
+    seen, uniq = set(), []
+    for n in hits:
+        t = target(n)
+        if t["_i"] not in seen:
+            seen.add(t["_i"])
+            uniq.append(n)
+    if not uniq:
+        print(f"no match for {mode[2:]} {want!r}")
+        sys.exit(1)
+    if nth is not None:
+        k = int(nth)
+        if not 1 <= k <= len(uniq):
+            print(f"--nth {k}: only {len(uniq)} matches")
+            sys.exit(1)
+        uniq = [uniq[k - 1]]
+    if len(uniq) > 1:
+        print(f"{len(uniq)} matches for {mode[2:]} {want!r}; pick one with --nth N:")
+        for k, n in enumerate(uniq, 1):
+            print(f"  {k}: {line(target(n))}")
+        sys.exit(2)
+    n = uniq[0]
+    t = target(n)
+    x, y = center(t)
+    print(f"{x} {y}")
+    print("node: " + line(n))
+    print("target: " + line(t))
+
+
+def at(nodes, args):
+    x, y = int(args[0]), int(args[1])
+    under = [n for n in nodes if visible(n) and n["_b"][0] <= x < n["_b"][2] and n["_b"][1] <= y < n["_b"][3]]
+    if not under:
+        print(f"{x} {y}")
+        print("node: nothing at this point")
+        return
+    area = lambda n: (n["_b"][2] - n["_b"][0]) * (n["_b"][3] - n["_b"][1])
+    n = min(under, key=area)
+    t = target(n)
+    print(f"{x} {y}")
+    print("node: " + line(n))
+    print("target: " + line(t))
+
+
+def main(argv):
+    if len(argv) < 2 or argv[0] not in ("dump", "find", "at"):
+        print(__doc__.strip())
+        return 3
+    nodes = load(argv[1])
+    {"dump": dump, "find": find, "at": at}[argv[0]](nodes, argv[2:])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+PY
+    cat > "${t}/ref/tiers.md" <<'MD'
+# Tiers: what each channel gives, and how the user unlocks it
+
+`@@T@@/bin/probe` says which are present. You never do any setup step
+yourself: give the user the steps below, quoted, with the trade-off.
+
+| Tier | Needs | Gives | Does not give |
+|---|---|---|---|
+| 0 intents | nothing (Termux's `am`) | launch apps, open files, pre-filled WhatsApp/SMS/mail/share screens, deep links | the screen, taps, contacts; the user taps the final button |
+| 1 termux-api | Termux:API app + `pkg install termux-api` | contacts (name to number), clipboard, dialogs and toasts on the phone, notifications list, SMS send, share | the screen, taps |
+| 2 shell | Shizuku + rish, or adb to the phone itself | read the screen (`ui dump`), tap, type, keys, swipe, `dumpsys`, screenshot | non-ASCII typing (needs tier 1's clipboard) |
+
+Without tier 2 these fail for Termux's uid; do not try them: `screencap`
+("Failed to take screenshot"), `uiautomator dump` and `content query`
+(`app_process: inaccessible or not found`), `input` (needs
+INJECT_EVENTS), `settings get` (INTERACT_ACROSS_USERS), `dumpsys`.
+
+## Tier 1: Termux:API
+Steps for the user:
+1. Install the Termux:API app **from the same source as Termux** (the
+   probe's first line says it: GITHUB, F_DROID or GOOGLE_PLAY_STORE). The
+   apps must share a signing key: a GitHub Termux needs the GitHub build
+   from https://github.com/termux/termux-api/releases, an F-Droid Termux the
+   F-Droid build, a Play Termux the Play build. Mixing them fails to
+   install or to talk to Termux.
+2. In Termux: `pkg install termux-api` (the commands).
+3. Android asks for each permission on first use (Contacts, SMS, Phone).
+   The notification list needs Settings > Notifications > Device & app
+   notifications (Notification access) > Termux:API.
+
+Trade-off: every script that runs in Termux can then use what was granted
+(all contacts, sending SMS that may cost money). Grant only what is used.
+
+Useful commands (each prints JSON): `termux-contact-list` (all contacts:
+filter it with python/jq, report only the one you need),
+`termux-clipboard-set <text>` / `termux-clipboard-get`,
+`termux-dialog confirm -t <title> -i <text>` (asks the user on the phone),
+`termux-toast <text>`, `termux-share`, `termux-open-url <url>`,
+`termux-notification-list` (private: only when the goal needs it),
+`termux-sms-send -n <number> <text>` (sends at once: a final step, needs
+`confirmed`), `termux-telephony-call <number>` (calls at once: same).
+If a command hangs more than ~10 s, the app is missing or its permission
+dialog is waiting: stop and say so.
+
+## Tier 2, recommended: Shizuku + rish
+Shizuku (open source, RikkaApps, Apache-2.0) runs a small server as the
+shell user, started once per boot through wireless debugging, no PC.
+`rish` runs commands through it from Termux. Needs Android 11+ and Wi-Fi
+for the start.
+Steps for the user:
+1. Install Shizuku: Google Play (`moe.shizuku.privileged.api`) or
+   https://github.com/RikkaApps/Shizuku/releases.
+2. Developer options: Settings > About phone > tap "Build number" 7
+   times. Then Settings > System > Developer options > Wireless debugging
+   (or search Settings for "Wireless debugging"):
+   on (Wi-Fi must be connected; "Allow" on this network).
+3. Shizuku > "Start via Wireless debugging" > Pairing. Shizuku shows a
+   notification. In Wireless debugging tap "Pair device with pairing
+   code", and type the 6-digit code into Shizuku's notification. Then
+   Shizuku > Start. It shows "Shizuku is running".
+4. Shizuku > "Use Shizuku in terminal apps" > Export files, into e.g.
+   `Download/shizuku`. Then in Termux:
+   ```
+   cp /sdcard/Download/shizuku/rish /sdcard/Download/shizuku/rish_shizuku.dex $PREFIX/bin/
+   sed -i 's/"PKG"/"com.termux"/' $PREFIX/bin/rish
+   chmod 700 $PREFIX/bin/rish && chmod 400 $PREFIX/bin/rish_shizuku.dex
+   rish -c id
+   ```
+   (Android 14+ refuses a writable .dex, hence 400.) The first `rish`
+   makes Shizuku ask whether Termux may use it: Allow. `rish -c id` then
+   prints `uid=2000(shell)`.
+5. Wireless debugging can be turned off again; Shizuku keeps running.
+
+After a reboot Shizuku is stopped: Wireless debugging on, Shizuku > Start
+(no new pairing), Wireless debugging off. Wi-Fi changes do not stop it.
+
+Trade-off: anything that runs in Termux (scripts, packages, a model) gets
+shell rights while Shizuku runs: read any screen, tap and type anywhere,
+install or remove apps, grant permissions. Revoke Termux in Shizuku's
+app list, or stop Shizuku, to close it.
+
+## Tier 2, without an extra app: adb to the phone itself
+Steps for the user:
+1. In Termux: `pkg install android-tools`.
+2. Developer options and Wireless debugging on, as in Shizuku step 2.
+3. Put Settings and Termux side by side (split screen: the pairing dialog
+   closes when you leave it). Wireless debugging > "Pair device with
+   pairing code" shows `IP address & port` and a code. In Termux:
+   `adb pair localhost:<pairing port> <code>`
+4. The Wireless debugging screen shows the connect port ("IP address &
+   Port", a different number): `adb connect localhost:<port>`, then
+   `adb devices` lists `localhost:<port>  device`.
+
+Each time Wireless debugging is turned on again, after a reboot or a Wi-Fi
+change, it gets a new port and the connection is gone: repeat step 4
+(pairing is kept; `adb mdns services` shows the new port). Wireless
+debugging must stay on while it is used, and it goes off when Wi-Fi does.
+
+Trade-off: the same shell rights as Shizuku for anything in Termux that
+holds the adb key (`~/.android/adbkey`). While Wireless debugging is on,
+adbd listens on the Wi-Fi network; only paired keys get in, but turn it off
+when done and avoid it on public Wi-Fi. Compared with Shizuku: no extra
+app, but it breaks on every port change and needs Wireless debugging left
+on.
+
+## Accessibility-service apps
+Apps that expose the UI tree through an accessibility service (automation
+apps) can read and act on every screen, including passwords, and nothing
+reliable and open source connects one to Termux today. Not used here;
+prefer Shizuku.
+MD
+    cat > "${t}/ref/screen.md" <<'MD'
+# Reading the screen and acting on it (tier 2)
+
+All through `@@T@@/bin/ui` (`ui --help`). It finds the channel itself
+(rish first, then adb); without one it exits 3 and says what is missing.
+
+## Read
+`ui dump [<word>]` runs `uiautomator dump` as the shell user and prints the
+screen as text, one line per node worth seeing:
+```
+screen: com.whatsapp 1080x2400, 8 of 11 nodes
+#3 Button desc="Search" id=menuitem_search @920,180 [click]
+#5 RelativeLayout ~"Taha / see you at 8" id=contact_row_container @540,357 [click]
+#12 EditText "Message" id=entry @510,2260 [click,edit,focus]
+```
+`"..."` is the text, `desc=` the content description, `~"..."` a label
+taken from the children, `@x,y` the center, `[...]` what it does.
+- Filter with a word (`ui dump taha`) instead of reading the whole screen;
+  texts are cut at 60 characters (`--full` for all of one you need).
+- Default 80 lines (`--max N`); `--all` adds the plain layout nodes.
+- `ui top` names the resumed activity. A dump fails on a locked screen,
+  while a video or animation plays, and on secure windows (banking, the
+  PIN pad): say so, don't loop.
+- `ui shot <file.png>` only when the text dump cannot answer (an image,
+  a canvas); images are heavy.
+
+## Act
+- `ui tap <text>`: matches text or desc, exact (case-insensitive) first,
+  then substring, and taps the center of the match or its nearest
+  clickable parent. Several matches: it lists them and taps nothing; pick
+  with `--nth N`, or use `--id <resource-id>` / `--desc <d>`. `ui tap <x> <y>`
+  taps a point.
+- A tap whose target reads send, call, pay, post, delete and the like is
+  refused (exit 6) without `--confirmed`. Use `--confirmed` only on a run
+  whose brief confirms that exact step.
+- `ui type <text>` types into the focused field (tap the field first).
+  Spaces are encoded for you. ASCII only: for other text (Turkish
+  letters, emoji) use a pre-fill intent, or with tier 1
+  `termux-clipboard-set "<text>"` then `ui key paste`.
+- `ui key back|home|enter|del|tab|search|paste|recent|<code>`. In a chat,
+  enter may send: treat it as a final step.
+- `ui swipe up|down|left|right` scrolls (up: towards later content).
+- `ui sh '<command>'` runs any command as the shell user (the
+  Safety rules still apply: no `pm install`, `settings put`, `pm grant`).
+
+## The loop
+dump, act, dump again. After every tap or type, check the new dump shows
+what the step should have caused (the chat title, the typed text in the
+box, the next screen). If it does not, stop and report what is on screen
+instead of guessing on. Wait with `sleep 1` before the dump when an app is
+opening.
+MD
+    cat > "${t}/ref/messaging.md" <<'MD'
+# Messages, mail and calls
+
+Check the target app is installed (the probe's apps line, or
+`cmd package list packages`). Text with spaces goes in one `--es` value,
+quoted; in URIs it must be URL-encoded
+(`python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "<text>"`).
+Pre-fill intents carry any text, Turkish letters and emoji included.
+Check the handler first with `cmd package resolve-activity` (see the
+agent's recipe 5): `ResolverActivity` means a chooser will appear.
+
+## Consent, in short
+You prepare; the user (or a `confirmed` brief) sends. A pre-fill intent
+never sends by itself. Report `awaiting-confirmation` with app, recipient
+and text.
+
+## WhatsApp (`com.whatsapp`; Business: `com.whatsapp.w4b`)
+No number needed, tier 0 (verified):
+`am start --user 0 -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "<text>" -p com.whatsapp`
+opens WhatsApp's "Send to..." picker with the text ready. The user picks
+the contact (search "taha") and taps send. Best tier-0 answer when you
+only have a name.
+
+With the number (international, digits only, no + or 00), straight to
+the chat with the text in the box:
+`am start --user 0 -a android.intent.action.VIEW -d "whatsapp://send?phone=<digits>&text=<urlencoded>" -p com.whatsapp`
+(`https://wa.me/<digits>?text=...` also works with `-p com.whatsapp`;
+without `-p` Android may ask which app.)
+
+Getting the number from a name: tier 1 `termux-contact-list`, filtered
+for the name; several matches: ask, listing only the matching names.
+Tier 0 has no contact access (content query is denied).
+
+Tier 2, by name, to the confirmation point:
+1. the SEND pre-fill above (or open WhatsApp and `ui tap --desc Search`),
+2. `ui dump`, `ui tap --desc Search` if the picker shows a search button,
+   `ui type taha`, `ui dump taha`,
+3. exactly one match: `ui tap "<name>"`; several: report them (names
+   only) and ask,
+4. in the chat, check the title is that contact and the box holds the
+   text (`ui dump`); then stop: `awaiting-confirmation`.
+5. Confirmed run: re-dump, same contact and text, then
+   `ui tap --desc Send --confirmed`, re-dump: the message appears in the
+   chat (a clock or tick icon next to it).
+
+## SMS (Google Messages `com.google.android.apps.messaging`)
+`am start --user 0 -a android.intent.action.SENDTO -d "smsto:<number>" --es sms_body "<text>"`
+opens the conversation with the text; the user taps send. Tier 1
+`termux-sms-send` sends without a screen: only with `confirmed`.
+
+## Mail (Gmail `com.google.android.gm`)
+`am start --user 0 -a android.intent.action.SENDTO -d "mailto:<addr>?subject=<enc>&body=<enc>"`
+opens a compose screen; the user taps send. Attachments: copy the file to
+/sdcard/Download first, then
+`am start --user 0 -a android.intent.action.SEND -t <mime> --eu android.intent.extra.STREAM file:///sdcard/Download/<name> --es android.intent.extra.SUBJECT "<s>" -n com.google.android.gm/.ComposeActivityGmailExternal`
+(`-p com.google.android.gm` alone also matches Google Chat: use `-n`).
+
+## Share to any app, calls
+- Share sheet: `am start --user 0 -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "<text>"`
+  (no `-p`: Android's chooser).
+- Telegram `org.telegram.messenger`, Signal `org.thoughtcrime.securesms`,
+  Messenger `com.facebook.orca`: the SEND intent with `-p <pkg>` opens
+  their own picker.
+- A call: `am start --user 0 -a android.intent.action.DIAL -d tel:<number>`
+  fills the dialer; the user presses call. Never `ACTION_CALL`.
+MD
+    for f in "${t}"/ref/*.md; do
+        sed "s|@@T@@|${t}|g" "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
+    done
+    chmod 755 "${t}/bin/probe" "${t}/bin/ui"
+    chmod 644 "${t}/bin/uitext.py" "${t}"/ref/*.md
 }
 on_termux() { case "${PREFIX:-}" in */com.termux/*) return 0 ;; esac; [ -d /data/data/com.termux/files/usr ]; }
 

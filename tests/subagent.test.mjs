@@ -4,7 +4,7 @@
 // API and a fake `pi` binary on PATH that replays JSON events. Needs Node >= 22.6.
 //
 //   tests/subagent.test.mjs [path/to/lets-code/subagents.ts]
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, realpathSync, rmSync, chmodSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, realpathSync, rmSync, chmodSync, readdirSync, existsSync, statSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -108,9 +108,11 @@ async function load(env = {}) {
 	const f = join(agentDir, "extensions", `subagent-${loads++}.ts`); writeFileSync(f, src);
 	const mod = await import(pathToFileURL(f).href);
 	let tool = null; const handlers = {}, tools = [], commands = {}, shortcuts = {};
+	const sent = [], userSent = [];
 	mod.default({ registerTool: (d) => { tool = d; tools.push(d); }, on(ev, h) { handlers[ev] = h; return () => {}; },
-		registerCommand: (name, d) => { commands[name] = d; }, registerShortcut: (key, d) => { shortcuts[key] = d; } });
-	return { mod, tool, tools, commands, shortcuts, handlers, run: (params, cwd = work, trusted = true) => tool.execute("id", params, undefined, undefined, { cwd, isProjectTrusted: trusted }) };
+		registerCommand: (name, d) => { commands[name] = d; }, registerShortcut: (key, d) => { shortcuts[key] = d; },
+		sendMessage: (m, o) => { sent.push([m, o]); }, sendUserMessage: (m, o) => { userSent.push([m, o]); } });
+	return { mod, tool, tools, commands, shortcuts, handlers, sent, userSent, run: (params, cwd = work, trusted = true) => tool.execute("id", params, undefined, undefined, { cwd, isProjectTrusted: trusted }) };
 }
 
 // --- what the model is told: agents and call shapes in the tool; the method once asked for
@@ -178,7 +180,9 @@ async function load(env = {}) {
 	t("single: result text", /Result for: find the config/.test(r.content[0].text), true);
 	t("single: usage line", /1 turn, ↑10 ↓5/.test(r.content[0].text), true);
 	const c = calls()[0];
-	t("child argv", c.argv.slice(0, 6), ["--mode", "json", "-p", "--no-session", "--provider", "lets-code"]);
+	t("child argv: its own session file", [c.argv.slice(0, 4), c.argv.slice(5, 7)], [["--mode", "json", "-p", "--session"], ["--provider", "lets-code"]]);
+	const sf = c.argv[4];
+	t("child session file: under the runs dir, named after the run, created 0600 for pi to fill", [sf.startsWith(join(agentDir, "lets-code-runs") + "/"), sf.endsWith(".pi.jsonl"), existsSync(sf), (statSync(sf).mode & 0o777).toString(8)], [true, true, true, "600"]);
 	t("child model/thinking/tools", [c.argv[c.argv.indexOf("--model") + 1], c.argv[c.argv.indexOf("--thinking") + 1], c.argv[c.argv.indexOf("--tools") + 1]], ["test-model", "low", "read,grep"]);
 	t("child task is last arg", c.argv[c.argv.length - 1], "Task: find the config");
 	t("child prompt file content", /"scout" agent\. finds things[\s\S]*You look around\./.test(c.prompt), true);
@@ -305,22 +309,22 @@ async function load(env = {}) {
 	}
 }
 
-// --- run transcripts (the /subagents view's data) and the view's hooks: UI only
+// --- run transcripts and the subagent sessions' hooks: UI only
 {
 	const reg = () => globalThis[Symbol.for("lets-code.subagent-runs")];
-	const { copyFileSync, statSync } = await import("node:fs");
+	const { copyFileSync } = await import("node:fs");
 	const { dirname } = await import("node:path");
 	const view = join(dirname(extPath), "subagent-view.ts");
 	if (existsSync(view)) copyFileSync(view, join(agentDir, "extensions", "subagent-view.ts"));
 	const h = await load({});
 	const { mod } = h;
 	t("view: a /subagents command and the alt+s shortcut", [typeof h.commands.subagents?.handler, typeof h.shortcuts["alt+s"]?.handler], ["function", "function"]);
-	t("view: no new tool and no prompt hook (zero context)", [h.tools.map((x) => x.name), Object.keys(h.handlers).sort()], [["subagent"], ["before_agent_start", "session_start"]]);
-	t("view: nothing about it in the tool's text", /subagents to watch|\/subagents|alt\+s/.test(JSON.stringify([h.tool.description, h.tool.promptSnippet, h.tool.promptGuidelines, h.tool.parameters])), false);
+	t("view: no new tool and no prompt hook (zero context)", [h.tools.map((x) => x.name), Object.keys(h.handlers).sort()], [["subagent"], ["before_agent_start", "input", "session_shutdown", "session_start", "user_bash"]]);
+	t("view: nothing about it in the tool's text", /subagents to (watch|switch)|\/subagents|alt\+s|session/.test(JSON.stringify([h.tool.description, h.tool.promptSnippet, h.tool.promptGuidelines, h.tool.parameters])), false);
 	const sections = {};
 	await h.handlers.before_agent_start({ prompt: "fix the typo", systemPromptOptions: { sections } }, { getContextUsage: () => ({ percent: 1 }) });
 	t("view: the prompt sections are unchanged", Object.keys(sections), []);
-	t("hint text", [mod.hintText(1), mod.hintText(2, "none"), mod.hintText(0)], ["1 subagent running · alt+s or /subagents to watch", "2 subagents running · /subagents to watch", ""]);
+	t("hint text", [mod.hintText(1), mod.hintText(2, "none"), mod.hintText(0)], ["1 subagent running · alt+s or /subagents to switch", "2 subagents running · /subagents to switch", ""]);
 
 	// the session's id names the runs' directory; the footer shows the hint while one runs
 	const statuses = [];
@@ -345,7 +349,8 @@ async function load(env = {}) {
 	const file = join(agentDir, "lets-code-runs", "sess-1", `${rec.id}.json`);
 	t("disk: saved under the session, 0600", [existsSync(file), (statSync(file).mode & 0o777).toString(8)], [true, "600"]);
 	t("disk: the finished run", JSON.parse(readFileSync(file, "utf8")).status, "done");
-	t("hint: shown while it ran, cleared after", [statuses.some(([k, v]) => k === "subagents" && v === "1 subagent running · alt+s or /subagents to watch"), statuses.at(-1)], [true, ["subagents", undefined]]);
+	t("hint: shown while it ran, cleared after", [statuses.some(([k, v]) => k === "subagents" && v === "1 subagent running · alt+s or /subagents to switch"), statuses.at(-1)], [true, ["subagents", undefined]]);
+	t("disk: the child's session file next to its transcript", [rec.sessionFile, existsSync(rec.sessionFile)], [join(agentDir, "lets-code-runs", "sess-1", `${rec.id}.pi.jsonl`), true]);
 
 	// parallel: two runs at once, each with its place in the call
 	statuses.length = 0;
@@ -353,7 +358,7 @@ async function load(env = {}) {
 	const a = reg().runs.find((r) => r.task === "stream a"), b = reg().runs.find((r) => r.task === "stream b");
 	t("parallel: both recorded, apart", [a.status, b.status, a.id !== b.id, a.events.length, b.events.length], ["done", "done", true, 4, 4]);
 	t("parallel: their place in the call", [a.parent, b.parent], [{ tool: "subagent", callId: "id", mode: "parallel", index: 0, of: 2 }, { tool: "subagent", callId: "id", mode: "parallel", index: 1, of: 2 }]);
-	t("parallel: the hint counted both", statuses.some(([, v]) => v === "2 subagents running · alt+s or /subagents to watch"), true);
+	t("parallel: the hint counted both", statuses.some(([, v]) => v === "2 subagents running · alt+s or /subagents to switch"), true);
 	t("parallel: tool result unchanged in shape", (par.content[0].text.match(/^## (scout|worker)/gm) ?? []).length, 2);
 
 	// the view's stop (x): that child only, the other one finishes
@@ -406,20 +411,113 @@ async function load(env = {}) {
 	t("and back: the first session's runs from disk", reg().runs.some((x) => x.task === "stream it"), true);
 	for (let i = 0; i < mod.KEEP_RUNS + 5; i++) { const x = mod.newRun({ name: "w" }, `p${i}`, work); x.session = "sess-p"; mod.finishRun(x, { exitCode: 0, text: "", stderr: "" }, false); mod.saveRun(x, true); }
 	mod.pruneRuns("sess-p");
-	t("prune: the newest KEEP_RUNS runs stay on disk", readdirSync(join(agentDir, "lets-code-runs", "sess-p")).length, mod.KEEP_RUNS);
+	for (const f of readdirSync(join(agentDir, "lets-code-runs", "sess-p"))) writeFileSync(join(agentDir, "lets-code-runs", "sess-p", f.replace(/\.json$/, ".pi.jsonl")), "{}\n");
+	mod.pruneRuns("sess-p");
+	t("prune: the newest KEEP_RUNS runs stay on disk", readdirSync(join(agentDir, "lets-code-runs", "sess-p")).filter((f) => f.endsWith(".json")).length, mod.KEEP_RUNS);
+	t("prune: a run's session file goes with its transcript", readdirSync(join(agentDir, "lets-code-runs", "sess-p")).length, 2 * mod.KEEP_RUNS);
 	t("pickRun: by row and by name", [mod.pickRun(loaded, "2", (x) => x)?.task, mod.pickRun(loaded, "sco", (x) => x)?.task, mod.pickRun(loaded, "9", (x) => x)], ["finished", "left running", undefined]);
 
 	// the command without a terminal: the list as text
 	if (existsSync(view)) {
 		const logged = []; const log = console.log; console.log = (m) => logged.push(String(m));
 		try { await h.commands.subagents.handler("", { hasUI: false }); } finally { console.log = log; }
-		t("no UI: /subagents prints the list", /^Subagents {2}\d+ running · \d+ finished/.test(logged[0] ?? ""), true);
+		t("no UI: /subagents prints the list", /^1\. [●✓✗■] \S+ — /.test(logged[0] ?? ""), true);
 	}
 	const ks = await load({ LETS_CODE_SUBAGENT_KEY: "none" });
 	t("LETS_CODE_SUBAGENT_KEY=none: no shortcut, the command stays", [Object.keys(ks.shortcuts), typeof ks.commands.subagents?.handler], [[], "function"]);
 	const ck = await load({ LETS_CODE_SUBAGENT_KEY: "ctrl+alt+w" });
 	t("LETS_CODE_SUBAGENT_KEY picks the key", Object.keys(ck.shortcuts), ["ctrl+alt+w"]);
 	delete process.env.LETS_CODE_SUBAGENT_KEY;
+}
+
+// --- subagent sessions: switching, read-only, detaching, the footer toggle
+{
+	const reg = () => globalThis[Symbol.for("lets-code.subagent-runs")];
+	const { copyFileSync } = await import("node:fs");
+	const { dirname } = await import("node:path");
+	const view = join(dirname(extPath), "subagent-view.ts");
+	if (existsSync(view)) copyFileSync(view, join(agentDir, "extensions", "subagent-view.ts"));
+	const stateFile = join(work, "state.json"); writeFileSync(stateFile, JSON.stringify({ metrics: true }));
+	const h = await load({ LETS_CODE_METRICS_SAVE: stateFile });
+	const { mod } = h;
+	const runsDir = join(agentDir, "lets-code-runs");
+	const home = join(work, "sessions", "home.jsonl"); mkdirSync(dirname(home), { recursive: true }); writeFileSync(home, "{}\n");
+	const statuses = [], notes = [], widgets = {};
+	let editor = "";
+	const ui = { setStatus: (k, v) => statuses.push([k, v]), notify: (m, t) => notes.push([t, m]), theme: { fg: (_c, s) => s }, setWidget: (k, v) => { widgets[k] = v; }, getEditorText: () => editor, setEditorText: (s) => { editor = s; } };
+	const sm = (file, id, entries = []) => ({ getSessionFile: () => file, getSessionId: () => id, getEntries: () => entries });
+	await h.handlers.session_start({ reason: "startup" }, { hasUI: true, ui, sessionManager: sm(home, "sess-s") });
+	t("isChildSession: a run's .pi.jsonl under the runs dir only", [mod.isChildSession(join(runsDir, "s", "x.pi.jsonl")), mod.isChildSession(home), mod.isChildSession(join(work, "x.pi.jsonl"))], [true, false, false]);
+
+	// the switch: through the command's ctx; a call in flight detaches instead of stopping its children
+	const switched = [];
+	const ctxFor = () => ({ hasUI: true, ui, switchSession: async (file, o) => {
+		switched.push([file, reg().switching === true]);
+		// pi aborts the turn in flight first (the abort below stands for it), then opens the file
+		abortTurn?.();
+		await h.handlers.session_start({ reason: "resume" }, { hasUI: true, ui, sessionManager: sm(file, mod.isChildSession(file) ? "child" : "sess-s", mod.isChildSession(file) ? [{ type: "message", message: { role: "user", content: "Task" } }] : []) });
+		await o?.withSession?.({});
+		return { cancelled: false };
+	} });
+	let abortTurn;
+	const ac = new AbortController(); abortTurn = () => ac.abort();
+	const call = h.tool.execute("call-d", { tasks: [{ agent: "worker", task: "stream d1" }, { agent: "scout", task: "stream d2" }] }, ac.signal, undefined, { cwd: work, isProjectTrusted: true });
+	let d1; for (let i = 0; i < 100 && !((d1 = reg().runs.find((r) => r.task === "stream d1")) && d1.events.length > 1 && existsSync(d1.sessionFile)); i++) await new Promise((r) => setTimeout(r, 20));
+	await h.commands.subagents.handler("1", ctxFor());
+	const res = await call;
+	t("switch: into the run's own session file, with reg.switching set while pi tears the turn down", switched[0], [d1.sessionFile, true]);
+	t("switch: reg.switching is cleared after", reg().switching, false);
+	t("detach: the call returns at once, says its runs go on, not an error", [/Still running in the background/.test(res.content[0].text), /worker, scout/.test(res.content[0].text), res.isError], [true, true, false]);
+	t("detach: the children were not stopped", reg().runs.filter((r) => /stream d[12]/.test(r.task)).map((r) => r.status), ["running", "running"]);
+	t("in a run's session: the status names it, read-only, the way back", statuses.at(-1)?.[1], "subagent worker · running · read-only · alt+s back");
+	t("in a run's session: the live widget is set", typeof widgets["subagent-live"], "function");
+	// read-only: a prompt and a ! command are refused there, the text stays in the editor
+	const inp = await h.handlers.input({ text: "hello", source: "interactive" }, { ui });
+	t("read-only: a prompt is refused and kept in the editor", [inp?.action, editor, /read-only/.test(notes.at(-1)?.[1] ?? "")], ["handled", "hello", true]);
+	let threw = false; try { h.handlers.user_bash({ command: "ls" }); } catch { threw = true; }
+	t("read-only: a ! command is refused", threw, true);
+	t("the view's own command text never goes to the model", (await h.handlers.input({ text: "/subagents back", source: "extension" }, { ui }))?.action, "handled");
+	// the reports wait while the run's session is open
+	for (let i = 0; i < 200 && reg().runs.some((r) => /stream d[12]/.test(r.task) && r.status === "running"); i++) await new Promise((r) => setTimeout(r, 20));
+	t("detach: the runs finished on their own", reg().runs.filter((r) => /stream d[12]/.test(r.task)).map((r) => r.status), ["done", "done"]);
+	t("detach: the report waits while another session is open", [h.sent.length, (reg().pending ?? []).length, /1 report waiting/.test(statuses.at(-1)?.[1] ?? "")], [0, 1, true]);
+	// back: alt+s sends /subagents back as a command; the command switches home and the report goes out
+	await h.shortcuts["alt+s"].handler({});
+	t("alt+s in a run's session: sends /subagents back as a command", h.userSent.at(-1), ["/subagents back", { expandPromptTemplates: true }]);
+	abortTurn = undefined;
+	await h.commands.subagents.handler("back", ctxFor());
+	await new Promise((r) => setTimeout(r, 120));
+	t("back: the main session's file", switched.at(-1)[0], home);
+	t("back: the report continues the main session as a message", [h.sent.length, h.sent[0]?.[0]?.customType, /^Reports of the subagent call that went on in the background:/.test(h.sent[0]?.[0]?.content ?? ""), /## worker[\s\S]*## scout/.test(h.sent[0]?.[0]?.content ?? ""), h.sent[0]?.[1]], [1, "lets-code-subagents", true, true, { triggerTurn: true, deliverAs: "followUp" }]);
+	t("back: prompts are the user's again", await h.handlers.input({ text: "hello", source: "interactive" }, { ui }), undefined);
+	let ok = true; try { h.handlers.user_bash({ command: "ls" }); } catch { ok = false; }
+	t("back: ! commands too", ok, true);
+	t("alt+s in the main session: sends /subagents (the picker)", (await h.shortcuts["alt+s"].handler({}), h.userSent.at(-1)), ["/subagents", { expandPromptTemplates: true }]);
+	t("/subagents back in the main session: nothing to do", (switched.length, await h.commands.subagents.handler("back", ctxFor()), switched.length), 2);
+	// a real abort (Esc) still stops the children
+	const ac2 = new AbortController();
+	const call2 = h.tool.execute("call-e", { agent: "worker", task: "hang on" }, ac2.signal, undefined, { cwd: work, isProjectTrusted: true });
+	let e1; for (let i = 0; i < 100 && !((e1 = reg().runs.find((r) => r.task === "hang on")) && e1.events.length > 1); i++) await new Promise((r) => setTimeout(r, 20));
+	ac2.abort();
+	const res2 = await call2;
+	t("a plain abort is not a detach: the child is stopped", [e1.status, /Still running/.test(res2.content[0].text)], ["aborted", false]);
+	// /subagents stop <n|name>
+	const call3 = h.tool.execute("call-f", { agent: "scout", task: "hang again" }, undefined, undefined, { cwd: work, isProjectTrusted: true });
+	let f1; for (let i = 0; i < 100 && !((f1 = reg().runs.find((r) => r.task === "hang again")) && f1.events.length > 1); i++) await new Promise((r) => setTimeout(r, 20));
+	await h.commands.subagents.handler("stop scout", ctxFor());
+	await call3;
+	t("/subagents stop <name> stops that run", f1.status, "aborted");
+	t("/subagents <unknown> says so", (await h.commands.subagents.handler("nobody", ctxFor()), /No run "nobody"/.test(notes.at(-1)?.[1] ?? "")), true);
+	// /subagents toggle: the footer list, remembered in the state file (other keys kept)
+	await h.commands.subagents.handler("toggle", ctxFor());
+	t("toggle: on, remembered next to the other keys", JSON.parse(readFileSync(stateFile, "utf8")), { metrics: true, subagentsFooter: true });
+	const block = globalThis[Symbol.for("lets-code.footer-blocks")]?.blocks?.get("subagents");
+	t("toggle: a footer block of the runs", [typeof block, block(120, (_c, s) => s).length > 0, block(70, (_c, s) => s).every((l) => l.replace(/\x1b\[[0-9;]*m/g, "").length <= 70)], ["function", true, true]);
+	t("toggle: the footer list replaces the running hint", statuses.at(-1)?.[1], undefined);
+	const again = await load({ LETS_CODE_METRICS_SAVE: stateFile });
+	t("toggle: the next launch starts with it", mod.readFooterOn(stateFile), true);
+	await again.commands.subagents.handler("toggle", ctxFor());
+	t("toggle: off again", [JSON.parse(readFileSync(stateFile, "utf8")).subagentsFooter, block(120, (_c, s) => s)], [false, []]);
 }
 
 rmSync(work, { recursive: true, force: true });

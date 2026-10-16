@@ -162,34 +162,72 @@ fails closed to the built-in roles. Mode changes are announced on
 pi's example but with a short schema (the community packages measured 6k
 to 8k tokens per turn). Agent files: Markdown + YAML frontmatter in
 `~/.pi/agent/agents`, `.pi/agents`, `.agents/agents`. A child is `pi --mode
-json -p --no-session --provider lets-code --model <id> [--thinking]
+json -p --session <run>.pi.jsonl --provider lets-code --model <id> [--thinking]
 [--tools] --append-system-prompt <file> "Task: ..."` with
 `LETS_CODE_SUBAGENT_DEPTH` and `LETS_CODE_ROLE` in its environment, parsed
 from `message_end` events; concurrency 2 by default (one GPU); depth 1 (a
 child registers no tool, so it pays nothing for it); 50 KB output cap.
 
-**Watching a subagent (`/subagents`).** The runner already reads the
-child's JSON stream, so it also keeps a transcript per run: the task, the
-assistant messages (thinking, text and tool-call blocks, rebuilt from
-`message_update` deltas, then replaced by `message_end`), tool runs from
-`tool_execution_*`, retries and compaction as notes, and status, tokens and
-the parent tool call. The registry lives on `globalThis`, so the copies of
-`subagents.ts` that the experts and Claude Code modules import share it,
-and `/reload` keeps it. It is saved under `lets-code-runs/<session>/` so
-finished runs reopen. We did not let the child write a real pi session
-instead (dropping `--no-session`). A session file gets whole messages only
-at `message_end`, so the view would not stream. It would also fill pi's
-session store, and full tool outputs would go uncapped. Faithfulness comes
-from rendering: the view feeds the recorded messages to pi's exported
-`UserMessageComponent`, `AssistantMessageComponent` and
-`ToolExecutionComponent` (with `create*ToolDefinition` for the built-in
-tools' renderers), which are the components the main view uses. A plain
-renderer takes over if they fail to load or throw. The UI is one
-`ctx.ui.custom` overlay (`width`/`maxHeight` 100%) plus `registerCommand`,
-`registerShortcut` and `setStatus`; no pi internals are touched. Zero
-context: no tool text, prompt section or message changes. The provider
-request was compared byte for byte with and without the feature. Steering
-a child would need `--mode rpc` instead of `-p`; that is left for later.
+**Subagent sessions (`/subagents`).** Each child writes a real pi session
+file (`--session`, created empty and 0600 first; pi writes its header into
+an empty file) under `lets-code-runs/<session>/`, outside pi's session
+store, so `/resume` and `-c` never list it. The picker (`ctx.ui.custom` in
+place of the editor) and `/subagents <n|name>` switch the TUI into it with
+the command ctx's `switchSession`, as `/resume` does, so pi itself draws
+it; `/subagents back` (or the key) switches back. The shortcut ctx has no
+`switchSession`, so the key sends the command with `pi.sendUserMessage(...,
+{ expandPromptTemplates: true })`, which pi runs as a command; an `input`
+hook drops the text should it ever reach the model.
+
+How live: pi reads a session file once, at the switch, and a child appends
+a message only at `message_end`. Following the file alone would therefore
+show whole messages only. We looked at running children in `--mode rpc`
+and attaching instead: pi 1.0.3's interactive mode draws only its own
+`AgentSession`'s events, and `RpcClient` is a programmatic client, not a
+viewer, so RPC would not make the native view stream either (it would add
+steering, which is left for later). So the runner, which reads the child's
+JSON stream anyway, keeps a transcript per run (the task, assistant
+messages rebuilt from `message_update` deltas and replaced at
+`message_end`, tool runs from `tool_execution_*`, retries and compaction
+as notes; status, tokens, the parent call), and in a running child's
+session a widget above the editor draws what the file does not hold yet:
+the message on its way and running tools, with pi's exported
+`AssistantMessageComponent` and `ToolExecutionComponent` (with the built-in
+tools' renderers; a plain renderer takes over if they fail). When the
+child completes a message, the session is opened again (at most every
+`LETS_CODE_SUBAGENT_REFRESH_MS`, 1000 by default; a switch measured 60 to
+120 ms), so pi's own view catches up and the widget keeps only the part on
+its way. Matching what the file holds: user and assistant messages by
+count, tool calls by `toolCallId`; a call pi already draws as pending
+shows in the widget only once its output streams.
+
+Read-only and one writer: two writers on one JSONL would corrupt the tree,
+so nothing in the TUI writes to a child's file. Prompts (the `input` hook)
+and `!` commands (`user_bash`) are refused there; the agent guard skips
+its thinking-level reset and the Claude Code adapter its
+SessionStart/SessionEnd hooks for such a switch. Continuing a finished
+child would also run under the main session's tools, role and prompt, not
+the agent's; that needs RPC (the agent's own process), later.
+
+Detaching: `switchSession` tears the current session down first, which
+aborts the turn in flight, and with it a `subagent`, `expert` or
+`workflow` call and its children. The switch sets `reg.switching`; a call
+wrapped in `detachable()` treats an abort that comes while it is set as a
+detach: its work keeps its own signal, the tool returns a short note at
+once (that note is the only text this feature ever puts in context, and
+only when the user switches mid-call), and when the runs end their report
+is sent to the session the call came from with `pi.sendMessage(...,
+{ triggerTurn: true, deliverAs: "followUp" })`, held while another
+session is open. A plain abort (Esc) still stops the children.
+
+The registry lives on `globalThis`, so the copies of `subagents.ts` that
+the experts and Claude Code modules import share it, and a switch or
+`/reload` (which load the module again) keep it. The footer list
+(`/subagents toggle`, saved as `subagentsFooter` in lets-code-state.json)
+is a block the footer module draws above its numbers (also on
+`globalThis`), or a widget below the editor without that footer. Zero
+context: no tool text, prompt section or message changes; the provider
+requests of a print-mode run were compared byte for byte against main.
 
 **Sandbox.** The example extension's shape: `createBashTool(cwd,
 {operations})` with commands wrapped by `SandboxManager.wrapWithSandbox`,

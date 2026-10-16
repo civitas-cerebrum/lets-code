@@ -523,37 +523,58 @@ requires: rea/runtime/node_modules/rea-agents/package.json
 ---
 ```
 
-**Watching a subagent.** `/subagents` (or <kbd>Alt</kbd>+<kbd>S</kbd>)
-opens a full-screen view of the session's subagent and expert runs. Running
-runs come first, then finished ones, newest first. Each row shows a status
-mark (`●` running, `✓` done, `✗` failed or timed out, `■` stopped), the
-agent, the task, the elapsed time and the tokens. While a run is going, the
-footer says `2 subagents running · alt+s or /subagents to watch`. Pick a
-run to see its conversation as the main view would draw it: the task,
-thinking, text, tool calls with their results collapsed, and the final
-report. It streams while the child works and follows the end unless you
-scroll up. The header shows the agent, status, elapsed time, tokens and
-the tool call the run belongs to. `/subagents 2` or `/subagents scout`
-opens a run directly. The view is read-only and costs no context: nothing
-in it reaches the model.
+**Subagent sessions.** Every subagent and expert run is a real pi
+session of its own, and you can switch the TUI into it. `/subagents` (or
+<kbd>Alt</kbd>+<kbd>S</kbd>) opens a picker in place of the input: the main
+session, then the runs, running first, then finished ones, newest first.
+Each row shows a status mark (`●` running, `✓` done, `✗` failed or timed
+out, `■` stopped), the agent, the task, the elapsed time and the tokens.
+<kbd>Enter</kbd> switches into that run's session the way `/resume` does, so
+pi draws it like any session: the task, thinking, text, tool calls and their
+results, with pi's own keys (<kbd>Ctrl</kbd>+<kbd>O</kbd> and the rest).
+<kbd>x</kbd> (twice) stops a running child; the others in the call go on.
+`/subagents 2` or `/subagents scout` switches straight to a run.
 
-| Key | In the view |
-|---|---|
-| <kbd>Esc</kbd> / <kbd>q</kbd> | back to the session |
-| <kbd>←</kbd> <kbd>→</kbd>, <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd>, <kbd>Alt</kbd>+<kbd>S</kbd> | previous / next run |
-| <kbd>↑</kbd> <kbd>↓</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd> <kbd>Home</kbd> <kbd>End</kbd> | scroll (<kbd>End</kbd> follows the end again) |
-| <kbd>t</kbd> | show or hide thinking |
-| <kbd>o</kbd> / <kbd>Ctrl</kbd>+<kbd>O</kbd> | expand or collapse tool output |
-| <kbd>l</kbd> | the list (<kbd>↑</kbd> <kbd>↓</kbd> pick, <kbd>Enter</kbd> open) |
-| <kbd>x</kbd> | stop this running child (asks first; the others in the call go on) |
+In a subagent's session the status line says so, for example `subagent
+scout · running · read-only · alt+s back`, and <kbd>Alt</kbd>+<kbd>S</kbd>
+or `/subagents back` returns to the main session. It is read-only: a
+prompt or a `!` command is refused there (the child process owns the file
+while it runs, and continuing a finished one here would run under the main
+session's tools and role, not the agent's). `/subagents` from there picks
+another run.
+
+How live a running child's session is: pi shows the messages the child has
+completed (a child writes a message to its session file when the message is
+done), and below them, above the input, the message on its way, token by
+token, and a running tool with its output as it streams, drawn with the
+same components, plus a line with the child's clock and tokens. Each time
+the child completes a message the session is opened again (about once a
+second at most, which takes some 60 to 120 ms), so pi's own view catches
+up; when the child ends, its session is complete.
+
+Switching away from the main session while a call is running does not stop
+its children: the call goes on in the background (the tool call shows
+`Still running in the background ...` and the turn ends), and once the runs
+are done their report is sent to the main session as a message that
+continues it, as soon as you are back there. A plain stop
+(<kbd>Esc</kbd>) still stops them.
+
+`/subagents toggle` adds the session's runs to the footer, one line each
+(running first; mark, name, task on wide terminals, elapsed time, tokens;
+condensed on narrow ones), and is remembered for the next launch like
+`/metrics`. While a run is going and the footer list is off, the status
+says `2 subagents running · alt+s or /subagents to switch`. None of this
+costs context: nothing in it reaches the model (the request is the same
+byte for byte).
 
 `LETS_CODE_SUBAGENT_KEY` picks another key (pi's key syntax, e.g.
-`ctrl+alt+w`), and `none` turns the key off. Transcripts are kept in memory
-for the session and in `~/.pi/agent/lets-code-runs/<session id>/`, one
-JSON file per run (mode 0600), so a finished run reopens after `/reload`, a
-restart with `-c`, or `/resume`. They hold only what the child printed, with
-tool output cut to its first and last few thousand characters and long
-arguments shortened. The newest 30 runs of a session
+`ctrl+alt+w`), and `none` turns the key off. Each run is kept in
+`~/.pi/agent/lets-code-runs/<session id>/`: its session file
+(`<run>.pi.jsonl`, outside pi's session store, so not in `/resume`'s list)
+and a transcript (`<run>.json`, what the live part and the lists draw
+from, with tool output cut to its first and last few thousand characters),
+both mode 0600, so a finished run reopens after `/reload`, a restart with
+`-c`, or `/resume`. The newest 30 runs of a session
 (`LETS_CODE_SUBAGENT_KEEP_RUNS`) and the newest 20 sessions stay on disk.
 
 </details>

@@ -251,6 +251,32 @@ same. Expert files are never listed in the `subagent` tool, whose
 description lists agents with their jobs, so nothing is listed twice; a
 call there is pointed at the expert tool.
 
+**Tester (achilles' method, not achilles).** achilles is a QA
+methodology for Claude Code: 24 skills of 8 to 95 KB, about 50 hooks that
+gate an 8-phase pipeline, ledgers, reviewer subagents and a role kernel,
+plus a pi adapter on a branch. Its harness assumes a frontier model that
+can afford the reading and the gates; for a 27B child it would be context
+and ceremony. What carries over is the method and the API underneath. So
+`tester` ships the method as about 5,000 words a 27B can follow (a
+550-word prompt, and references read per step: Steps API, mobile, order
+of work and done criteria, composition, bugs and diagnosis), distilled
+from achilles main @ 6384b5f with every harness, hook, ledger, schema and
+Claude Code tool name taken out and mapped onto pi's seven tools. The
+API is installed pinned, like REA's package: element-interactions 0.3.9,
+element-repository 0.3.2, @playwright/test 1.64.1 and webdriverio 9.32.0
+(element-repository's peer range is ^9.27). Two helpers replace what the
+harness and achilles' browser CLI did: `e2e-init` (a test project from
+the pins, installed from npm's cache that setup warmed, never overwriting
+a file) and `peek.mjs` (URL, status, title, ARIA snapshot, console errors,
+failed requests, screenshot: the selector source). Mobile: the Steps API
+is Playwright-only and achilles' own lifecycle is web-only ("mobile
+support is on the roadmap"), but element-repository resolves the same
+named elements on Android and iOS through WebdriverIO, so mobile tests use
+it directly; `mobile-check` reports what is missing instead of installing
+an Appium stack. No agent dir: the child needs only its prompt and pi's
+tools. `platform: linux, darwin` keeps it off Termux (Node says `android`
+there), where Playwright has no browser.
+
 **Claude Code adapter.** Automatic: the launcher switches it on only where
 the project's `.claude` (up to the git root) has hooks or workflow scripts,
 the parts that need the adapter to work at all; skills and commands alone

@@ -8,7 +8,7 @@
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, realpathSync, rmSync, chmodSync, readdirSync, existsSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 
 const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/experts.ts");
@@ -256,6 +256,26 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	t("bad brief item rejects the file", sub.parseAgentFile("---\nname: z\nexpert: true\nbrief:\n  - no colon here\n---\n", "z.md", "user"), null);
 	t("setup outside the agent dir rejects the file", sub.parseAgentFile("---\nname: z\nexpert: true\nsetup: /etc/passwd\n---\n", "z.md", "user"), null);
 	t("platform", [sub.platformOk(undefined), sub.platformOk(process.platform), sub.platformOk("no-such-os")], [true, true, false]);
+}
+
+
+// the tester expert as lets-code writes it (tester_write_agent): its fields parse,
+// its brief has the two required fields, it is listed only on Linux and macOS,
+// and it is not set up until tester/setup has run
+{
+	const sub = await import(pathToFileURL(join(ext, "subagents.ts")).href);
+	const lc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lets-code"), "utf8");
+	const from = lc.indexOf("\ntester_write_agent() {");
+	const body = lc.slice(lc.indexOf("<<'MD'\n", from) + 7, lc.indexOf("\nMD\n", from) + 1);
+	const a = sub.parseAgentFile(body, join(agentDir, "agents", "tester.md"), "user", undefined, false, true);
+	t("tester: an expert", [a?.name, !!a?.expert], ["tester", true]);
+	t("tester: brief", a?.expert?.brief.map((f) => `${f.name}${f.required ? "*" : ""}`), ["target*", "platform", "goal*", "how_to_run", "scope", "constraints"]);
+	t("tester: no agent dir of its own; its prompt", [a?.agentDir, a?.appendPrompt, a?.timeout], [undefined, join(agentDir, "tester", "prompt.md"), 3600]);
+	t("tester: setup under the agent dir", a?.expert?.setup, join(agentDir, "tester", "setup"));
+	t("tester: not set up before its setup", a?.expert?.ready, false);
+	t("tester: Linux and macOS only (not Termux: process.platform android)", [sub.platformOk(a?.expert?.platform), a?.expert?.platform.split(/[,\s]+/).includes("android")], [["linux", "darwin"].includes(process.platform), false]);
+	t("tester: use_for whole in the line", a?.expert?.useFor, body.match(/^use_for: (.*)$/m)[1]);
+	t("tester: pi's tools", a?.tools, ["bash", "read", "edit", "write", "grep", "find", "ls"]);
 }
 
 console.log(`\n${n} checks, ${fail ? "FAILURES" : "all passed"}`);

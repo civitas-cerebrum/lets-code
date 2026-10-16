@@ -6641,6 +6641,829 @@ MD
     REA_AGENT=1
 }
 
+# Tester expert: web-app QA in a child pi that knows achilles' QA method
+# (civitas-cerebrum/achilles: journey mapping, test composition, bug
+# discovery, failure diagnosis, evidence) and writes its tests with the API
+# achilles drives: @civitas-cerebrum/element-interactions (the Steps API and
+# page-repository.json over Playwright) and, for mobile, element-repository
+# with WebdriverIO/Appium. achilles itself (its skills, hooks, gates, role
+# kernel, ledgers) is not installed: its method is distilled into the
+# child's instructions and tester/ref/*.md, from achilles main @ 6384b5f
+# (2026-10-04).
+# Dormant until the user enables it; then tester/setup installs the pinned
+# packages into tester/runtime (and so into npm's cache, which e2e-init
+# installs from) and Playwright's chromium, and checks the mobile
+# prerequisites without installing them. Not on Termux: Playwright has no
+# browser for Android, and Appium needs a host with the Android SDK.
+TESTER_PINS="@civitas-cerebrum/element-interactions@0.3.9 @civitas-cerebrum/element-repository@0.3.2 @playwright/test@1.64.1 webdriverio@9.32.0"
+TESTER_DIR="${PI_AGENT_DIR}/tester"
+pi_write_tester() {
+    local invoke="$1" rc
+    TESTER_NOTE=""; TESTER_AGENT=""
+    mkdir -p "${TESTER_DIR}/bin" "${TESTER_DIR}/ref" "${TESTER_DIR}/work"
+    rm -rf "${TESTER_DIR}/agent" "${TESTER_DIR}/extension.ts"   # an earlier design's
+
+    # 1. the setup: the pinned packages and chromium (first run, or when the
+    # pins change), then the mobile check (never fatal)
+    {
+        echo '#!/usr/bin/env bash'
+        echo '# Written by lets-code (tester); regenerated on launch, edits are overwritten.'
+        echo '# setup [--no-install]: installs the pinned test API into runtime/ and'
+        echo '# Playwright'"'"'s chromium when missing or other pins, then reports the mobile'
+        echo '# prerequisites (bin/mobile-check). Progress goes to stderr; on failure the'
+        echo '# last stdout line says why. --no-install: exit 3 when not installed.'
+        printf 'pins="%s"\n' "${TESTER_PINS}"
+        cat <<'SH'
+set -u
+here="$(cd "$(dirname "$0")" && pwd)"
+rt="${here}/runtime"; mark="${rt}/.installed"
+p="${SETUP_LOG_PREFIX:+${SETUP_LOG_PREFIX} }tester:"
+if [ "$(cat "${mark}" 2>/dev/null)" != "${pins}" ]; then
+    [ "${1:-}" = --no-install ] && exit 3
+    command -v npm >/dev/null 2>&1 || { echo "npm not found; run: bash ${here}/setup"; exit 2; }
+    rm -f "${mark}"; mkdir -p "${rt}"
+    python3 - "${rt}/package.json" ${pins} <<'PY' || { echo "could not write ${rt}/package.json"; exit 1; }
+import json, sys
+deps = {}
+for spec in sys.argv[2:]:
+    name, _, version = spec.rpartition("@")
+    deps[name] = version
+json.dump({"name": "lets-code-tester", "private": True, "dependencies": deps}, open(sys.argv[1], "w"), indent=2)
+PY
+    echo "${p} installing ${pins} into ${rt} (first run only, ~130 MB) ..." >&2
+    # --ignore-scripts: sql-client's postinstall copies a Claude Code skill into
+    # ./.claude/skills and ~/.claude/skills, and WebdriverIO's driver packages
+    # download geckodriver/edgedriver; none of it is needed (chromium comes next)
+    (cd "${rt}" && npm install --ignore-scripts --no-audit --no-fund --loglevel=error >/dev/null 2>&1) || { echo "install failed; run: cd ${rt} && npm install --ignore-scripts"; exit 1; }
+    echo "${p} Playwright's chromium, unless cached (~170 MB) ..." >&2
+    (cd "${rt}" && ./node_modules/.bin/playwright install chromium >/dev/null 2>&1) || { echo "browser download failed; run: cd ${rt} && npx playwright install chromium"; exit 1; }
+    echo "${pins}" > "${mark}"
+fi
+[ "${1:-}" = --no-install ] && exit 0
+bash "${here}/bin/mobile-check" 2>/dev/null | sed "s|^|${p} |" >&2
+exit 0
+SH
+    } > "${TESTER_DIR}/setup"
+    chmod 755 "${TESTER_DIR}/setup"
+
+    # 2. the child's helpers: a test project from the pins, the mobile check
+    {
+        echo '#!/usr/bin/env bash'
+        echo '# Written by lets-code (tester); regenerated on launch, edits are overwritten.'
+        echo '# e2e-init [--mobile] <dir> [<base-url>]: makes <dir> an element-interactions test project'
+        echo '# (adds the pinned packages as devDependencies, from npm'"'"'s cache when it can),'
+        echo '# and writes what is missing of playwright.config.ts, tests/fixtures/base.ts,'
+        echo '# tests/data/page-repository.json and tests/e2e/. Never overwrites a file.'
+        echo '# --mobile: element-repository and WebdriverIO instead, for Appium scripts.'
+        printf 'pins="%s"\n' "${TESTER_PINS}"
+        cat <<'SH'
+set -eu
+mobile=""; [ "${1:-}" = --mobile ] && { mobile=1; shift; }
+[ $# -ge 1 ] || { echo "usage: e2e-init [--mobile] <dir> [<base-url>]" >&2; exit 2; }
+dir="$1"; url="${2:-}"
+mkdir -p "${dir}"; cd "${dir}"
+[ -f package.json ] || printf '{\n  "name": "e2e",\n  "private": true,\n  "scripts": { "test:e2e": "playwright test" }\n}\n' > package.json
+if [ -n "${mobile}" ]; then   # element-repository + WebdriverIO, plain .mjs scripts against Appium
+    mob=""; for s in ${pins}; do case "${s}" in webdriverio@*|@civitas-cerebrum/element-repository@*) mob="${mob} ${s}" ;; esac; done
+    # shellcheck disable=SC2086
+    npm install -D --prefer-offline --ignore-scripts --no-audit --no-fund --loglevel=error ${mob} >/dev/null
+    mkdir -p tests/mobile tests/data
+    [ -f tests/data/page-repository.json ] || printf '{\n  "pages": []\n}\n' > tests/data/page-repository.json
+    echo "ready (mobile): $(pwd) (scripts in tests/mobile/*.mjs, selectors in tests/data/page-repository.json with \"platform\"; run: node tests/mobile/<name>.mjs)"
+    exit 0
+fi
+web=""; for s in ${pins}; do case "${s}" in webdriverio@*) ;; *) web="${web} ${s}" ;; esac; done
+# shellcheck disable=SC2086
+npm install -D --prefer-offline --ignore-scripts --no-audit --no-fund --loglevel=error ${web} >/dev/null
+mkdir -p tests/e2e tests/fixtures tests/data
+if [ ! -f playwright.config.ts ] && [ ! -f playwright.config.js ]; then
+    cat > playwright.config.ts <<TS
+import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './tests/e2e',
+  fullyParallel: true,
+  retries: 0,
+  reporter: [['list'], ['html', { open: 'never' }]],
+  use: {
+    ${url:+baseURL: '${url}',
+    }trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
+    video: 'retain-on-failure',
+  },
+  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+});
+TS
+fi
+[ -f tests/fixtures/base.ts ] || cat > tests/fixtures/base.ts <<'TS'
+import { test as base, expect } from '@playwright/test';
+import { baseFixture } from '@civitas-cerebrum/element-interactions';
+
+export const test = baseFixture(base, 'tests/data/page-repository.json');
+export { expect };
+TS
+[ -f tests/data/page-repository.json ] || printf '{\n  "pages": []\n}\n' > tests/data/page-repository.json
+echo "ready: $(pwd) (specs in tests/e2e, selectors in tests/data/page-repository.json, import { test, expect } from '../fixtures/base'; run: npx playwright test)"
+SH
+    } > "${TESTER_DIR}/bin/e2e-init"
+    cat > "${TESTER_DIR}/bin/mobile-check" <<'SH'
+#!/usr/bin/env bash
+# Written by lets-code (tester); regenerated on launch, edits are overwritten.
+# mobile-check: what mobile testing (element-repository + WebdriverIO +
+# Appium) needs on this machine, one line each; exit 0 when Android or iOS
+# can run. Nothing is installed.
+ok=0; miss=""
+have() { command -v "$1" >/dev/null 2>&1; }
+if have appium; then
+    drivers="$(appium driver list --installed 2>&1 | grep -oE 'uiautomator2|xcuitest' | sort -u | tr '\n' ' ')"
+    echo "mobile: appium $(appium --version 2>/dev/null | tail -n 1) found; drivers: ${drivers:-none (appium driver install uiautomator2)}"
+else
+    miss="${miss} appium"; echo "mobile: appium not found (npm i -g appium && appium driver install uiautomator2)"
+fi
+sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+if have adb; then
+    n="$(adb devices 2>/dev/null | awk 'NR>1 && $2=="device"' | wc -l | tr -d ' ')"
+    echo "mobile: adb found; ${n} device(s) or emulator(s) attached"
+    [ -n "${sdk}" ] || echo "mobile: ANDROID_HOME is not set (the uiautomator2 driver needs it)"
+    if [ "${n}" -gt 0 ] && [ -n "${sdk}" ] && have appium; then ok=1; fi
+else
+    miss="${miss} android-sdk"; echo "mobile: adb not found (Android SDK platform-tools, a device or an emulator)"
+fi
+have java || echo "mobile: java not found (the Android SDK tools need a JDK)"
+if [ "$(uname -s)" = Darwin ]; then
+    if have xcrun && xcrun simctl list devices booted 2>/dev/null | grep -q Booted; then
+        echo "mobile: an iOS simulator is booted"; have appium && ok=1
+    else
+        echo "mobile: no booted iOS simulator (Xcode: xcrun simctl boot <device>)"
+    fi
+else
+    echo "mobile: iOS needs macOS with Xcode"
+fi
+if [ "${ok}" = 1 ]; then echo "mobile: ready"; exit 0; fi
+echo "mobile: not ready${miss:+ (missing:${miss})}; web testing is unaffected"
+exit 1
+SH
+    chmod 755 "${TESTER_DIR}/bin/e2e-init" "${TESTER_DIR}/bin/mobile-check"
+
+    # 3. the child's standing instructions and references
+    tester_write_knowledge
+
+    # 4. the expert; a user's own agent of that name is left alone
+    # (TESTER_AGENT stays empty)
+    tester_write_agent
+
+    # 5. install (on) or check an installed one (files)
+    if [ "${invoke}" = files ]; then
+        bash "${TESTER_DIR}/setup" --no-install >/dev/null 2>&1 || true
+        return 0
+    fi
+    rc=0; TESTER_NOTE="$(SETUP_LOG_PREFIX="${LOG_PREFIX}" bash "${TESTER_DIR}/setup" 2>/dev/null)" || rc=$?
+    if [ ${rc} -eq 0 ]; then TESTER_NOTE=""; else TESTER_NOTE="$(printf '%s\n' "${TESTER_NOTE}" | tail -n 1)"; TESTER_NOTE="${TESTER_NOTE:-setup failed (exit ${rc})}"; fi
+    return 0
+}
+tester_write_knowledge() {
+    local t="${TESTER_DIR}" f
+    mkdir -p "${t}/ref" "${t}/bin"
+    cat > "${t}/prompt.md" <<'MD'
+You are the tester agent of a lets-code session: QA of web apps (and of
+Android or iOS apps where Appium is set up), following the achilles QA
+method. Another agent gave you one brief and will see only your final
+message. You have bash, read, edit, write, grep, find and ls.
+
+## Tools here
+- `@@T@@/bin/e2e-init <dir> [<base-url>]`: makes `<dir>` a test project
+  with the pinned API (element-interactions Steps API over Playwright,
+  page-repository.json); never overwrites a file. `--mobile` adds
+  WebdriverIO for Appium. Chromium is installed.
+- `node @@T@@/bin/peek.mjs <url> [<out-dir>]`: what a page really shows:
+  URL, status, title, ARIA snapshot, console errors, failed requests, a
+  screenshot.
+- `@@T@@/bin/mobile-check`: what mobile testing still lacks here.
+- References; read the one you need before that step, not all of them:
+  - `@@T@@/ref/api-web.md`: the Steps API, page-repository.json, running tests
+  - `@@T@@/ref/api-mobile.md`: element-repository with WebdriverIO and Appium
+  - `@@T@@/ref/method.md`: order of work, journey mapping, coverage passes, what done means
+  - `@@T@@/ref/composition.md`: which tests to write, structure, test IDs, assertions, selectors, data
+  - `@@T@@/ref/bugs.md`: exploring a live app, bug hunting, diagnosing a failing test, verifying a change, evidence, bug reports
+
+## Order of work
+1. Read the brief. Find the app: the project path or URL; how it starts
+   (`how_to_run`, package.json, README). Start it if it is not running.
+2. Look before writing: `peek` every page in scope, read the source that
+   renders it. Selectors come from what you saw, never from guesses.
+3. Scaffold with `e2e-init`: in the project when the brief gives one (an
+   existing Playwright setup is reused), else under `@@T@@/work/<name>`.
+4. Do the goal, at the brief's scope and no wider:
+   - cover a journey, page or form: composition.md (variants, partition
+     table), then api-web.md
+   - verify a flow or a change: bugs.md sections 5 and 6
+   - find bugs: bugs.md section 2
+   - a failing or flaky test: bugs.md section 3 (evidence before verdict)
+   - map the app or cover it all: method.md
+   - mobile (`platform` android or ios): run mobile-check first; if it
+     is not ready, stop and report its lines
+5. Run what you wrote with `npx playwright test --reporter=list` from the
+   test project. A new test must pass 3 runs in a row; a test that fails
+   because the app is wrong stays red and becomes a finding.
+6. Report.
+
+## Rules
+- Every selector lives in page-repository.json; tests use the Steps API,
+  never `page.locator()` (a throwaway exploration spec may).
+- Never weaken, skip or delete an assertion to get green. No fixed sleeps.
+- Each test ends with an assertion that would fail if the action did
+  nothing.
+- Every claim cites evidence on disk (test output, screenshot, trace path).
+- Stay inside `scope` and `constraints`. Do not commit, and do not touch
+  application code except one data-testid attribute as composition.md
+  allows.
+- Stop the servers and processes you started.
+
+## Final message, for an agent that has not seen any of it
+## Result
+What was tested and the verdict, in two or three sentences.
+## Tests
+Files written or changed, the command that runs them, and the pass/fail
+counts the last run printed.
+## Findings
+Bugs and failures, each with steps, expected, actual, severity and evidence paths.
+## Not done
+What was out of scope or out of reach, and why.
+MD
+    cat > "${t}/ref/api-web.md" <<'MD'
+# Web tests: element-interactions cheat sheet (v0.3.9, Playwright only)
+
+## Layout
+Make the test project with `@@T@@/bin/e2e-init <dir> [<base-url>]` (the pinned packages, from npm's cache):
+```
+package.json                    # devDependencies: element-interactions, element-repository, @playwright/test
+playwright.config.ts            # testDir tests/e2e, reporters list + html, trace/screenshot/video on failure, baseURL
+tests/fixtures/base.ts          # builds `test` with baseFixture
+tests/data/page-repository.json # ALL selectors live here
+tests/e2e/<journey>.spec.ts     # specs
+```
+Serve a static site yourself if nothing serves it: `python3 -m http.server <port> >/tmp/srv.log 2>&1 &` (kill it when done).
+
+## Fixture (exact exports)
+The package exports `baseFixture` (a function). It does NOT export `test`/`expect`/`steps`. You build `test`; `expect` comes from `@playwright/test`; `steps` is a fixture name.
+```ts
+// tests/fixtures/base.ts
+import { test as base, expect } from '@playwright/test';
+import { baseFixture } from '@civitas-cerebrum/element-interactions';
+export const test = baseFixture(base, 'tests/data/page-repository.json', {
+  timeout: 30000,      // element op timeout (default 30000)
+  // repoTimeout: 15000, interceptionRetry: true, blockedOrigins: /analytics/, screenshotOnFailure: true
+});
+export { expect };
+```
+The 2nd arg is the path to the JSON, passed to `new ElementRepository(page, path)`: absolute or relative to the project root, so run `npx playwright test` from the project root. Fixtures in tests: `steps`, `repo`, `interactions`, `contextStore`, `page`.
+Other exports you may need: `Steps`, `DropdownSelectType`, `WebElement`, `ElementInteractions`.
+
+## page-repository.json
+```json
+{ "pages": [
+  { "name": "LoginPage", "elements": [
+    { "elementName": "emailInput",  "selector": { "css": "input[name='email']" } },
+    { "elementName": "submitButton","selector": { "role": "button", "name": "Log in" } },
+    { "elementName": "errorBox",    "selector": { "id": "error" } },
+    { "elementName": "heading",     "selector": { "xpath": "//h1" } },
+    { "elementName": "welcome",     "selector": { "text": { "regex": "Welcome,? .+", "flags": "i" } } },
+    { "elementName": "authBtn",     "selector": { "role": "button", "name": { "regex": "Log in|Sign in", "flags": "i" } } }
+  ]},
+  { "name": "PaymentIframe", "frame": { "css": "iframe[title*='card' i]" }, "frameIndex": "first",
+    "elements": [ { "elementName": "cardInput", "selector": { "css": "#card" } } ] }
+]}
+```
+Strategies: `css`, `xpath`, `id` (no `#`), `text` (string or `{regex,flags}`), `role`+`name`, also `testid`, `placeholder`, `label` (aria-label). `frame` scopes a page inside an iframe (`frameIndex`: "first"/"last"/number; array = nested frames). Optional `"fallback": { ...selector }` inside a selector.
+Naming: page `name` PascalCase (`LoginPage`), `elementName` camelCase (`submitButton`). Never put raw selectors in tests.
+
+## Steps API: always (elementName, pageName, ...)
+```ts
+import { DropdownSelectType } from '@civitas-cerebrum/element-interactions';
+await steps.navigateTo('/login');                       // relative to baseURL
+await steps.click('submitButton', 'LoginPage');
+await steps.click('cards', 'ListPage', { strategy: 'index', index: 2 }); // or 'random' / { strategy:'text', text:'X' }
+await steps.fill('emailInput', 'LoginPage', 'a@b.com');
+await steps.check('termsBox', 'SignupPage');
+await steps.pressKey('Enter');
+const v = await steps.selectDropdown('country', 'SignupPage', { type: DropdownSelectType.VALUE, value: 'NL' });
+await steps.fillForm('SignupPage', { emailInput: 'a@b.com', country: { type: DropdownSelectType.RANDOM } });
+// verify
+await steps.verifyText('heading', 'LoginPage', 'Sign in');   // exact; omit 3rd arg = not empty
+await steps.verifyTextContains('errorBox', 'LoginPage', 'invalid');
+await steps.verifyUrlContains('/dashboard');
+await steps.verifyCount('rows', 'ListPage', { exactly: 3 });  // greaterThan / lessThan / ...OrEqual
+await steps.verifyPresence('welcome', 'HomePage');           // attached + visible
+await steps.verifyAbsence('errorBox', 'LoginPage');
+await steps.verifyState('submitButton', 'LoginPage', 'disabled'); // enabled|checked|visible|hidden|focused...
+await steps.verifyInputValue('emailInput', 'LoginPage', 'a@b.com');
+await steps.verifyPageTitle(/Login/);
+// expect chain (retries, first failure throws)
+await steps.expect('errorBox', 'LoginPage').text.toContain('required');
+await steps.expect('rows', 'ListPage').count.toBeGreaterThan(0);
+await steps.expect('submitButton', 'LoginPage').visible.toBeTrue().enabled.toBeTrue();
+await steps.expect('errorBox', 'LoginPage').not.text.toContain('Crash');
+// visibility probe / gate
+const shown = await steps.isVisible('cookieBanner', 'HomePage', { timeout: 1000 }); // boolean, never throws
+await steps.isVisible('cookieBanner', 'HomePage').click();   // skips silently if hidden
+// waits
+await steps.waitForState('modal', 'HomePage', 'visible');    // throws on timeout; { optional: true } -> false
+await steps.waitForUrl(/dashboard/);
+// data
+const t = await steps.getText('welcome', 'HomePage');
+// screenshots / visual
+await steps.screenshot({ fullPage: true, path: 'shot.png' });
+await steps.screenshot('loginForm', 'LoginPage');
+await steps.verifyVisualMatch('login.png', { mask: [{ elementName: 'clock', pageName: 'LoginPage' }] });
+```
+Fluent form: `await steps.on('submitButton','LoginPage').click();`
+
+## Example spec
+```ts
+// tests/e2e/login.spec.ts
+import { test, expect } from '../fixtures/base';
+
+test.describe('Login', () => {
+  test('valid login reaches dashboard', async ({ steps }) => {
+    await steps.navigateTo('/login');
+    await steps.isVisible('cookieAccept', 'LoginPage').click();
+    await steps.fill('emailInput', 'LoginPage', 'user@test.com');
+    await steps.fill('passwordInput', 'LoginPage', 'Secret123!');
+    await steps.click('submitButton', 'LoginPage');
+    await steps.verifyUrlContains('/dashboard');
+    await steps.verifyTextContains('welcome', 'DashboardPage', 'user@test.com');
+  });
+
+  test('empty submit shows error', async ({ steps }) => {
+    await steps.navigateTo('/login');
+    await steps.click('submitButton', 'LoginPage');
+    await steps.verifyPresence('errorBox', 'LoginPage');
+    await steps.expect('errorBox', 'LoginPage').text.toMatch(/required/i);
+    const url = steps.getUrl();
+    expect(url).toContain('/login');
+  });
+});
+```
+Every `elementName`/page used above (`cookieAccept`, `passwordInput`, `DashboardPage.welcome`...) must exist in page-repository.json.
+
+## Run
+```bash
+npx playwright test                              # all tests
+npx playwright test tests/e2e/login.spec.ts -g "valid login"
+npx playwright test --reporter=list              # readable console output for agents
+npx playwright test --trace on                   # always record trace
+npx playwright test --update-snapshots           # refresh visual baselines
+unzip -p test-results/<dir>/trace.zip trace.trace | head   # a failed attempt's trace, read from the shell
+```
+MD
+    cat > "${t}/ref/api-mobile.md" <<'MD'
+# Mobile (Appium) cheat sheet: element-repository 0.3.2
+
+## What is supported
+- `@civitas-cerebrum/element-repository` works with a WebdriverIO `Browser` (Appium session) as well as a Playwright `Page`. Elements come back as `PlatformElement`.
+- The Steps API (`@civitas-cerebrum/element-interactions`, `baseFixture`, `steps.*`) is Playwright-only. Achilles' lifecycle is web-only. For mobile, use `ElementRepository` + the `Element` methods directly, with your own asserts.
+
+## Constructor
+```ts
+import { ElementRepository, isPlatform, PlatformElement } from '@civitas-cerebrum/element-repository';
+const repo = new ElementRepository(driver, 'tests/data/page-repository.json', 15000);
+// (driver: WebdriverIO Browser | Playwright Page, pathOrParsedJson, defaultTimeout ms = 15000)
+```
+
+## page-repository.json with platform
+`platform`: `"web"` (default if omitted), `"android"`, `"ios"`. The same page `name` can appear once per platform.
+```json
+{ "pages": [
+  { "name": "LoginPage", "platform": "android", "elements": [
+    { "elementName": "emailInput",   "selector": { "id": "com.example:id/email" } },
+    { "elementName": "submitButton", "selector": { "accessibility id": "SubmitBtn" } },
+    { "elementName": "title",        "selector": { "uiautomator": "new UiSelector().text(\"Login\")" } },
+    { "elementName": "anyButton",    "selector": { "class name": "android.widget.Button" } }
+  ]},
+  { "name": "LoginPage", "platform": "ios", "elements": [
+    { "elementName": "submitButton", "selector": { "predicate": "label == \"Submit\"" } },
+    { "elementName": "allButtons",   "selector": { "class chain": "**/XCUIElementTypeButton" } }
+  ]}
+]}
+```
+Mobile keys (camelCase alias): `accessibility id` (`accessibilityId`) -> `~v`; `xpath` (raw); `id` -> `#v`; `uiautomator` (`androidUIAutomator`) -> `android=v`; `predicate` (`iOSNsPredicateString`); `class chain` (`iOSClassChain`); `class name` (`className`). `role`+`name` and `text` regex also map to UiSelector (Android) and predicates (iOS).
+
+## Repository methods (elementName, pageName)
+`get`, `getAll`, `getRandom`, `getByText(el, page, text)`, `getByAttribute(el, page, attr, value)`, `getByIndex(el, page, i)`, `getVisible`, `getByRole`, `getSelector`, `getSelectorRaw`, `getPagePlatform(page)`. `get*` returning `Element | null` take `strict` (true = throw instead of null).
+
+## Element interface
+Actions (return `Promise<Element>`, optional `{ timeout }`): `click`, `fill(text)`, `clear`, `check`, `uncheck`, `hover`, `doubleClick`, `scrollIntoView`, `pressSequentially(text, delay?)`. Web only: `setInputFiles`, `dispatchEvent`.
+State/data: `isVisible()`, `isEnabled()`, `isChecked()`, `textContent()`, `getAttribute(name)`, `inputValue()`, `count()`, `all()`, `first()`, `nth(i)`, `filter({ hasText })`, `locateChild(sel)`, `raw()`, `waitFor({ state })` (visible|hidden|attached|detached).
+Chain: `await el.action(5000).waitForState('visible').click()`; also `verifyPresence()`, `verifyText(t)`, `verifyTextContains(t)`, `getText()`.
+
+## Minimal Android session (`tests/mobile/login.android.mjs`, run with `node tests/mobile/login.android.mjs`)
+```js
+import { remote } from 'webdriverio';
+import { ElementRepository } from '@civitas-cerebrum/element-repository';
+
+const driver = await remote({
+  hostname: '127.0.0.1', port: 4723, logLevel: 'warn',
+  capabilities: {
+    platformName: 'Android',
+    'appium:automationName': 'UiAutomator2',
+    'appium:deviceName': 'emulator-5554',      // from `adb devices`
+    'appium:app': '/abs/path/app-debug.apk',   // or appPackage + appActivity:
+    // 'appium:appPackage': 'com.example', 'appium:appActivity': '.MainActivity',
+  },
+});
+try {
+  const repo = new ElementRepository(driver, 'tests/data/page-repository.json');
+  await (await repo.get('emailInput', 'LoginPage')).fill('user@test.com');
+  await (await repo.get('submitButton', 'LoginPage')).click();
+  const title = await repo.get('title', 'LoginPage');
+  await title.waitFor({ state: 'visible' });
+  if ((await title.textContent()) !== 'Login') throw new Error('title mismatch');
+  console.log('PASS');
+} finally {
+  await driver.deleteSession();
+}
+```
+`@@T@@/bin/e2e-init --mobile <dir>` adds `webdriverio` and `element-repository` (pinned) and `tests/mobile/`. The `.mjs` extension allows top-level await.
+
+## Prerequisites
+Run `@@T@@/bin/mobile-check` first. It prints what is missing (Appium 2 with the uiautomator2 or xcuitest driver, Android SDK `adb` with a device or emulator and `ANDROID_HOME`, or macOS with Xcode and a booted simulator) and exits 1 when mobile cannot run. Then do not install any of it yourself: report its lines under "Not done".
+MD
+    cat > "${t}/ref/method.md" <<'MD'
+# QA method: map journeys, then grow coverage
+
+## 1. Order of work
+1. **Scaffold**: run `@@T@@/bin/e2e-init` and create `tests/e2e/docs/`. Exit when `npx playwright test --list` works.
+2. **Groundwork**: write `docs/app-context.md` (purpose, roles, auth, URLs). Add a fixture that creates users at runtime.
+3. **Happy path**: one green spec for each of the 2–5 primary flows.
+4. **Journey map** (section 2).
+5. **Coverage expansion** (section 3).
+6. **Secrets**: move every literal into `.env`, add `.env.example`, re-run.
+7. **Report**: specs, journeys per tier, findings, open bugs. Use real numbers only.
+
+**Narrow scope** (one journey or page): still read `app-context.md`, write that one journey block, cover its tier's expectations, run its negative matrix and meet its exit criteria. Never quietly shrink a scope you were given. If you run out of budget, write what is done and what is pending, and stop with "resume needed".
+
+## 2. Journey mapping
+- Browse the live app breadth-first from every entry point. Click nav, CTAs, footers, tabs and dropdowns. Try one mobile viewport. Use `@@T@@/bin/peek.mjs` (see bugs.md).
+- Use source routes only as a checklist. Every mapped URL must be visited live.
+- For each page, write the URL, purpose, actions, states (empty/loading/error/data) and links into `app-context.md`.
+- Record auth walls you can't pass as gated. Never guess credentials.
+- Log the auth type, mutation requests (POST/PUT/PATCH/DELETE) and persistent banners.
+- **Flows**: for each entry point, ask what the user wants to achieve. Trace entry → goal and note the branches.
+- **Edge pass (mandatory)**: re-walk for role-locked routes, deep links, expired sessions, deletion and error paths. Mapping is done when this pass finds nothing new.
+- **Priority** (business impact):
+  - P0: revenue or core conversion.
+  - P1: what most users use.
+  - P2: supporting content.
+  - P3: peripheral.
+- **Risk** (observed only): input-heavy, mutating, auth boundary, money, third-party, ≥3 states, prior bugs, git churn. Two or more makes a journey "elevated". Risk orders journeys within a tier; it never changes the tier.
+- **Revise**:
+  - Extract 3+ shared steps as `sj-`.
+  - Split multi-goal journeys.
+  - Fold viewport-only or empty-state-only "journeys" into the parent's state variations.
+
+`tests/e2e/docs/journey-map.md` (blocks in priority order):
+```
+## Site Map: /, /login, /cart, /checkout ... Gated: /admin (admin role)
+### sj-login: Log in — /login → /; Used by: j-checkout
+### j-checkout: Buy a product
+Priority: P0  Risk factors: mutating, auth-boundary, payment
+Pages touched: /, /product/:id, /cart, /checkout   Sub-journey refs: sj-login
+Steps: 1. add to cart → /cart 2. pay → /checkout/done
+Branches: remove item; back from payment
+State variations: empty cart, card declined, mobile
+Exit: confirmation + order listed in /orders
+Test expectations: full journey; error per failing step; edge inputs; mobile; perf
+```
+**Expectations by tier.**
+- P0: as in the example.
+- P1: full journey, key errors and data checks.
+- P2: page loads, links, content and one journey test.
+- P3: smoke only.
+
+## 3. Coverage expansion (every journey, every pass)
+1. **Compose**: cover every authored expectation (`<j-slug>.spec.ts`). Add discoveries to the map.
+2. **Widen**: promote new branches and retry gaps. Skip a journey only if its block has no changes, related findings or owed fixes, and write down the reason.
+3. **Consolidate**: cross-journey and data-lifecycle tests (create → edit → delete).
+4. **Probe, no tests**: build a negative matrix and log each result in `adversarial-findings.md` as Boundary verified, Suspected bug or Ambiguous.
+   - The negation of each expectation: missing or malformed fields, overlong input, wrong user, other tenant's ID, empty list, injection, double submit, after logout, back and resubmit.
+   - Always add: auth tamper, tenant isolation, replay, session boundary, input boundaries.
+5. **Regression**: re-probe the Ambiguous items and try combined probes. Write passing tests in `<j-slug>-regression.spec.ts` for verified boundaries only.
+
+After every pass:
+- Dedup tests that check the same invariant, keeping one.
+- Merge duplicate findings without losing any content.
+- Run the whole suite; it must have zero failures and no unexplained skips.
+
+**Modes.**
+- Standard: all passes.
+- Depth: all passes, with full attention on each journey.
+- Breadth: one sweep, no probes. P0 gets happy path, errors, edge and mobile; P1 happy path and errors; P2 happy path; P3 smoke.
+
+## 4. Done means
+- **Journey**: 100% of authored expectations covered and green. Every matrix entry recorded. Boundaries locked. Bugs reported with evidence. New tests green 3 runs in a row.
+- **Map**: every URL visited, the edge pass found nothing new, sub-journey refs match both ways, gated areas listed.
+- **Expansion**: every journey has a result each pass:
+  - new tests
+  - covered (with a table mapping each expectation to its test)
+  - blocked (with the reason)
+  - skipped (with the user's words quoted)
+
+  Dedup is done and the suite is green.
+- **Suite**: the checkpoint table (authored vs covered) is at 100%; any P0 under 100% means not done. Residual risk is listed: gated areas, blocked journeys, Ambiguous findings, placeholders.
+
+## 5. Quality rules
+- Never weaken, flip or delete an assertion to get a pass. No skip, try/catch or detour around a broken feature. If the app is wrong, report expected vs actual with a screenshot and leave the test red.
+- Classify each failure (test vs app) from the trace, the DOM and the console, not from the error text.
+- End every test with an assertion on the action's effect. If it would pass when the action did nothing, it is worthless.
+- Oracle strength:
+  - P0 mutation: confirm through the API or DB.
+  - P0 read and P1 mutation: reload and re-check.
+  - A toast alone is enough only for P2/P3.
+- Bite-check: change an expected value, see the test fail, then revert.
+- Take selectors from the live DOM only.
+- Generate data per test and clean up in `afterAll`. Never use current page content as the oracle.
+- Never commit `test.fail()`, and never encode a bug as passing behaviour.
+- Do not commit: leave the changes for the caller.
+MD
+    cat > "${t}/ref/composition.md" <<'MD'
+# Test Composition Rules
+
+## 1. Variants per journey (in order)
+1. **Happy path.** The full UI walk, done by exactly ONE test per journey.
+2. **Error states.** Validation errors, network failure, session expiry, bad input.
+3. **Edge cases.** Read them off the partition table.
+4. **Mobile.** Happy path at 375x812, P0/P1 only.
+5. **Negative flows.** Unauthorized access, permission denied, steps out of order.
+6. **Data lifecycle.** Create/read/update/delete, when the journey needs it.
+
+Depth: P0 gets all six. P1 gets 1-4. P2 gets the happy path, one error and one data check. P3 gets a smoke test.
+
+**Partition table.** Write it as a comment at the top of the spec, BEFORE the tests. Columns: Input | Class | Representative | Valid? | Test.
+- Take the classes from the spec or from observed validation (error text, `maxlength`). Never invent them.
+- One test per class.
+- Test both sides of every edge: `min-1`/`min`, `max`/`max+1`, empty/1 char.
+- Each invalid row and each boundary row gets a test. Interior valid rows fold into the happy path.
+
+**Derivative tests** reach their start state through API or cookie injection, then assert only their own surface. Inject auth everywhere except in login/signup tests.
+
+## 2. Structure
+- One spec file per journey or area, under about 200 lines. Use one `describe` with `test.describe.configure({ timeout: 60_000 })`.
+- One behaviour per test. The title states that behaviour.
+- Specs that change data put `// serial-deliberate: <reason>` then `test.describe.configure({ mode: 'serial' })` at the top of the file.
+- Do not mock the network or components.
+
+## 3. Test IDs
+- Every title starts with an ID: `test('TCLG-000420 · a wrong password is rejected', ...)`.
+- Format: `TC` plus 0-3 area letters, a dash, then 4-6 digits. A separator follows (`·`, space, `-`, `:` or `|`).
+- Describe titles need no ID.
+- IDs are unique across the suite: grep before creating one.
+- The ID belongs to the scenario. Rewording or moving the test keeps it. Retired IDs are never reused. When you split a test, the new test gets a fresh ID.
+
+## 4. Assertions
+- Every test ENDS with an assertion of the action's effect.
+- Ask: "Would this pass if the action did nothing?" If yes, replace it. Examples: a list still present after a click, or an input existing after a fill. Assert the URL, new text, selected state, modal or input value instead.
+- Strength levels:
+  - L0: a toast appears.
+  - L1: reload, then re-read the value.
+  - L2: an API GET with status and shape checks.
+  - L3: a DB read.
+- Data-changing steps need at least L2 on P0 and L1 on P1.
+- For values that change between runs, use one of these forms:
+  - round-trip: assert the value the test created
+  - delta: before/after, e.g. `count + 1`
+  - shape: a regex match
+
+  Never assert timestamps, server IDs or seed counts as literals.
+- Bite check: break one expected value, confirm the test fails, then revert.
+
+## 5. Selectors
+- **No raw selectors in tests.** Add the element to `page-repository.json` and use the Steps API. Never call `page.locator()`.
+- Never invent a selector. Inspect the DOM or reuse a repository entry.
+- Preference order: `data-testid` > `id` > stable CSS > text > XPath. A unique role plus accessible name also counts as stable.
+- Avoid nth-child chains, position-based CSS and copy text.
+- **Add a test attribute to the frontend source** only when the frontend source is in this workspace AND the element has no test attribute, unique role+name or stable text.
+  - Use the attribute the project already uses (`data-testid` by default).
+  - Name it in kebab-case by role and context, e.g. `cart-drawer-close`.
+  - Exactly ONE change: one attribute on one opening tag. Never touch `class`, `id`, `style`, `aria-*`, handlers, text or structure.
+  - If the element comes from a third-party component, or the change needs a structural edit, STOP and report.
+  - Verify in order: screenshot → patch → typecheck → unit tests → affected spec → screenshot. The screenshots must be identical.
+  - On any failure, run `git checkout -- <file>` and report.
+
+## 6. Test data
+- First find each data dependency's source, whether it can be written, and whether the environment is isolated, shared or production.
+- **Preferred:** seed your own data. Generate it inside the test body, unique per attempt (`Date.now()` + `randomUUID`), never at module scope (retries collide).
+  - Prefer creating it through the API, then a DB seed, then the UI.
+- **Read-only or production data:** declare a requirement ("a product with ≥2 variants"), resolve it at runtime from the app's source, and assert against what you resolved.
+- Never hardcode current content.
+- Durable accounts come from `process.env` via `tests/fixtures/test-data.ts`. Workers never share an account.
+- Skip ONLY on a missing premise, and name it: `test.skip(true, 'premise: ...')`. Broken renders and 500 errors FAIL.
+- Run side-effecting actions (real email, orders) only on test environments.
+- **Cleanup:**
+  - Delete created data in `after*` hooks so it runs even on failure.
+  - Make cleanup idempotent (no throw if the data was never created).
+  - If no delete path exists, annotate `cleanup-blocked` and report it.
+- If data cannot be generated, isolated and cleaned up, flag the scenario as blocked. Do not write it.
+
+## 7. Hard rules
+- Never weaken, skip or reroute a test to pass against an app bug. No try/catch around app errors. Report what you expected, what happened, and screenshot evidence.
+- A test that fails because of a filed defect keeps its correct assertion and gets the `@known-defect` tag, plus a comment pointing to the bug.
+- Use `test.fail()` only for a ticketed defect.
+- Never add fixed sleeps. Wait on conditions.
+- A new or edited test must pass 3 times in a row; a healed flaky test, 5 times. Then re-run the suite.
+- No padding with duplicates. Never stop at one test either.
+MD
+    cat > "${t}/ref/bugs.md" <<'MD'
+# QA methodology: bugs, failures, verification
+
+## 0. Ground rules
+- Every claim cites a file on disk (screenshot, trace.zip, error-context.md, console log, saved response). Never link a file that does not exist.
+- "Could not measure" is not "found nothing". Before trusting a clean result, prove the check can fail:
+  - Probe a control element that exists on every build (header, `<main>`).
+  - If the control is missing, you are on a login wall, a bot challenge or a 404, and the probe is void.
+- Never weaken an assertion, skip a test, or try/catch a failure into green.
+- No `waitForTimeout`/sleep. Wait on a condition: element state, URL, response, network idle.
+- Secrets: name the .env key, never the value. Redact Authorization/Set-Cookie/`*-token` headers in HARs and console logs.
+
+## 1. Explore a live app from the shell
+- `node @@T@@/bin/peek.mjs <url> [<out-dir>]`: loads the page in chromium and prints the final URL, HTTP status, title, the ARIA snapshot (roles and accessible names: your selector source), console errors and failed requests; saves a full-page screenshot.
+- To act on a page (fill, click, then look), write a throwaway spec in the test project that does the steps with `page` and logs `await page.locator('body').ariaSnapshot()`, then run it with `--reporter=list`. Delete it afterwards.
+- Never guess a selector or a page state you have not seen this way.
+
+## 2. Bug discovery
+- Probe first, read docs and tests after. Use the docs to drop known issues and to find mismatches (a documented state that never appears, inconsistent validation).
+- Budget about 30 probes. Close a category after 8 consecutive dry probes. Record what you did not probe and why.
+- Element probes:
+  - Inputs: empty, `<script>`, `'";DROP`, max length, 0, negative, unicode, whitespace.
+  - State: back after submit, refresh mid-flow, double-click, re-submit.
+  - Races: rapid clicks, acting during spinners or debounce.
+  - Access: URL without auth, tampered IDs/params (IDOR), expired session, a user doing admin actions.
+  - Data: empty, single item, last page, overflowing text, zero results.
+  - Cross-feature: two tabs, filter plus back, viewport resize.
+- Flow probes (2-3 variants each):
+  - Interrupt the flow.
+  - Skip a step via URL.
+  - Edit the same record in two tabs.
+  - Create, edit, delete, undo.
+  - Log out or switch role mid-flow.
+  - Delete upstream data.
+  - Repeat an action 20 times (stacked toasts, DOM growth).
+- Visibility gate: a UX bug counts only if a screenshot shows it. A hidden or zero-size element is `info` (DOM-only). Security findings are rated on impact when a response, header or DOM excerpt backs them.
+- Dedup: give each finding an ID and a fingerprint `<page>:<category>:<behaviour>`. Drop anything already filed or covered by a passing test.
+- Record each confirmed bug as a test that asserts the CORRECT behaviour, so it fails now and goes green unedited once fixed:
+  - Title: `@bug-discovery @known-defect <bug>`. JSDoc: `@finding`, `@severity`, numbered `@steps`.
+  - First assertion: the element is visible.
+  - Do not rerun or "heal" it.
+  - Do not use skip/fixme. If a red suite is unacceptable, use `test.fail(true,'Known defect: …')` instead, and only for a filed bug.
+
+## 3. Diagnose a failing or flaky test
+- Gather the evidence floor before ANY verdict, "flake" included, and write down what each item showed:
+  1. Error and stack: file, line, step.
+  2. The trace from the FAILED attempt (attempt 0, not `-retry1`). Use `show-trace`, or `unzip` it and `jq` the actions. Note navigations, overlays and 5xx responses before the failure.
+  3. Screenshot `test-failed-1.png` and DOM `error-context.md`. Describe what is on screen.
+  4. Console: app errors versus third-party noise.
+  5. Video for motion. If still unclear, reproduce live.
+- A timeout says where the run stopped, not why. An overlay, a banner, an animation, a 500 behind a skeleton and a missing element all look the same.
+- Group failures by shared cause and fix the group that unblocks the most tests first.
+- Classify:
+  - **Test bug:** the page is correct and the element is visible; the test targeted it wrong (selector, missing condition wait, hardcoded value, state leak, navigation race). Fix it.
+  - **App bug:** wrong UI (blank page, error, broken layout, wrong data) while the test logic is right. It must reproduce live, or appear in at least 2 independent artifacts. STOP: report it and leave the test unchanged.
+  - **Environment:** CDN, third-party, network, a CI-only difference (viewport, URL, dependency version). Report it. A local green does not explain away a CI red.
+  - **Flake:** mixed results across reruns. **Ambiguous:** show the evidence and ask.
+- Traps:
+  - A selector can resolve to a hidden duplicate (`count()` returns 2 or more). Tighten the selector; do not add a wait.
+  - A modal frame can mount while its content hangs on a spinner. That is an app bug.
+- Fix rules:
+  - Re-learn selectors from the live DOM by text, then role and name, then landmark. If several candidates match, ask.
+  - Changing an expected value or a flow step needs human approval.
+  - Stability bar: 3 consecutive passes for a fix, 5 in suite order for a formerly flaky test. Any red: revert and re-diagnose.
+  - If two different fixes fail, tag the test `@flaky` and log its error signature. Never skip it silently.
+
+## 4. Repair a rotted suite
+- Run the full suite 3 times and build a per-test matrix: green, deterministic fail, flaky-consistent, flaky-chaotic.
+- Cluster failures by signal. Test each hypothesis with the cheapest targeted rerun.
+- If it is still unclear after 5 runs, escalate with the matrix.
+- Fix one representative per cluster (section 3), then rerun the healed tests 3 times in suite order.
+- Never delete a test.
+
+## 5. Verify a change or ticket
+- Write the acceptance criteria verbatim as user-observable statements. Label ones you invented "unconfirmed". Ask what must NOT change.
+- The diff shows where to look, not what to assert.
+- Before asserting:
+  1. Check the feature exists.
+  2. Step through it with a screenshot and a state dump each step.
+  3. Derive assertions from what you saw.
+  4. Judge what looks wrong.
+- Assert outcomes ("visible and focusable"), not just mechanisms (class names).
+- Give every absence check a positive control (the page is alive).
+- Negative control (mandatory): run the new tests against the old code (merge-base or main). A test that passes on both sides covers nothing. With no control available, say "green but unverified".
+- Read the initial state before toggling. Pin the viewport. Wait for late-hydrating content.
+- Report defects found outside the criteria too, and inspect screenshots for spacing, clipping and alignment.
+
+## 6. One-off verification with evidence
+- Inputs: one-sentence task, URL, credentials key, and a pass criterion quoted verbatim.
+- Capture a screenshot per step (`01-…png`), video, trace (`--trace=on`), HAR and console into a timestamped directory. Use `--workers=1`.
+- Positive evidence: the expected state is shown. Negative evidence: the bad state is absent, next to a control proving the page loaded. Capture before/after on the old and new builds when the change is visual.
+- Verdict: PASSED (criterion met), FAILED (any assertion failed; ship the evidence anyway), INCONCLUSIVE (crash before the criterion was evaluated; never a hedge).
+- summary.md: what I did, what I observed, evidence links, capture gaps, reproduction command.
+
+## 7. Bug report
+- Summary: `Location - concise issue`.
+- Description in the third person.
+- Environment URL, browser and version, build/commit, account by .env key.
+- Steps from zero, ending with "Observe …".
+- Expected (correct, testable) and Actual (facts only), kept separate.
+- Evidence paths: screenshot, trace, console, response.
+- Severity:
+  - critical: security, privacy, core flow blocked.
+  - high: user stuck, no workaround.
+  - medium: wrong but continuable.
+  - low: cosmetic.
+  - info: DOM-only.
+- Reproducible: live, or from 2 artifacts. Include the reproduction test path.
+MD
+    cat > "${t}/bin/peek.mjs" <<'JS'
+// Written by lets-code (tester); regenerated on launch, edits are overwritten.
+// peek.mjs <url> [<out-dir>]: loads <url> in headless chromium (the tester's
+// pinned Playwright) and prints the final URL, the HTTP status, the title, the
+// ARIA snapshot (roles and accessible names), console errors and failed
+// requests; saves a full-page screenshot to <out-dir> (default: a temp dir).
+import { createRequire } from "node:module";
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const [url, outArg] = process.argv.slice(2);
+if (!url) { console.error("usage: node peek.mjs <url> [<out-dir>]"); process.exit(2); }
+const require = createRequire(join(dirname(fileURLToPath(import.meta.url)), "..", "runtime", "package.json"));
+const { chromium } = require("@playwright/test");
+const out = outArg || mkdtempSync(join(tmpdir(), "peek-"));
+mkdirSync(out, { recursive: true });
+const browser = await chromium.launch();
+const errors = []; const failed = [];
+try {
+	const page = await browser.newPage();
+	page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
+	page.on("pageerror", (e) => errors.push(String(e)));
+	page.on("requestfailed", (r) => failed.push(`${r.method()} ${r.url()} ${r.failure()?.errorText ?? ""}`));
+	page.on("response", (r) => { if (r.status() >= 400) failed.push(`${r.request().method()} ${r.url()} ${r.status()}`); });
+	const res = await page.goto(url, { waitUntil: "load", timeout: 30000 });
+	await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+	const shot = join(out, "peek.png");
+	await page.screenshot({ path: shot, fullPage: true });
+	const aria = await page.locator("body").ariaSnapshot();
+	console.log(`url: ${page.url()}\nstatus: ${res?.status() ?? "none"}\ntitle: ${await page.title()}\nscreenshot: ${shot}`);
+	console.log(`aria snapshot:\n${aria.length > 8000 ? aria.slice(0, 8000) + "\n[cut at 8000 chars]" : aria}`);
+	console.log(`console errors: ${errors.length ? "\n- " + errors.join("\n- ") : "none"}`);
+	console.log(`failed requests: ${failed.length ? "\n- " + failed.join("\n- ") : "none"}`);
+} catch (e) {
+	console.log(`could not load ${url}: ${e?.message ?? e}`); process.exitCode = 1;
+} finally {
+	await browser.close();
+}
+JS
+    # the helpers' and references' own paths
+    for f in "${t}/prompt.md" "${t}"/ref/*.md; do
+        sed "s|@@T@@|${t}|g" "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
+    done
+    chmod 644 "${t}/prompt.md" "${t}"/ref/*.md "${t}/bin/peek.mjs"
+}
+tester_write_agent() {
+    local af="${PI_AGENT_DIR}/agents/tester.md" tmp
+    if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    mkdir -p "${PI_AGENT_DIR}/agents"
+    tmp="$(mktemp "${af}.XXXXXX")" || return 0
+    cat > "${tmp}" <<'MD'
+---
+# Written by lets-code (tester); regenerated on launch, edits are overwritten.
+# To keep your own version, delete this line: lets-code then leaves it alone.
+name: tester
+description: QA of web apps (and Android/iOS apps where Appium is set up) with achilles' method
+tools: bash, read, edit, write, grep, find, ls
+append_prompt: tester/prompt.md
+timeout: 3600
+requires: tester/runtime/.installed
+expert: true
+use_for: anything on a web app that needs a browser: Playwright/e2e tests, checking flows or changes, bugs
+keywords: e2e tests, Playwright
+job: QA of a web app in a browser with achilles' method and its Steps API (Playwright): e2e tests for a journey or form, a flow or change verified with evidence, bugs hunted, failing e2e tests diagnosed; mobile apps where Appium is set up; up to an hour
+platform: linux, darwin
+setup: tester/setup
+setup_note: installs element-interactions, Playwright and WebdriverIO (pinned) with npm into ~/.pi/agent/tester (about 130 MB) and Playwright's chromium unless cached (about 170 MB); reports what mobile testing would still need
+brief:
+  - target (required): the web URL, the app's project path, or the mobile app id or .apk
+  - platform: web (default), android or ios
+  - goal (required): the QA task in the user's words (a journey or form to cover, a flow or change to verify, bugs to find, a failing e2e test, tests for a ticket)
+  - how_to_run: commands that start the app and run the existing tests, if known
+  - scope: which pages, journeys or files; how deep
+  - constraints: what not to touch, logins or test data to use, time limits
+---
+MD
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+    TESTER_AGENT=1
+}
+
 # `lets-code mandate init [--global]`: a starter manifest to edit.
 mandate_init() {
     local target
@@ -7971,6 +8794,14 @@ case "$(lc "${EXPERTS}")" in
                 [ -z "${REA_NOTE}" ] || log "note: rea: ${REA_NOTE}"
             else
                 pi_write_rea files
+            fi
+            if ! on_termux; then   # Playwright has no browser for Android
+                if [ "$(lc_expert_remembered tester)" = true ]; then
+                    pi_write_tester on
+                    [ -z "${TESTER_NOTE}" ] || log "note: tester: ${TESTER_NOTE}"
+                else
+                    pi_write_tester files
+                fi
             fi
             FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }experts: on"
         fi ;;

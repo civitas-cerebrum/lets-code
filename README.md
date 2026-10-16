@@ -71,7 +71,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
 | 🧑‍🔬 **Experts** (on by default) | Subagents with their own knowledge behind one `expert` tool that costs one line of context: the model sees each expert's name and what it is for, asks for a job and a brief template when it needs one, and runs it with a filled-in brief. Every expert is dormant until you say yes (a dialog the first time, remembered); one that needs an install gets it then. |
-| 📱 **Termux device** (expert) | On a phone running lets-code in Termux, the `termux-device` expert does phone tasks end to end: launch or bring an app to the front, open a file in an app, fire an intent, with recipes and traps verified on Termux and a check that the launch really reached the system. |
+| 📱 **Termux device** (expert) | On a phone running lets-code in Termux, the `termux-device` expert does phone tasks end to end: launch or bring an app to the front, open a file in an app, fire an intent, prepare a message (WhatsApp, SMS, mail) for you to send, and, once you set up Shizuku or adb, read the screen, tap and type. It checks first what the phone allows and tells you the one setup step that unlocks more. |
 | 🔬 **REA** (expert) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: the `reverse-engineer` expert hands the question to a separate pi that has REA's 170 tools, so they never enter your session. REA is installed when you enable it. |
 | 🧪 **Tester** (expert) | Web-app QA the way [achilles](https://github.com/civitas-cerebrum/achilles) does it, on demand: the `tester` expert maps journeys, writes and runs e2e tests with the Steps API of [element-interactions](https://github.com/civitas-cerebrum/element-interactions) (Playwright), verifies a flow or change with evidence, hunts bugs and diagnoses failing e2e tests, in a separate pi; Android and iOS apps too where Appium is set up. Installed when you enable it; Linux and macOS only. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
@@ -631,7 +631,7 @@ caller must tell it, and, where it needs one, a setup. lets-code ships three,
 context names each expert usable here with a few words on what it is for:
 
 ```text
-expert: these tasks go to the expert named, not done by hand, even quick ones: reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); termux-device (phone tasks: open or bring up apps, open files in apps, intents). Actions: list | enable | run
+expert: these tasks go to the expert named, not done by hand, even quick ones: reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
 ```
 
 (On Linux and macOS `tester (anything on a web app that needs a browser:
@@ -650,7 +650,7 @@ The templates:
 
 | Expert | Brief (* required) |
 |---|---|
-| `termux-device` | `goal`*: the user's goal, verbatim |
+| `termux-device` | `goal`*: the user's goal, verbatim; `confirmed`: only after you approved the exact final step it reported (app, recipient, text) |
 | `reverse-engineer` | `target`*: absolute path or URL of the artifact; `question`*: what to find out; `purpose`: what the answer is for |
 | `tester` | `target`*: the web URL, the app's project path, or the mobile app id or .apk; `platform`: web (default), android or ios; `goal`*: the QA task in the user's words; `how_to_run`: commands that start the app and run the existing tests; `scope`: which pages, journeys or files, how deep; `constraints`: what not to touch, logins or test data, time limits |
 
@@ -762,19 +762,96 @@ itself through Android's `am`. Doing that reliably takes device knowledge a
 model guesses wrong (which `am` works without root, `--user 0`, why
 `termux-open` fails on files in `~`, how to tell a real launch from a
 silent failure), so it is the expert `termux-device` (see
-[Experts](#experts)): "open this PDF", "bring Spotify to the front" go to
+[Experts](#experts)): "open this PDF", "bring Spotify to the front", "send
+Taha on WhatsApp that I'm late" go to
 `expert({action: "run", name: "termux-device", brief: {goal}})` with the
 user's goal verbatim, and the agent reports each command with its exit
 code and how far the result is verified. The first run asks you to enable
 it (remembered), or `/experts enable termux-device`.
 
+**Tiers.** A non-rooted Termux cannot see the screen or inject input:
+`screencap`, `uiautomator dump`, `input`, `content query` and `dumpsys`
+all fail for its uid. So the expert starts every task with
+`~/.pi/agent/termux/bin/probe` (read-only, about 3 s), uses the best tier
+present, and when the goal needs a missing one it does what it can and
+tells you the setup step below.
+
+| Tier | Needs | Gives |
+|---|---|---|
+| 0 intents | nothing | launch apps, open files, deep links; pre-filled messages: WhatsApp's "Send to..." picker with your text (no number needed), a chat with the text (with a number), SMS, mail compose, the share sheet. You tap Send |
+| 1 Termux:API | the Termux:API app + `pkg install termux-api` | contacts (name to number), clipboard, dialogs on the phone, notification list, SMS. No screen |
+| 2 shell | Shizuku + `rish`, or adb to the phone itself | the screen as text, taps, typing, keys, swipes |
+
+Setup, done by you (the expert never installs, changes settings or enables
+debugging; it gives you these steps):
+
+- **Tier 1, Termux:API.** Install the app from the *same source as Termux*
+  (`echo $TERMUX_APK_RELEASE`: GITHUB means
+  [its GitHub releases](https://github.com/termux/termux-api/releases),
+  F_DROID F-Droid, GOOGLE_PLAY_STORE Play; mixed signing keys do not
+  work), then `pkg install termux-api`. Each permission (Contacts, SMS) is
+  asked on first use. Trade-off: everything that runs in Termux can use
+  what you grant. Note: with the commands installed but the app missing,
+  `termux-*` calls hang; the probe says so.
+- **Tier 2, Shizuku + rish (recommended).** Install
+  [Shizuku](https://github.com/RikkaApps/Shizuku/releases) (or from Play).
+  Enable Developer options (tap Build number 7 times) and Wireless
+  debugging (needs Wi-Fi). In Shizuku: Start via Wireless debugging >
+  Pairing, then in Wireless debugging "Pair device with pairing code" and
+  type the code into Shizuku's notification; Start. Then Shizuku > Use
+  Shizuku in terminal apps > Export files (e.g. to `Download/shizuku`), and
+  in Termux:
+  ```sh
+  cp /sdcard/Download/shizuku/rish /sdcard/Download/shizuku/rish_shizuku.dex $PREFIX/bin/
+  sed -i 's/"PKG"/"com.termux"/' $PREFIX/bin/rish
+  chmod 700 $PREFIX/bin/rish && chmod 400 $PREFIX/bin/rish_shizuku.dex
+  rish -c id    # allow Termux in Shizuku's prompt; prints uid=2000(shell)
+  ```
+  Wireless debugging can then be turned off; Shizuku runs until reboot
+  (after one: Wireless debugging on, Shizuku > Start, no new pairing).
+  Wi-Fi changes do not stop it.
+- **Tier 2, adb, no extra app.** `pkg install android-tools`; Wireless
+  debugging on; with Settings and Termux in split screen, "Pair device
+  with pairing code" and `adb pair localhost:<pairing port> <code>`, then
+  `adb connect localhost:<port>` with the port the Wireless debugging
+  screen shows. The port changes whenever Wireless debugging restarts
+  (reboot, Wi-Fi change): `adb connect` again (`adb mdns services` shows
+  it); it must stay on while used.
+
+Trade-off of tier 2 either way: anything running in Termux gets shell
+rights (read any screen, tap anywhere, install apps, grant permissions)
+while the channel is up. adb also keeps adbd listening on the Wi-Fi
+network while Wireless debugging is on (paired keys only). Shizuku is the
+better fit for a phone used on its own: one start per boot, Wireless
+debugging off afterwards, and you can revoke Termux in Shizuku.
+Accessibility-service automation apps are not used: they see every
+screen, and no reliable open-source one talks to Termux.
+
+**Screen.** With tier 2, `~/.pi/agent/termux/bin/ui dump [<word>]` prints
+the screen as one line per useful node (text, description, id, center,
+clickable/editable) instead of raw XML; `ui tap <text>|--id|--desc|<x y>`
+taps (several matches: it lists them and taps nothing), `ui type`
+(ASCII; other text goes through a pre-fill intent or the clipboard),
+`ui key`, `ui swipe`; the expert re-dumps after each action to verify.
+A screenshot (`ui shot`) is the last resort.
+
+**Consent.** Sending, calling, posting, paying and deleting are the
+user's: the expert prepares everything up to the final button (a pre-fill,
+or the chat open with the text in the box) and reports
+`awaiting-confirmation` with the app, recipient and text. The calling
+agent asks you; only a re-run whose brief has `confirmed` taps Send (and
+`ui tap` refuses a Send/Call/Pay-like target without `--confirmed`). At
+tiers 0 and 1 you tap Send yourself. It reads only what the task needs
+from the screen and does not copy chats or contacts into its report.
+
 It may launch apps, open files (copied to `/sdcard/Download`, since other
 apps cannot read Termux's home) and run read-only checks; it never
 installs, changes settings, force-stops, deletes or reboots, and recommends
 the command instead. lets-code writes `~/.pi/agent/agents/termux-device.md`
-on every launch on Termux and keeps it current; elsewhere it is not listed.
-A file of yours by that name (without the `# Written by lets-code` line) is
-left alone.
+and `~/.pi/agent/termux/` (`bin/`: probe, ui, uitext.py; `ref/`: tiers,
+screen, messaging, read on demand) on every launch on Termux and keeps
+them current; elsewhere it is not listed. A file of yours by that name
+(without the `# Written by lets-code` line) is left alone.
 
 </details>
 

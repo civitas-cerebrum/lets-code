@@ -45,6 +45,12 @@ t "helpers parse"               "$(bash -n "${T}/bin/probe" && bash -n "${T}/bin
 for r in tiers screen messaging; do
     t "ref ${r} named in the body or a ref" "$(cat "${af}" "${T}"/ref/*.md | grep -c "ref/${r}.md" | awk '{print ($1 > 0) ? "yes" : "no"}')" yes
 done
+t "job set (expert-lint)"        "$(grep -c '^job: ' "${af}")" 1
+t "app identity: no package-name grep" "$(grep -c 'list packages | grep' "${af}" || true)" 0
+t "app identity: by role, mailto"      "$(grep -c 'action.SENDTO -d mailto:`' "${af}")" 1
+t "app identity: launcher list"        "$(grep -c 'query-activities --brief --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER | grep /' "${af}")" 1
+t "app identity: Gmail example"        "$(grep -c 'Gmail is `com.google.android.gm`' "${af}")" 1
+t "failed launch: re-derive first"     "$(grep -c 'When a launch' "${af}")" 1
 t "consent: final step needs confirmed" "$(grep -c "brief's \`confirmed\` field" "${af}")" 1
 t "safety: no wireless debugging"       "$(grep -c 'enable developer options or wireless debugging' "${af}")" 1
 before="$(cd "${PI_AGENT_DIR}" && find . -type f -exec cat {} +)"; write_termux_agent
@@ -127,6 +133,7 @@ t "probe: rish channel"         "$(echo "${out}" | sed -n 's/^tier 2 shell: //p'
 t "probe: all tiers"            "$(echo "${out}" | sed -n 's/^tiers: //p')" "0 1 2"
 t "probe: no next at tier 2"    "$(echo "${out}" | grep -c '^next:' || true)" 0
 t "probe: shizuku installed"    "$(echo "${out}" | sed -n 's/^shizuku: //p')" installed
+t "probe: no known app is not absence" "$(echo "${out}" | sed -n 's/^apps: //p')" "none of these messaging apps (others by role: see Which app is it)"
 
 fake rish 'echo "Server is not running"; exit 1'
 rm -f "${iso}/termux-toast"

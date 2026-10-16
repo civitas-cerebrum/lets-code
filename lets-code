@@ -4823,9 +4823,10 @@ export function wantsOrchestration(prompt: string): boolean {
 // The method, about 170 tokens.
 export function orchestration(agents: AgentDef[]): string {
 	const has = (n: string) => agents.some((a) => a.name === n);
-	const flow = has("scout") && has("worker") && has("reviewer")
+	const flow = (has("scout") && has("worker") && has("reviewer")
 		? "scouts in parallel map the code (one per area) -> you decide -> workers in parallel on disjoint files -> reviewer -> you run the tests"
-		: "gather in parallel -> you decide -> act in parallel on disjoint parts -> check -> you run the tests";
+		: "gather in parallel -> you decide -> act in parallel on disjoint parts -> check -> you run the tests")
+		+ (has("general") ? "; open questions -> general" : "");
 	return [
 		"Orchestration (lets-code): you are the orchestrator; subagents read and work in fresh contexts, you keep the plan and the decisions.",
 		...(agents.length ? [`- Agents: ${agentJobs(agents)}.`] : []),
@@ -6256,11 +6257,74 @@ file and line, what is wrong, and how to fix it. End with "No findings"
 if there are none.
 MD
 }
+starter_worker() {
+    cat <<'MD'
+---
+name: worker
+description: Makes a delegated change and tests it
+---
+Complete the assigned task autonomously. Make the change, run the tests
+that cover it, and fix what fails.
+
+Output:
+## Done
+What changed, in two or three sentences.
+## Files changed
+`path` — what changed
+## Notes
+Anything the main agent must know (open questions, things not done).
+MD
+}
+# Claude Code's general-purpose agent, for what is neither a map (scout)
+# nor a change (worker): open questions, searches that may take several
+# tries, multi-step tasks. Full tools; it answers, it does not dump files.
+starter_general() {
+    cat <<'MD'
+---
+name: general
+description: Researches open questions; runs multi-step tasks
+---
+Do the assigned task autonomously and completely, without gold-plating.
+When you do not know where something lives, search broadly: grep and find
+across code and docs, try other names and places before concluding it is
+not there. Read only the parts that matter; run commands to check what you
+claim. Change files only when the task asks for it.
+
+Output, concise (no file dumps):
+## Answer
+The conclusion, in a few sentences.
+## Evidence
+`path:line`, commands run and what they showed, behind each claim.
+## Open
+What is unverified or not done.
+MD
+}
+# The starters (scout, worker, general, reviewer) are written once, to an
+# agent dir with no file of the user's; from then on they are the user's.
+# An earlier version's starters are upgraded on launch, each only while the
+# file is exactly as that version wrote it: reviewer.md moves to the
+# reviewer role, worker.md gets the description that tells it from general.
+# general came later: it joins an install that has one of the earlier
+# starters and no general.md. The dir's .lets-code-starters lists it once
+# written, so a general.md the user deletes stays deleted (remove "general"
+# from that file to get it back).
+STARTER_WORKER_V1='General-purpose agent with full tools for a delegated change; isolated context'
 write_default_agents() {
-    local dir="${PI_AGENT_DIR}/agents" e
+    local dir="${PI_AGENT_DIR}/agents" e mark
+    mark="${dir}/.lets-code-starters"
     if [ -f "${dir}/reviewer.md" ] && [ "$(cat "${dir}/reviewer.md")" = "$(starter_reviewer | sed 's/^role: reviewer$/role: readonly/')" ]; then
         starter_reviewer > "${dir}/reviewer.md"
         log "subagents: ${dir}/reviewer.md moved to the reviewer role (it can run the tests now)"
+    fi
+    if [ -f "${dir}/worker.md" ] && [ "$(cat "${dir}/worker.md")" = "$(starter_worker | sed "s|^description: .*|description: ${STARTER_WORKER_V1}|")" ]; then
+        starter_worker > "${dir}/worker.md"
+        log "subagents: ${dir}/worker.md: new description (changes; general takes research)"
+    fi
+    if [ ! -e "${dir}/general.md" ] && ! grep -qx general "${mark}" 2>/dev/null \
+        && { [ -f "${dir}/scout.md" ] || [ -f "${dir}/worker.md" ] || [ -f "${dir}/reviewer.md" ]; }; then
+        starter_general > "${dir}/general.md"
+        starter_mark "${mark}"
+        log "subagents: starter agent general added to ${dir} (research, multi-step tasks); delete it to opt out"
     fi
     if [ -d "${dir}" ]; then
         for e in "${dir}"/* "${dir}"/.[!.]*; do
@@ -6289,24 +6353,16 @@ The types, functions or config that matter, quoted.
 ## Start here
 The one file to open first, and why.
 MD
-    cat > "${dir}/worker.md" <<'MD'
----
-name: worker
-description: General-purpose agent with full tools for a delegated change; isolated context
----
-Complete the assigned task autonomously. Make the change, run the tests
-that cover it, and fix what fails.
-
-Output:
-## Done
-What changed, in two or three sentences.
-## Files changed
-`path` — what changed
-## Notes
-Anything the main agent must know (open questions, things not done).
-MD
+    starter_worker > "${dir}/worker.md"
+    starter_general > "${dir}/general.md"
     starter_reviewer > "${dir}/reviewer.md"
-    log "subagents: starter agents written to ${dir} (scout, worker, reviewer)"
+    starter_mark "${mark}"
+    log "subagents: starter agents written to ${dir} (scout, worker, general, reviewer)"
+}
+# the starters added after the first set, by name, one per line (only general so far)
+starter_mark() {
+    [ -f "$1" ] || echo '# Written by lets-code: starter agents added after the first set; a name here is not added again.' > "$1"
+    grep -qx general "$1" || echo general >> "$1"
 }
 
 # Termux device expert: termux-device does phone tasks on the Android
@@ -10146,7 +10202,7 @@ expert's own files are under `@@AGENT@@/<name>/` (`ref/`, `bin/`, `setup`).
 ## Order of work
 1. Read the brief. Scope is `user` unless it says `builtin`.
 2. Survey: `expert-lint --list`. Your expert must not take another one's
-   tasks, nor a plain subagent's (scout, worker, reviewer).
+   tasks, nor a plain subagent's (scout, worker, general, reviewer).
 3. Read the sources the brief names: docs, repo, scripts. Read only what
    the expert needs; note exact commands, flags, traps and versions.
 4. Design, before writing (format.md, use-for.md, safety.md):
@@ -10288,7 +10344,7 @@ lets-code's: it is rewritten on every launch. A user's own expert must
 not carry it. Deleting the line from a built-in keeps your edited copy.
 Names already taken: the built-ins (`termux-device`, `reverse-engineer`,
 `tester`, `expert-builder`, ...) and the starter agents (`scout`,
-`worker`, `reviewer`).
+`worker`, `general`, `reviewer`).
 
 ## State
 Dormant until the user enables it (`/experts enable <name>`, or the dialog

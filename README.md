@@ -461,8 +461,11 @@ may only tighten it.
 <summary><b>Subagents</b></summary>
 
 Subagents are on by default (`SUBAGENTS=false` turns them off). The model
-gets one tool, `subagent`, and lets-code writes three starter agents
-(`scout`, `worker`, `reviewer`) to `~/.pi/agent/agents` when it is empty.
+gets one tool, `subagent`, and lets-code writes four starter agents to
+`~/.pi/agent/agents` when it is empty: `scout` (read-only map of the code),
+`worker` (makes a change and tests it), `general` (researches open
+questions, runs multi-step tasks, answers with the evidence; modelled on
+Claude Code's general-purpose agent) and `reviewer`.
 An agent is a Markdown file with YAML frontmatter, the same layout pi's own
 example and the community packages use:
 
@@ -480,7 +483,11 @@ Investigate quickly and report ...
 mandate role (`readonly` is a built-in without the planning prompt;
 `reviewer` also runs tests). The starter `reviewer` agent uses `reviewer`;
 one written by an earlier version with `role: readonly` is updated on
-launch unless you edited it. Project
+launch unless you edited it, and so is an earlier `worker` description.
+`general` came later: an install with the earlier starters gets it on
+launch unless it has a `general.md` of its own. If you delete it, it stays
+deleted (it is listed in `agents/.lets-code-starters`; take the line out
+to get it back). Project
 agents in `.pi/agents/` or `.agents/agents/` are used once the project is
 trusted. Calls: `{agent, task}`, `{tasks: [...]}` for parallel work (at most
 2 at a time by default, since one GPU serves every agent;

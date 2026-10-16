@@ -4,7 +4,7 @@
 // module next to it (its runner and agent files). Loads both with a fake pi
 // API, a fake UI and a fake `pi` binary on PATH. Needs Node >= 22.6.
 //
-//   tests/expert.test.mjs [path/to/lets-code/experts.ts]
+//   tests/experts.test.mjs [path/to/lets-code/experts.ts]
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, realpathSync, rmSync, chmodSync, readdirSync, existsSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -108,7 +108,7 @@ const { tool, commands, mod } = await load();
 	const line = mod.snippet(many);
 	t("20 experts: compact line under the budget", [line.length <= mod.LINE_BUDGET + 200, line.includes("x1 (kw one)"), line.includes("x0 (a rather long description…)")], [true, true, true]);
 	t("2 experts: full use_for", mod.snippet(many.slice(0, 2)).includes("x0 (a rather long description of what this one does)"), true);
-	t("the /expert command", typeof commands.expert?.handler, "function");
+	t("the /experts command", typeof commands.experts?.handler, "function");
 }
 
 // --- list: jobs, states, templates; one expert's full template
@@ -148,7 +148,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	clearCalls();
 	const r = await run(tool, { action: "run", name: "helper", brief }, ctx(undefined));
 	t("no UI: refused", r.isError, true);
-	has("no UI: says how the user enables it", out(r), "only the user can enable it: /expert enable helper");
+	has("no UI: says how the user enables it", out(r), "only the user can enable it: /experts enable helper");
 	t("no UI: nothing ran", calls().length, 0);
 	const c = ctx([false]);
 	const r2 = await run(tool, { action: "run", name: "helper", brief }, c);
@@ -208,7 +208,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	t("setup fails: error with the script's note", [r2.isError, out(r2)], [true, "Setting up the tool expert failed: npm not found; run: npm install."]);
 }
 
-// --- dormant by default; /expert
+// --- dormant by default; /experts
 {
 	rmSync(join(agentDir, "lets-code-state.json"));
 	t("no per-launch switch any more", mod.launchDecisions, undefined);
@@ -217,21 +217,22 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	await run(s6.tool, { action: "run", name: "helper", brief }, c6);
 	t("dormant despite old switches in the environment: asks the user", c6.asked.length, 1);
 	const notes = []; const cc = { hasUI: true, ui: { notify: (m) => notes.push(m), setStatus: () => {}, confirm: async () => { throw new Error("no dialog for a command"); } } };
-	await s6.commands.expert.handler("disable helper", cc);
-	t("/expert disable: remembered false", [state().experts.helper, notes[notes.length - 1]], [false, "The helper expert is dormant again (remembered)."]);
-	has("/expert list: one line per expert, dormant mark", (await s6.commands.expert.handler("list", cc), notes[notes.length - 1]), "○ helper  Looks into a built artifact and answers one question");
-	has("/expert list: declined shown plainly", notes[notes.length - 1], "dormant, declined in this session");
-	t("/expert list: no tool wording", /just run it|action: "run"/.test(notes[notes.length - 1]), false);
-	await s6.commands.expert.handler("helper", cc);
-	has("/expert <name>: details with the brief", notes[notes.length - 1], "  Brief");
-	has("/expert <name>: how to enable", notes[notes.length - 1], "/expert enable helper");
-	await s6.commands.expert.handler("enable helper", cc);
-	t("/expert enable: no dialog, remembered", [notes[notes.length - 1], state().experts.helper], ["The helper expert is enabled (remembered).", true]);
-	await s6.commands.expert.handler("enable nope", cc);
-	has("/expert enable unknown", notes[notes.length - 1], 'Unknown expert "nope"');
-	t("completions", (await s6.commands.expert.getArgumentCompletions("en")).map((x) => x.value), ["enable"]);
-	t("completions: a full word offers nothing", (await s6.commands.expert.getArgumentCompletions("list")).length, 0);
-	t("completions: names", (await s6.commands.expert.getArgumentCompletions("enable he")).map((x) => x.value), ["enable helper"]);
+	await s6.commands.experts.handler("disable helper", cc);
+	t("/experts disable: remembered false", [state().experts.helper, notes[notes.length - 1]], [false, "The helper expert is dormant again (remembered)."]);
+	has("/experts list: one line per expert, dormant mark", (await s6.commands.experts.handler("list", cc), notes[notes.length - 1]), "○ helper");
+	t("/experts list: every line fits the terminal", notes[notes.length - 1].split("\n").every((l) => l.length <= (process.stdout.columns || 80) - 3), true);
+	has("/experts list: declined shown plainly", notes[notes.length - 1], "dormant, declined in this session");
+	t("/experts list: no tool wording", /just run it|action: "run"/.test(notes[notes.length - 1]), false);
+	await s6.commands.experts.handler("helper", cc);
+	has("/experts <name>: details with the brief", notes[notes.length - 1], "\nBrief\n  target    required");
+	has("/experts <name>: how to enable", notes[notes.length - 1], "/experts enable helper");
+	await s6.commands.experts.handler("enable helper", cc);
+	t("/experts enable: no dialog, remembered", [notes[notes.length - 1], state().experts.helper], ["The helper expert is enabled (remembered).", true]);
+	await s6.commands.experts.handler("enable nope", cc);
+	has("/experts enable unknown", notes[notes.length - 1], 'Unknown expert "nope"');
+	t("completions", (await s6.commands.experts.getArgumentCompletions("en")).map((x) => x.value), ["enable"]);
+	t("completions: a full word offers nothing", (await s6.commands.experts.getArgumentCompletions("list")).length, 0);
+	t("completions: names", (await s6.commands.experts.getArgumentCompletions("enable he")).map((x) => x.value), ["enable helper"]);
 }
 
 // --- the subagent tool: experts are not listed there, and a call is pointed here

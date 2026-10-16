@@ -227,7 +227,7 @@ no new false triggers.
 *Dormant until the user says yes:* an expert can install things (REA: npm,
 160 MB) and run commands on a device, so only the user enables it, through
 `ctx.ui.confirm` the first time a run needs it (or the model proposes
-`enable`) or `/expert enable`; the model cannot, and without a UI the call
+`enable`) or `/experts enable`; the model cannot, and without a UI the call
 is refused with the way to do it. The yes is remembered
 (`lets-code-state.json`, merge-safe like the thinking level and the trust
 answer), a no only for the session. There is one switch for the feature

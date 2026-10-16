@@ -55,7 +55,7 @@
 #   lets-code --no-mandate       launch without the mandate (modes) extension
 #   lets-code --subagents | --no-subagents   the subagent tool on/off (default on)
 #   lets-code --experts | --no-experts   the expert tool on/off (default on, needs subagents);
-#                                each expert is enabled in a session (/expert)
+#                                each expert is enabled in a session (/experts)
 #   lets-code --claude-code | --no-claude-code   Claude Code adapter with ~/.claude too / off (default: automatic where a project needs it)
 #                                (default on): .claude/ commands, skills, agents,
 #                                hooks, permissions, MCP, workflows, CLAUDE.md
@@ -116,7 +116,7 @@
 #      or another client's config into pi's built-in MCP support;
 #      experts (on by default, with subagents) — an `expert` tool for
 #      subagents with their own knowledge, each dormant until the user
-#      enables it (a dialog or /expert enable, remembered): termux-device
+#      enables it (a dialog or /experts enable, remembered): termux-device
 #      (phone tasks, on Termux) and reverse-engineer (REA's MCP server in a
 #      separate pi, so its tools never enter this session).
 #  10. Claude Code adapter (on by default): a project or user set up for
@@ -4410,7 +4410,7 @@ TS
 # Experts: subagents with their own knowledge (termux-device,
 # reverse-engineer, your own), behind one small tool, `expert`. Each is
 # an agent file with `expert: true`; the user enables one (a dialog, or
-# /expert enable), its setup runs then, and the choice is remembered.
+# /experts enable), its setup runs then, and the choice is remembered.
 pi_write_experts_extension() {
     local dir f tmp
     lc_ext_module experts; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
@@ -4439,9 +4439,9 @@ pi_write_experts_extension() {
 // refused with a note); run checks the brief against the template, asks to
 // enable first when needed, and dispatches through the subagents module's
 // runner (same progress, abort, timeout, depth and concurrency). Every
-// expert is dormant until the user says yes (the dialog, /expert enable);
+// expert is dormant until the user says yes (the dialog, /experts enable);
 // that is remembered (lets-code-state.json, key experts), and
-// /expert disable makes it dormant again. A dormant one costs its entry in
+// /experts disable makes it dormant again. A dormant one costs its entry in
 // the line and nothing else: its setup runs on enable.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
@@ -4548,12 +4548,12 @@ export default async function (pi: ExtensionAPI) {
 	const discover = (): Spec[] => sub.discoverExperts();
 	const known = discover();
 	if (!known.length) return;   // none usable here: no tool, no tokens
-	const session = new Map<string, boolean>();   // decided in this session (dialog, /expert)
+	const session = new Map<string, boolean>();   // decided in this session (dialog, /experts)
 	const declined = new Set<string>();            // said no in this session: not asked again
 	const enabled = (n: string) => session.has(n) ? session.get(n)! : remembered()[n] === true;
 	const find = (n: string) => discover().find((s) => s.name === n);
 	const unknown = (n: string) => `Unknown expert "${n}". Experts: ${discover().map((s) => s.name).join(", ") || "none"}.`;
-	const howTo = (n: string) => `/expert enable ${n}`;
+	const howTo = (n: string) => `/experts enable ${n}`;
 	function stateOf(s: Spec): string {
 		const on = enabled(s.name); const ready = s.expert.ready;
 		if (on) return ready ? "enabled" : "enabled, not set up (run sets it up)";
@@ -4571,37 +4571,53 @@ export default async function (pi: ExtensionAPI) {
 		return [`Experts (brief: * = required; run: {action: "run", name, brief: {field: value}}):`,
 			...specs.map((s) => `- ${s.name}: ${s.expert.job} [${stateOf(s)}]\n  brief: ${template(s)}`)].join("\n");
 	}
-	// /expert for the user: one aligned line per expert with a state mark, the
+	// /experts for the user: one aligned line per expert with a state mark, the
 	// details (brief fields, setup) only for one named expert. listText above
 	// is the model's view, worded for the tool; this one is for reading.
-	function menuText(name?: string): string {
+	function menuText(name?: string, cols = process.stdout.columns || 80): string {
 		const specs = discover();
+		const W = Math.max(30, cols - 3);   // pi indents a notification by a column or two
 		const mark = (s: Spec) => (enabled(s.name) ? "●" : "○");
 		const state = (s: Spec) => {
 			if (enabled(s.name)) return s.expert.ready ? "enabled" : "enabled, sets up on its first run";
 			if (declined.has(s.name)) return "dormant, declined in this session";
 			return s.expert.setup && !s.expert.ready ? `dormant, on enable: ${s.expert.setupNote || "runs its setup"}` : "dormant";
 		};
-		const cut = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1).replace(/[\s,;:]+\S*$/, "")}…` : t);
+		const cut = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1).replace(/[\s,;:(]+\S*$/, "")}…` : t);
+		// words onto lines of at most n characters, each after the indent
+		const wrap = (t: string, indent: string, n: number) => {
+			const out: string[] = []; let line = "";
+			for (const w of t.split(/\s+/).filter(Boolean)) {
+				if (line && line.length + 1 + w.length > n) { out.push(indent + line); line = w; } else line = line ? `${line} ${w}` : w;
+			}
+			if (line) out.push(indent + line);
+			return out;
+		};
 		if (name) {
 			const s = specs.find((x) => x.name === name); if (!s) return unknown(name);
-			const w = Math.max(...s.expert.brief.map((f) => f.name.length), 4);
-			return [`${mark(s)} ${s.name} · ${state(s)}`, `  ${s.expert.job}`, "", "  Brief",
-				...s.expert.brief.map((f) => `    ${f.name.padEnd(w)}  ${f.required ? "required" : "        "}  ${f.hint || ""}`.trimEnd()),
-				"", `  /expert ${enabled(s.name) ? "disable" : "enable"} ${s.name}`].join("\n");
+			const fw = Math.max(...s.expert.brief.map((f) => f.name.length), 4);
+			const fields = s.expert.brief.flatMap((f) => {
+				const head = `  ${f.name.padEnd(fw)}  ${f.required ? "required" : "optional"}`;
+				return [head, ...wrap(f.hint || "", "    ", W - 4)];
+			});
+			return [`${mark(s)} ${s.name}`, ...wrap(state(s), "  ", W - 2), "", ...wrap(s.expert.job, "  ", W - 2), "", "Brief", ...fields,
+				"", `/experts ${enabled(s.name) ? "disable" : "enable"} ${s.name}`].join("\n");
 		}
 		if (!specs.length) return "No experts are usable here.";
-		const w = Math.max(...specs.map((x) => x.name.length));
-		return ["Experts  (● enabled  ○ dormant)",
-			...specs.flatMap((s) => {
-				const line = `  ${mark(s)} ${s.name.padEnd(w)}  ${cut(s.expert.job, 64)}`;
-				const st = state(s);
-				return st === "enabled" || st === "dormant" ? [line] : [line, `${" ".repeat(w + 6)}${cut(st, 64)}`];
-			}),
-			"", "  /expert <name> for details · /expert enable|disable <name>"].join("\n");
+		const nw = Math.max(...specs.map((x) => x.name.length));
+		const side = W - (nw + 4) >= 36;   // room for the job next to the name, else under it
+		const rows = specs.flatMap((s) => {
+			const st = state(s); const extra = st === "enabled" || st === "dormant" ? [] : [st];
+			if (side) {
+				const pad = " ".repeat(nw + 4);
+				return [`${mark(s)} ${s.name.padEnd(nw)}  ${cut(s.expert.job, W - nw - 4)}`, ...extra.map((x) => pad + cut(x, W - nw - 4))];
+			}
+			return [`${mark(s)} ${s.name}`, `  ${cut(s.expert.job, W - 2)}`, ...extra.map((x) => `  ${cut(x, W - 2)}`)];
+		});
+		return ["Experts  ● enabled  ○ dormant", "", ...rows, "", cut("/experts <name> for details", W), cut("/experts enable|disable <name>", W)].join("\n");
 	}
 	// enabled and set up -> null; else why not. consent: the user asked for it
-	// (/expert enable), so no dialog. The user's yes is remembered.
+	// (/experts enable), so no dialog. The user's yes is remembered.
 	async function ensure(name: string, ctx: ExtensionContext, progress: (l: string) => void, consent: boolean, signal?: AbortSignal): Promise<string | null> {
 		let s = find(name); if (!s) return unknown(name);
 		const yesNow = consent || !enabled(name);
@@ -4609,7 +4625,7 @@ export default async function (pi: ExtensionAPI) {
 			if (declined.has(name)) return `The user declined the ${name} expert in this session; they can enable it with ${howTo(name)}.`;
 			if (!ctx.hasUI) return `The ${name} expert is not enabled, and only the user can enable it: ${howTo(name)}.`;
 			const setup = !s.expert.ready && s.expert.setup ? `\nSetup: ${s.expert.setupNote || "runs its setup script"}.` : "";
-			const yes = await ctx.ui.confirm(`Enable the ${name} expert?`, `${s.expert.job}${setup}\nlets-code remembers the answer yes; /expert disable ${name} undoes it.`);
+			const yes = await ctx.ui.confirm(`Enable the ${name} expert?`, `${s.expert.job}${setup}\nlets-code remembers the answer yes; /experts disable ${name} undoes it.`);
 			if (!yes) { declined.add(name); return `The user declined to enable the ${name} expert.`; }
 		}
 		if (!s.expert.ready) {
@@ -4674,8 +4690,8 @@ export default async function (pi: ExtensionAPI) {
 			return text(results.map(sub.render).join("\n\n"), results.every((r: any) => r.exitCode !== 0));
 		},
 	});
-	pi.registerCommand("expert", {
-		description: "Experts: /expert [list] | <name> | enable <name> | disable <name>",
+	pi.registerCommand("experts", {
+		description: "Experts: /experts [list] | <name> | enable <name> | disable <name>",
 		getArgumentCompletions: (prefix: string) => {
 			const words = prefix.split(/\s+/);
 			// a word typed out in full offers nothing, so Enter runs the command
@@ -4687,7 +4703,7 @@ export default async function (pi: ExtensionAPI) {
 			const say = (m: string, type: "info" | "warning" | "error" = "info") => (ctx.hasUI ? ctx.ui.notify(m, type) : console.log(m));
 			if (verb === "list") return say(menuText(name));
 			if (find(verb) && !name) return say(menuText(verb));
-			if ((verb !== "enable" && verb !== "disable") || !name) return say("Usage: /expert [list] | <name> | enable <name> | disable <name>", "warning");
+			if ((verb !== "enable" && verb !== "disable") || !name) return say("Usage: /experts [list] | <name> | enable <name> | disable <name>", "warning");
 			if (!find(name)) return say(unknown(name), "warning");
 			if (verb === "disable") { session.set(name, false); remember(name, false); return say(`The ${name} expert is dormant again (remembered).`); }
 			const why = await ensure(name, ctx, (l) => ctx.ui?.setStatus?.("expert", l), true);
@@ -6871,7 +6887,7 @@ run_setup() {  # run_setup [full|granular]
             echo ""
             echo "# Experts: subagents with their own knowledge (termux-device on"
             echo "# Termux, reverse-engineer) behind one 'expert' tool. Each is dormant"
-            echo "# until you enable it in a session (a dialog, or /expert enable;"
+            echo "# until you enable it in a session (a dialog, or /experts enable;"
             echo "# remembered). On by default (with subagents); EXPERTS=false turns"
             echo "# the tool off."
             echo "EXPERTS=\"true\""
@@ -7931,13 +7947,13 @@ tmp = p + ".tmp"
 with open(tmp, "w") as f: json.dump(s, f, indent=2); f.write("\n")
 os.chmod(tmp, 0o600); os.replace(tmp, p)
 PY
-        then log "note: ${var}=true in ${CONFIG_FILE} is now remembered as the ${name} expert enabled (/expert disable makes it dormant); ${var} is no longer read, remove it."
+        then log "note: ${var}=true in ${CONFIG_FILE} is now remembered as the ${name} expert enabled (/experts disable makes it dormant); ${var} is no longer read, remove it."
         fi
     done
 }
 # Experts (on by default, need subagents): the expert tool and the experts
 # lets-code ships. Every expert is dormant until the user enables it in a
-# session (a dialog or /expert enable, remembered in lets-code-state.json);
+# session (a dialog or /experts enable, remembered in lets-code-state.json);
 # a dormant one is listed and costs nothing else: REA is installed only
 # once enabled, and an enabled one is kept current here.
 unset LETS_CODE_EXPERTS_ON LETS_CODE_TERMUX_AGENT

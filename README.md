@@ -657,7 +657,7 @@ field, and its report comes back. Experts are never listed in the
 **Dormant until you say yes.** Every expert starts dormant: listed, nothing
 installed, nothing else in the context. It is enabled only by you: the
 yes/no dialog when the model first runs it (or proposes `enable`), or
-`/expert enable <name>`. The yes is remembered in
+`/experts enable <name>`. The yes is remembered in
 `~/.pi/agent/lets-code-state.json` under `experts`, and that is when its
 setup runs (REA's install). A no is not asked again in that session and is
 not remembered. There is one switch for the whole feature, `EXPERTS`
@@ -665,9 +665,9 @@ not remembered. There is one switch for the whole feature, `EXPERTS`
 expert: with tens of experts a flag each would not scale.
 
 ```text
-/expert                     list them with their state
-/expert enable <name>       enable (and set up) without a dialog; remembered
-/expert disable <name>      dormant again; remembered
+/experts                     list them with their state
+/experts enable <name>       enable (and set up) without a dialog; remembered
+/experts disable <name>      dormant again; remembered
 ```
 
 **Many experts.** Each entry in the line is the name and its `use_for`.
@@ -737,7 +737,7 @@ silent failure), so it is the expert `termux-device` (see
 `expert({action: "run", name: "termux-device", brief: {goal}})` with the
 user's goal verbatim, and the agent reports each command with its exit
 code and how far the result is verified. The first run asks you to enable
-it (remembered), or `/expert enable termux-device`.
+it (remembered), or `/experts enable termux-device`.
 
 It may launch apps, open files (copied to `/sdcard/Download`, since other
 apps cannot read Termux's home) and run read-only checks; it never

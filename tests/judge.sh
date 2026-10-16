@@ -14,7 +14,7 @@ sys.stdout.write(s[i:j + 3])
 PY
 )"
 
-work="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/judge-test.XXXXXX")" && pwd)"   # macOS TMPDIR ends in /
+work="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/judge-test.XXXXXX")" && pwd -P)"   # macOS: TMPDIR ends in /, /var is /private/var
 trap 'rm -rf "${work}"' EXIT
 PI_AGENT_DIR="${work}/agent"; JUDGE_DIR="${PI_AGENT_DIR}/acceptance-judge"
 fail=0
@@ -78,7 +78,7 @@ echo v2 > "${r}/src/a.txt"; g commit -qam two
 echo v3 > "${r}/src/a.txt"; echo new > "${r}/src/c.txt"; echo noise > "${r}/x.log"; rm "${r}/src/b.txt"
 status_before="$(git -C "${r}" status --porcelain)"
 c="$(bash "${sc}" "${r}")"
-t "copy: under the temp dir"       "$(case "${c}" in "${TMPDIR}/lets-code-judge/"*) echo yes ;; esac)" yes
+t "copy: under the temp dir"       "$([ "${c#"${TMPDIR}/lets-code-judge/"}" != "${c}" ] && echo yes)" yes
 t "copy: the working tree"         "$(cat "${c}/src/a.txt"):$(cat "${c}/src/c.txt")" "v3:new"
 t "copy: no ignored, no deleted"   "$([ -e "${c}/x.log" ] || [ -e "${c}/src/b.txt" ] && echo yes || echo no)" no
 t "copy: dependencies linked"      "$([ -L "${c}/node_modules" ] && [ -d "${c}/node_modules/dep" ] && echo yes)" yes

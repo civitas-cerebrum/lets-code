@@ -8454,8 +8454,8 @@ set -eu
 root="${TMPDIR:-/tmp}"; root="${root%/}/lets-code-judge"
 if [ "${1:-}" = --clean ]; then rm -rf "${root}"; echo "removed ${root}"; exit 0; fi
 [ $# -ge 1 ] && [ -d "$1" ] || { echo "usage: scratch-copy <dir> [<rev>] | --clean" >&2; exit 2; }
-src="$(cd "$1" && pwd)"; rev="${2:-}"
-mkdir -p "${root}"; dst="$(mktemp -d "${root}/copy.XXXXXX")"
+src="$(cd "$1" && pwd -P)"; rev="${2:-}"   # physical, as git reports the top level
+mkdir -p "${root}"; dst="$(cd "$(mktemp -d "${root}/copy.XXXXXX")" && pwd -P)"
 if top="$(git -C "${src}" rev-parse --show-toplevel 2>/dev/null)"; then
     rel="${src#"${top}"}"
     if [ -n "${rev}" ]; then

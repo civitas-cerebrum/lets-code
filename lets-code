@@ -3883,7 +3883,9 @@ export function classify(cmd: string, role: Role): { decision: Decision; group: 
 export function redirectTargets(cmd: string): string[] {
 	const out: string[] = [];
 	for (const m of cmd.matchAll(/(?:^|[^<>])(?:\d?>>?|&>|>\|)\s*([^\s;&|)]+)/g)) if (!/^&\d/.test(m[1]) && m[1] !== "/dev/null") out.push(m[1].replace(/^['"]|['"]$/g, ""));
-	for (const m of cmd.matchAll(/\b(?:tee|touch|mkdir|cp|mv|install|ln|rsync)\s+(?:-[a-zA-Z]+\s+)*(.*?)(?:$|[;&|])/g)) for (const a of m[1].split(/\s+/)) if (a && !a.startsWith("-")) out.push(a.replace(/^['"]|['"]$/g, ""));
+	// only where a command starts (line start, after ; & | ( or sudo/env/command):
+	// "npm install left-pad" is a package install, not install(1) writing "left-pad"
+	for (const m of cmd.matchAll(/(?:^|[;&|(]|\b(?:sudo|env|command|exec|time|nice)\s)\s*(?:tee|touch|mkdir|cp|mv|install|ln|rsync)\s+(?:-[a-zA-Z]+\s+)*(.*?)(?=$|[;&|])/g)) for (const a of m[1].split(/\s+/)) if (a && !a.startsWith("-")) out.push(a.replace(/^['"]|['"]$/g, ""));
 	for (const m of cmd.matchAll(/\bsed\s+-i\S*\s+(?:-e\s+\S+\s+|'[^']*'\s+|"[^"]*"\s+)+(\S+)/g)) out.push(m[1]);
 	return out.filter((p) => !/[$`]/.test(p));
 }

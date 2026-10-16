@@ -523,37 +523,101 @@ requires: rea/runtime/node_modules/rea-agents/package.json
 ---
 ```
 
-**Watching a subagent.** `/subagents` (or <kbd>Alt</kbd>+<kbd>S</kbd>)
-opens a full-screen view of the session's subagent and expert runs. Running
-runs come first, then finished ones, newest first. Each row shows a status
-mark (`●` running, `✓` done, `✗` failed or timed out, `■` stopped), the
-agent, the task, the elapsed time and the tokens. While a run is going, the
-footer says `2 subagents running · alt+s or /subagents to watch`. Pick a
-run to see its conversation as the main view would draw it: the task,
-thinking, text, tool calls with their results collapsed, and the final
-report. It streams while the child works and follows the end unless you
-scroll up. The header shows the agent, status, elapsed time, tokens and
-the tool call the run belongs to. `/subagents 2` or `/subagents scout`
-opens a run directly. The view is read-only and costs no context: nothing
-in it reaches the model.
+**Subagent sessions.** Every subagent and expert run is a real pi
+session of its own, and you can switch the TUI into it. The footer lists
+the sessions: `◂ main` (the main session) first, then the runs, running
+first, then finished ones, newest first; each row shows a status mark (`●`
+running, `✓` done, `✗` failed or timed out, `■` stopped), the agent, the
+task (wide terminals), the elapsed time and the tokens, and `▸` marks the
+session that is open. <kbd>Alt</kbd>+<kbd>S</kbd> (or `/subagents`) hands the
+keys to that list: <kbd>↑</kbd>/<kbd>↓</kbd> select, <kbd>Enter</kbd> switches
+to the selected session the way `/resume` does (so pi draws it like any
+session), <kbd>x</kbd> twice stops a running child (the others in the call go
+on), <kbd>Esc</kbd> gives the keys back to the editor. The list keeps its
+height while it has the keys, so nothing moves. In a subagent's session the
+list is always there (it is the way back: <kbd>Alt</kbd>+<kbd>S</kbd>,
+<kbd>Enter</kbd> on `◂ main`); in the main session it shows when
+`/subagents toggle` put it there, or while it has the keys.
+`/subagents back`, `/subagents 2` or `/subagents scout` switch directly.
 
-| Key | In the view |
-|---|---|
-| <kbd>Esc</kbd> / <kbd>q</kbd> | back to the session |
-| <kbd>←</kbd> <kbd>→</kbd>, <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd>, <kbd>Alt</kbd>+<kbd>S</kbd> | previous / next run |
-| <kbd>↑</kbd> <kbd>↓</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd> <kbd>Home</kbd> <kbd>End</kbd> | scroll (<kbd>End</kbd> follows the end again) |
-| <kbd>t</kbd> | show or hide thinking |
-| <kbd>o</kbd> / <kbd>Ctrl</kbd>+<kbd>O</kbd> | expand or collapse tool output |
-| <kbd>l</kbd> | the list (<kbd>↑</kbd> <kbd>↓</kbd> pick, <kbd>Enter</kbd> open) |
-| <kbd>x</kbd> | stop this running child (asks first; the others in the call go on) |
+In a subagent's session the status line says whose it is, for example
+`subagent scout · running`. The session works like the main one, through
+the child's own process (each child is a pi in RPC mode, with the agent's
+tools, role, instructions and model), and pi's keys work on its messages
+as on the main session's (<kbd>Ctrl</kbd>+<kbd>T</kbd> thinking blocks,
+<kbd>Ctrl</kbd>+<kbd>O</kbd> tool output, and the rest):
+
+- **Typing while it works** steers it, as <kbd>Enter</kbd> does while the
+  main session streams: the message waits under the chat (`Steering: …`)
+  and goes in after the current tool calls. <kbd>Alt</kbd>+<kbd>Enter</kbd> queues a follow-up
+  instead, and <kbd>Alt</kbd>+<kbd>Up</kbd> brings what is queued back to the
+  editor, as in the main session.
+- **Typing while it rests** (done, stopped, or after a restart) starts its
+  next turn. A child that has rested `LETS_CODE_SUBAGENT_IDLE_S` seconds
+  (300) has exited; its process starts again on the same session file with
+  the agent's settings, so it never runs with the main session's tools or
+  role.
+- <kbd>Esc</kbd> aborts its turn, as in the main session; the process stays,
+  so you can go on.
+- `!` and `!!` run in the child's process and land in its session; pi
+  shows the output as for any `!` command.
+- **Slash commands** work as in the main session. Those that concern the
+  conversation act on the child: `/model` and the thinking level
+  (<kbd>Shift</kbd>+<kbd>Tab</kbd>, `/thinking`) are passed on to it,
+  `/compact` compacts its session (pi also says its own compaction of the
+  copy it shows was cancelled), `/name` names its session; `/copy`,
+  `/export`, `/share` and `/session` read its session as it is now (the
+  view is caught up first). `/new` starts a new main session and `/resume`
+  lists the main sessions, as from the main session; `/fork` and `/clone`
+  say to go back first (they would fork the copy). The rest (`/subagents`
+  and its subcommands, `/metrics`, `/experts`, `/settings`, `/model`'s
+  picker, `/hotkeys`, `/reload`, ...) behave exactly as in the main
+  session. A `/mode` or `/plan` there sets the main session's mode: a
+  subagent's role is fixed by its agent file.
+- A dialog the child's guards open (the mandate asking before a command)
+  appears here with the agent's name in front.
+- When a turn you started in a child ends, its reply is added to the main
+  session as a short message (`scout (a subagent the user went on with in
+  its own session) replied: …`, as soon as you are back there), so the
+  model there knows; it does not start a turn.
+
+Children go when the main session ends (quit, `/new`, `/resume` of another
+session), when their run is pruned, or after resting as above.
+
+How live a running child's session is: as live as the main session. The
+message on its way (thinking, text, tool calls token by token, a tool's
+output as it streams) is drawn above the input as pi draws a streaming
+message, with the same components, plus a line with the child's clock and
+tokens; each message the child completes (its replies, tool results, your
+prompts and steers) is then added to the chat in place, as pi adds one.
+The session is never reloaded while you are in it, so nothing jumps or
+scrolls back. Switching into or out of a child's session is a session
+switch like `/resume`: pi redraws the screen then, and shows its own
+footer for a moment while it loads the session.
+
+Switching away from the main session while a call is running does not stop
+its children: the call goes on in the background (the tool call shows
+`Still running in the background ...` and the turn ends), and once the runs
+are done their report is sent to the main session as a message that
+continues it, as soon as you are back there. A plain stop
+(<kbd>Esc</kbd>) still stops them.
+
+`/subagents toggle` shows the list in the main session's footer too
+(condensed on narrow terminals), and is remembered for the next launch
+like `/metrics`. While a run is going and the footer list is off, the status
+says `2 subagents running · alt+s or /subagents to switch`. None of this
+costs context: nothing in it reaches the model (the requests of the main
+session and of its children are the same byte for byte).
 
 `LETS_CODE_SUBAGENT_KEY` picks another key (pi's key syntax, e.g.
-`ctrl+alt+w`), and `none` turns the key off. Transcripts are kept in memory
-for the session and in `~/.pi/agent/lets-code-runs/<session id>/`, one
-JSON file per run (mode 0600), so a finished run reopens after `/reload`, a
-restart with `-c`, or `/resume`. They hold only what the child printed, with
-tool output cut to its first and last few thousand characters and long
-arguments shortened. The newest 30 runs of a session
+`ctrl+alt+w`), and `none` turns the key off. Each run is kept in
+`~/.pi/agent/lets-code-runs/<session id>/`: its session file
+(`<run>.pi.jsonl`, outside pi's session store, so not in `/resume`'s list),
+the copy the TUI opens (`<run>.view.jsonl`), the agent's instructions
+(`<run>.prompt.md`, for a restart) and a transcript (`<run>.json`, what the live part and the lists draw
+from, with tool output cut to its first and last few thousand characters),
+both mode 0600, so a finished run reopens after `/reload`, a restart with
+`-c`, or `/resume`. The newest 30 runs of a session
 (`LETS_CODE_SUBAGENT_KEEP_RUNS`) and the newest 20 sessions stay on disk.
 
 </details>

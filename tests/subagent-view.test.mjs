@@ -1,9 +1,12 @@
 #!/usr/bin/env node
-// Unit test for the /subagents view lets-code writes next to the subagents
-// module (~/.pi/agent/extensions/lets-code/subagent-view.ts): the list's
-// order and layout at phone (70) and wide (120) widths, the run screen's
-// header and transcript, and the keys, with a fake TUI and the plain
-// helpers (no pi, no terminal). Needs Node >= 22.6.
+// Unit test for the drawing side of the subagent sessions, which lets-code
+// writes next to the subagents module
+// (~/.pi/agent/extensions/lets-code/subagent-view.ts): the order and
+// formatting of runs, the footer list (/subagents toggle) and the picker
+// (/subagents, alt+s) at phone (70) and wide (120) widths, the picker's
+// keys, and the live part of a running child's session (what its session
+// file does not hold yet), with a fake TUI and the plain helpers (no pi, no
+// terminal). Needs Node >= 22.6.
 //
 //   tests/subagent-view.test.mjs [path/to/lets-code/subagents.ts]
 import { existsSync } from "node:fs";
@@ -26,8 +29,8 @@ const ev = (o) => ({ v: 0, at: now, ...o });
 const run = (o) => ({ v: 1, kind: "subagent", cwd: "/work", session: "s1", turns: 1, input: 1200, output: 340, dropped: 0, ver: 0, events: [ev({ t: "user", text: o.task ?? "task" })], ...o });
 const runs = [
 	run({ id: "a", agent: "scout", task: "Map the config loader in src/config and report the files", status: "done", started: now - 90_000, ended: now - 30_000 }),
-	run({ id: "b", agent: "reviewer", task: "Review the parser change for missed edge cases", status: "running", started: now - 20_000, parent: { tool: "subagent", callId: "call_0123456789abcdef", mode: "parallel", index: 1, of: 2 } }),
-	run({ id: "c", agent: "scout", task: "Find where the CLI flags are parsed", status: "running", started: now - 25_000, parent: { tool: "subagent", callId: "call_0123456789abcdef", mode: "parallel", index: 0, of: 2 } }),
+	run({ id: "b", agent: "reviewer", task: "Review the parser change for missed edge cases", status: "running", started: now - 20_000 }),
+	run({ id: "c", agent: "scout", task: "Find where the CLI flags are parsed", status: "running", started: now - 25_000 }),
 	run({ id: "d", agent: "termux-device", kind: "expert", task: "Brief for the termux-device expert.\n\n## Goal\nopen the PDF in Files", status: "failed", exitCode: 3, started: now - 300_000, ended: now - 290_000 }),
 	run({ id: "e", agent: "worker", task: "Add the --dry-run flag", status: "aborted", started: now - 60_000, ended: now - 10_000 }),
 ];
@@ -39,138 +42,82 @@ t("order: running first (as they started), then finished newest first", v.order(
 t("summary: an expert brief loses its preamble and headings", v.summary(runs[3].task), "open the PDF in Files");
 t("status labels", runs.map(v.statusLabel), ["done", "running", "running", "failed (exit 3)", "stopped"]);
 
-// --- the list at 120 and 70 columns
-for (const width of [120, 70]) {
-	const lines = v.listLines(runs, { width, now, selected: "b" });
-	t(`list ${width}: every line fits`, lines.every((l) => W(l) <= width), true);
-	const rows = lines.filter((l) => /[●✓✗■]/.test(l)).map(strip);
-	t(`list ${width}: one row per run, running first`, rows.map((l) => l.replace(/^. . /, "").split(/\s+/)[0]), ["scout", "reviewer", "worker", "scout", "termux-device"]);
-	t(`list ${width}: the selected row has the cursor`, rows[1].startsWith("❯ ● reviewer"), true);
-	t(`list ${width}: elapsed and tokens right-aligned in one column`, new Set(rows.map((l) => W(l))).size, 1);
-	t(`list ${width}: elapsed of a running run counts to now`, /25s/.test(rows[0]), true);
-	t(`list ${width}: tokens`, /1\.5k$/.test(rows[0]), true);
-	t(`list ${width}: title counts`, strip(lines[0]), "Subagents  2 running · 3 finished");
-}
+// --- the footer list, which is also the navigator
 {
-	const wide = v.listLines(runs, { width: 120, now }).map(strip).find((l) => /Map the config/.test(l));
-	const narrow = v.listLines(runs, { width: 70, now }).map(strip).find((l) => /Map the config/.test(l));
-	t("list 120: the whole task fits", /report the files/.test(wide), true);
-	t("list 70: the task is cut with an ellipsis", /…/.test(narrow) && !/report the files/.test(narrow), true);
-	const tiny = v.listLines(runs, { width: 40, now }).map(strip);
-	t("list 40: two lines per run (name and time, then the task)", tiny.some((l) => /^ {4}Map the config/.test(l)) && tiny.some((l) => /^  ✓ scout  1m 00s · 1\.5k$/.test(l)), true);
-	t("list 40: every line fits", tiny.every((l) => W(l) <= 40), true);
-	t("empty list says so", v.listLines([], { width: 70, now }).map(strip).some((l) => /No subagent or expert runs/.test(l)), true);
+	t("footer: nothing without runs", v.footerLines([], { width: 120, now }), []);
+	t("nav rows: the main session, then the runs in order", v.navRows(runs).map((r) => r.id ?? r.kind), ["main", "c", "b", "e", "a", "d"]);
+	const wide = v.footerLines(runs, { width: 120, now, current: "b" }).map(strip);
+	t("footer: the main session first, then the runs, running first, then a line of keys", [wide.length, wide[0].slice(1, 8), wide.slice(1, 5).map((l) => l.slice(1, 3) + l.slice(3).trim().split(/\s+/)[0]), /alt\+s: switch session$/.test(wide.at(-1))], [v.FOOTER_ROWS + 1, "◂ main ", ["● scout", "● reviewer", "■ worker", "✓ scout"], true]);
+	t("footer: at most FOOTER_ROWS rows; the keys line says how many more", /↓1 more · alt\+s: switch session/.test(wide.at(-1)), false);
+	t("footer: the open session is marked", [wide[2].startsWith("▸"), wide[0].startsWith(" "), v.footerLines(runs, { width: 120, now }).map(strip)[0].startsWith("▸")], [true, true, true]);
+	t("footer wide: the task, the elapsed time and ↑in ↓out", [/Find where the CLI flags/.test(wide[1]), /25s/.test(wide[1]), /↑1\.2k ↓340/.test(wide[1])], [true, true, true]);
+	const mid = v.footerLines(runs, { width: 90, now }).map(strip);
+	t("footer under 100 columns: no task, the clock and tokens stay", [/Find where/.test(mid[1]), /25s/.test(mid[1]), /↑1\.2k ↓340/.test(mid[1])], [false, true, true]);
+	const phone = v.footerLines(runs, { width: 70, now }).map(strip);
+	t("footer at 70 columns: one total for the tokens", [/25s · 1\.5k$/.test(phone[1].trimEnd()), phone.every((l) => W(l) <= 70)], [true, true]);
+	t("footer: every line fits, at any width, navigating or not", [40, 70, 90, 120].every((w) => [undefined, 0, 3].every((sel) => v.footerLines(runs, { width: w, now, selected: sel }).every((l) => W(l) <= w))), true);
+	const many = Array.from({ length: 14 }, (_, i) => run({ id: `m${i}`, agent: `w${i}`, task: `job ${i}`, status: "done", started: now - 1000 * i, ended: now - 500 * i }));
+	const still = v.footerLines(many, { width: 70, now }).map(strip);
+	t("footer: more runs than rows: the first rows and how many more", [still.length, /↓9 more · alt\+s: switch session/.test(still.at(-1))], [v.FOOTER_ROWS + 1, true]);
+	const nav = v.footerLines(many, { width: 70, now, selected: 10 }).map(strip);
+	t("navigating: a window around the selection, the same height, the keys", [nav.length, nav.some((l) => l.startsWith("❯") && /w9 /.test(l)), /^↑\d+ ↓\d+ more · ↑↓ select · enter switch · esc editor$/.test(nav.at(-1))], [v.FOOTER_ROWS + 1, true, true]);
+	const nav0 = v.footerLines(runs, { width: 70, now, selected: 0, current: "b" }).map(strip);
+	t("navigating: the main row selectable; x only offered on a running run", [nav0[0].startsWith("❯◂ main"), /x stop/.test(nav0.at(-1)), /x stop/.test(v.footerLines(runs, { width: 70, now, selected: 1 }).map(strip).at(-1))], [true, false, true]);
+	t("navigating: the stop asks first", strip(v.footerLines(runs, { width: 70, now, selected: 1, confirm: true }).at(-1)), "Stop scout? x again stops it");
+	t("footer: the same height navigating or not (no jump when focus moves)", [v.footerLines(runs, { width: 70, now }).length, v.footerLines(runs, { width: 70, now, selected: 2 }).length], [v.FOOTER_ROWS + 1, v.FOOTER_ROWS + 1]);
 }
 
-// --- header and transcript
+// --- the part on its way: what the session file does not hold yet
 {
-	const h = v.headerLines(runs[1], { width: 70, now, index: 1, count: 5 }).map(strip);
-	t("header: agent, status, elapsed, tokens; position on the right", [/^● reviewer  running  20s · ↑1\.2k ↓340/.test(h[0]), h[0].endsWith("2/5"), W(h[0])], [true, true, 70]);
-	t("header: the parent tool call and the task's place in it", h[1], "subagent call …89abcdef · task 2/2 · 1 turn");
-	const e = v.headerLines(runs[3], { width: 120, now, index: 4, count: 5 }).map(strip);
-	t("header: an expert is marked", /^✗ termux-device expert  failed \(exit 3\)/.test(e[0]), true);
-	const narrow = v.headerLines({ ...runs[1], agent: "a-very-long-agent-name-indeed" }, { width: 30, now, index: 0, count: 1 });
-	t("header: fits a narrow terminal", narrow.every((l) => W(l) <= 30), true);
+	const cmd = { command: "sleep 25" };
+	const live = run({ id: "l", agent: "scout", task: "Task: look", status: "running", started: now - 30_000, events: [
+		ev({ t: "user", text: "Task: look" }),
+		ev({ t: "assistant", done: true, blocks: [{ type: "thinking", text: "first the sleep" }, { type: "toolCall", id: "c1", name: "bash", text: "", args: cmd }] }),
+		ev({ t: "tool", id: "c1", name: "bash", args: cmd, done: true, output: "", cut: 0 }),
+		ev({ t: "assistant", done: true, blocks: [{ type: "toolCall", id: "c2", name: "read", text: "", args: { path: "calc.py" } }, { type: "toolCall", id: "c3", name: "bash", text: "", args: { command: "ls" } }] }),
+		ev({ t: "tool", id: "c2", name: "read", args: { path: "calc.py" }, done: true, output: "def add", cut: 0 }),
+		ev({ t: "tool", id: "c3", name: "bash", args: { command: "ls" }, done: false, output: "", cut: 0 }),
+		ev({ t: "note", text: "retrying (attempt 1/3)", error: true }),
+		ev({ t: "assistant", done: false, blocks: [{ type: "text", text: "Found it" }] }),
+	] });
+	const entries = (msgs) => [{ type: "session" }, { type: "model_change" }, ...msgs.map((m) => ({ type: "message", message: m }))];
+	const file0 = v.loadedOf(entries([]));
+	t("tail: an empty file: everything", v.tailEvents(live, file0).length, live.events.length);
+	const file2 = v.loadedOf(entries([{ role: "user", content: "Task: look" }, { role: "assistant", content: [{ type: "toolCall", id: "c1" }] }]));
+	t("tail: past the loaded messages; a loaded call with no output yet is pi's to draw", v.tailEvents(live, file2).map((e) => e.t + (e.id ? `:${e.id}` : "")), ["tool:c1", "assistant", "tool:c2", "tool:c3", "note", "assistant"]);
+	const file4 = v.loadedOf(entries([{ role: "user", content: "Task: look" }, { role: "assistant", content: [{ type: "toolCall", id: "c1" }] }, { role: "toolResult", toolCallId: "c1" },
+		{ role: "assistant", content: [{ type: "toolCall", id: "c2" }, { type: "toolCall", id: "c3" }] }, { role: "toolResult", toolCallId: "c2" }]));
+	t("tail: the file caught up: the running tool (its call is drawn by pi), the note and the message on its way", v.tailEvents(live, file4).map((e) => e.t), ["note", "assistant"]);
+	live.events[5].output = "calc.py\n";
+	t("tail: once it streams output, the running tool shows", v.tailEvents(live, file4).map((e) => e.t + (e.id ? `:${e.id}` : "")), ["tool:c3", "note", "assistant"]);
+	const lines = v.liveLines(live, file4, { width: 70, now }).map(strip);
+	const q = v.liveLines(live, file4, { width: 70, now, queued: [{ text: "go left", kind: "steer" }, { text: "then right " + "x".repeat(90), kind: "followUp" }] }).map(strip);
+	t("live: sent and not yet taken, one line each, as pi labels them", [q.includes(" Steering: go left"), q.some((l) => l.startsWith(" Follow-up: then right") && W(l) <= 70)], [true, true]);
+	t("live: the streaming text and the working line, in 70 columns", [lines.some((l) => /Found it/.test(l)), /● scout working · 30s · ↑1\.2k ↓340 · live/.test(lines.at(-1)), lines.every((l) => W(l) <= 70)], [true, true, true]);
+	const done = { ...live, status: "done", ended: now, events: live.events.map((e) => ({ ...e, done: true })) };
+	const full = v.loadedOf(entries([{ role: "user" }, { role: "assistant" }, { role: "toolResult", toolCallId: "c1" }, { role: "assistant" }, { role: "toolResult", toolCallId: "c2" }, { role: "toolResult", toolCallId: "c3" }, { role: "assistant" }]));
+	t("live: a finished run whose file has it all draws nothing", v.liveLines(done, full, { width: 120, now }), []);
+	const shown = new WeakSet(live.events.slice(0, 7));
+	t("live: what is already in the chat is not drawn again", v.liveLines(live, file0, { width: 120, now, added: shown }).map(strip).filter((l) => /Task: look|hmm|first the sleep|calc\.py/.test(l)).length, 0);
 }
+
+// --- the transcript: pi's components when they load, else the plain lines
 {
-	const flags = { expanded: false, thinking: true };
-	const out = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n");
-	const bash = v.plainEvent(ev({ t: "tool", id: "1", name: "bash", args: { command: "npm test" }, done: true, output: out, cut: 0 }), 70, flags).map(strip);
-	t("tool: title with the command", bash[0], "● bash npm test");
-	t("bash collapsed: the last lines, how many are hidden", [bash[1], bash[bash.length - 1]], ["  … 34 earlier lines (o expands)", "  line 40"]);
-	const read = v.plainEvent(ev({ t: "tool", id: "2", name: "read", args: { path: "src/a.ts" }, done: true, output: out, cut: 0 }), 70, flags).map(strip);
-	t("read collapsed: the first lines", [read[0], read[1], read[read.length - 1]], ["● read src/a.ts", "  line 1", "  … 34 more lines (o expands)"]);
-	t("expanded: everything", v.plainEvent(ev({ t: "tool", id: "1", name: "bash", args: { command: "x" }, done: true, output: out, cut: 0 }), 70, { ...flags, expanded: true }).length, 41);
-	t("running tool without output", v.plainEvent(ev({ t: "tool", id: "3", name: "grep", args: { pattern: "TODO", path: "src" }, done: false, output: "", cut: 0 }), 70, flags).map(strip), ["● grep TODO in src", "  running…"]);
-	const long = v.plainEvent(ev({ t: "tool", id: "4", name: "bash", args: { command: "x".repeat(200) }, done: true, output: "y".repeat(300), cut: 0 }), 70, flags);
-	t("long command and output lines are cut to the width", long.every((l) => W(l) <= 70), true);
-	const a = ev({ t: "assistant", done: true, blocks: [{ type: "thinking", text: "I should look at the parser first." }, { type: "text", text: "The parser drops trailing commas. " + "word ".repeat(30) }] });
-	const shown = v.plainEvent(a, 70, flags).map(strip);
-	t("thinking shown (dimmed), then the text, wrapped", [shown[0], shown.slice(1).every((l) => W(l) <= 70), shown.length > 2], ["  I should look at the parser first.", true, true]);
-	t("thinking hidden: one line", v.plainEvent(a, 70, { ...flags, thinking: false }).map(strip)[0], "  Thinking… (t shows it)");
-	t("assistant error", v.plainEvent(ev({ t: "assistant", done: true, blocks: [], error: "500 upstream" }), 70, flags).map(strip), ["  Error: 500 upstream"]);
-	t("user task", v.plainEvent(ev({ t: "user", text: "Find the bug" }), 70, flags).map(strip), ["› Find the bug"]);
-	const end = v.endLines(runs[0], 70, now).map(strip)[0];
-	t("end line: how it finished, centred", [/done after 1m 00s · 1 turn · ↑1\.2k ↓340/.test(end), W(end) <= 70, end.startsWith("─")], [true, true, true]);
-	t("no end line while running", v.endLines(runs[1], 70, now), []);
+	const r = run({ id: "x", agent: "scout", status: "running", started: now });
+	const evs = [ev({ t: "user", text: "Task: look" }), ev({ t: "assistant", done: false, blocks: [{ type: "thinking", text: "hmm" }, { type: "text", text: "Hello there" }] }), ev({ t: "tool", id: "c", name: "bash", args: { command: "ls" }, done: true, output: "a\nb", cut: 0 })];
 	const tr = new v.Transcript(v.plainDeps(), { fg: (_c, s) => s }, {});
-	const r = run({ id: "x", agent: "scout", status: "done", started: now - 1000, ended: now, dropped: 3, events: [ev({ t: "user", text: "task" }), a] });
-	const ls = tr.lines(r, 70, flags, now);
-	t("transcript: dropped events are noted after the task", ls.some((l) => /3 earlier events not kept/.test(l)), true);
-	t("transcript: cached per version", tr.lines(r, 70, flags, now)[2] === ls[2] && tr.cache.size === 2, true);
-}
-
-// --- the view: keys, scrolling, live updates (fake TUI, plain keys)
-function harness(width, rows = 20, start) {
-	const reg = { runs: runs.map((r) => ({ ...r, events: [...r.events] })), listeners: new Set() };
-	const renders = { n: 0 }; let closed = 0; const stops = [];
-	const tui = { requestRender: () => { renders.n++; }, terminal: { rows } };
-	const view = v.createView({ tui, theme: { fg: (_c, s) => s }, deps: v.plainDeps(), registry: reg, start, key: "alt+s", stop: (id) => stops.push(id), done: () => { closed++; } });
-	return { view, reg, renders, stops, closed: () => closed, draw: () => view.render(width).map(strip) };
-}
-const K = { up: "\x1b[A", down: "\x1b[B", left: "\x1b[D", right: "\x1b[C", enter: "\r", esc: "\x1b", tab: "\t", stab: "\x1b[Z", pgup: "\x1b[5~", pgdn: "\x1b[6~", end: "\x1b[F", home: "\x1b[H", alts: "\x1bs" };
-for (const width of [70, 120]) {
-	const h = harness(width);
-	let lines = h.draw();
-	t(`view ${width}: opens on the list, the first run selected`, [lines[0].startsWith("Subagents"), lines.some((l) => l.startsWith("❯ ● scout"))], [true, true]);
-	t(`view ${width}: exactly the terminal's rows, each within the width`, [lines.length, h.view.render(width).every((l) => W(l) <= width)], [20, true]);
-	h.view.handleInput(K.down);
-	t(`view ${width}: down moves the cursor`, h.draw().some((l) => l.startsWith("❯ ● reviewer")), true);
-	h.view.handleInput(K.enter);
-	lines = h.draw();
-	t(`view ${width}: enter opens the run`, [h.view.screen, /^● reviewer  running/.test(lines[0]), lines[1].startsWith("subagent call")], ["run", true, true]);
-	t(`view ${width}: key hints at the bottom, within the width`, [/esc back/.test(lines[19]), W(lines[19]) <= width], [true, true]);
-	h.view.handleInput(K.tab); t(`view ${width}: tab -> next run`, h.view.current().id, "e");
-	h.view.handleInput(K.right); t(`view ${width}: right -> next run`, h.view.current().id, "a");
-	h.view.handleInput(K.left); h.view.handleInput(K.stab); t(`view ${width}: left and shift+tab -> previous`, h.view.current().id, "b");
-	h.view.handleInput(K.alts); t(`view ${width}: the shortcut moves on too`, h.view.current().id, "e");
-	h.view.handleInput("l"); t(`view ${width}: l -> the list, same run selected`, [h.view.screen, h.draw().some((l) => l.startsWith("❯ ■ worker"))], ["list", true]);
-	h.view.handleInput(K.esc); t(`view ${width}: esc closes`, h.closed(), 1);
-	t(`view ${width}: closing unsubscribes`, h.reg.listeners.size, 0);
-}
-{
-	// a long, still-running transcript: follows the end, stops following when scrolled up
-	const h = harness(70, 12, { screen: "run", id: "b" });
-	const r = h.reg.runs.find((x) => x.id === "b");
-	for (let i = 0; i < 30; i++) r.events.push(ev({ t: "tool", id: `t${i}`, name: "bash", args: { command: `step ${i}` }, done: true, output: `out ${i}`, cut: 0, v: 1 }));
-	let lines = h.draw();
-	t("run: opened directly by id", h.view.current().id, "b");
-	t("run: follows the end", lines.some((l) => /step 29/.test(l)), true);
-	h.view.handleInput(K.pgup);
-	lines = h.draw();
-	t("pgup: scrolled up, no longer at the end", [h.view.follow, lines.some((l) => /step 29/.test(l)), /more · end follows/.test(lines[11])], [false, false, true]);
-	r.events.push(ev({ t: "tool", id: "new", name: "bash", args: { command: "step 30" }, done: true, output: "", cut: 0 }));
-	h.reg.listeners.forEach((l) => l(r));
-	t("a new event repaints", h.renders.n > 0, true);
-	t("scrolled up: stays put when the run grows", h.draw().some((l) => /step 30/.test(l)), false);
-	h.view.handleInput(K.end);
-	t("end: follows again", [h.view.follow, h.draw().some((l) => /step 30/.test(l))], [true, true]);
-	h.view.handleInput(K.home); t("home: the top (the task)", h.draw()[3].startsWith("›"), true);
-	h.view.handleInput(K.pgdn); h.view.handleInput(K.down); t("pgdn/down scroll", h.view.top > 0, true);
-	h.view.handleInput("x");
-	t("x on a running run asks first", [h.view.confirm, /Stop reviewer\? y stops it/.test(h.draw()[11])], [true, true]);
-	h.view.handleInput("n"); t("any other key keeps it running", [h.view.confirm, h.stops], [false, []]);
-	h.view.handleInput("x"); h.view.handleInput("y"); t("x then y stops that child", h.stops, ["b"]);
-	h.view.handleInput(K.tab); h.view.handleInput("x"); t("x on a finished run does nothing", h.view.confirm, false);
-	h.view.handleInput("t"); t("t toggles thinking", h.view.flags.thinking, false);
-	h.view.handleInput("o"); t("o toggles tool output", h.view.flags.expanded, true);
-	t("the run screen fits 70 columns", h.view.render(70).every((l) => W(l) <= 70), true);
-	h.view.handleInput("q"); t("q closes", h.closed(), 1);
-}
-{
-	// resize: the same view reflows to the new width
-	const h = harness(120, 16, { screen: "run", id: "a" });
-	const wide = h.view.render(120), narrow = h.view.render(70);
-	t("reflow on resize", [wide.every((l) => W(l) <= 120), narrow.every((l) => W(l) <= 70), wide.length, narrow.length], [true, true, 16, 16]);
-	h.view.dispose();
-}
-{
-	// keys the plain parser knows (pi's own matchesKey replaces it inside pi)
-	const m = v.plainMatchesKey;
-	t("plain keys", [m("\x1b", "escape"), m("\x1b[A", "up"), m("\x1bOA", "up"), m("\x1b[Z", "shift+tab"), m("\x1bs", "alt+s"), m("\x03", "ctrl+c"), m("q", "q"), m("\x1b[5~", "pageUp"), m("x", "q")], [true, true, true, true, true, true, true, true, false]);
-	t("plain truncate keeps the width", [v.plainWidth(v.plainTruncate("\x1b[2mhello world\x1b[0m", 6)), strip(v.plainTruncate("hello world", 6))], [6, "hello…"]);
-	t("plain wrap", v.plainWrap("aaa bbb ccc", 7), ["aaa bbb", "ccc"]);
-	t("plain wrap breaks long words", v.plainWrap("x".repeat(10), 4), ["xxxx", "xxxx", "xx"]);
+	const plain = tr.lines(evs, r, 60, { expanded: false, thinking: true });
+	t("plain: task, thinking, text, the tool and its output", [plain.some((l) => /› Task: look/.test(l)), plain.some((l) => /hmm/.test(l)), plain.some((l) => /Hello there/.test(l)), plain.some((l) => /● bash ls/.test(l)), plain.some((l) => /^ {2}b$/.test(l))], [true, true, true, true, true]);
+	const boom = { ...v.plainDeps(), pi: { UserMessageComponent: class { constructor() { throw new Error("no"); } }, AssistantMessageComponent: class {}, ToolExecutionComponent: class {}, tools: {} } };
+	const tr2 = new v.Transcript(boom, { fg: (_c, s) => s }, {});
+	t("pi's components failing: the plain lines take over", [tr2.lines(evs, r, 60, { expanded: false, thinking: true }).some((l) => /Hello there/.test(l)), tr2.piFailed], [true, true]);
+	const fake = { ...v.plainDeps(), pi: {
+		UserMessageComponent: class { constructor(text) { this.text = text; } render() { return [`USER ${this.text}`]; } },
+		AssistantMessageComponent: class { updateContent(m, streaming) { this.m = m; this.s = streaming; } render() { return [`ASSISTANT ${this.m.content.map((c) => c.text ?? c.thinking).join("|")}${this.s ? " …" : ""}`]; } },
+		ToolExecutionComponent: class { constructor(name, id, args) { this.name = name; this.args = args; } updateResult(res) { this.res = res; } render() { return [`TOOL ${this.name} ${this.args.command} -> ${this.res?.content?.[0]?.text ?? ""}`]; } },
+		tools: {} } };
+	const tr3 = new v.Transcript(fake, { fg: (_c, s) => s }, {});
+	t("pi's components: each event drawn by them", tr3.lines(evs, r, 60, { expanded: false, thinking: true }), ["USER Task: look", "ASSISTANT hmm|Hello there …", "TOOL bash ls -> a\nb"]);
 }
 
 console.log(`\n${n} checks, ${fail ? "FAILURES" : "all passed"}`);

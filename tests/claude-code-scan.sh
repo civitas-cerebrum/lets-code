@@ -8,7 +8,12 @@ eval "$(sed -n '/^CC_SUMMARY=/p; /^claude_code_scan() {/,/^}$/p' "$(dirname "$0"
 fail=0
 export LETS_CODE_CLAUDE_SCOPE=all   # CLAUDE_CODE=all first; the default (auto) at the end
 check() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: got '$2', want '$3'"; fail=1; fi; }
-work="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/cc-scan.XXXXXX")" && pwd -P)"
+# an empty mktemp result would make work the current directory, which the
+# trap below deletes: stop unless it is a fresh cc-scan.* directory
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/cc-scan.XXXXXX")" || { echo "FAIL  mktemp"; exit 1; }
+[ -n "${tmp}" ] && [ -d "${tmp}" ] || { echo "FAIL  mktemp gave no directory"; exit 1; }
+work="$(cd "${tmp}" && pwd -P)" || exit 1
+case "${work}" in */cc-scan.??????) ;; *) echo "FAIL  unexpected scratch dir: ${work}"; exit 1 ;; esac
 trap 'rm -rf "${work}"' EXIT
 export HOME="${work}/home"; unset CLAUDE_CONFIG_DIR
 PI_AGENT_DIR="${HOME}/.pi/agent"; mkdir -p "${PI_AGENT_DIR}" "${HOME}/.claude/skills/one" "${HOME}/.claude/commands"

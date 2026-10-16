@@ -1387,12 +1387,20 @@ export default function (pi: ExtensionAPI) {
 		if ((data.getAvailableProviderCount?.() ?? 1) > 1 && m?.provider) model = `(${m.provider}) ${model}`;
 		return spread(color("dim", where), color("dim", model), w);
 	};
+	// lines other lets-code modules put in the footer, above the numbers (the
+	// subagents list of /subagents toggle): globalThis, so a module loaded
+	// again after a reload or a session switch replaces its own block
+	const host = ((globalThis as any)[Symbol.for("lets-code.footer-blocks")] ??= { blocks: new Map() });
 	const footer = (tui: { requestRender(): void }, theme: Theme, data: FooterData) => {
 		tuiRef = tui;
 		const color: Color = (c, s) => theme.fg(c, s);
 		return {
 			render(w: number): string[] {
-				const lines = full ? [topLine(data, w, color)] : [];
+				const lines: string[] = [];
+				for (const block of (host.blocks as Map<string, (w: number, c: Color) => string[]>).values()) {
+					try { for (const l of block(w, color)) lines.push(cut(l, w)); } catch { /* a block's problem, not the footer's */ }
+				}
+				if (full) lines.push(topLine(data, w, color));
 				for (const l of statsLines(stats(), full, color, w)) lines.push(cut(l, w));
 				const others = [...data.getExtensionStatuses()].sort(([a], [b]) => a.localeCompare(b)).map(([, v]) => v.replace(/\s+/g, " ").trim());
 				if (others.length) lines.push(cut(others.join(" "), w));
@@ -1403,6 +1411,7 @@ export default function (pi: ExtensionAPI) {
 		};
 	};
 	const repaint = () => tuiRef?.requestRender();
+	host.repaint = repaint;
 	const tick = () => { if (sentAt === undefined) return; glyph = FRAMES[frame++ % FRAMES.length]; repaint(); };
 	const stop = () => { if (timer !== undefined) { clearInterval(timer); timer = undefined; } glyph = ""; };
 	const start = () => {
@@ -3322,7 +3331,10 @@ export default function (pi: ExtensionAPI) {
 		d.reset();
 	};
 
-	pi.on("session_start", async () => {
+	pi.on("session_start", async (_e: any, ctx: any) => {
+		// a subagent's own session, opened from /subagents: read-only, and its
+		// process may still be writing it, so nothing here may append to it
+		if (/[\\/]lets-code-runs[\\/][^\\/]+[\\/][^\\/]+\.(pi|view)\.jsonl$/.test(String(ctx?.sessionManager?.getSessionFile?.() ?? ""))) return;
 		if (AUTO && pi.getThinkingLevel() !== BASE) pi.setThinkingLevel(BASE as any);
 		if (AUTO && PLAN) {
 			planning = true;
@@ -4094,16 +4106,19 @@ pi_write_subagent_extension() {
 // lacks are dropped), effort -> thinking, permissionMode plan -> the
 // readonly role; model, color and the rest are ignored (one model here).
 //
-// Watching a run: the runner keeps each child's transcript (see "run
-// transcripts" below), and /subagents (or LETS_CODE_SUBAGENT_KEY, default
-// alt+s; "none" turns the key off) opens a full-screen view of the runs,
-// live while they work (subagent-view.ts). While one runs, the footer says
-// so, with the key. UI only: no tool text, prompt or context changes.
+// Subagent sessions: each child is a pi in RPC mode on a real session file of
+// its own (--session, under lets-code-runs/; see "the child process"), and
+// /subagents (or LETS_CODE_SUBAGENT_KEY, default alt+s; "none" turns the key
+// off) switches the TUI into it, live while it works, and back; there you
+// go on with the child as with the main session (see "subagent sessions"
+// below; subagent-view.ts draws the picker, the footer list and the live
+// part). While one runs, the footer says so, with the key. No tool text,
+// prompt or context changes.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Type } from "typebox";
 
@@ -4246,13 +4261,16 @@ export function discoverAgents(cwd: string, trusted: boolean): AgentDef[] {
 interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number; timedOut?: number; stopped?: boolean }
 
 // ------------------------------------------------------------ run transcripts
-// Each child's JSON event stream is also kept as a transcript, for the
-// /subagents view (subagent-view.ts). UI only: none of it reaches the model.
+// Each child's JSON event stream is also kept as a transcript: the live part
+// of a running child's session and the lists (subagent sessions, below).
+// UI only: none of it reaches the model.
 // Kept in memory for the session (on globalThis, so the copies of this module
 // the experts and Claude Code modules import share it, and a /reload keeps
 // it), and on disk as <agent dir>/lets-code-runs/<session id>/<run>.json
 // (0600, written at most every RUN_SAVE_MS while it runs and once at the
-// end), so a finished run reopens after a reload or a restart. Capped: a
+// end), so a finished run is listed after a reload or a restart. Next to it
+// is the child's own pi session file, <run>.pi.jsonl, which the TUI
+// switches into. Capped: a
 // tool's output keeps its head and tail (TOOL_OUT_CAP characters), a long
 // argument (ARG_CAP) or text block (TEXT_CAP) is cut, a run keeps its newest
 // MAX_EVENTS events, and the newest KEEP_RUNS runs of a session (and
@@ -4263,7 +4281,7 @@ export interface Block { type: "text" | "thinking" | "toolCall"; text: string; i
 export type RunEvent = { v: number; at: number } & (
 	| { t: "user"; text: string }
 	| { t: "assistant"; blocks: Block[]; done: boolean; stop?: string; error?: string }
-	| { t: "tool"; id: string; name: string; args: unknown; done: boolean; isError?: boolean; output: string; cut: number; details?: unknown }
+	| { t: "tool"; id: string; name: string; args: unknown; done: boolean; isError?: boolean; output: string; cut: number; details?: unknown; end?: number }
 	| { t: "note"; text: string; error?: boolean });
 // the parent tool call a run belongs to
 export interface RunMeta { tool?: string; callId?: string; mode?: "single" | "parallel" | "chain"; index?: number; of?: number }
@@ -4271,6 +4289,9 @@ export interface RunRecord {
 	v: 1; id: string; agent: string; kind: "subagent" | "expert"; task: string; cwd: string; session: string;
 	started: number; ended?: number; status: RunStatus; exitCode?: number; turns: number; input: number; output: number; live?: number;
 	parent?: RunMeta; events: RunEvent[]; dropped: number; final?: string; ver: number; seenTask?: boolean;
+	sessionFile?: string;   // the child's own pi session file
+	spawn?: Spawn;          // how its process starts (again): args, environment, folder
+	home?: string;          // the session file of the main session it belongs to
 }
 export const TOOL_OUT_CAP = 6000;
 export const TEXT_CAP = 32000;
@@ -4339,7 +4360,7 @@ export function addRun(rec: RunRecord): void {
 	reg.runs.push(rec);
 	const done = reg.runs.filter((r) => r.status !== "running").sort((a, b) => (b.ended ?? b.started) - (a.ended ?? a.started));
 	const drop = new Set(done.slice(KEEP_RUNS).map((r) => r.id));
-	if (drop.size) reg.runs = reg.runs.filter((r) => !drop.has(r.id));
+	if (drop.size) { reg.runs = reg.runs.filter((r) => !drop.has(r.id)); for (const id of drop) killChild(id); }
 }
 const openAssistant = (rec: RunRecord) => { for (let i = rec.events.length - 1; i >= 0; i--) { const e = rec.events[i]; if (e.t === "assistant") return e.done ? undefined : e; } return undefined; };
 const toolEv = (rec: RunRecord, id: string | undefined, name?: string) => {
@@ -4402,7 +4423,7 @@ export function recordEvent(rec: RunRecord, ev: any, now = Date.now()): boolean 
 			if (!x) { x = { t: "tool", id: String(ev.toolCallId ?? ""), name: String(ev.toolName ?? "tool"), args: clipArgs(ev.args), done: false, output: "", cut: 0, v: 0, at: now }; push(x); }
 			const o = clipOutput(resultText(ev.type === "tool_execution_end" ? ev.result : ev.partialResult));
 			x.output = o.text; x.cut = o.cut;
-			if (ev.type === "tool_execution_end") { x.done = true; x.isError = !!ev.isError; x.details = smallDetails(ev.result?.details); }
+			if (ev.type === "tool_execution_end") { x.done = true; x.isError = !!ev.isError; x.details = smallDetails(ev.result?.details); x.end = now; }
 			x.v++;
 			break;
 		}
@@ -4448,7 +4469,12 @@ export function pruneRuns(session: string): void {
 	const byTime = (dir: string, names: string[]) => names.map((n) => { try { return { n, t: statSync(join(dir, n)).mtimeMs }; } catch { return { n, t: 0 }; } }).sort((a, b) => b.t - a.t);
 	try {
 		const root = runsRoot(), dir = join(root, session || "no-session");
-		for (const { n } of byTime(dir, readdirSync(dir).filter((f) => f.endsWith(".json"))).slice(KEEP_RUNS)) rmSync(join(dir, n), { force: true });
+		// a run is its transcript and its session file: pruned together
+		for (const { n } of byTime(dir, readdirSync(dir).filter((f) => f.endsWith(".json"))).slice(KEEP_RUNS)) {
+			rmSync(join(dir, n), { force: true });
+			for (const ext of [".pi.jsonl", ".view.jsonl", ".prompt.md"]) rmSync(join(dir, n.replace(/\.json$/, ext)), { force: true });
+			killChild(n.replace(/\.json$/, ""));
+		}
 		for (const { n } of byTime(root, readdirSync(root)).slice(RUNS_SESSIONS)) rmSync(join(root, n), { recursive: true, force: true });
 	} catch { /* nothing to prune */ }
 }
@@ -4483,68 +4509,275 @@ export function useSession(session: string): void {
 }
 
 
+// ------------------------------------------------------------ the child process
+// Each run is one pi in RPC mode (--mode rpc) on its own session file, with
+// the agent's tools, thinking level, skills, role and instructions. The
+// first prompt is the task; the call that started it gets the child's last
+// reply when that turn settles (agent_settled), as with -p before. The
+// process then stays, idle, so the user can go on with it from its session
+// (see "subagent sessions"): a prompt while it works is a steer, one while
+// it is idle a new turn, Esc aborts the turn. An idle child goes after
+// IDLE_MS, when its run is pruned, when the main session ends or pi quits;
+// the next prompt starts it again on the same file with the same settings
+// (rec.spawn, saved with the transcript, so this also works after a
+// restart). A turn the user started gets its reply to the main session as a
+// message (reportContinuation), so the model there stays informed.
+//
+// Dialogs a child's extensions open (the mandate asking before a command,
+// say) come over RPC as extension_ui_request and are shown in this TUI with
+// the agent's name; without a UI they are answered as cancelled (the
+// mandate then denies, as it did without a UI before).
+export const IDLE_MS = Math.max(50, Math.round(Number(process.env.LETS_CODE_SUBAGENT_IDLE_S ?? "300") * 1000) || 300_000);
+export const ABORT_WAIT_MS = 5000;
+export interface Spawn { args: string[]; env: Record<string, string>; unset?: string[]; cwd: string }
+interface Turn {
+	r: RunResult; resolve: (r: RunResult) => void; first: boolean;
+	stopped: boolean; aborting: boolean; stopReason?: string; error?: string;
+	onProgress?: (line: string) => void; timer?: ReturnType<typeof setTimeout>; killTimer?: ReturnType<typeof setTimeout>; cleanup?: () => void;
+}
+const lastText = (c: unknown) => (typeof c === "string" ? c : Array.isArray(c) ? c.filter((x: any) => x?.type === "text").map((x: any) => x.text).join("\n") : "");
+export class Child {
+	rec: RunRecord; proc?: ReturnType<typeof spawn>; buf = ""; seq = 0; stderr = "";
+	waiting = new Map<string, (res: any) => void>();
+	turn?: Turn; idle?: ReturnType<typeof setTimeout>;
+	queued: { text: string; kind: "steer" | "followUp" }[] = [];   // sent while it works, not yet in the conversation
+	constructor(rec: RunRecord) { this.rec = rec; }
+	get alive(): boolean { return !!this.proc && this.proc.exitCode === null && this.proc.signalCode === null; }
+	get busy(): boolean { return !!this.turn; }
+	// a child at rest must not keep pi running (print mode exits; the pipes close it)
+	private hold(on: boolean) {
+		const p: any = this.proc; if (!p) return;
+		for (const x of [p, p.stdin, p.stdout, p.stderr]) { try { on ? x?.ref?.() : x?.unref?.(); } catch { /* gone */ } }
+	}
+	start(): boolean {
+		if (this.alive) return true;
+		const s = this.rec.spawn;
+		if (!s) { this.stderr = "this run predates restartable subagents"; return false; }
+		const env: Record<string, string | undefined> = { ...process.env, ...s.env };
+		for (const k of s.unset ?? []) delete env[k];
+		let p: ReturnType<typeof spawn>;
+		try { p = spawn("pi", s.args, { cwd: s.cwd, env: env as NodeJS.ProcessEnv, stdio: ["pipe", "pipe", "pipe"] }); }
+		catch (e) { this.stderr = e instanceof Error ? e.message : String(e); return false; }
+		this.proc = p; this.buf = ""; this.stderr = "";
+		p.stdout!.setEncoding("utf8");
+		p.stdout!.on("data", (d: string) => {
+			this.buf += d;
+			for (let i = this.buf.indexOf("\n"); i >= 0; i = this.buf.indexOf("\n")) { const line = this.buf.slice(0, i).replace(/\r$/, ""); this.buf = this.buf.slice(i + 1); this.handle(line); }
+		});
+		p.stderr!.on("data", (d) => { this.stderr = (this.stderr + d.toString()).slice(-4000); });
+		p.stdin!.on("error", () => { /* it went away; close says how */ });
+		p.on("error", (e) => { this.stderr += `\n${e.message}`; this.exited(p, 1); });
+		p.on("close", (code) => { if (this.buf.trim()) this.handle(this.buf); this.buf = ""; this.exited(p, code); });
+		this.hold(true);
+		return true;
+	}
+	write(o: unknown): void { try { this.proc?.stdin?.write(JSON.stringify(o) + "\n"); } catch { /* gone */ } }
+	send(cmd: Record<string, unknown>): Promise<any> {
+		if (!this.alive) return Promise.resolve({ success: false, error: `${this.rec.agent} is not running` });
+		const id = `lc${++this.seq}`;
+		this.hold(true);   // an answer is due: keep it referenced until it comes
+		return new Promise((res) => {
+			this.waiting.set(id, (v: any) => { if (!this.waiting.size && !this.turn) this.hold(false); res(v); });
+			this.write({ ...cmd, id });
+		});
+	}
+	handle(line: string): void {
+		if (!line.trim()) return;
+		let ev: any; try { ev = JSON.parse(line); } catch { return; }
+		if (ev?.type === "response") { const w = this.waiting.get(ev.id); if (w) { this.waiting.delete(ev.id); w(ev); } return; }
+		if (ev?.type === "extension_ui_request") { void childDialog(this, ev); return; }
+		if (ev?.type === "message_end" && ev.message?.role === "user" && this.queued.length) {
+			const t = lastText(ev.message.content).trim(), i = this.queued.findIndex((q) => q.text.trim() === t);
+			if (i >= 0) this.queued.splice(i, 1);
+		}
+		if (recordEvent(this.rec, ev)) { saveRun(this.rec); notifyRuns(this.rec); }
+		const t = this.turn;
+		if (!t) return;
+		if (ev.type === "message_end" && ev.message?.role === "assistant") {
+			const r = t.r, m = ev.message;
+			r.turns++; const u = m.usage; if (u) { r.input += u.input || 0; r.output += u.output || 0; }
+			const text = lastText(m.content); if (text.trim()) r.text = text;
+			t.stopReason = m.stopReason; t.error = m.errorMessage;
+		}
+		if (ev.type === "tool_execution_start" && t.onProgress) t.onProgress(`${this.rec.agent}: ${ev.toolName} ${ev.toolName === "bash" ? String(ev.args?.command ?? "").slice(0, 60) : String(ev.args?.path ?? "")}`);
+		if (ev.type === "agent_settled") this.endTurn();
+	}
+	// one turn: the task (first) or the user's next prompt; resolves when it settles
+	prompt(text: string, o: { first?: boolean; signal?: AbortSignal; timeout?: number; onProgress?: (line: string) => void; images?: unknown[] } = {}): Promise<RunResult> {
+		const rec = this.rec, reg = registry();
+		if (this.idle) { clearTimeout(this.idle); this.idle = undefined; }
+		const r: RunResult = { agent: rec.agent, task: text, text: "", exitCode: 0, stderr: "", turns: 0, input: 0, output: 0 };
+		if (!o.first) {   // going on: the clock goes on from the time it ran
+			rec.started = Date.now() - (rec.ended !== undefined ? rec.ended - rec.started : 0);
+			rec.ended = undefined; rec.status = "running"; rec.exitCode = undefined; rec.live = 0;
+			saveRun(rec, true); notifyRuns(rec);
+		}
+		return new Promise((resolve) => {
+			const t: Turn = { r, resolve, first: !!o.first, stopped: false, aborting: false, onProgress: o.onProgress };
+			this.turn = t;
+			// the stop of the picker, /subagents stop and Esc in its session: this child only
+			reg.stops.set(rec.id, () => this.abort(true));
+			if (!this.start()) { r.exitCode = 1; r.stderr = this.stderr || "pi did not start"; this.endTurn(); return; }
+			this.hold(true);
+			if (o.timeout) t.timer = setTimeout(() => { r.timedOut = o.timeout; this.abort(); }, o.timeout * 1000);
+			if (o.signal) {
+				const onAbort = () => this.abort();
+				if (o.signal.aborted) onAbort(); else { o.signal.addEventListener("abort", onAbort, { once: true }); t.cleanup = () => o.signal!.removeEventListener("abort", onAbort); }
+			}
+			void this.send({ type: "prompt", message: text, ...(o.images?.length ? { images: o.images } : {}) }).then((res) => {
+				if (this.turn !== t) return;
+				if (!res?.success) { r.exitCode = 1; r.stderr = String(res?.error ?? this.stderr ?? "the prompt was refused"); this.endTurn(); }
+				else if (res.data?.disposition === "handled") this.endTurn();   // an extension command: no turn
+			});
+		});
+	}
+	// a prompt while it works: a steer (pi's Enter while the main session
+	// streams) or a follow-up (its follow-up key, alt+enter)
+	steer(text: string, kind: "steer" | "followUp" = "steer", images?: unknown[]): Promise<any> {
+		const q = { text, kind }; this.queued.push(q); notifyRuns(this.rec);
+		return this.send({ type: "prompt", message: text, streamingBehavior: kind, ...(images?.length ? { images } : {}) }).then((res) => {
+			if (!res?.success) { const i = this.queued.indexOf(q); if (i >= 0) this.queued.splice(i, 1); notifyRuns(this.rec); }
+			return res;
+		});
+	}
+	// pi's dequeue key: what was sent and not yet taken comes back to the editor
+	async dequeue(): Promise<string[]> {
+		const res = await this.send({ type: "clear_queue" });
+		const d = res?.data ?? {};
+		const texts = [...(Array.isArray(d.steering) ? d.steering : []), ...(Array.isArray(d.followUp) ? d.followUp : [])].map(String);
+		this.queued = []; notifyRuns(this.rec);
+		return texts.length ? texts : [];
+	}
+	// stop the turn (the process stays); one that does not settle in time goes with its process
+	abort(stopped = false): void {
+		const t = this.turn; if (!t) return;
+		if (stopped) t.stopped = true;
+		if (t.aborting) return;
+		t.aborting = true;
+		void this.send({ type: "abort" });
+		t.killTimer = setTimeout(() => { if (this.turn === t) this.kill(true); }, ABORT_WAIT_MS);
+		(t.killTimer as any).unref?.();
+	}
+	endTurn(): void {
+		const t = this.turn; if (!t) return;
+		this.turn = undefined;
+		if (t.timer) clearTimeout(t.timer); if (t.killTimer) clearTimeout(t.killTimer); t.cleanup?.();
+		const r = t.r, rec = this.rec;
+		registry().stops.delete(rec.id);
+		this.queued = [];
+		if (r.timedOut) r.exitCode = r.exitCode || 124;
+		else if (r.exitCode === 0 && (t.aborting || t.stopReason === "aborted")) r.exitCode = 130;
+		else if (r.exitCode === 0 && t.stopReason === "error") { r.exitCode = 1; r.stderr ||= String(t.error ?? "the model request failed"); }
+		if (t.stopped && !r.timedOut) r.stopped = true;
+		finishRun(rec, r, !r.timedOut && (t.stopped || t.aborting || t.stopReason === "aborted")); saveRun(rec, true); pruneRuns(rec.session); notifyRuns(rec);
+		t.resolve(r);
+		if (!t.first) reportContinuation(rec, r);
+		if (!this.alive) return;
+		// at rest: without a UI no one can go on with it; else it waits IDLE_MS
+		if (!(registry() as any).ui) { this.kill(); return; }
+		this.hold(false);
+		this.idle = setTimeout(() => this.kill(), IDLE_MS);
+		(this.idle as any).unref?.();
+	}
+	exited(p: ReturnType<typeof spawn>, code: number | null): void {
+		if (p !== this.proc) return;
+		this.proc = undefined;
+		if (this.idle) { clearTimeout(this.idle); this.idle = undefined; }
+		for (const w of this.waiting.values()) w({ success: false, error: `${this.rec.agent} exited` });
+		this.waiting.clear();
+		if (this.turn) { const r = this.turn.r; r.exitCode = r.timedOut ? code || 124 : code || 1; r.stderr = this.stderr; this.endTurn(); }
+	}
+	// close its input (pi's orderly exit), then the signals
+	kill(now = false): void {
+		const p = this.proc; if (!p) return;
+		if (this.idle) { clearTimeout(this.idle); this.idle = undefined; }
+		try { p.stdin?.end(); } catch { /* gone */ }
+		const term = setTimeout(() => { try { p.kill("SIGTERM"); } catch { /* gone */ } }, now ? 0 : 2000); (term as any).unref?.();
+		const hard = setTimeout(() => { try { p.kill("SIGKILL"); } catch { /* gone */ } }, now ? 3000 : 5000); (hard as any).unref?.();
+	}
+}
+type ChildReg = Registry & { children?: Map<string, Child>; exitHook?: boolean; ui?: any };
+export function childOf(rec: RunRecord): Child {
+	const reg = registry() as ChildReg;
+	const m = (reg.children ??= new Map());
+	let c = m.get(rec.id);
+	if (!c) { c = new Child(rec); m.set(rec.id, c); }
+	else if (c.rec !== rec && !c.busy) c.rec = rec;   // the same run, read again from disk
+	if (!reg.exitHook) {   // pi quits: no child outlives it
+		reg.exitHook = true;
+		process.once("exit", () => { for (const x of (registry() as ChildReg).children?.values() ?? []) { try { x.proc?.kill("SIGTERM"); } catch { /* gone */ } } });
+	}
+	return c;
+}
+export function killChild(id: string): void { const reg = registry() as ChildReg; reg.children?.get(id)?.kill(); reg.children?.delete(id); }
+export function killChildren(): void { const reg = registry() as ChildReg; for (const [id, c] of reg.children ?? []) { c.abort(); c.kill(); reg.children!.delete(id); } }
+// a dialog of a child's extension, shown here with the agent's name
+async function childDialog(c: Child, ev: any): Promise<void> {
+	const reg = registry() as ChildReg & { view?: { viewing?: string } }, ui = reg.ui, name = c.rec.agent;
+	const reply = (o: Record<string, unknown>) => c.write({ type: "extension_ui_response", id: ev.id, ...o });
+	const m = String(ev.method ?? "");
+	if (m === "notify") { if (ui && reg.view?.viewing === c.rec.id) { try { ui.notify(`${name}: ${ev.message ?? ""}`, ev.notifyType ?? "info"); } catch { /* no UI */ } } return; }
+	if (!["select", "confirm", "input", "editor"].includes(m)) return;   // statuses, widgets, titles: this TUI has its own
+	if (!ui) { reply({ cancelled: true }); return; }
+	const title = `${name}: ${ev.title ?? ""}`, opts = ev.timeout ? { timeout: ev.timeout } : undefined;
+	try {
+		if (m === "select") { const v = await ui.select(title, ev.options ?? [], opts); reply(v === undefined ? { cancelled: true } : { value: v }); }
+		else if (m === "confirm") { const v = await ui.confirm(title, ev.message ?? "", opts); reply({ confirmed: !!v }); }
+		else if (m === "input") { const v = await ui.input(title, ev.placeholder, opts); reply(v === undefined ? { cancelled: true } : { value: v }); }
+		else { const v = await ui.editor(title, ev.prefill); reply(v === undefined ? { cancelled: true } : { value: v }); }
+	} catch { reply({ cancelled: true }); }
+}
+
 // also the runner of the Claude Code adapter's workflow agents
 export function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSignal | undefined, onProgress?: (line: string) => void, meta?: RunMeta): Promise<RunResult> {
-	const args = ["--mode", "json", "-p", "--no-session"];
+	const rec = newRun(agent, task, cwd, meta);
+	// the child's own session, next to its transcript: a real pi session file
+	// outside pi's session store, so not in /resume (created empty and 0600
+	// first: pi writes its header into an empty file); its instructions too,
+	// so a later start finds them
+	const dir = join(runsRoot(), rec.session || "no-session");
+	let sessionArgs = ["--no-session"], promptFile = "";
+	try {
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const f = join(dir, `${rec.id}.pi.jsonl`); writeFileSync(f, "", { mode: 0o600, flag: "wx" });
+		rec.sessionFile = f; sessionArgs = ["--session", f]; promptFile = join(dir, `${rec.id}.prompt.md`);
+	} catch { promptFile = join(mkdtempSync(join(tmpdir(), "lets-code-agent-")), "prompt.md"); }
+	const args = ["--mode", "rpc", ...sessionArgs];
 	if (MODEL) args.push("--provider", process.env.LETS_CODE_PROVIDER || "lets-code", "--model", MODEL);
 	// medium unless the agent file says otherwise: without --thinking a child takes the level
 	// pi last saved in settings.json, i.e. whatever a session last switched to (xhigh included)
 	args.push("--thinking", agent.thinking || "medium");
 	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
 	for (const s of agent.skills ?? []) args.push("--skill", s);
-	const tmp = mkdtempSync(join(tmpdir(), "lets-code-agent-"));
-	const promptFile = join(tmp, "prompt.md");
 	// An agent that brings its own instructions (append_prompt) and has no body
 	// gets exactly those, without the generic preamble (REA: the child sees the
 	// same instructions as through rea/run).
 	if (agent.prompt.trim() || !agent.appendPrompt) {
-		writeFileSync(promptFile, `You are the "${agent.name}" agent. ${agent.description}\n\n${agent.prompt}\n`);
+		writeFileSync(promptFile, `You are the "${agent.name}" agent. ${agent.description}\n\n${agent.prompt}\n`, { mode: 0o600 });
 		args.push("--append-system-prompt", promptFile);
 	}
 	if (agent.appendPrompt) args.push("--append-system-prompt", agent.appendPrompt);
-	args.push(`Task: ${task}`);
-	const env = { ...process.env, LETS_CODE_SUBAGENT_DEPTH: String(DEPTH + 1), LETS_CODE_AGENT_NAME: agent.name, LETS_CODE_ROLE: agent.role || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "" };
-	if (!env.LETS_CODE_ROLE) delete (env as any).LETS_CODE_ROLE;
+	const env: Record<string, string> = { LETS_CODE_SUBAGENT_DEPTH: String(DEPTH + 1), LETS_CODE_AGENT_NAME: agent.name };
+	const role = agent.role || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "";
+	if (role) env.LETS_CODE_ROLE = role;
 	if (agent.agentDir) env.PI_CODING_AGENT_DIR = agent.agentDir;
-	const r: RunResult = { agent: agent.name, task, text: "", exitCode: 0, stderr: "", turns: 0, input: 0, output: 0 };
-	const rec = newRun(agent, task, cwd, meta); addRun(rec); saveRun(rec, true); notifyRuns(rec);
-	let stopped = false, finished = false;
-	return new Promise((resolve) => {
-		const child = spawn("pi", args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
-		const timer = agent.timeout ? setTimeout(() => {
-			r.timedOut = agent.timeout;
-			try { child.kill("SIGTERM"); } catch { /* gone */ }
-			setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* gone */ } }, 5000).unref();
-		}, agent.timeout * 1000) : undefined;
-		let buf = "";
-		const handle = (line: string) => {
-			if (!line.trim()) return;
-			let ev: any; try { ev = JSON.parse(line); } catch { return; }
-			if (recordEvent(rec, ev)) { saveRun(rec); notifyRuns(rec); }
-			if (ev.type === "message_end" && ev.message?.role === "assistant") {
-				r.turns++; const u = ev.message.usage; if (u) { r.input += u.input || 0; r.output += u.output || 0; }
-				const c = ev.message.content; const text = typeof c === "string" ? c : Array.isArray(c) ? c.filter((x: any) => x?.type === "text").map((x: any) => x.text).join("\n") : "";
-				if (text.trim()) r.text = text;
-			}
-			if (ev.type === "tool_execution_start" && onProgress) onProgress(`${agent.name}: ${ev.toolName} ${ev.toolName === "bash" ? String(ev.args?.command ?? "").slice(0, 60) : String(ev.args?.path ?? "")}`);
-		};
-		child.stdout.on("data", (d) => { buf += d.toString(); const lines = buf.split("\n"); buf = lines.pop() ?? ""; lines.forEach(handle); });
-		child.stderr.on("data", (d) => { r.stderr += d.toString().slice(0, 4000); });
-		const onAbort = () => { try { child.kill("SIGTERM"); } catch { /* gone */ } };
-		signal?.addEventListener("abort", onAbort, { once: true });
-		// the view's stop (x): this child only; the others of the call go on
-		registry().stops.set(rec.id, () => { stopped = true; onAbort(); });
-		child.on("error", (e) => { r.exitCode = 1; r.stderr += `\n${e.message}`; finish(); });
-		child.on("close", (code) => { if (buf) handle(buf); r.exitCode = r.timedOut ? (code || 124) : code ?? 1; finish(); });
-		const finish = () => {
-			if (finished) return; finished = true;
-			if (timer) clearTimeout(timer); signal?.removeEventListener("abort", onAbort); try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ok */ }
-			registry().stops.delete(rec.id);
-			if (stopped && !signal?.aborted) r.stopped = true;
-			finishRun(rec, r, stopped || !!signal?.aborted); saveRun(rec, true); pruneRuns(rec.session); notifyRuns(rec);
-			resolve(r);
-		};
-	});
+	rec.spawn = { args, env, unset: role ? [] : ["LETS_CODE_ROLE"], cwd };
+	const vs = (registry() as any).view;
+	rec.home = vs && !isChildSession(vs.current) ? vs.current || vs.home || undefined : vs?.home || undefined;
+	addRun(rec); saveRun(rec, true); notifyRuns(rec);
+	return childOf(rec).prompt(`Task: ${task}`, { first: true, signal, timeout: agent.timeout, onProgress });
+}
+// a turn the user started in a run's own session: its reply goes to the main
+// session too (one line of where it comes from, then the reply), held while
+// another session is open; it does not start a turn there
+export const CONTINUED_HEAD = (agent: string) => `${agent} (a subagent the user went on with in its own session) replied:`;
+export function reportContinuation(rec: RunRecord, r: RunResult): void {
+	if (!rec.home) return;
+	if (r.stopped && !r.text.trim()) return;   // the user stopped it before it said anything: nothing to tell
+	const reg = registry() as any;
+	const reply = r.text.trim() || (r.stopped ? "(stopped by the user)" : r.stderr.trim() ? `(no reply; ${r.stderr.trim().slice(-300)})` : "(no reply)");
+	(reg.pending ??= []).push({ home: rec.home, text: `${CONTINUED_HEAD(rec.agent)}\n\n${cap(reply)}`, isError: r.exitCode !== 0, quiet: true });
+	notifyRuns(); flushPending();
 }
 export function cap(s: string): string { if (Buffer.byteLength(s, "utf8") <= OUTPUT_CAP) return s; let t = s.slice(0, OUTPUT_CAP); while (Buffer.byteLength(t, "utf8") > OUTPUT_CAP) t = t.slice(0, -1); return `${t}\n\n[output truncated at 50 KB]`; }
 export function render(r: RunResult): string {
@@ -4603,75 +4836,619 @@ export function orchestration(agents: AgentDef[]): string {
 	].join("\n");
 }
 
-// ------------------------------------------------------------ the /subagents view
-// UI only: a command, a shortcut and a footer status; no tool, prompt or
-// context change. The view itself is subagent-view.ts, loaded on first use.
+// ------------------------------------------------------------ subagent sessions
+// UI only: a command, a shortcut, a status, a widget and footer lines; no
+// tool, prompt or context change (the exceptions, a note in a call that
+// detaches and the reply of a turn the user started in a child, are below).
+// Every child runs on its own pi session file, <run id>.pi.jsonl next to its
+// transcript, outside pi's session store, so it is not in /resume's list.
+// /subagents (or LETS_CODE_SUBAGENT_KEY, default alt+s; "none" turns the key
+// off) opens a picker in place of the editor: the main session, then the
+// runs, running first. Enter switches the TUI into that run's session with
+// pi's own switchSession, the way /resume does: pi draws it as it draws any
+// session. The status says whose session it is; alt+s or /subagents back
+// returns to the main session; /subagents <n | name> switches straight to
+// a run; /subagents toggle shows the runs in the footer (remembered).
+//
+// The child's session works as the main one does, through the child's own
+// process (its RPC, see "the child process"): a prompt while it works is a
+// steer, one while it rests a new turn (its process starts again when it
+// has gone), Esc aborts its turn, ! and !! run in its process and land in
+// its session, /model and the thinking level are passed on to it, /compact
+// compacts its session. The TUI itself never writes to a child's file: the
+// child is that file's one writer, so the TUI opens a copy of it
+// (<run id>.view.jsonl, made when the session is opened), and whatever pi
+// appends to the copy (a model or thinking change, a ! command's record,
+// the messages below) stays in the copy.
+//
+// How live, and without reloading: pi reads a session file when it opens
+// it. The copy holds what the child had completed then (cut before an
+// assistant message whose tool calls have no results yet). From then on,
+// each message the child completes (its replies, tool results, the user's
+// own prompts and steers) is added to the chat in-process, as a custom
+// message drawn with pi's own message and tool components
+// (registerMessageRenderer), the way pi adds a message in the main session;
+// the session is never reopened while you look at it, so nothing jumps.
+// The message on its way (thinking, text and tool calls token by token, a
+// tool's output as it streams, steers not yet taken) is drawn below the
+// chat in a widget above the editor, as pi draws a streaming message.
+//
+// switchSession exists on a command's ctx only: the shortcut sends the
+// command (/subagents, /subagents back) with pi.sendUserMessage, which pi
+// runs as a command; an input hook drops the text should it ever get
+// further.
+//
+// Detaching: pi aborts the turn in flight before it replaces the session.
+// A subagent or expert call in that turn would stop its children, so when
+// the abort comes from one of these switches (reg.switching) the call
+// detaches instead: its children go on, the tool returns at once with a
+// short note, and once they are done their report goes to the session the
+// call came from, as a message that continues it (held while another
+// session is open).
 export const VIEW_KEY = (process.env.LETS_CODE_SUBAGENT_KEY ?? "alt+s").trim().toLowerCase();
+const keyOn = (key = VIEW_KEY) => !!key && key !== "none";
 const HERE = dirname(fileURLToPath(import.meta.url));
+export const CUSTOM_TYPE = "lets-code-subagents";
+export const VIEW_MSG = "lets-code-subagent-message";   // a child's message added to its session's chat
 // the footer line while something runs
 export function hintText(n: number, key = VIEW_KEY): string {
 	if (!n) return "";
-	return `${n} subagent${n === 1 ? "" : "s"} running · ${key && key !== "none" ? `${key} or ` : ""}/subagents to watch`;
+	return `${n} subagent${n === 1 ? "" : "s"} running · ${keyOn(key) ? `${key} or ` : ""}/subagents to switch`;
 }
-// /subagents <arg>: a number (its row in the list) or an agent name
+// the status in a subagent's session
+export function markerText(r: { agent: string; status: string; exitCode?: number } | undefined): string {
+	if (!r) return "subagent session";
+	const st = r.status === "failed" ? (r.exitCode ? `failed (exit ${r.exitCode})` : "failed") : ({ running: "running", done: "done", aborted: "stopped", timeout: "timed out" } as Record<string, string>)[r.status] ?? r.status;
+	return `subagent ${r.agent} · ${st}`;
+}
+// pi's keybindings this view follows: <agent dir>/keybindings.json over pi's defaults
+export const KEY_DEFAULTS: Record<string, string[]> = {
+	"app.interrupt": ["escape"], "app.thinking.toggle": ["ctrl+t"], "app.tools.expand": ["ctrl+o"], "app.message.copy": ["ctrl+x"],
+	"app.message.followUp": process.platform === "win32" ? ["ctrl+q"] : ["alt+enter"], "app.message.dequeue": process.platform === "win32" ? ["alt+q"] : ["alt+up"], "app.session.resume": [],
+};
+export function keyBindings(dir = AGENT_DIR): Record<string, string[]> {
+	const out: Record<string, string[]> = { ...KEY_DEFAULTS };
+	try {
+		const doc = JSON.parse(readFileSync(join(dir, "keybindings.json"), "utf8"));
+		for (const k of Object.keys(out)) if (k in doc) out[k] = (Array.isArray(doc[k]) ? doc[k] : [doc[k]]).map(String);
+	} catch { /* pi's defaults */ }
+	return out;
+}
+// /subagents' argument completions: none until a letter is typed, so Enter on
+// "/subagents" or "/subagents " opens the navigator and never takes a suggestion
+export const SUBCOMMANDS = ["toggle", "back", "stop"];
+export function subcommandCompletions(prefix: string): { value: string; label: string }[] | null {
+	const p = String(prefix ?? "").trimStart();
+	if (!p.trim() || /\s/.test(p.trim())) return null;
+	const out = SUBCOMMANDS.filter((a) => a.startsWith(p.trim()) && a !== p.trim()).map((a) => ({ value: a, label: a }));
+	return out.length ? out : null;
+}
+// The copy of a child's session file the TUI opens: up to (not including) an
+// assistant message whose tool calls have no results yet, so pi never draws a
+// pending call it will not hear the end of; the live part has the rest.
+export function viewLines(text: string): string[] {
+	const lines = text.split("\n").filter((l) => l.trim());
+	const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return undefined; } });
+	const results = new Set<string>();
+	let cut = lines.length;
+	for (let i = parsed.length - 1; i >= 0; i--) {
+		const m = parsed[i]?.type === "message" ? parsed[i].message : undefined;
+		if (m?.role === "toolResult" && m.toolCallId) results.add(String(m.toolCallId));
+		if (m?.role === "assistant" && Array.isArray(m.content) && m.content.some((c: any) => c?.type === "toolCall" && !results.has(String(c.id)))) cut = i;
+	}
+	return lines.slice(0, cut);
+}
+// /subagents <arg>: a number (its row in the picker, the main session is 0) or an agent name
 export function pickRun(runs: RunRecord[], arg: string, ordered: (r: RunRecord[]) => RunRecord[]): RunRecord | undefined {
 	const rs = ordered(runs); const a = arg.trim();
 	if (!a) return undefined;
 	if (/^\d+$/.test(a)) return rs[Number(a) - 1];
 	return rs.find((r) => r.agent === a) ?? rs.find((r) => r.agent.startsWith(a));
 }
-function setupView(pi: ExtensionAPI) {
-	const api = pi as any;
-	const reg = registry() as Registry & { status?: (r?: RunRecord) => void };
-	let ui: any, shown = "", opened = false;
-	const status = () => {
-		const text = hintText(reg.runs.filter((r) => r.status === "running").length);
-		if (!ui || text === shown) return;
-		shown = text;
-		try { ui.setStatus("subagents", text ? (ui.theme?.fg ? ui.theme.fg("dim", text) : text) : undefined); } catch { /* no footer */ }
-	};
-	// one status listener per process: a /reload replaces the old module's
-	if (reg.status) reg.listeners.delete(reg.status);
-	reg.status = status; reg.listeners.add(status);
-	pi.on("session_start", (_e: any, ctx: any) => {
-		if (ctx?.hasUI) { ui = ctx.ui; shown = ""; }
-		useSession(String(ctx?.sessionManager?.getSessionId?.() ?? ""));
-		status();
+// a child's own session file, or the copy the TUI opens of it (under the runs dir)
+export function isChildSession(p: string): boolean {
+	return !!p && p.startsWith(`${runsRoot()}${sep}`) && /\.(pi|view)\.jsonl$/.test(p);
+}
+// commands that read the session itself (see the key hook in a child's session)
+export const READS_SESSION = /^\/(copy|export|share|session)(\s|$)/;
+export const viewFile = (sessionFile: string) => sessionFile.replace(/\.pi\.jsonl$/, ".view.jsonl");
+export function detachNote(names: string[]): string {
+	return `Still running in the background (the user opened a subagent's session, which ended this turn): ${names.join(", ") || "the runs of this call"}. Their reports follow in a message when they finish; do not start them again.`;
+}
+export const DELIVER_HEAD = "Reports of the subagent call that went on in the background:";
+
+// quiet: a reply to a turn the user started in a child; it informs, it starts no turn
+interface Pending { home: string; text: string; isError: boolean; quiet?: boolean }
+interface ViewState {
+	home: string; homeId: string;        // the main session (its file and id)
+	current: string;                     // the session file open now
+	viewing?: string;                    // the run whose session is open
+	loaded?: any;                        // what that session held when it opened (view.loadedOf)
+	added?: WeakSet<object>; addedCount?: number;   // the run's events added to the chat since
+	resubmit?: string; resubmitKey?: string; passOnce?: boolean;   // a command (or key) to run again once the copy is caught up
+	nav?: boolean; sel?: number; confirm?: boolean;   // the footer navigator has the keys; its selected row
+	followUpNext?: boolean;               // the follow-up key was pressed: the next prompt is a follow-up
+	picker: boolean;
+	footer: boolean;
+}
+type Reg = Registry & { status?: (r?: RunRecord) => void; view?: ViewState; pending?: Pending[]; switching?: boolean; pi?: any; ui?: any };
+export function viewState(reg = registry()): ViewState {
+	const r = reg as Reg;
+	return (r.view ??= { home: "", homeId: "", current: "", picker: false, footer: readFooterOn() });
+}
+// /subagents toggle: remembered in lets-code-state.json (key subagentsFooter), as /metrics is
+export const stateFile = () => process.env.LETS_CODE_METRICS_SAVE || process.env.LETS_CODE_STATE_FILE || join(AGENT_DIR, "lets-code-state.json");
+export function readFooterOn(file = stateFile()): boolean {
+	try { return JSON.parse(readFileSync(file, "utf8"))?.subagentsFooter === true; } catch { return false; }
+}
+export function saveFooterOn(on: boolean, file = stateFile()): void {
+	let doc: any = {};
+	try { doc = JSON.parse(readFileSync(file, "utf8")); } catch { /* missing or unreadable: start over */ }
+	if (!doc || typeof doc !== "object" || Array.isArray(doc)) doc = {};
+	if (doc.subagentsFooter === on) return;
+	doc.subagentsFooter = on;
+	const tmp = `${file}.${process.pid}.tmp`;
+	writeFileSync(tmp, JSON.stringify(doc, null, 2) + "\n", { mode: 0o600 });
+	renameSync(tmp, file);
+}
+
+// A call (subagent, expert, workflow) whose children should outlive a
+// session switch: work gets its own signal, aborted by the call's abort
+// unless that abort comes from a switch (reg.switching); then the call
+// returns detachNote at once and its result is delivered later.
+export function detachable(signal: AbortSignal | undefined, callId: string, work: (signal: AbortSignal, job: { detached: boolean }) => Promise<{ text: string; isError: boolean }>): Promise<{ text: string; isError: boolean }> {
+	const reg = registry() as Reg, vs = viewState(reg);
+	const home = vs.current;   // the session this call runs in
+	const inner = new AbortController(), job = { detached: false };
+	return new Promise((resolve) => {
+		let settled = false;
+		const onAbort = () => {
+			if (reg.switching && home && !settled) {
+				settled = true; job.detached = true;
+				const names = reg.runs.filter((r) => r.status === "running" && r.parent?.callId === callId).map((r) => r.agent);
+				resolve({ text: detachNote(names), isError: false });
+				return;
+			}
+			inner.abort();
+		};
+		if (signal?.aborted) inner.abort(); else signal?.addEventListener("abort", onAbort, { once: true });
+		const end = (r: { text: string; isError: boolean }) => {
+			signal?.removeEventListener("abort", onAbort);
+			if (!job.detached) { settled = true; resolve(r); return; }
+			(reg.pending ??= []).push({ home, text: `${DELIVER_HEAD}\n\n${r.text}`, isError: r.isError });
+			notifyRuns(); flushPending();   // the status says a report waits; the main session gets it now if it is open
+		};
+		work(inner.signal, job).then(end, (e) => end({ text: `The call failed: ${e instanceof Error ? e.message : String(e)}`, isError: true }));
 	});
-	const loadView = () => import(pathToFileURL(join(HERE, "subagent-view.ts")).href);
-	const open = async (ctx: any, start: { screen: "list" | "run"; id?: string }) => {
-		const view = await loadView();
-		if (!ctx?.hasUI || (ctx.mode && ctx.mode !== "tui")) {   // no screen to draw on: the list as text
-			const text = view.listLines(reg.runs, { width: 100, now: Date.now() }).join("\n");
-			if (ctx?.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
-			return;
-		}
-		if (opened) return;
-		opened = true;
+}
+// reports for the session that is open now: a detached call's continues it
+// (a follow-up when it is busy); a continued child's reply only informs it
+export function flushPending(): void {
+	const reg = registry() as Reg, vs = viewState(reg);
+	if (!reg.pending?.length || !reg.pi || !vs.current || isChildSession(vs.current)) return;
+	const mine = reg.pending.filter((p) => p.home === vs.current);
+	if (!mine.length) return;
+	reg.pending = reg.pending.filter((p) => p.home !== vs.current);
+	for (const p of mine) {
+		try { reg.pi.sendMessage({ customType: CUSTOM_TYPE, content: p.text, display: true }, p.quiet ? { triggerTurn: false } : { triggerTurn: true, deliverAs: "followUp" }); }
+		catch { (reg.pending ??= []).push(p); }   // a stale pi (mid-switch): the next session_start sends it
+	}
+}
+
+const isTui = (ctx: any) => !!ctx?.hasUI && (!ctx.mode || ctx.mode === "tui");
+// subagent-view.ts and pi's parts, loaded once per process (on globalThis):
+// a session switch loads this module again, and the footer list and the
+// chat messages must draw from the first frame, not after an import
+const VG = Symbol.for("lets-code.subagent-view");
+const vg = () => ((globalThis as any)[VG] ??= {} as { view?: any; deps?: any });
+let view: any = vg().view, deps: any = vg().deps;
+const loadView = async () => (view ??= vg().view ??= await import(pathToFileURL(join(HERE, "subagent-view.ts")).href));
+const loadDeps = async () => { const v = await loadView(); return (deps ??= vg().deps ??= await v.piDeps()); };
+
+function setupSessions(pi: ExtensionAPI) {
+	const api = pi as any;
+	const reg = registry() as Reg;
+	const vs = viewState(reg);
+	const viewed = () => (vs.viewing ? reg.runs.find((r) => r.id === vs.viewing) : undefined);
+	const inChild = () => isChildSession(vs.current);
+	const FOOTER = Symbol.for("lets-code.footer-blocks");
+	const viaFooter = process.env.LETS_CODE_METRICS_ON !== undefined;   // lets-code's footer draws the list
+	let liveTui: any, footTui: any, lastStatus: string | undefined, transcript: any, clock: ReturnType<typeof setInterval> | undefined;
+	const repaint = () => { try { liveTui?.requestRender?.(); } catch { /* gone */ } try { footTui?.requestRender?.(); } catch { /* gone */ } try { (globalThis as any)[FOOTER]?.repaint?.(); } catch { /* none */ } };
+	const theme = () => (reg.ui?.theme?.fg ? reg.ui.theme : { fg: (_c: string, s: string) => s });
+	const notify = (m: string, t: "info" | "warning" | "error" = "info") => { try { reg.ui?.notify?.(m, t); } catch { /* no UI */ } };
+	const status = () => {
+		if (!reg.ui) return;
+		const running = reg.runs.filter((r) => r.status === "running").length;
+		let text = "";
+		if (inChild()) {
+			text = markerText(viewed());
+			const waiting = (reg.pending ?? []).filter((p) => p.home === vs.home).length;
+			if (waiting) text += ` · ${waiting} report${waiting === 1 ? "" : "s"} waiting`;
+		} else if (!vs.footer) text = hintText(running);
+		if (text === lastStatus) return;
+		lastStatus = text;
+		try { reg.ui.setStatus("subagents", text ? theme().fg(inChild() ? "accent" : "dim", text) : undefined); } catch { /* no footer */ }
+	};
+	// the footer list: drawn by lets-code's footer (a block it asks for on
+	// every render), else by a widget below the editor
+	// The footer list, which is also the navigator: in a child's session it is
+	// always there (it is the way out); in the main session when /subagents
+	// toggle put it there, or while alt+s (/subagents) navigates
+	const footerShown = () => !!view && (vs.footer || inChild() || !!vs.nav);
+	const footerBlock = (w: number, color?: (c: string, s: string) => string) => (footerShown()
+		? view.footerLines(reg.runs, { width: w, now: Date.now(), current: vs.viewing ?? "main", selected: vs.nav ? vs.sel ?? 0 : undefined, confirm: vs.confirm, key: keyOn() ? VIEW_KEY : "/subagents", theme: color ? { fg: color } : theme(), deps })
+		: []);
+	const applyFooter = () => {
+		const host = ((globalThis as any)[FOOTER] ??= { blocks: new Map() });
+		host.blocks.set("subagents", footerBlock);
+		if (viaFooter || !reg.ui) return;
 		try {
-			const deps = await view.piDeps();
-			await ctx.ui.custom((tui: any, theme: any, _kb: any, done: (v: undefined) => void) => view.createView({
-				tui, theme, deps, registry: reg, start, key: VIEW_KEY !== "none" ? VIEW_KEY : undefined,
-				stop: (id: string) => reg.stops.get(id)?.(), done: () => done(undefined),
-			}), { overlay: true, overlayOptions: { anchor: "top-left", width: "100%", maxHeight: "100%" } });
+			reg.ui.setWidget("subagents-footer", (tui: any) => { footTui = tui; return { render: (w: number) => footerBlock(w), invalidate() {}, dispose() { if (footTui === tui) footTui = undefined; } }; }, { placement: "belowEditor" });
+		} catch { /* no widgets */ }
+	};
+	// the navigator: alt+s (or /subagents) gives the footer list the keys
+	// the editor has the keys (not a selector, a dialog or our own list): pi's
+	// editor is the focused component with getText and onSubmit
+	const editorFocused = () => {
+		const fc = (reg as any).tui?.focusedComponent;
+		if (!fc) return true;   // no TUI handle here: as before
+		return typeof fc.getText === "function" && "onSubmit" in fc;
+	};
+	const navRows = () => (view ? view.navRows(reg.runs) : [{ kind: "main" }]);
+	const openNav = () => {
+		if (!view) return;
+		if (!reg.runs.length) { notify("No subagent or expert runs in this session yet."); return; }
+		vs.nav = true; vs.confirm = false;
+		vs.sel = inChild() ? 0 : Math.min(1, navRows().length - 1);   // from a child: the main session; from the main session: the first run
+		repaint();
+	};
+	const closeNav = () => { if (!vs.nav) return; vs.nav = false; vs.confirm = false; repaint(); };
+	const navKey = (data: string): { consume: true } | undefined => {
+		const rows = navRows();
+		const k = (x: string) => keyIs(data, x);
+		const sel = Math.max(0, Math.min(vs.sel ?? 0, rows.length - 1));
+		const row = rows[sel], run = row?.kind === "run" ? reg.runs.find((x) => x.id === row.id) : undefined;
+		if (vs.confirm) { vs.confirm = false; if ((data === "x" || data === "X") && run?.status === "running") reg.stops.get(run.id)?.(); repaint(); return { consume: true }; }
+		if (k("up")) { vs.sel = Math.max(0, sel - 1); repaint(); return { consume: true }; }
+		if (k("down")) { vs.sel = Math.min(rows.length - 1, sel + 1); repaint(); return { consume: true }; }
+		if (k("escape") || (keyOn() && k(VIEW_KEY))) { closeNav(); return { consume: true }; }
+		if (data === "x" || data === "X") { if (run?.status === "running") { vs.confirm = true; repaint(); } return { consume: true }; }
+		if (k("enter")) {
+			closeNav();
+			if (row?.kind === "main") { if (inChild()) command("back"); }
+			else if (row && row.id !== vs.viewing) command(`id:${row.id}`);
+			return { consume: true };
+		}
+		closeNav();   // any other key: back to the editor, which gets the key
+		return undefined;
+	};
+	// the live widget of a child's session
+	const applyLive = () => {
+		if (!reg.ui) return;
+		const r = viewed();
+		if (!r || !view || !inChild()) { try { reg.ui.setWidget("subagent-live", undefined); } catch { /* none */ } return; }
+		try {
+			reg.ui.setWidget("subagent-live", (tui: any, th: any) => {
+				liveTui = tui; (reg as any).tui = tui; transcript = new view.Transcript(deps, th?.fg ? th : theme(), tui);
+				return {
+					render: (w: number) => { const x = viewed(); return x ? view.liveLines(x, vs.loaded ?? view.loadedOf([]), { width: w, now: Date.now(), transcript, theme: th?.fg ? th : theme(), deps, queued: (reg as any).children?.get(x.id)?.queued, added: vs.added, flags: { expanded: !!reg.ui?.getToolsExpanded?.(), thinking: !hideThinking() } }) : []; },
+					invalidate: () => transcript?.clear(),
+					dispose: () => { if (liveTui === tui) liveTui = undefined; },
+				};
+			}, { placement: "aboveEditor" });
+		} catch { /* no widgets */ }
+	};
+	// the view's command, sent from places without a command ctx
+	const command = (args: string) => { try { (reg.pi ?? pi).sendUserMessage(`/subagents${args ? ` ${args}` : ""}`, { expandPromptTemplates: true }); } catch (e) { notify(`subagents: ${e instanceof Error ? e.message : String(e)}`, "error"); } };
+	// the run's completed messages, added to the chat as they come (in order:
+	// up to the first one still on its way, which the widget draws)
+	const addDone = () => {
+		const r = viewed();
+		if (!r || !inChild() || !view || !vs.loaded || !vs.added) return;
+		let n = 0;
+		for (const ev of view.tailEvents(r, vs.loaded)) {
+			if (vs.added.has(ev)) continue;
+			if ((ev.t === "assistant" || ev.t === "tool") && !ev.done) break;
+			vs.added.add(ev); n++; vs.addedCount = (vs.addedCount ?? 0) + 1;
+			try { (reg.pi ?? pi).sendMessage({ customType: VIEW_MSG, content: "", display: true, details: { ev: JSON.parse(JSON.stringify(ev)), cwd: r.cwd } }, { triggerTurn: false }); } catch { /* a stale pi: the next session_start adds it */ vs.added.delete(ev); break; }
+		}
+		if (n) repaint();
+	};
+	const onRuns = () => { addDone(); status(); repaint(); if (!inChild()) flushPending(); };
+	// pi's "hide thinking blocks" setting (ctrl+t), read at most every 200 ms:
+	// pi.getSettings where pi has it (1.0), else its settings.json (0.87)
+	let hideMemo = { at: 0, v: false };
+	const readHide = (): boolean => {
+		const api: any = reg.pi ?? pi;
+		if (typeof api.getSettings === "function") return !!api.getSettings()?.hideThinkingBlock;
+		try { return !!JSON.parse(readFileSync(join(AGENT_DIR, "settings.json"), "utf8"))?.hideThinkingBlock; } catch { return false; }
+	};
+	const hideThinking = () => {
+		if (Date.now() - hideMemo.at > 200) { try { hideMemo = { at: Date.now(), v: readHide() }; } catch { hideMemo.at = Date.now(); } }
+		return hideMemo.v;
+	};
+	let bindings = keyBindings();
+	const keyIs = (data: string, k: string) => { try { return (deps?.matchesKey ?? view?.plainMatchesKey ?? ((d: string, x: string) => (x === "escape" ? d === "\x1b" : x === "enter" ? d === "\r" : false)))(data, k); } catch { return false; } };
+	const action = (data: string, name: string) => (bindings[name] ?? []).some((k) => keyIs(data, k));
+	// a child's message in its session's chat: pi's own components, one spacer as pi puts between messages
+	api.registerMessageRenderer?.(VIEW_MSG, (message: any, opts: any, th: any) => {
+		const ev = message?.details?.ev;
+		if (!ev || !view) return undefined;
+		const tr = new view.Transcript(deps ?? view.plainDeps(), th?.fg ? th : theme(), { requestRender: () => repaint() });
+		let memo: { key: string; lines: string[] } | undefined;
+		return {
+			// pi's own toggles: ctrl+o sets this message's expanded state (pi calls
+			// setExpanded on every expandable chat message), ctrl+t pi's thinking setting
+			render: (w: number) => {
+				const flags = { expanded: !!opts?.expanded, thinking: !hideThinking() };
+				const key = `${w}|${flags.expanded ? 1 : 0}|${flags.thinking ? 1 : 0}`;
+				if (memo?.key === key) return memo.lines;
+				const lines = tr.event(ev, { cwd: message.details.cwd }, w, flags);
+				// the component's own spacer goes (pi's message box puts one); its padding stays
+				let i = 0; while (i < lines.length && lines[i] === "") i++;
+				memo = { key, lines: lines.slice(i) };
+				return memo.lines;
+			},
+			invalidate: () => { memo = undefined; tr.clear(); },
+		};
+	});
+	// one listener per process: a reload or a switch loads this module again and replaces the old one's
+	if (reg.status) reg.listeners.delete(reg.status);
+	reg.status = onRuns; reg.listeners.add(onRuns);
+
+	pi.on("session_start", async (_e: any, ctx: any) => {
+		reg.pi = pi;
+		if (isTui(ctx)) reg.ui = ctx.ui;
+		const sm = ctx?.sessionManager;
+		const file = String(sm?.getSessionFile?.() ?? "");
+		vs.current = file;
+		lastStatus = undefined;
+		if (isChildSession(file)) {
+			// a run's own session: the main session (and its runs) stay as they were
+			const r = reg.runs.find((x) => x.sessionFile && (x.sessionFile === file || viewFile(x.sessionFile) === file));
+			vs.viewing = r?.id ?? basename(file).replace(/\.(pi|view)\.jsonl$/, "");
+		} else {
+			vs.home = file; vs.homeId = String(sm?.getSessionId?.() ?? "");
+			vs.viewing = undefined; vs.added = undefined;
+			useSession(vs.homeId);
+		}
+		if (clock) { clearInterval(clock); clock = undefined; }
+		if (isTui(ctx)) {
+			try { await loadDeps(); } catch { /* the view's parts did not load: no picker, no live part */ }
+			if (view) vs.loaded = view.loadedOf(isChildSession(file) ? (sm?.getEntries?.() ?? []) : []);
+			if (isChildSession(file)) { vs.added = new WeakSet(); vs.addedCount = 0; }
+			applyFooter(); applyLive();
+			// The keys: the footer navigator (alt+s) in every session; in a child's
+			// session the keys whose effect is the child's (Esc, follow-up, dequeue)
+			// or that read its session (copy), as they work in the main session
+			bindings = keyBindings();
+			// pi's TUI, for the focus check and a key sent again: an empty widget below the editor takes no line
+			try { ctx.ui.setWidget("subagents-tui", (tui: any) => { (reg as any).tui = tui; return { render: () => [], invalidate() {} }; }, { placement: "belowEditor" }); } catch { /* no widgets */ }
+			if (typeof ctx.ui.onTerminalInput === "function") {
+				try {
+					ctx.ui.onTerminalInput((data: string) => {
+						if (vs.nav) return navKey(data);
+						// pi's own selectors and dialogs keep their keys (Esc closes a selector, it does not stop the child)
+						if (!editorFocused()) return undefined;
+						if (keyOn() && keyIs(data, VIEW_KEY)) { openNav(); return { consume: true }; }
+						if (!inChild()) return undefined;
+						if (vs.passOnce) { vs.passOnce = false; return undefined; }   // a held command or key, sent again
+						if (action(data, "app.interrupt")) {
+							const r = viewed();
+							if (r?.status !== "running") return undefined;
+							childOf(r).abort(true);   // as Esc in the main session: no message, the turn shows as aborted
+							return { consume: true };
+						}
+						// pi redraws on its toggles; the child's messages read the new state then
+						// (the new state is known at once: pi may write its setting a moment later)
+						if (action(data, "app.thinking.toggle")) { const v = !hideThinking(); setTimeout(() => { hideMemo = { at: Date.now() + 2000, v }; repaint(); }, 0); return undefined; }
+						if (action(data, "app.tools.expand")) { setTimeout(repaint, 0); return undefined; }
+						if (action(data, "app.message.followUp")) { vs.followUpNext = true; setTimeout(() => { vs.followUpNext = false; }, 500); return undefined; }
+						if (action(data, "app.message.dequeue")) {
+							const r = viewed(), c = r && (reg as any).children?.get(r.id);
+							if (!c?.queued?.length) return undefined;   // nothing queued: pi says so
+							void c.dequeue().then((texts: string[]) => {
+								const cur = String(reg.ui?.getEditorText?.() ?? "");
+								try { reg.ui?.setEditorText?.([texts.join("\n\n"), cur].filter((t) => t.trim()).join("\n\n")); } catch { /* keep going */ }
+								notify(`Restored ${texts.length} queued message${texts.length === 1 ? "" : "s"} to editor`);
+							});
+							return { consume: true };
+						}
+						if (action(data, "app.message.copy") && (vs.addedCount ?? 0) > 0 && !vs.resubmit) { vs.resubmitKey = data; vs.resubmit = "\0key"; command("refresh"); return { consume: true }; }
+						if (action(data, "app.session.resume") && !vs.resubmit) { vs.resubmit = "/resume"; command("back"); return { consume: true }; }
+						if (!keyIs(data, "enter")) return undefined;
+						const text = String(reg.ui?.getEditorText?.() ?? "").trim();
+						// /name names the child's session (pi would name only the copy)
+						const nm = /^\/name(?:\s+([\s\S]*))?$/.exec(text);
+						if (nm && nm[1]?.trim()) {
+							const r = viewed();
+							if (r) { try { reg.ui.setEditorText(""); } catch { /* keep going */ } void forward({ type: "set_session_name", name: nm[1].trim() }, `session named "${nm[1].trim()}"`); return { consume: true }; }
+						}
+						// /resume lists the sessions of the session that is open: from a
+						// child's, that would be the runs; it opens in the main session
+						if (/^\/resume$/.test(text) && !vs.resubmit) {
+							try { reg.ui.setEditorText(""); } catch { /* keep going */ }
+							vs.resubmit = text; command("back");
+							return { consume: true };
+						}
+						// commands that read the session itself (/copy, /export, ...) see the
+						// messages added since it opened only once the copy is made again: a
+						// command is the user acting, so the copy is made again first and the
+						// command then runs on it
+						if (READS_SESSION.test(text) && (vs.addedCount ?? 0) > 0 && !vs.resubmit) {
+							vs.resubmit = text;
+							command("refresh");
+							return { consume: true };
+						}
+						return undefined;
+					});
+				} catch { /* no key hook here */ }
+			}
+			// a command held for this session (the copy caught up, or the main session open) runs now, as typed
+			if (vs.resubmit) {
+				const again = vs.resubmit, k = vs.resubmitKey; vs.resubmit = undefined; vs.resubmitKey = undefined;
+				setTimeout(() => {
+					try {
+						if (again === "\0key" && k) { vs.passOnce = true; (reg as any).tui?.handleTerminalInput?.(k); }
+						else { reg.ui?.setEditorText?.(again); vs.passOnce = true; (reg as any).tui?.handleTerminalInput?.("\r"); }
+					} catch { /* the user can press it again */ } finally { vs.passOnce = false; }
+				}, 30);
+			}
+			vs.nav = false; vs.confirm = false;   // a switch ends the navigation
+			// the clocks of running runs move once a second
+			clock = setInterval(() => { if (reg.runs.some((x) => x.status === "running") && footerShown()) repaint(); }, 1000);
+			(clock as any).unref?.();
+			addDone();
+		}
+		status();
+		if (!isChildSession(file)) setTimeout(flushPending, 50);
+	});
+	// /new in a child's session starts a new main session, as in the main
+	// session; /fork and /clone (and /tree's branching) would fork the copy
+	pi.on("session_before_switch", (event: any) => {
+		if (!inChild() || event?.reason !== "new") return undefined;
+		command("new");
+		return { cancel: true };
+	});
+	pi.on("session_before_fork", () => {
+		if (!inChild()) return undefined;
+		notify("/fork and /clone work on the main session: alt+s or /subagents back first.", "warning");
+		return { cancel: true };
+	});
+	pi.on("session_shutdown", (event: any) => {
+		if (clock) { clearInterval(clock); clock = undefined; }
+		// the main session ends (quit, /new, /resume elsewhere): its children go; our own switches and /reload keep them
+		if (!reg.switching && event?.reason !== "reload") killChildren();
+	});
+	// in a child's session, the editor talks to the child; this view's own command text never reaches the model
+	pi.on("input", (event: any) => {
+		const text = String(event?.text ?? "");
+		if (/^\/subagents(\s|$)/.test(text.trim())) return { action: "handled" };
+		if (!inChild()) return undefined;
+		const r = viewed();
+		if (!r) { notify("This subagent's run is not known here any more.", "warning"); return { action: "handled" }; }
+		if (!text.trim()) return { action: "handled" };
+		const c = childOf(r), images = Array.isArray(event?.images) && event.images.length ? event.images : undefined;
+		const kind = vs.followUpNext ? "followUp" : "steer"; vs.followUpNext = false;
+		if (c.busy) void c.steer(text, kind, images).then((res) => { if (!res?.success) notify(`${r.agent}: ${res?.error ?? "the message was refused"}`, "error"); });
+		else {
+			if (!r.spawn) { notify("This run predates restartable subagents; it cannot go on.", "warning"); return { action: "handled" }; }
+			void c.prompt(text, { images }).then((x) => { if (x.exitCode !== 0 && !x.stopped && x.exitCode !== 130) notify(`${r.agent}: ${(x.stderr || "the turn failed").trim().slice(-200)}`, "error"); });
+		}
+		repaint();
+		return { action: "handled" };
+	});
+	// ! and !! in a child's session run in the child (and land in its session);
+	// pi draws the result as for any ! command and records it in its copy
+	pi.on("user_bash", async (event: any) => {
+		if (!inChild()) return undefined;
+		const r = viewed(), c = r && childOf(r);
+		if (!r || !c || !(c.alive || c.start())) return { result: { output: `${r?.agent ?? "the subagent"} could not start: ${c?.stderr ?? ""}`, exitCode: 1, cancelled: false, truncated: false } };
+		const res = await c.send({ type: "bash", command: String(event?.command ?? ""), excludeFromContext: !!event?.excludeFromContext });
+		const d = res?.data ?? {};
+		if (!res?.success) return { result: { output: String(res?.error ?? "failed"), exitCode: 1, cancelled: false, truncated: false } };
+		return { result: { output: String(d.output ?? ""), exitCode: typeof d.exitCode === "number" ? d.exitCode : 0, cancelled: !!d.cancelled, truncated: !!d.truncated, fullOutputPath: d.fullOutputPath } };
+	});
+	// /model, the thinking level and /compact in a child's session act on the child
+	const forward = async (cmd: Record<string, unknown>, what: string) => {
+		const r = viewed(); if (!r) return;
+		const c = childOf(r);
+		if (!c.alive && !c.start()) { notify(`${r.agent} could not start: ${c.stderr}`, "error"); return; }
+		const res = await c.send(cmd);
+		notify(res?.success ? `${r.agent}: ${what}` : `${r.agent}: ${res?.error ?? `${what} failed`}`, res?.success ? "info" : "error");
+	};
+	pi.on("model_select", (event: any) => {
+		if (!inChild() || !event?.model) return;
+		void forward({ type: "set_model", provider: event.model.provider, modelId: event.model.id }, `model ${event.model.id}`);
+	});
+	pi.on("thinking_level_select", (event: any) => {
+		if (!inChild() || !event?.level) return;
+		void forward({ type: "set_thinking_level", level: event.level }, `thinking ${event.level}`);
+	});
+	pi.on("session_before_compact", (event: any) => {
+		if (!inChild()) return undefined;
+		if (event?.reason === "manual") void forward({ type: "compact", ...(event.customInstructions ? { customInstructions: event.customInstructions } : {}) }, "session compacted");
+		return { cancel: true };   // the copy is never compacted here
+	});
+
+	// switch the TUI to a session file; a call in flight detaches (see above)
+	const switchTo = async (ctx: any, file: string, refresh = false, then?: (ctx: any) => unknown): Promise<boolean> => {
+		if (!file) return false;
+		if (file === vs.current && !refresh) return true;
+		if (!existsSync(file)) { notify(isChildSession(file) ? "That run has not written its session yet; try again in a moment." : "The main session has no file yet.", "warning"); return false; }
+		if (typeof ctx?.switchSession !== "function") { notify("Switching needs the /subagents command.", "warning"); return false; }
+		reg.switching = true;
+		try {
+			const r = await ctx.switchSession(file, { withSession: async (n: any) => { reg.switching = false; await then?.(n); } });
+			if (r?.cancelled) { notify("Switch cancelled.", "warning"); return false; }
+			return true;
 		} catch (e) {
-			ctx.ui.notify(`subagents view: ${e instanceof Error ? e.message : String(e)}`, "error");
-		} finally { opened = false; }
+			notify(`Switching sessions failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+			return false;
+		} finally { reg.switching = false; }
+	};
+	// a child's session is opened as a fresh copy of its file (the child writes the file)
+	const switchToRun = async (ctx: any, r: RunRecord, refresh = false) => {
+		if (!r.sessionFile || !existsSync(r.sessionFile)) { notify("That run has no session file (it predates this version).", "warning"); return; }
+		const copy = viewFile(r.sessionFile);
+		try { writeFileSync(copy, viewLines(readFileSync(r.sessionFile, "utf8")).join("\n") + "\n", { mode: 0o600 }); chmodSync(copy, 0o600); }
+		catch (e) { notify(`Could not open that session: ${e instanceof Error ? e.message : String(e)}`, "error"); return; }
+		await switchTo(ctx, copy, refresh);
+	};
+	const listText = () => {
+		const rs = view ? view.order(reg.runs) : reg.runs;
+		if (!rs.length) return "No subagent or expert runs in this session yet.";
+		return rs.map((r: RunRecord, i: number) => `${i + 1}. ${view?.MARK?.[r.status] ?? r.status} ${r.agent} — ${view ? view.statusLabel(r) : r.status}, ${view ? view.elapsed(view.runMs(r, Date.now())) : ""}, ↑${r.input} ↓${r.output}: ${view ? view.summary(r.task).slice(0, 80) : r.task.slice(0, 80)}`).join("\n");
 	};
 	api.registerCommand?.("subagents", {
-		description: "Watch subagent and expert runs, live: /subagents [n | agent]",
+		description: "Subagent sessions: /subagents navigates the footer list (as alt+s); /subagents toggle: the list in the main session's footer; back; stop <n|agent>; <n|agent> switches",
+		getArgumentCompletions: (prefix: string) => subcommandCompletions(prefix),
 		handler: async (args: string, ctx: any) => {
 			const a = String(args ?? "").trim();
-			if (!a) return open(ctx, { screen: "list" });
-			const view = await loadView();
-			const r = pickRun(reg.runs, a, view.order);
-			if (!r) { const m = `No run "${a}". /subagents lists them.`; if (ctx?.hasUI) ctx.ui.notify(m, "warning"); else console.log(m); return; }
-			return open(ctx, { screen: "run", id: r.id });
+			try { await loadDeps(); } catch { /* plain */ }
+			const say = (m: string, t: "info" | "warning" | "error" = "info") => (ctx?.hasUI ? ctx.ui.notify(m, t) : console.log(m));
+			if (a === "toggle") {
+				vs.footer = !vs.footer;
+				if (DEPTH === 0) { try { saveFooterOn(vs.footer); } catch { /* best effort */ } }
+				applyFooter(); lastStatus = undefined; status(); repaint();
+				return say(vs.footer ? "Subagents in the footer (remembered)." : "No subagents in the footer (remembered).");
+			}
+			if (a === "stop" || a.startsWith("stop ")) {
+				const r = pickRun(reg.runs, a.slice(4), view?.order ?? ((x: RunRecord[]) => x));
+				if (!r || r.status !== "running") return say(r ? `${r.agent} is not running.` : `No run "${a.slice(4).trim()}".`, "warning");
+				reg.stops.get(r.id)?.();
+				return say(`Stopping ${r.agent}.`);
+			}
+			if (!isTui(ctx)) return say(listText());
+			reg.ui = ctx.ui;
+			if (a === "back" || a === "main") {
+				if (!inChild()) return say("This is the main session.");
+				await switchTo(ctx, vs.home);
+				return;
+			}
+			if (a.startsWith("id:")) {   // the navigator's switch
+				const r = reg.runs.find((x) => x.id === a.slice(3));
+				if (r) await switchToRun(ctx, r);
+				return;
+			}
+			if (a === "refresh") { const r = viewed(); if (inChild() && r) await switchToRun(ctx, r, true); return; }
+			if (a === "new") {   // /new typed in a child's session: a new main session
+				if (!inChild()) return;
+				await switchTo(ctx, vs.home, false, async (n: any) => { await n?.newSession?.(); });
+				return;
+			}
+			if (a) {
+				const r = pickRun(reg.runs, a, view?.order ?? ((x: RunRecord[]) => x));
+				if (!r) return say(`No run "${a}". /subagents lists them.`, "warning");
+				return switchToRun(ctx, r);
+			}
+			if (vs.nav) closeNav(); else openNav();   // the footer navigator
 		},
 	});
-	if (VIEW_KEY && VIEW_KEY !== "none") api.registerShortcut?.(VIEW_KEY, {
-		description: "Watch the subagents (inside the view: the next run)",
-		handler: async (ctx: any) => open(ctx, { screen: reg.runs.length ? "run" : "list" }),
+	if (keyOn()) api.registerShortcut?.(VIEW_KEY, {
+		description: "Subagent sessions: the footer list takes the keys (↑↓ enter switches, esc back to the editor)",
+		handler: async () => { if (vs.nav) closeNav(); else openNav(); },   // where the key hook is missing
 	});
 }
 
@@ -4708,30 +5485,40 @@ export default function (pi: ExtensionAPI) {
 			const missing = (n: string) => EXPERTS && discoverExperts().some((s) => s.name === n)
 				? { content: [{ type: "text" as const, text: `"${n}" is an expert: use expert({action: "run", name: "${n}", brief}) (action "list" shows its brief template).` }], isError: true }
 				: { content: [{ type: "text" as const, text: `Unknown agent "${n}". Agents:\n${list}` }], isError: true };
-			const progress = (line: string) => onUpdate?.({ content: [{ type: "text", text: line }] });
+			// a call goes on when the user switches sessions mid-call (see detachable)
+			let job = { detached: false };
+			const progress = (line: string) => { if (!job.detached) onUpdate?.({ content: [{ type: "text", text: line }] }); };
+			const detach = (work: (s: AbortSignal) => Promise<{ text: string; isError: boolean }>) =>
+				detachable(signal, _id, (s, j) => { job = j; return work(s); }).then((o) => ({ content: [{ type: "text" as const, text: o.text }], isError: o.isError }));
 			if (params.tasks?.length) {
 				if (params.tasks.length > MAX_PARALLEL) return { content: [{ type: "text" as const, text: `Too many parallel tasks (${params.tasks.length}); max ${MAX_PARALLEL}.` }], isError: true };
 				for (const t of params.tasks) if (!find(t.agent)) return missing(t.agent);
-				const results = await mapLimit(params.tasks, CONCURRENCY, (t: any, i: number) => runAgent(find(t.agent)!, t.task, ctx.cwd, signal, progress, { tool: "subagent", callId: _id, mode: "parallel", index: i, of: params.tasks.length }));
-				return { content: [{ type: "text" as const, text: results.map(render).join("\n\n") }], isError: results.every((r) => r.exitCode !== 0) };
+				return detach(async (sig) => {
+					const results = await mapLimit(params.tasks, CONCURRENCY, (t: any, i: number) => runAgent(find(t.agent)!, t.task, ctx.cwd, sig, progress, { tool: "subagent", callId: _id, mode: "parallel", index: i, of: params.tasks.length }));
+					return { text: results.map(render).join("\n\n"), isError: results.every((r) => r.exitCode !== 0) };
+				});
 			}
 			if (params.chain?.length) {
 				for (const t of params.chain) if (!find(t.agent)) return missing(t.agent);
-				const results: RunResult[] = []; let previous = "";
-				for (const [i, t] of (params.chain as any[]).entries()) {
-					const r = await runAgent(find(t.agent)!, t.task.replace(/\{previous\}/g, previous), ctx.cwd, signal, progress, { tool: "subagent", callId: _id, mode: "chain", index: i, of: params.chain.length });
-					r.step = i + 1; results.push(r); previous = r.text;
-					if (r.exitCode !== 0 || signal?.aborted) break;
-				}
-				return { content: [{ type: "text" as const, text: results.map(render).join("\n\n") }], isError: results[results.length - 1]?.exitCode !== 0 };
+				return detach(async (sig) => {
+					const results: RunResult[] = []; let previous = "";
+					for (const [i, t] of (params.chain as any[]).entries()) {
+						const r = await runAgent(find(t.agent)!, t.task.replace(/\{previous\}/g, previous), ctx.cwd, sig, progress, { tool: "subagent", callId: _id, mode: "chain", index: i, of: params.chain.length });
+						r.step = i + 1; results.push(r); previous = r.text;
+						if (r.exitCode !== 0 || sig.aborted) break;
+					}
+					return { text: results.map(render).join("\n\n"), isError: results[results.length - 1]?.exitCode !== 0 };
+				});
 			}
 			if (!params.agent || !params.task) return { content: [{ type: "text" as const, text: `Give {agent, task}, {tasks:[...]} or {chain:[...]}. Agents:\n${list}` }], isError: !agents.length };
 			const a = find(params.agent); if (!a) return missing(params.agent);
-			const r = await runAgent(a, params.task, ctx.cwd, signal, progress, { tool: "subagent", callId: _id, mode: "single" });
-			return { content: [{ type: "text" as const, text: render(r) }], isError: r.exitCode !== 0 };
+			return detach(async (sig) => {
+				const r = await runAgent(a, params.task, ctx.cwd, sig, progress, { tool: "subagent", callId: _id, mode: "single" });
+				return { text: render(r), isError: r.exitCode !== 0 };
+			});
 		},
 	});
-	if (DEPTH === 0) setupView(pi);
+	if (DEPTH === 0) setupSessions(pi);
 	// once on, it stays on for the session (see above); subagents never get it
 	pi.on("before_agent_start", async (event: any, ctx: any) => {
 		const sections = event?.systemPromptOptions?.sections;
@@ -4756,26 +5543,26 @@ TS
     pi_write_subagent_view_extension "${dir}"
 }
 
-# The /subagents view (a full-screen overlay of the subagent and expert
-# runs, live), next to subagents.ts, which loads it on first use; the index
-# never loads it on its own.
+# The drawing side of the subagent sessions (the picker, the footer list,
+# the live part of a running child's session), next to subagents.ts, which
+# loads it; the index never loads it on its own.
 pi_write_subagent_view_extension() {  # pi_write_subagent_view_extension <dir>
     local dir="$1" f tmp
     f="${dir}/subagent-view.ts"
     tmp="$(mktemp "${dir}/.subagent-view.XXXXXX")"
     cat > "${tmp}" <<'TS'
-// Written by lets-code (subagents: the run view); regenerated on launch, edits are overwritten.
-// The /subagents view, loaded by subagents.ts the first time it opens (the
-// index never loads it on its own). One full-screen overlay
-// (ctx.ui.custom with overlay: true) with two screens: the list of this
-// session's subagent and expert runs (running first), and one run's
-// transcript, drawn with pi's own message and tool components
+// Written by lets-code (subagents: the session view's parts); regenerated on launch, edits are overwritten.
+// The drawing side of the subagent sessions, loaded by subagents.ts (the
+// index never loads it on its own): the formatting of a run, the footer
+// list, which is also the navigator (alt+s, /subagents) that switches the
+// TUI into a run's own pi session and back, and the live part of a running
+// child's session (the message on its way, which its session file does not
+// have yet), drawn with pi's own message and tool components
 // (UserMessageComponent, AssistantMessageComponent, ToolExecutionComponent
 // with the built-in tools' renderers) when they load, else with the plain
-// renderer below (same content, simpler look). It streams while the child
-// runs: the runner notifies the view on every event it records. Read-only;
-// nothing here reaches the model. No runtime imports: pi's parts come in
-// through piDeps(), so the module also loads where pi is not installed (tests).
+// renderer below (same content, simpler look). Nothing here reaches the
+// model. No runtime imports: pi's parts come in through piDeps(), so the
+// module also loads where pi is not installed (tests).
 
 type Run = any;
 type Ev = any;
@@ -4787,15 +5574,6 @@ export interface Deps {
 	truncateToWidth(s: string, w: number): string;
 	wrap(s: string, w: number): string[];
 	pi?: PiParts;
-}
-export interface Registry { runs: Run[]; listeners: Set<(r?: Run) => void> }
-export interface ViewOptions {
-	tui: { requestRender(): void; terminal?: { rows?: number } };
-	theme: Theme; deps: Deps; registry: Registry;
-	start?: { screen?: "list" | "run"; id?: string };
-	key?: string;                 // the shortcut that opened it: inside the view it moves to the next run
-	stop?(id: string): void;      // stops one running child (the runner's own kill)
-	done(): void;
 }
 
 // ------------------------------------------------------------------ plain helpers (no pi)
@@ -4836,9 +5614,10 @@ export function plainWrap(s: string, w: number): string[] {
 const SEQ: Record<string, string[]> = {
 	escape: ["\x1b"], enter: ["\r", "\n"], tab: ["\t"], "shift+tab": ["\x1b[Z"], space: [" "],
 	up: ["\x1b[A", "\x1bOA"], down: ["\x1b[B", "\x1bOB"], right: ["\x1b[C", "\x1bOC"], left: ["\x1b[D", "\x1bOD"],
-	backspace: ["\x7f", "\b"], pageUp: ["\x1b[5~"], pageDown: ["\x1b[6~"], home: ["\x1b[H", "\x1b[1~", "\x1bOH"], end: ["\x1b[F", "\x1b[4~", "\x1bOF"],
+	home: ["\x1b[H", "\x1b[1~", "\x1bOH"], end: ["\x1b[F", "\x1b[4~", "\x1bOF"],
+	"alt+enter": ["\x1b\r"], "alt+up": ["\x1b[1;3A", "\x1b\x1b[A"],
 };
-// the raw sequences of the keys this view uses (pi's matchesKey replaces it inside pi)
+// the raw sequences of the keys the picker uses (pi's matchesKey replaces it inside pi)
 export function plainMatchesKey(data: string, key: string): boolean {
 	if (SEQ[key]) return SEQ[key].includes(data);
 	const alt = /^alt\+(.)$/.exec(key); if (alt) return data === `\x1b${alt[1]}`;
@@ -4887,6 +5666,7 @@ export function statusLabel(r: Run): string {
 	return ({ running: "running", done: "done", aborted: "stopped", timeout: "timed out" } as Record<string, string>)[r.status] ?? String(r.status);
 }
 export const tokens = (r: Run) => (r.input || 0) + (r.output || 0) + (r.live || 0);
+const io = (r: Run) => `↑${compact(r.input || 0)} ↓${compact((r.output || 0) + (r.live || 0))}`;
 // running first (in the order they started), then the finished ones, newest first
 export function order(runs: Run[]): Run[] {
 	const live = runs.filter((r) => r.status === "running").sort((a, b) => a.started - b.started);
@@ -4901,55 +5681,92 @@ const ident: Theme = { fg: (_c, s) => s };
 const pad = (s: string, w: number, deps: Deps) => s + " ".repeat(Math.max(0, w - deps.visibleWidth(s)));
 const cutTo = (s: string, w: number, deps: Deps) => (w <= 0 ? "" : deps.visibleWidth(s) <= w ? s : deps.truncateToWidth(s, w));
 
-// The list screen: a title, one row per run (two below 56 columns), the keys.
-export function listLines(runs: Run[], o: { width: number; now: number; selected?: string; theme?: Theme; deps?: Deps; keyHint?: string }): string[] {
-	const th = o.theme ?? ident, deps = o.deps ?? plainDeps(), W = Math.max(20, o.width);
+// ------------------------------------------------------------------ the footer list (and navigator)
+// The session's runs in the footer, the main session first: one line each
+// (mark, name, task on wide terminals, elapsed time, tokens; under
+// TASK_MIN_WIDTH the task goes, under NARROW_WIDTH one total for the
+// tokens), then one line of keys. The open session is marked ▸. With
+// `selected` the list is navigating: ❯ marks the selected row and the last
+// line has the keys. At most FOOTER_ROWS rows; with more, a window around
+// the selection (or the first rows), and the last line says how many more.
+export const FOOTER_ROWS = 6;
+export const TASK_MIN_WIDTH = 100;
+export const NARROW_WIDTH = 72;
+export interface NavRow { kind: "main" | "run"; id?: string }
+export function navRows(runs: Run[]): NavRow[] { return [{ kind: "main" }, ...order(runs).map((r) => ({ kind: "run" as const, id: r.id }))]; }
+export function footerLines(runs: Run[], o: { width: number; now: number; current?: string; selected?: number; confirm?: boolean; key?: string; theme?: Theme; deps?: Deps }): string[] {
 	const rs = order(runs);
-	const live = rs.filter((r) => r.status === "running").length;
-	const bold = (s: string) => (th.bold ? th.bold(s) : s);
-	const out = [cutTo(`${bold("Subagents")}${th.fg("dim", `  ${live} running · ${rs.length - live} finished`)}`, W, deps), ""];
-	if (!rs.length) out.push(th.fg("dim", "  No subagent or expert runs in this session yet."));
-	const nw = Math.min(14, Math.max(4, ...rs.map((r) => r.agent.length)));
-	const timeW = 7, tokW = 5;
-	const fixed = 2 + 2 + nw + 2 + 2 + timeW + 2 + tokW;
-	const wide = W - fixed >= 12;
-	for (const r of rs) {
-		const sel = r.id === o.selected;
-		const cursor = sel ? th.fg("accent", "❯") : " ";
-		const mark = th.fg(COLOR[r.status] ?? "dim", MARK[r.status] ?? "?");
-		const name = cutTo(r.agent, nw, deps);
-		const time = elapsed(runMs(r, o.now)), tok = tokens(r) ? compact(tokens(r)) : "–";
-		const task = summary(r.task) || "(no task)";
-		const nameS = sel ? bold(name) : name;
-		if (wide) {
-			const tw = W - fixed;
-			out.push(`${cursor} ${mark} ${pad(nameS, nw, deps)}  ${pad(th.fg(sel ? "text" : "muted", cutTo(task, tw, deps)), tw, deps)}  ${th.fg("dim", time.padStart(timeW))}  ${th.fg("dim", tok.padStart(tokW))}`);
-		} else {
-			out.push(cutTo(`${cursor} ${mark} ${nameS}  ${th.fg("dim", `${time} · ${tok}`)}`, W, deps));
-			out.push(`    ${th.fg(sel ? "text" : "muted", cutTo(task, W - 4, deps))}`);
+	if (!rs.length) return [];
+	const th = o.theme ?? ident, deps = o.deps ?? plainDeps(), W = Math.max(20, o.width);
+	const nav = o.selected !== undefined, total = rs.length + 1, cur = o.current ?? "main";
+	const sel = nav ? Math.max(0, Math.min(o.selected!, total - 1)) : -1;
+	const start = total <= FOOTER_ROWS ? 0 : nav ? Math.max(0, Math.min(sel - Math.floor(FOOTER_ROWS / 2), total - FOOTER_ROWS)) : 0;
+	const end = Math.min(total, start + FOOTER_ROWS);
+	const nw = Math.min(W < NARROW_WIDTH ? 12 : 16, Math.max(4, ...rs.map((r) => r.agent.length)));
+	const lines: string[] = [];
+	for (let i = start; i < end; i++) {
+		const r = i === 0 ? undefined : rs[i - 1];
+		const here = r ? r.id === cur : cur === "main";
+		const lead = i === sel ? th.fg("accent", "❯") : here ? th.fg("accent", "▸") : " ";
+		const mark = r ? th.fg(COLOR[r.status] ?? "dim", MARK[r.status] ?? "?") : th.fg("muted", "◂");
+		const nameS = pad(cutTo(r ? r.agent : "main", nw, deps), nw, deps);
+		const name = i === sel && th.bold ? th.bold(nameS) : nameS;
+		if (!r) {
+			const what = W < TASK_MIN_WIDTH ? "" : `  ${th.fg("muted", "the main session")}`;
+			lines.push(cutTo(`${lead}${mark} ${name}${what}`, W, deps));
+			continue;
 		}
+		const time = elapsed(runMs(r, o.now));
+		if (W < NARROW_WIDTH) { lines.push(cutTo(`${lead}${mark} ${name} ${th.fg("dim", `${time} · ${compact(tokens(r))}`)}`, W, deps)); continue; }
+		const tail = `${th.fg("dim", time.padStart(7))}  ${th.fg("dim", io(r).padStart(13))}`;
+		if (W < TASK_MIN_WIDTH) { lines.push(cutTo(`${lead}${mark} ${name}  ${tail}`, W, deps)); continue; }
+		const tw = W - (2 + 1 + nw + 2 + 2 + 7 + 2 + 13);
+		lines.push(cutTo(`${lead}${mark} ${name}  ${th.fg("muted", pad(cutTo(summary(r.task) || "(no task)", tw, deps), tw, deps))}  ${tail}`, W, deps));
 	}
-	out.push("");
-	const keys = W >= 64 ? `↑↓ pick · enter open · ${o.keyHint ? `${o.keyHint}/` : ""}tab next · esc close` : "↑↓ pick · enter open · esc close";
-	out.push(th.fg("dim", cutTo(keys, W, deps)));
-	return out.map((l) => cutTo(l, W, deps));
+	const above = start, below = total - end;
+	const more = above || below ? `${above ? `↑${above} ` : ""}${below ? `↓${below} ` : ""}more · ` : "";
+	const selRun = sel > 0 ? rs[sel - 1] : undefined;
+	let keys: string;
+	if (nav && o.confirm && selRun) keys = th.fg("warning", `Stop ${selRun.agent}? x again stops it`);
+	else if (nav) keys = th.fg("dim", `${more}↑↓ select · enter switch${selRun?.status === "running" ? " · x stop" : ""} · esc editor`);
+	else keys = th.fg("dim", `${more}${o.key ?? "alt+s"}: switch session`);
+	lines.push(cutTo(keys, W, deps));
+	return lines;
 }
 
-// The run screen's header: status line (right: position among the runs) and
-// where it comes from (the parent tool call).
-export function headerLines(r: Run, o: { width: number; now: number; index: number; count: number; theme?: Theme; deps?: Deps }): string[] {
-	const th = o.theme ?? ident, deps = o.deps ?? plainDeps(), W = Math.max(20, o.width);
-	const bold = (s: string) => (th.bold ? th.bold(s) : s);
-	const tok = `↑${compact(r.input || 0)} ↓${compact((r.output || 0) + (r.live || 0))}`;
-	const left = `${th.fg(COLOR[r.status] ?? "dim", MARK[r.status] ?? "?")} ${bold(r.agent)}${r.kind === "expert" ? th.fg("dim", " expert") : ""}  ${th.fg(COLOR[r.status] ?? "dim", statusLabel(r))}  ${th.fg("dim", `${elapsed(runMs(r, o.now))} · ${tok}`)}`;
-	const right = th.fg("dim", `${o.index + 1}/${o.count}`);
-	const lw = deps.visibleWidth(left), rw = deps.visibleWidth(right);
-	const top = lw + 2 + rw <= W ? left + " ".repeat(W - lw - rw) + right : cutTo(left, W, deps);
-	const p = r.parent ?? {};
-	const call = p.callId ? `${p.tool ?? "subagent"} call …${String(p.callId).slice(-8)}` : `${p.tool ?? (r.kind === "expert" ? "expert" : "subagent")} call`;
-	const where = p.mode && p.mode !== "single" ? ` · ${p.mode === "chain" ? "step" : "task"} ${(p.index ?? 0) + 1}/${p.of ?? 1}` : "";
-	const turns = ` · ${r.turns || 0} turn${r.turns === 1 ? "" : "s"}`;
-	return [top, cutTo(th.fg("dim", `${call}${where}${turns}`), W, deps)];
+// ------------------------------------------------------------------ the part on its way
+// What of a run its session file does not hold yet, given what the open
+// session loaded: the task when the file had no user message, assistant
+// messages past the ones loaded, tool calls whose result is not in the
+// file (one whose call is, pi already draws as pending: shown here only
+// once its output streams); a note when nothing after it is in the file.
+export interface Loaded { users: number; assistants: number; results: Set<string>; calls: Set<string> }
+export function loadedOf(entries: any[]): Loaded {
+	const l: Loaded = { users: 0, assistants: 0, results: new Set(), calls: new Set() };
+	for (const e of entries ?? []) {
+		if (e?.type !== "message") continue;
+		const m = e.message ?? {};
+		if (m.role === "user") l.users++;
+		else if (m.role === "assistant") { l.assistants++; for (const c of Array.isArray(m.content) ? m.content : []) if (c?.type === "toolCall" && c.id) l.calls.add(String(c.id)); }
+		else if (m.role === "toolResult" && m.toolCallId) l.results.add(String(m.toolCallId));
+	}
+	return l;
+}
+export function tailEvents(r: Run, loaded: Loaded): Ev[] {
+	const evs: Ev[] = r?.events ?? [];
+	let users = 0, assistants = 0;
+	const skip = evs.map((ev) => {
+		if (ev.t === "user") return ++users <= loaded.users;
+		if (ev.t === "assistant") return ev.done && ++assistants <= loaded.assistants;
+		if (ev.t === "tool") return loaded.results.has(String(ev.id)) || (!ev.done && !ev.output && loaded.calls.has(String(ev.id)));
+		return undefined;   // a note: decided below
+	});
+	// a note shows when nothing after it is in the file already
+	for (let i = evs.length - 1, later = false; i >= 0; i--) {
+		if (skip[i] === undefined) skip[i] = later;
+		else if (skip[i] && (evs[i].t !== "tool" || loaded.results.has(String(evs[i].id)))) later = true;
+	}
+	return evs.filter((_e, i) => !skip[i]);
 }
 
 // ------------------------------------------------------------------ transcript
@@ -4974,7 +5791,7 @@ export function plainEvent(ev: Ev, width: number, flags: Flags, th: Theme = iden
 		for (const b of ev.blocks ?? []) {
 			if (b.type === "thinking" && b.text?.trim()) {
 				if (flags.thinking) plainWrap(b.text.trim(), W - 2).forEach((l) => out.push(`  ${th.fg("dim", it(l))}`));
-				else out.push(`  ${th.fg("dim", it("Thinking… (t shows it)"))}`);
+				else out.push(`  ${th.fg("dim", it("Thinking…"))}`);
 			} else if (b.type === "text" && b.text?.trim()) {
 				for (const l of plainWrap(b.text.trim(), W - 2)) out.push(`  ${l}`);
 			}
@@ -4989,22 +5806,14 @@ export function plainEvent(ev: Ev, width: number, flags: Flags, th: Theme = iden
 		else {
 			const shown = flags.expanded || lines.length <= TOOL_PREVIEW ? lines : ev.name === "bash" ? lines.slice(-TOOL_PREVIEW) : lines.slice(0, TOOL_PREVIEW);
 			const more = lines.length - shown.length;
-			if (more && ev.name === "bash") out.push(`  ${th.fg("dim", `… ${more} earlier line${more === 1 ? "" : "s"} (o expands)`)}`);
+			if (more && ev.name === "bash") out.push(`  ${th.fg("dim", `… ${more} earlier line${more === 1 ? "" : "s"}`)}`);
 			for (const l of shown) out.push(cutTo(`  ${th.fg(ev.isError ? "error" : "dim", l.replace(/\t/g, "    "))}`, W, deps));
-			if (more && ev.name !== "bash") out.push(`  ${th.fg("dim", `… ${more} more line${more === 1 ? "" : "s"} (o expands)`)}`);
+			if (more && ev.name !== "bash") out.push(`  ${th.fg("dim", `… ${more} more line${more === 1 ? "" : "s"}`)}`);
 		}
 	} else if (ev.t === "note") {
 		for (const l of plainWrap(ev.text, W - 2)) out.push(`  ${th.fg(ev.error ? "error" : "dim", l)}`);
 	}
 	return out;
-}
-// how the run ended, under its transcript
-export function endLines(r: Run, width: number, now: number, th: Theme = ident, deps: Deps = plainDeps()): string[] {
-	if (r.status === "running") return [];
-	const text = `${statusLabel(r)} after ${elapsed(runMs(r, now))} · ${r.turns || 0} turn${r.turns === 1 ? "" : "s"} · ↑${compact(r.input || 0)} ↓${compact(r.output || 0)}`;
-	const w = deps.visibleWidth(text) + 4;
-	const rule = w < width ? "─".repeat(Math.floor((width - w) / 2)) : "";
-	return [cutTo(th.fg(COLOR[r.status] ?? "dim", `${rule}  ${text}  ${rule}`), width, deps)];
 }
 
 // Each event drawn once per (version, width, flags): with pi's components when
@@ -5015,22 +5824,20 @@ export class Transcript {
 	piFailed = false;
 	constructor(deps: Deps, theme: Theme, tui: any) { this.deps = deps; this.theme = theme; this.tui = tui; }
 	clear() { this.cache.clear(); }
-	lines(r: Run, width: number, flags: Flags, now: number): string[] {
+	lines(evs: Ev[], r: Run, width: number, flags: Flags): string[] {
 		const out: string[] = [];
 		const pi = this.deps.pi && !this.piFailed;
-		(r.events ?? []).forEach((ev: Ev, i: number) => {
-			if (i === 1 && r.dropped) out.push("", this.theme.fg("dim", `  … ${r.dropped} earlier event${r.dropped === 1 ? "" : "s"} not kept`));
+		for (const ev of evs) {
 			const ls = this.event(ev, r, width, flags);
-			if (!ls.length) return;
+			if (!ls.length) continue;
 			if (!pi && out.length) out.push("");
 			out.push(...ls);
-		});
-		const end = endLines(r, width, now, this.theme, this.deps);
-		if (end.length) out.push("", ...end);
+		}
 		return out;
 	}
 	event(ev: Ev, r: Run, width: number, flags: Flags): string[] {
-		const key = `${ev.v ?? 0}|${width}|${flags.expanded ? 1 : 0}|${flags.thinking ? 1 : 0}|${this.piFailed ? 0 : 1}`;
+		// a running tool's clock moves: drawn again once a second
+		const key = `${ev.v ?? 0}|${width}|${flags.expanded ? 1 : 0}|${flags.thinking ? 1 : 0}|${this.piFailed ? 0 : 1}|${ev.t === "tool" && !ev.done ? Math.floor(Date.now() / 1000) : ""}`;
 		const hit = this.cache.get(ev);
 		if (hit && hit.key === key) return hit.lines;
 		let lines: string[] | undefined;
@@ -5056,133 +5863,38 @@ export class Transcript {
 		if (ev.t === "tool") {
 			const def = p.tools[ev.name]?.(r.cwd || process.cwd());
 			const c = new p.ToolExecutionComponent(ev.name, ev.id || `call-${ev.at}`, ev.args ?? {}, { showImages: false }, def, this.tui, r.cwd || process.cwd());
+			// the tool's own clock (bash shows Elapsed / Took), not this component's
+			const st = c.rendererState;
+			if (st && typeof st === "object") { st.startedAt = ev.at; if (ev.done) st.endedAt = ev.end ?? ev.at; }
 			c.markExecutionStarted?.(); c.setArgsComplete?.();
 			if (ev.done || ev.output) c.updateResult({ content: [{ type: "text", text: ev.output ?? "" }], details: ev.details, isError: !!ev.isError }, !ev.done);
 			c.setExpanded?.(flags.expanded);
-			return c.render(width);   // it brings its own spacer, as in the main view
+			const lines = c.render(width);   // it brings its own spacer, as in the main view
+			// a running tool's renderer starts a timer to redraw itself; this component is thrown away
+			if (st?.interval) { clearInterval(st.interval); st.interval = undefined; }
+			return lines;
 		}
 		return ["", ...plainEvent(ev, width, flags, this.theme, this.deps)];
 	}
 }
 
-// ------------------------------------------------------------------ the view
-export const KEYS_WIDE = "esc back · ←/→ tab runs · ↑↓ pgup/pgdn scroll · t thinking · o tools · l list · x stop";
-export const KEYS_NARROW = "esc back · ←→ runs · ↑↓ scroll · t think · o tools · l list · x stop";
-export class RunsView {
-	o: ViewOptions;
-	screen: "list" | "run";
-	id?: string;
-	top = 0; follow = true; flags: Flags = { expanded: false, thinking: true };
-	confirm = false; closed = false;
-	lastMax = 0; lastBody = 10;
-	transcript: Transcript;
-	listener: (r?: Run) => void;
-	timer?: ReturnType<typeof setInterval>;
-	constructor(o: ViewOptions) {
-		this.o = o;
-		this.transcript = new Transcript(o.deps, o.theme, o.tui);
-		const rs = this.runs();
-		const first = o.start?.id ? rs.find((r) => r.id === o.start!.id) : rs[0];
-		this.id = first?.id;
-		this.screen = o.start?.screen === "run" && first ? "run" : "list";
-		this.listener = () => { if (!this.closed) this.o.tui.requestRender(); };
-		o.registry.listeners.add(this.listener);
-		// the clocks of running runs move once a second
-		this.timer = setInterval(() => { if (this.runs().some((r) => r.status === "running")) this.o.tui.requestRender(); }, 1000);
-		(this.timer as any).unref?.();
-	}
-	runs(): Run[] { return order(this.o.registry.runs); }
-	current(): Run | undefined { const rs = this.runs(); return rs.find((r) => r.id === this.id) ?? rs[0]; }
-	rows(): number { return Math.max(8, this.o.tui.terminal?.rows || process.stdout.rows || 24); }
-	keyHint(): string { return this.o.key ? this.o.key : ""; }
-	render(width: number): string[] {
-		const W = Math.max(20, width), H = this.rows(), deps = this.o.deps, now = Date.now();
-		let lines: string[];
-		if (this.screen === "list") {
-			lines = listLines(this.o.registry.runs, { width: W, now, selected: this.current()?.id, theme: this.o.theme, deps, keyHint: this.keyHint() });
-			if (lines.length > H) {   // keep the selected row in sight
-				const idx = Math.max(0, this.runs().findIndex((r) => r.id === this.current()?.id));
-				const per = W - (2 + 2 + Math.min(14, Math.max(4, ...this.runs().map((r) => r.agent.length))) + 2 + 2 + 7 + 2 + 5) >= 12 ? 1 : 2;
-				const body = lines.slice(2, lines.length - 2), room = H - 4;
-				const start = Math.max(0, Math.min(idx * per - Math.floor(room / 2), body.length - room));
-				lines = [...lines.slice(0, 2), ...body.slice(start, start + room), ...lines.slice(-2)];
-			}
-		} else {
-			const r = this.current();
-			if (!r) { this.screen = "list"; return this.render(width); }
-			const rs = this.runs();
-			const head = headerLines(r, { width: W, now, index: Math.max(0, rs.findIndex((x) => x.id === r.id)), count: rs.length, theme: this.o.theme, deps });
-			const rule = this.o.theme.fg("dim", "─".repeat(W));
-			const body = this.transcript.lines(r, W, this.flags, now);
-			const bodyH = Math.max(1, H - head.length - 2);
-			const max = Math.max(0, body.length - bodyH);
-			if (this.follow) this.top = max;
-			this.top = Math.max(0, Math.min(this.top, max));
-			if (this.top >= max) this.follow = true;
-			this.lastMax = max; this.lastBody = bodyH;
-			const view = body.slice(this.top, this.top + bodyH);
-			while (view.length < bodyH) view.push("");
-			const below = body.length - (this.top + bodyH);
-			let foot: string;
-			if (this.confirm) foot = this.o.theme.fg("warning", `Stop ${r.agent}? y stops it, any other key keeps it running`);
-			else {
-				const keys = W >= 92 ? KEYS_WIDE : KEYS_NARROW;
-				const k = r.status === "running" ? keys : keys.replace(/ · x stop$/, "");
-				foot = this.o.theme.fg("dim", below > 0 && !this.follow ? `↓ ${below} more · end follows · ${k}` : k);
-			}
-			lines = [...head, rule, ...view, foot];
-		}
-		while (lines.length < H) lines.push("");
-		return lines.slice(0, H).map((l) => cutTo(l, W, deps));
-	}
-	move(step: number) {
-		const rs = this.runs(); if (!rs.length) return;
-		const i = Math.max(0, rs.findIndex((r) => r.id === this.current()?.id));
-		this.id = rs[(i + step + rs.length) % rs.length].id;
-	}
-	open(step = 0) { if (step) this.move(step); this.screen = "run"; this.top = 0; this.follow = true; this.confirm = false; }
-	close() { if (this.closed) return; this.closed = true; this.dispose(); this.o.done(); }
-	handleInput(data: string): void {
-		const k = (key: string) => this.o.deps.matchesKey(data, key);
-		const shortcut = !!this.o.key && k(this.o.key);
-		if (this.screen === "run" && this.confirm) {
-			this.confirm = false;
-			const r = this.current();
-			if ((data === "y" || data === "Y") && r?.status === "running") this.o.stop?.(r.id);
-		} else if (k("escape") || k("q") || k("ctrl+c")) {
-			this.close(); return;
-		} else if (this.screen === "list") {
-			if (k("up") || k("k")) this.move(-1);
-			else if (k("down") || k("j")) this.move(1);
-			else if (k("enter") || k("right") || k("space")) { if (this.current()) this.open(); }
-			else if (shortcut || k("tab")) { if (this.current()) this.open(); }
-			else return;
-		} else {
-			const page = Math.max(1, this.lastBody - 1);
-			const scroll = (d: number) => { this.top = Math.max(0, Math.min(this.lastMax, this.top + d)); this.follow = this.top >= this.lastMax; };
-			if (shortcut || k("tab") || k("right")) this.open(1);
-			else if (k("shift+tab") || k("left")) this.open(-1);
-			else if (k("up") || k("k")) scroll(-1);
-			else if (k("down") || k("j")) scroll(1);
-			else if (k("pageUp")) scroll(-page);
-			else if (k("pageDown") || k("space")) scroll(page);
-			else if (k("home") || data === "g") { this.top = 0; this.follow = this.lastMax === 0; }
-			else if (k("end") || data === "G") this.follow = true;
-			else if (k("t")) this.flags = { ...this.flags, thinking: !this.flags.thinking };
-			else if (k("o") || k("ctrl+o")) this.flags = { ...this.flags, expanded: !this.flags.expanded };
-			else if (k("l") || k("backspace")) this.screen = "list";
-			else if (k("x")) { if (this.current()?.status === "running" && this.o.stop) this.confirm = true; }
-			else return;
-		}
-		this.o.tui.requestRender();
-	}
-	invalidate(): void { this.transcript.clear(); }
-	dispose(): void {
-		this.o.registry.listeners.delete(this.listener);
-		if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
-	}
+// The live widget of a run's session: the part on its way, then one line
+// while the run works (its clock and tokens: the session file has neither).
+export function liveLines(r: Run, loaded: Loaded, o: { width: number; now: number; transcript?: Transcript; theme?: Theme; deps?: Deps; flags?: Flags; queued?: { text: string; kind: string }[]; added?: { has(e: object): boolean } }): string[] {
+	if (!r) return [];
+	const th = o.theme ?? ident, deps = o.deps ?? plainDeps(), W = Math.max(20, o.width);
+	const flags = o.flags ?? { expanded: false, thinking: false };   // thinking collapsed, as pi shows it
+	// what is already in the chat (added there as it completed) is not drawn again
+	const evs = tailEvents(r, loaded).filter((e) => !o.added?.has(e));
+	const out = o.transcript ? o.transcript.lines(evs, r, W, flags) : evs.flatMap((ev, i) => [...(i ? [""] : []), ...plainEvent(ev, W, flags, th, deps)]);
+	// pi puts a spacer above the widgets, as it puts one above each chat message:
+	// the first message's own spacer goes, so moving it to the chat moves nothing
+	while (out.length && out[0] === "") out.shift();
+	// sent and not yet taken: one line each, as pi shows the main session's under the chat
+	for (const q of o.queued ?? []) out.push(cutTo(" " + th.fg("dim", `${q.kind === "followUp" ? "Follow-up" : "Steering"}: ${String(q.text).replace(/\s+/g, " ")}`), W, deps));
+	if (r.status === "running") out.push("", cutTo(`${th.fg("accent", "●")} ${th.fg("dim", `${r.agent} working · ${elapsed(runMs(r, o.now))} · ${io(r)} · live`)}`, W, deps));
+	return out.map((l) => cutTo(l, W, deps));
 }
-export function createView(o: ViewOptions): RunsView { return new RunsView(o); }
 TS
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
@@ -5484,8 +6196,15 @@ export default async function (pi: ExtensionAPI) {
 				const why = await ensure(n, ctx, progress, false, signal);
 				if (why) return text(runs.length > 1 ? `${why} Nothing ran.` : why, true);
 			}
-			const results = await sub.mapLimit(runs, sub.CONCURRENCY, (r: any, i: number) => sub.runAgent(find(r.name)!, renderBrief(find(r.name)!, asBrief(r.brief)!), ctx.cwd, signal, progress, { tool: "expert", callId: _id, mode: runs.length > 1 ? "parallel" : "single", index: i, of: runs.length }));
-			return text(results.map(sub.render).join("\n\n"), results.every((r: any) => r.exitCode !== 0));
+			// the call goes on when the user switches sessions mid-call (the subagents module's detachable)
+			let job = { detached: false };
+			const quiet = (line: string) => { if (!job.detached) progress(line); };
+			const out = await sub.detachable(signal, _id, async (sig: AbortSignal, j: { detached: boolean }) => {
+				job = j;
+				const results = await sub.mapLimit(runs, sub.CONCURRENCY, (r: any, i: number) => sub.runAgent(find(r.name)!, renderBrief(find(r.name)!, asBrief(r.brief)!), ctx.cwd, sig, quiet, { tool: "expert", callId: _id, mode: runs.length > 1 ? "parallel" : "single", index: i, of: runs.length }));
+				return { text: results.map(sub.render).join("\n\n"), isError: results.every((r: any) => r.exitCode !== 0) };
+			});
+			return text(out.text, out.isError);
 		},
 	});
 	pi.registerCommand("experts", {
@@ -7535,8 +8254,15 @@ export default function (pi: ExtensionAPI) {
 					const list = discoverWorkflows(cwd, trusted);
 					return { content: [{ type: "text" as const, text: list.map((w) => `- ${w.name}: ${w.description}`).join("\n") || "No workflows." }] };
 				}
-				const r = await startWorkflow(params.name, params.args ?? "", signal, (line) => onUpdate?.({ content: [{ type: "text", text: line }] }));
-				return { content: [{ type: "text" as const, text: r.text }], isError: r.error };
+				// the call goes on when the user switches sessions mid-call (the subagents module's detachable)
+				const sub = await import(pathToFileURL(join(HERE, "subagents.ts")).href);
+				let job = { detached: false };
+				const out = await sub.detachable(signal, _id, async (sig: AbortSignal, j: { detached: boolean }) => {
+					job = j;
+					const r = await startWorkflow(params.name, params.args ?? "", sig, (line) => { if (!job.detached) onUpdate?.({ content: [{ type: "text", text: line }] }); });
+					return { text: r.text, isError: r.error };
+				});
+				return { content: [{ type: "text" as const, text: out.text }], isError: out.isError };
 			},
 		} as any);
 		const runCommand = async (name: string, args: string, ctx: any) => {
@@ -7557,6 +8283,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ----------------------------------------------------------- lifecycle
+	// a subagent's own session file, opened from /subagents (see the subagents module)
+	const childView = (f: unknown) => /[\\/]lets-code-runs[\\/][^\\/]+[\\/][^\\/]+\.(pi|view)\.jsonl$/.test(String(f ?? ""));
 	pi.on("session_start", async (event: any, ctx: ExtensionContext) => {
 		cwd = ctx.cwd; currentCtx = ctx;
 		if (event?.reason !== "reload") await settleTrust(ctx);
@@ -7579,6 +8307,8 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (event?.reason === "reload") return;
+		// into or out of a subagent's session (/subagents): not a session start for Claude's hooks
+		if (childView(ctx.sessionManager?.getSessionFile?.()) || childView(event?.previousSessionFile)) return;
 		const source = ({ startup: "startup", new: "clear", resume: "resume", fork: "fork" } as Record<string, string>)[event?.reason] ?? "startup";
 		const o = await fire("SessionStart", source, { source, model: process.env.LETS_CODE_MODEL ?? "" }, ctx);
 		if (o?.context.length) pendingContext.push(...o.context);
@@ -7598,6 +8328,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", async (event: any, ctx: ExtensionContext) => {
 		if (DEPTH > 0 || event?.reason === "reload" || !has("SessionEnd")) return;
+		if (childView(ctx?.sessionManager?.getSessionFile?.()) || childView(event?.targetSessionFile)) return;
 		const reason = ({ quit: "prompt_input_exit", new: "clear", resume: "resume" } as Record<string, string>)[event?.reason] ?? "other";
 		await fire("SessionEnd", reason, { reason }, ctx, 1500);   // Claude's budget for these
 	});

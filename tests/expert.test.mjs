@@ -24,13 +24,25 @@ process.env.LETS_CODE_MODEL = "test-model";
 process.env.PATH = `${bin}:${process.env.PATH}`;
 for (const k of ["LETS_CODE_SUBAGENT_DEPTH", "LETS_CODE_ROLE", "LETS_CODE_MODE"]) delete process.env[k];
 
-// fake pi: records argv, replies with the task
+// fake pi in RPC mode: records argv and the first prompt (the task), replies with it
 writeFileSync(join(bin, "pi"), `#!/usr/bin/env node
 const fs = require("fs"); const path = require("path");
 const id = Date.now() + "-" + Math.random().toString(36).slice(2);
-fs.writeFileSync(path.join(process.env.FAKE_PI_DIR, "call-" + id + ".json"), JSON.stringify({ argv: process.argv.slice(2), agentDir: process.env.PI_CODING_AGENT_DIR, depth: process.env.LETS_CODE_SUBAGENT_DEPTH }));
-const task = process.argv[process.argv.length - 1];
-process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Result for: " + task.replace(/^Task: /, "") }], usage: { input: 10, output: 5 } } }) + "\\n");
+const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+let buf = "", first = true;
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (d) => {
+  buf += d;
+  for (let i = buf.indexOf("\\n"); i >= 0; i = buf.indexOf("\\n")) {
+    const c = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
+    if (c.type !== "prompt") { out({ type: "response", id: c.id, command: c.type, success: true }); continue; }
+    if (first) { first = false; fs.writeFileSync(path.join(process.env.FAKE_PI_DIR, "call-" + id + ".json"), JSON.stringify({ argv: process.argv.slice(2), task: c.message, agentDir: process.env.PI_CODING_AGENT_DIR, depth: process.env.LETS_CODE_SUBAGENT_DEPTH })); }
+    out({ type: "response", id: c.id, command: "prompt", success: true, data: { disposition: "started" } });
+    out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Result for: " + c.message.replace(/^Task: /, "") }], usage: { input: 10, output: 5 }, stopReason: "stop" } });
+    out({ type: "agent_settled" });
+  }
+});
+process.stdin.on("end", () => process.exit(0));
 `);
 chmodSync(join(bin, "pi"), 0o755);
 const fake = join(work, "fake"); mkdirSync(fake); process.env.FAKE_PI_DIR = fake;
@@ -185,7 +197,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	const r = await run(s2.tool, { action: "run", name: "helper", brief: { ...brief, extra_note: "keep it short" } }, c);
 	t("run: no dialog once remembered", c.asked.length, 0);
 	t("run: ok", r.isError, false);
-	const call = calls()[0]; const task = call?.argv[call.argv.length - 1] ?? "";
+	const call = calls()[0]; const task = call?.task ?? "";
 	t("run: one child, one level deeper", [calls().length, call?.depth], [1, "1"]);
 	has("run: brief heading per field", task, "## Target\n/bin/true\n\n## Question\nwhat does --version print\n\n## Purpose\na test");
 	has("run: an extra field comes last", task, "## Extra note\nkeep it short");

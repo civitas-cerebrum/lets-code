@@ -162,34 +162,149 @@ fails closed to the built-in roles. Mode changes are announced on
 pi's example but with a short schema (the community packages measured 6k
 to 8k tokens per turn). Agent files: Markdown + YAML frontmatter in
 `~/.pi/agent/agents`, `.pi/agents`, `.agents/agents`. A child is `pi --mode
-json -p --no-session --provider lets-code --model <id> [--thinking]
-[--tools] --append-system-prompt <file> "Task: ..."` with
+rpc --session <run>.pi.jsonl --provider lets-code --model <id> [--thinking]
+[--tools] --append-system-prompt <file>` sent `"Task: ..."` as its first RPC `prompt` with
 `LETS_CODE_SUBAGENT_DEPTH` and `LETS_CODE_ROLE` in its environment, parsed
 from `message_end` events; concurrency 2 by default (one GPU); depth 1 (a
 child registers no tool, so it pays nothing for it); 50 KB output cap.
 
-**Watching a subagent (`/subagents`).** The runner already reads the
-child's JSON stream, so it also keeps a transcript per run: the task, the
-assistant messages (thinking, text and tool-call blocks, rebuilt from
-`message_update` deltas, then replaced by `message_end`), tool runs from
-`tool_execution_*`, retries and compaction as notes, and status, tokens and
-the parent tool call. The registry lives on `globalThis`, so the copies of
-`subagents.ts` that the experts and Claude Code modules import share it,
-and `/reload` keeps it. It is saved under `lets-code-runs/<session>/` so
-finished runs reopen. We did not let the child write a real pi session
-instead (dropping `--no-session`). A session file gets whole messages only
-at `message_end`, so the view would not stream. It would also fill pi's
-session store, and full tool outputs would go uncapped. Faithfulness comes
-from rendering: the view feeds the recorded messages to pi's exported
-`UserMessageComponent`, `AssistantMessageComponent` and
-`ToolExecutionComponent` (with `create*ToolDefinition` for the built-in
-tools' renderers), which are the components the main view uses. A plain
-renderer takes over if they fail to load or throw. The UI is one
-`ctx.ui.custom` overlay (`width`/`maxHeight` 100%) plus `registerCommand`,
-`registerShortcut` and `setStatus`; no pi internals are touched. Zero
-context: no tool text, prompt section or message changes. The provider
-request was compared byte for byte with and without the feature. Steering
-a child would need `--mode rpc` instead of `-p`; that is left for later.
+**Subagent sessions (`/subagents`).** Each child writes a real pi session
+file (`--session`, created empty and 0600 first; pi writes its header into
+an empty file) under `lets-code-runs/<session>/`, outside pi's session
+store, so `/resume` and `-c` never list it. The footer navigator and
+`/subagents <n|name>` switch the TUI into it with the command ctx's
+`switchSession`, as `/resume` does, so pi itself draws it. The navigator
+is the footer list (a block the footer module draws, or a widget below
+the editor without it): `◂ main` and the runs. A terminal input hook
+(`onTerminalInput`) gives it the keys on alt+s and while it has them takes
+↑ ↓ enter x esc; any other key gives them back and goes to the editor. It
+acts only while pi's editor is the focused component, so a selector or a
+dialog keeps its keys. The list has the same height with and without the
+keys (its last line is the keys line either way). The hook has no
+`switchSession`, so a switch sends the command (`/subagents back`,
+`/subagents id:<run>`) with `pi.sendUserMessage(..., {
+expandPromptTemplates: true })`, which pi runs as a command; an `input`
+hook drops the text should it ever reach the model.
+
+Children are interactive: each is a pi in `--mode rpc` (the `Child`
+driver in `subagents.ts`), started with the agent's tools, thinking level,
+skills, role (`LETS_CODE_ROLE`), agent dir and instructions (kept in
+`<run>.prompt.md`) and `--session` on its file. The call sends the task as
+the first `prompt` and returns the last reply when `agent_settled` comes,
+so the parent's tool result is what `-p` gave; the requests of the parent
+and of the child were compared byte for byte with main through a fake
+OpenAI server. The process then rests: in its session the user's prompt is
+an RPC `prompt` with `streamingBehavior: "steer"` while it works (what
+Enter does while the main session streams; pi's follow-up key cannot be
+told apart, because the TUI's own session is idle) or a new turn while it
+rests; Esc (a terminal input hook, active only while the child works)
+sends `abort`; `!` is the RPC `bash` command, `/model` and the thinking
+level `set_model` / `set_thinking_level` (from pi's `model_select` and
+`thinking_level_select` events), `/compact` the RPC `compact` (the TUI's
+own compaction is cancelled in `session_before_compact`). A child that
+rested `LETS_CODE_SUBAGENT_IDLE_S` (300 s) gets its stdin closed (pi's
+orderly exit; SIGTERM, then SIGKILL after it); so does every child when
+the main session ends (`session_shutdown` other than our own switches and
+`/reload`), when its run is pruned, and when pi exits. At rest a child is
+`unref`'d, so `lets-code -p` does not wait for it; without a UI it is
+stopped after its turn. The next prompt starts it again from `rec.spawn`
+(saved in the transcript), on the same session file: same agent config,
+also after a restart. Dialogs of the child's extensions arrive as
+`extension_ui_request` and are shown with the TUI's `select` / `confirm` /
+`input` / `editor`, prefixed with the agent's name (cancelled without a
+UI); this replaces the headless answers a `-p` child had.
+
+How live: pi reads a session file once, at the switch, and a child appends
+a message only when it is complete. Following the file alone would
+therefore show whole messages only, and RPC does not change that: pi
+1.0.3's interactive mode draws only its own `AgentSession`'s events, and
+`RpcClient` is a programmatic client, not a viewer. So the driver, which
+reads the child's event stream anyway, keeps a transcript per run (the
+task, assistant messages rebuilt from `message_update` deltas and replaced
+at `message_end`, user messages, tool runs from `tool_execution_*`,
+retries and compaction as notes; status, tokens, the parent call), and in
+a child's session a widget above the editor draws what the file does not
+hold yet: the message on its way, running tools and steers not yet taken,
+with pi's exported `UserMessageComponent`, `AssistantMessageComponent` and
+`ToolExecutionComponent` (with the built-in tools' renderers; a plain
+renderer takes over if they fail). Each event the child completes is then
+added to the chat in-process: `pi.sendMessage` of a custom message
+(`lets-code-subagent-message`, `triggerTurn: false`, so it is appended to
+the open session and pi adds it to the chat at once, as it adds a message
+in the main session), drawn by a `registerMessageRenderer` renderer with
+the same components (their own spacer line dropped: pi's message box puts
+one), in order, up to the first event still on its way; the widget leaves
+out what was added (and its first spacer: pi puts one above the widgets),
+so moving a message from the widget to the chat moves nothing on screen.
+The first version reopened the session (`switchSession`) after each
+completed message instead; each reopen redrew the whole chat, which made
+the view jump on the phone and showed pi's own footer between the reloads.
+Now the session is opened only when the user switches; frames taken every
+0.5 s while a child streamed showed no jump and no screen clear at 70 and
+120 columns. The copy the TUI opens stops before an assistant message
+whose tool calls have no results yet (pi would draw them pending and never
+hear the end); the rest comes in as above. Matching what the file holds:
+user and assistant messages by count, tool calls by `toolCallId`.
+
+Commands in a child's session run in the TUI as in the main session. pi's
+own commands that read the open session (`/copy`, `/export`, `/share`,
+`/session`) would see the copy without the messages added since it
+opened, so a key hook (`onTerminalInput`, Enter) holds them, opens a fresh
+copy and submits them again (`tui.handleTerminalInput`); that is the one
+reload, and it happens when the user acts. `/name` goes to the child
+(`set_session_name`), `/resume` is submitted in the main session (from the
+copy, pi would list the runs dir), `/new` is cancelled in
+`session_before_switch` and a new main session started instead,
+`/fork`/`/clone` are cancelled in `session_before_fork` with a note. A
+mandate `/mode` acts on the main session: children register no mode
+commands, their role is fixed. `/subagents` alone always opens the navigator:
+its argument completions appear only once a letter is typed (pi 0.87 takes
+Enter for a highlighted completion, which turned `/subagents ` into a
+subcommand).
+
+pi's keys: pi applies its toggles to the chat's components (Ctrl+O calls
+`setExpanded` on every expandable message, which pi's custom message
+boxes pass to the renderer; Ctrl+T calls `setHideThinkingBlock` only on its
+`AssistantMessageComponent`s), so the child's added messages and the live
+part read the state themselves: tool output from `ui.getToolsExpanded()`
+and pi's per-message expanded flag, hidden thinking from pi's setting
+(`pi.getSettings()` on pi 1.0, `settings.json` on 0.87, and the toggle
+key itself so the change shows at once). Keys whose effect is the child's
+go to the child: Esc (`abort`), the follow-up key (the next prompt is sent
+as `followUp`), the dequeue key (`clear_queue`, back into the editor),
+copy (the view catches up first). The bindings are read from
+`<agent dir>/keybindings.json` over pi's defaults.
+
+One writer: the child process owns its session file, and pi appends to
+whatever session it has open (a model or thinking change, a `!` record),
+so the TUI opens a copy, `<run>.view.jsonl`, made when the session is
+opened; what pi appends to the copy stays there. The agent guard still
+skips its thinking-level reset and the Claude Code adapter its
+SessionStart/SessionEnd hooks for such a switch. When a turn the user
+started in a child ends, its reply goes to the main session as a custom
+message (one line of where it comes from, then the reply) with
+`triggerTurn: false`, held while another session is open: the model there
+is informed without a turn of its own.
+
+Detaching: `switchSession` tears the current session down first, which
+aborts the turn in flight, and with it a `subagent`, `expert` or
+`workflow` call and its children. The switch sets `reg.switching`; a call
+wrapped in `detachable()` treats an abort that comes while it is set as a
+detach: its work keeps its own signal, the tool returns a short note at
+once (that note is the only text this feature ever puts in context, and
+only when the user switches mid-call), and when the runs end their report
+is sent to the session the call came from with `pi.sendMessage(...,
+{ triggerTurn: true, deliverAs: "followUp" })`, held while another
+session is open. A plain abort (Esc) still stops the children.
+
+The registry lives on `globalThis`, so the copies of `subagents.ts` that
+the experts and Claude Code modules import share it, and a switch or
+`/reload` (which load the module again) keep it. The footer list
+(`/subagents toggle`, saved as `subagentsFooter` in lets-code-state.json)
+is a block the footer module draws above its numbers (also on
+`globalThis`), or a widget below the editor without that footer. Zero
+context: no tool text, prompt section or message changes; the provider
+requests of a print-mode run were compared byte for byte against main.
 
 **Sandbox.** The example extension's shape: `createBashTool(cwd,
 {operations})` with commands wrapped by `SandboxManager.wrapWithSandbox`,

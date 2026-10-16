@@ -5592,6 +5592,7 @@ description: Phone tasks on this Android device (Termux), end to end: launch or 
 tools: bash, read
 expert: true
 use_for: phone tasks: apps, files, intents, messages; screen/taps once set up
+job: Does a phone task end to end (launch an app, open a file, fire an intent, prepare a message; screen and taps where set up) and reports each command with its evidence; a few minutes
 keywords: phone, apps, messages
 platform: termux
 brief:
@@ -5624,7 +5625,8 @@ Messages, mail, calls: `ref/messaging.md`.
   belong to uid`). Every `am` call needs `--user 0`.
 
 ## Recipes (tier 0)
-1. **Launch an app:** `am start --user 0 -n <pkg>/<Activity>`. Success is
+1. **Launch an app:** find it first (below), then
+   `am start --user 0 -n <pkg>/<Activity>`. Success is
    rc=0 with only a `Starting: Intent {...}` line, or the warning that the
    task was brought to the front.
 2. **Control check (required before claiming a launch):** the same command
@@ -5638,10 +5640,32 @@ Messages, mail, calls: `ref/messaging.md`.
    `.gateway.preview.PreviewActivity`.)
 4. **Generic intent:** `am start --user 0 -a <ACTION> -d <uri> [-t <mime>] [-p <pkg> | -n <comp>] [--es <key> <value>]`
 5. **Find a handler or main activity (read-only):**
-   `/system/bin/cmd package resolve-activity --user 0 -a <ACTION> [-c <CAT>] [-d <uri>] [-t <mime>] [-p <pkg>]`
-   (read `name=`, `packageName=`; `ResolverActivity` means the user will
-   be asked to choose). Packages: `/system/bin/cmd package list packages | grep <word>`.
+   `/system/bin/cmd package resolve-activity --brief --user 0 -a <ACTION> [-c <CAT>] [-d <uri>] [-t <mime>] [-p <pkg>]`
+   (the last line is `<pkg>/<Activity>`; `ResolverActivity` means the user
+   will be asked to choose; `No activity found`: nothing handles it).
+   Every match: `query-activities` instead of `resolve-activity`.
 6. **Evidence:** `logcat -c` before, `logcat -d` after (your uid's logs only).
+
+## Which app is it
+Package names are not app names: Gmail is `com.google.android.gm`, K-9
+Mail `com.fsck.k9`, Outlook `com.microsoft.office.outlook`. Never decide
+which app it is, or that none is installed, from a grep on package names.
+1. **By role** (best): resolve the intent the task implies, with recipe 5.
+   Mail: `-a android.intent.action.SENDTO -d mailto:`; browser:
+   `-a android.intent.action.VIEW -d https://example.com`; SMS:
+   `-a android.intent.action.SENDTO -d smsto:`; dialer:
+   `-a android.intent.action.DIAL -d tel:`.
+2. **Its launcher activity:** recipe 5 with
+   `-a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p <pkg>`.
+   Launch that to open the app; the role's own activity opens a compose
+   or dial screen instead.
+3. **By name:** list every launchable app,
+   `/system/bin/cmd package query-activities --brief --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER | grep /`,
+   and read the whole list: activity names often carry the app's name
+   (`.ConversationListActivityGmail`) where the package does not.
+"Not installed" needs both 1 and 3 to come back empty. When a launch
+fails, redo 1 and 3 before concluding anything: the component may be
+wrong, not the app missing.
 
 ## Traps (do not retry)
 - Without tier 2, `screencap`, `uiautomator`, `input`, `content` and
@@ -5724,7 +5748,7 @@ else
     for pair in whatsapp:com.whatsapp whatsapp-business:com.whatsapp.w4b telegram:org.telegram.messenger signal:org.thoughtcrime.securesms messages:com.google.android.apps.messaging gmail:com.google.android.gm messenger:com.facebook.orca; do
         has "${pair#*:}" && apps="${apps:+${apps}, }${pair%%:*}"
     done
-    echo "apps: ${apps:-no known messaging app}"
+    echo "apps: ${apps:-none of these messaging apps (others by role: see Which app is it)}"
 fi
 
 # tier 0: the control check (a component that does not exist must be refused)
@@ -6357,8 +6381,8 @@ MD
     cat > "${t}/ref/messaging.md" <<'MD'
 # Messages, mail and calls
 
-Check the target app is installed (the probe's apps line, or
-`cmd package list packages`). Text with spaces goes in one `--es` value,
+Find the target app by its role or the launcher list (the agent's "Which
+app is it"); the probe's apps line names only a few known packages. Text with spaces goes in one `--es` value,
 quoted; in URIs it must be URL-encoded
 (`python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "<text>"`).
 Pre-fill intents carry any text, Turkish letters and emoji included.

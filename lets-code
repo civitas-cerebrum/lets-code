@@ -643,7 +643,7 @@ def to_models(doc):
             level_map["xhigh"] = xhigh_value or "xhigh"
             model_doc["samplingParamsByThinkingLevel"] = {"xhigh": xhigh_params}
         if effort_map:
-            compat["chatTemplateKwargs"]["reasoning_effort"] = {"$var": "thinking.level", "omitWhenOff": True}
+            compat["chatTemplateKwargs"]["reasoning_effort"] = {"$var": "thinking.effort", "omitWhenOff": True}
         if level_map:
             model_doc["thinkingLevelMap"] = level_map
     if openrouter and os.environ.get("LETS_CODE_OPENROUTER_PROVIDER"):

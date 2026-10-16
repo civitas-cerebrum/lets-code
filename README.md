@@ -536,12 +536,37 @@ results, with pi's own keys (<kbd>Ctrl</kbd>+<kbd>O</kbd> and the rest).
 `/subagents 2` or `/subagents scout` switches straight to a run.
 
 In a subagent's session the status line says so, for example `subagent
-scout · running · read-only · alt+s back`, and <kbd>Alt</kbd>+<kbd>S</kbd>
-or `/subagents back` returns to the main session. It is read-only: a
-prompt or a `!` command is refused there (the child process owns the file
-while it runs, and continuing a finished one here would run under the main
-session's tools and role, not the agent's). `/subagents` from there picks
-another run.
+scout · running · alt+s back`, and <kbd>Alt</kbd>+<kbd>S</kbd> or
+`/subagents back` returns to the main session; `/subagents` from there
+picks another run. The session works like the main one, through the
+child's own process (each child is a pi in RPC mode, with the agent's
+tools, role, instructions and model):
+
+- **Typing while it works** steers it, as <kbd>Enter</kbd> does while the
+  main session streams: the message waits under the chat (`Steering: …`)
+  and goes in after the current tool calls.
+- **Typing while it rests** (done, stopped, or after a restart) starts its
+  next turn. A child that has rested `LETS_CODE_SUBAGENT_IDLE_S` seconds
+  (300) has exited; its process starts again on the same session file with
+  the agent's settings, so it never runs with the main session's tools or
+  role.
+- <kbd>Esc</kbd> aborts its turn, as in the main session; the process stays,
+  so you can go on.
+- `!` and `!!` run in the child's process and land in its session (pi
+  first shows a placeholder line, then the real output once the session
+  refreshes). `/model` and the thinking level (<kbd>Shift</kbd>+<kbd>Tab</kbd>)
+  are passed on to the child. `/compact` compacts the child's session (pi
+  then also says its own compaction was cancelled: the TUI shows a copy of
+  the child's file and never compacts that).
+- A dialog the child's guards open (the mandate asking before a command)
+  appears here with the agent's name in front.
+- When a turn you started in a child ends, its reply is added to the main
+  session as a short message (`scout (a subagent the user went on with in
+  its own session) replied: …`, as soon as you are back there), so the
+  model there knows; it does not start a turn.
+
+Children go when the main session ends (quit, `/new`, `/resume` of another
+session), when their run is pruned, or after resting as above.
 
 How live a running child's session is: pi shows the messages the child has
 completed (a child writes a message to its session file when the message is
@@ -564,14 +589,15 @@ continues it, as soon as you are back there. A plain stop
 condensed on narrow ones), and is remembered for the next launch like
 `/metrics`. While a run is going and the footer list is off, the status
 says `2 subagents running · alt+s or /subagents to switch`. None of this
-costs context: nothing in it reaches the model (the request is the same
-byte for byte).
+costs context: nothing in it reaches the model (the requests of the main
+session and of its children are the same byte for byte).
 
 `LETS_CODE_SUBAGENT_KEY` picks another key (pi's key syntax, e.g.
 `ctrl+alt+w`), and `none` turns the key off. Each run is kept in
 `~/.pi/agent/lets-code-runs/<session id>/`: its session file
-(`<run>.pi.jsonl`, outside pi's session store, so not in `/resume`'s list)
-and a transcript (`<run>.json`, what the live part and the lists draw
+(`<run>.pi.jsonl`, outside pi's session store, so not in `/resume`'s list),
+the copy the TUI opens (`<run>.view.jsonl`), the agent's instructions
+(`<run>.prompt.md`, for a restart) and a transcript (`<run>.json`, what the live part and the lists draw
 from, with tool output cut to its first and last few thousand characters),
 both mode 0600, so a finished run reopens after `/reload`, a restart with
 `-c`, or `/resume`. The newest 30 runs of a session

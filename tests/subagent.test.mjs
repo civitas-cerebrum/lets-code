@@ -17,64 +17,108 @@ process.env.PI_CODING_AGENT_DIR = agentDir;
 process.env.LETS_CODE_SUBAGENTS_ON = "1";
 process.env.LETS_CODE_MODEL = "test-model";
 process.env.LETS_CODE_SUBAGENT_CONCURRENCY = "2";
+process.env.LETS_CODE_SUBAGENT_IDLE_S = "0.5";   // children at rest go soon (each is a process)
 process.env.PATH = `${bin}:${process.env.PATH}`;
 
-// fake pi: records argv + env, waits, replays a reply built from the task
 writeFileSync(join(bin, "pi"), `#!/usr/bin/env node
+// fake pi in RPC mode: records its start (argv, env, instructions) and the
+// first prompt as a call, then answers prompts with events built from the
+// task; steer, abort, bash, set_model, set_thinking_level and compact too
 const fs = require("fs"); const path = require("path");
 const dir = process.env.FAKE_PI_DIR; const id = Date.now() + "-" + Math.random().toString(36).slice(2);
-fs.writeFileSync(path.join(dir, "call-" + id + ".json"), JSON.stringify({ argv: process.argv.slice(2), env: { role: process.env.LETS_CODE_ROLE, depth: process.env.LETS_CODE_SUBAGENT_DEPTH }, agentDir: process.env.PI_CODING_AGENT_DIR, cwd: process.cwd(), prompt: fs.readFileSync(process.argv[process.argv.indexOf("--append-system-prompt") + 1], "utf8") }));
-const task = process.argv[process.argv.length - 1];
-const running = path.join(dir, "running-" + id); fs.writeFileSync(running, "");
-const n = fs.readdirSync(dir).filter((f) => f.startsWith("running-")).length;
-fs.appendFileSync(path.join(dir, "concurrency"), n + "\\n");
+const argv = process.argv.slice(2);
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
-process.on("SIGTERM", () => { try { fs.unlinkSync(running); } catch {} process.exit(143); });
-if (/stream/.test(task)) {   // a recorded-shape event stream: thinking, a tool call with a big output, the answer
-  const big = "HEAD" + "z".repeat(20000) + "TAIL"; const cmd = { command: "cat big.txt" };
-  const evs = [
-    { type: "session", version: 3, id: "child", timestamp: "2026-01-01T00:00:00.000Z", cwd: process.cwd() }, { type: "agent_start" }, { type: "turn_start" },
-    { type: "message_start", message: { role: "user", content: task } }, { type: "message_end", message: { role: "user", content: task } },
-    { type: "message_start", message: { role: "assistant", content: [], stopReason: "pending" } },
-    { type: "message_update", usage: { output: 1 }, assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
-    { type: "message_update", usage: { output: 3 }, assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Look at " } },
-    { type: "message_update", usage: { output: 5 }, assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "the files." } },
-    { type: "message_update", usage: { output: 5 }, assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "Look at the files." } },
-    { type: "message_update", usage: { output: 6 }, assistantMessageEvent: { type: "toolcall_start", contentIndex: 1, id: "call_1", toolName: "bash" } },
-    { type: "message_update", usage: { output: 9 }, assistantMessageEvent: { type: "toolcall_delta", contentIndex: 1, delta: "{\\"command\\":" } },
-    { type: "message_update", usage: { output: 12 }, assistantMessageEvent: { type: "toolcall_end", contentIndex: 1, toolCall: { type: "toolCall", id: "call_1", name: "bash", arguments: cmd } } },
-    { type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: "Look at the files." }, { type: "toolCall", id: "call_1", name: "bash", arguments: cmd }], usage: { input: 100, output: 20 }, stopReason: "toolUse" } },
-    { type: "tool_execution_start", toolCallId: "call_1", toolName: "bash", args: cmd },
-    { type: "tool_execution_update", toolCallId: "call_1", toolName: "bash", args: cmd, partialResult: { content: [{ type: "text", text: "HEAD" }], details: {} } },
-    { type: "tool_execution_end", toolCallId: "call_1", toolName: "bash", result: { content: [{ type: "text", text: big }], details: {} }, isError: false },
-    { type: "message_start", message: { role: "toolResult", toolCallId: "call_1", content: [{ type: "text", text: big }] } },
-    { type: "message_end", message: { role: "toolResult", toolCallId: "call_1", content: [{ type: "text", text: big }] } },
-    { type: "turn_end" }, { type: "turn_start" },
-    { type: "message_start", message: { role: "assistant", content: [], stopReason: "pending" } },
-    { type: "message_update", usage: { output: 1 }, assistantMessageEvent: { type: "text_start", contentIndex: 0 } },
-    { type: "message_update", usage: { output: 4 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Found it: " } },
-    { type: "message_update", usage: { output: 8 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "line 3." } },
-    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Found it: line 3." }], usage: { input: 150, output: 10 }, stopReason: "stop" } },
-    { type: "turn_end" }, { type: "agent_end", messages: [] }, { type: "agent_settled" },
-  ];
-  let i = 0; const tick = () => { if (i < evs.length) { out(evs[i++]); setTimeout(tick, 15); } else { fs.unlinkSync(running); process.exit(0); } }; tick();
-  return;
+const log = (o) => fs.appendFileSync(path.join(dir, "cmds"), JSON.stringify({ pid: process.pid, ...o }) + "\\n");
+const ap = argv.indexOf("--append-system-prompt");
+let first = true, turn = null; const steers = []; let uiWait = null;
+process.on("SIGTERM", () => { if (turn) { try { fs.unlinkSync(turn.running); } catch {} } process.exit(143); });
+const later = (ms, f) => { const t = setTimeout(f, ms); if (turn) turn.timers.push(t); };
+const settle = (stop = "stop") => {
+  const t = turn; if (!t) return; turn = null;
+  t.timers.forEach(clearTimeout);
+  try { fs.unlinkSync(t.running); } catch {}
+  if (stop === "aborted") out({ type: "message_end", message: { role: "assistant", content: [], stopReason: "aborted", errorMessage: "aborted" } });
+  out({ type: "agent_end", messages: [] }); out({ type: "agent_settled" });
+};
+const reply = (text, usage = { input: 10, output: 5 }) => out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], usage, stopReason: "stop" } });
+function startTurn(msg) {
+  const running = path.join(dir, "running-" + id + "-" + Date.now()); fs.writeFileSync(running, "");
+  const n = fs.readdirSync(dir).filter((f) => f.startsWith("running-")).length;
+  fs.appendFileSync(path.join(dir, "concurrency"), n + "\\n");
+  turn = { running, timers: [] };
+  out({ type: "agent_start" });
+  out({ type: "message_start", message: { role: "user", content: msg } }); out({ type: "message_end", message: { role: "user", content: msg } });
+  const task = msg;
+  if (/stream/.test(task)) {
+    const big = "HEAD" + "z".repeat(20000) + "TAIL"; const cmd = { command: "cat big.txt" };
+    const evs = [
+      { type: "turn_start" },
+      { type: "message_start", message: { role: "assistant", content: [], stopReason: "pending" } },
+      { type: "message_update", usage: { output: 1 }, assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+      { type: "message_update", usage: { output: 3 }, assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Look at " } },
+      { type: "message_update", usage: { output: 5 }, assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "the files." } },
+      { type: "message_update", usage: { output: 5 }, assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "Look at the files." } },
+      { type: "message_update", usage: { output: 6 }, assistantMessageEvent: { type: "toolcall_start", contentIndex: 1, id: "call_1", toolName: "bash" } },
+      { type: "message_update", usage: { output: 9 }, assistantMessageEvent: { type: "toolcall_delta", contentIndex: 1, delta: "{\\"command\\":" } },
+      { type: "message_update", usage: { output: 12 }, assistantMessageEvent: { type: "toolcall_end", contentIndex: 1, toolCall: { type: "toolCall", id: "call_1", name: "bash", arguments: cmd } } },
+      { type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: "Look at the files." }, { type: "toolCall", id: "call_1", name: "bash", arguments: cmd }], usage: { input: 100, output: 20 }, stopReason: "toolUse" } },
+      { type: "tool_execution_start", toolCallId: "call_1", toolName: "bash", args: cmd },
+      { type: "tool_execution_update", toolCallId: "call_1", toolName: "bash", args: cmd, partialResult: { content: [{ type: "text", text: "HEAD" }], details: {} } },
+      { type: "tool_execution_end", toolCallId: "call_1", toolName: "bash", result: { content: [{ type: "text", text: big }], details: {} }, isError: false },
+      { type: "message_start", message: { role: "toolResult", toolCallId: "call_1", content: [{ type: "text", text: big }] } },
+      { type: "message_end", message: { role: "toolResult", toolCallId: "call_1", content: [{ type: "text", text: big }] } },
+      { type: "turn_end" }, { type: "turn_start" },
+      { type: "message_start", message: { role: "assistant", content: [], stopReason: "pending" } },
+      { type: "message_update", usage: { output: 1 }, assistantMessageEvent: { type: "text_start", contentIndex: 0 } },
+      { type: "message_update", usage: { output: 4 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Found it: " } },
+      { type: "message_update", usage: { output: 8 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "line 3." } },
+      { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Found it: line 3." }], usage: { input: 150, output: 10 }, stopReason: "stop" } },
+      { type: "turn_end" },
+    ];
+    let i = 0; const tick = () => { if (!turn) return; if (i < evs.length) { out(evs[i++]); later(15, tick); } else settle(); }; tick();
+    return;
+  }
+  if (/hang/.test(task)) {   // works until stopped
+    out({ type: "message_start", message: { role: "assistant", content: [] } });
+    out({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "working" } });
+    return;
+  }
+  if (/ask first/.test(task)) {   // an extension's dialog, answered by the parent
+    uiWait = (r) => { reply(\`Answer: \${r.cancelled ? "cancelled" : r.value}\`); settle(); };
+    out({ type: "extension_ui_request", id: "ui-1", method: "select", title: "Allow?", options: ["Allow once", "Deny"] });
+    return;
+  }
+  out({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } });
+  later(/steer/.test(task) ? 400 : 150, () => {
+    if (/slow/.test(task)) return;   // never answers; only an abort ends it
+    if (/fail/.test(task)) { process.stderr.write("boom"); try { fs.unlinkSync(turn.running); } catch {} process.exit(3); }
+    for (const s of steers.splice(0)) { out({ type: "message_start", message: { role: "user", content: s } }); out({ type: "message_end", message: { role: "user", content: s } }); reply(\`Steered: \${s}\`); }
+    const text = /big/.test(task) ? "x".repeat(60 * 1024) : "Result for: " + task.replace(/^Task: /, "");
+    reply(text); settle();
+  });
 }
-if (/hang/.test(task)) {   // works until stopped
-  out({ type: "message_start", message: { role: "assistant", content: [] } });
-  out({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "working" } });
-  setInterval(() => {}, 1000);
-  return;
-}
-out({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } });
-setTimeout(() => {
-  if (/slow/.test(task)) return;   // never answers; only a timeout ends it
-  if (/fail/.test(task)) { process.stderr.write("boom"); fs.unlinkSync(running); process.exit(3); }
-  const text = /big/.test(task) ? "x".repeat(60 * 1024) : "Result for: " + task.replace(/^Task: /, "");
-  out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], usage: { input: 10, output: 5 } } });
-  fs.unlinkSync(running); process.exit(0);
-}, 150);
-if (/slow/.test(task)) setTimeout(() => {}, 60000);
+let buf = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (d) => {
+  buf += d;
+  for (let i = buf.indexOf("\\n"); i >= 0; i = buf.indexOf("\\n")) {
+    const line = buf.slice(0, i); buf = buf.slice(i + 1);
+    if (!line.trim()) continue;
+    const c = JSON.parse(line);
+    const ok = (data) => out({ type: "response", id: c.id, command: c.type, success: true, ...(data ? { data } : {}) });
+    if (c.type === "extension_ui_response") { const w = uiWait; uiWait = null; w?.(c); continue; }
+    log({ type: c.type, message: c.message, streamingBehavior: c.streamingBehavior, command: c.command, provider: c.provider, modelId: c.modelId, level: c.level });
+    if (c.type === "prompt") {
+      if (first) { first = false; fs.writeFileSync(path.join(dir, "call-" + id + ".json"), JSON.stringify({ argv, task: c.message, env: { role: process.env.LETS_CODE_ROLE, depth: process.env.LETS_CODE_SUBAGENT_DEPTH }, agentDir: process.env.PI_CODING_AGENT_DIR, cwd: process.cwd(), prompt: ap >= 0 ? fs.readFileSync(argv[ap + 1], "utf8") : "" })); }
+      if (turn) { if (c.streamingBehavior !== "steer" && c.streamingBehavior !== "followUp") { out({ type: "response", id: c.id, command: "prompt", success: false, error: "busy" }); continue; } steers.push(c.message); ok({ disposition: "queued" }); continue; }
+      ok({ disposition: "started" }); startTurn(c.message); continue;
+    }
+    if (c.type === "abort") { if (turn) settle("aborted"); ok(); continue; }
+    if (c.type === "bash") { ok({ output: "ran: " + c.command, exitCode: 0 }); continue; }
+    ok();
+  }
+});
+process.stdin.on("end", () => process.exit(0));
 `);
 chmodSync(join(bin, "pi"), 0o755);
 const fake = join(work, "fake"); mkdirSync(fake); process.env.FAKE_PI_DIR = fake;
@@ -180,17 +224,17 @@ async function load(env = {}) {
 	t("single: result text", /Result for: find the config/.test(r.content[0].text), true);
 	t("single: usage line", /1 turn, ↑10 ↓5/.test(r.content[0].text), true);
 	const c = calls()[0];
-	t("child argv: its own session file", [c.argv.slice(0, 4), c.argv.slice(5, 7)], [["--mode", "json", "-p", "--session"], ["--provider", "lets-code"]]);
-	const sf = c.argv[4];
+	t("child argv: RPC mode on its own session file", [c.argv.slice(0, 3), c.argv.slice(4, 6)], [["--mode", "rpc", "--session"], ["--provider", "lets-code"]]);
+	const sf = c.argv[3];
 	t("child session file: under the runs dir, named after the run, created 0600 for pi to fill", [sf.startsWith(join(agentDir, "lets-code-runs") + "/"), sf.endsWith(".pi.jsonl"), existsSync(sf), (statSync(sf).mode & 0o777).toString(8)], [true, true, true, "600"]);
 	t("child model/thinking/tools", [c.argv[c.argv.indexOf("--model") + 1], c.argv[c.argv.indexOf("--thinking") + 1], c.argv[c.argv.indexOf("--tools") + 1]], ["test-model", "low", "read,grep"]);
-	t("child task is last arg", c.argv[c.argv.length - 1], "Task: find the config");
+	t("the task is the first prompt, not an argument", [c.task, c.argv.includes("Task: find the config")], ["Task: find the config", false]);
 	t("child prompt file content", /"scout" agent\. finds things[\s\S]*You look around\./.test(c.prompt), true);
 	t("child role from agent file, depth 1", c.env, { role: "plan", depth: "1" });
 	t("child cwd", c.cwd, work);
 	const r2 = await h.run({ agent: "worker", task: "x" });
-	t("worker inherits parent mode as role", calls().find((x) => /Task: x$/.test(x.argv.at(-1))).env.role, "ask");
-	t("agent without thinking runs at medium", (({ argv }) => argv[argv.indexOf("--thinking") + 1])(calls().find((x) => /Task: x$/.test(x.argv.at(-1)))), "medium");
+	t("worker inherits parent mode as role", calls().find((x) => /Task: x$/.test(x.task)).env.role, "ask");
+	t("agent without thinking runs at medium", (({ argv }) => argv[argv.indexOf("--thinking") + 1])(calls().find((x) => /Task: x$/.test(x.task))), "medium");
 	t("unknown agent lists agents", (await h.run({ agent: "nope", task: "x" })).content[0].text.includes("- scout: finds things"), true);
 	t("no args lists agents, not an error", (await h.run({})).isError, false);
 	t("failure reported", (({ isError, content }) => [isError, /exit 3/.test(content[0].text) && /boom/.test(content[0].text)])(await h.run({ agent: "worker", task: "please fail" })), [true, true]);
@@ -208,7 +252,7 @@ async function load(env = {}) {
 	t("parallel: too many", (await h.run({ tasks: Array.from({ length: 9 }, () => ({ agent: "worker", task: "x" })) })).isError, true);
 	const ch = await h.run({ chain: [{ agent: "scout", task: "look" }, { agent: "worker", task: "use {previous}" }] });
 	t("chain: steps numbered", /step 1[\s\S]*step 2/.test(ch.content[0].text), true);
-	t("chain: previous substituted", calls().some((c) => /Task: use Result for: look$/.test(c.argv.at(-1))), true);
+	t("chain: previous substituted", calls().some((c) => /Task: use Result for: look$/.test(c.task)), true);
 	const stop = await h.run({ chain: [{ agent: "worker", task: "fail now" }, { agent: "worker", task: "never" }] });
 	t("chain: stops after failure", [stop.isError, /step 2/.test(stop.content[0].text)], [true, false]);
 }
@@ -266,21 +310,21 @@ async function load(env = {}) {
 	t("shown once its env is set", /\bre\b/.test(on.tool.description), true);
 	const r = await on.run({ agent: "re", task: "inspect /bin/true" });
 	t("agent type run: not an error", r.isError, false);
-	const c = calls().find((x) => x.argv.at(-1) === "Task: inspect /bin/true");
+	const c = calls().find((x) => x.task === "Task: inspect /bin/true");
 	const after = (flag) => c.argv.flatMap((v, i) => (v === flag ? [c.argv[i + 1]] : []));
 	t("child gets agent_dir as PI_CODING_AGENT_DIR", c.agentDir, join(rea, "agent"));
 	t("child gets each skill", after("--skill"), [join(rea, "skill-a"), join(rea, "skill-b")]);
 	t("child gets the agent prompt, then append_prompt", [after("--append-system-prompt").length, after("--append-system-prompt")[1]], [2, join(rea, "prompt.md")]);
-	t("child task still last", c.argv.at(-1), "Task: inspect /bin/true");
+	t("child task: the first prompt", c.task, "Task: inspect /bin/true");
 	// no body, own instructions: exactly those (REA sees what rea/run gave it), no generic preamble
 	writeFileSync(join(agentDir, "agents", "re2.md"), fm(full).replace("name: re", "name: re2").replace("---\nbody\n", "---\n"));
 	const on2 = await load();
 	await on2.run({ agent: "re2", task: "inspect /bin/false" });
-	const c2 = calls().find((x) => x.argv.at(-1) === "Task: inspect /bin/false");
+	const c2 = calls().find((x) => x.task === "Task: inspect /bin/false");
 	const after2 = (flag) => c2.argv.flatMap((v, i) => (v === flag ? [c2.argv[i + 1]] : []));
 	t("no body + append_prompt: only its own instructions", after2("--append-system-prompt"), [join(rea, "prompt.md")]);
 	rmSync(join(agentDir, "agents", "re2.md"));
-	t("other agents keep the parent's agent dir", calls().find((x) => x.argv.at(-1) === "Task: find the config").agentDir, agentDir);
+	t("other agents keep the parent's agent dir", calls().find((x) => x.task === "Task: find the config").agentDir, agentDir);
 	const started = Date.now();
 	const slow = await on.run({ agent: "slow", task: "slow down" });
 	t("timeout stops the child", [slow.isError, /timed out after 1s/.test(slow.content[0].text), Date.now() - started < 8000], [true, true, true]);
@@ -319,7 +363,7 @@ async function load(env = {}) {
 	const h = await load({});
 	const { mod } = h;
 	t("view: a /subagents command and the alt+s shortcut", [typeof h.commands.subagents?.handler, typeof h.shortcuts["alt+s"]?.handler], ["function", "function"]);
-	t("view: no new tool and no prompt hook (zero context)", [h.tools.map((x) => x.name), Object.keys(h.handlers).sort()], [["subagent"], ["before_agent_start", "input", "session_shutdown", "session_start", "user_bash"]]);
+	t("view: no new tool and no prompt hook (zero context)", [h.tools.map((x) => x.name), Object.keys(h.handlers).sort()], [["subagent"], ["before_agent_start", "input", "model_select", "session_before_compact", "session_shutdown", "session_start", "thinking_level_select", "user_bash"]]);
 	t("view: nothing about it in the tool's text", /subagents to (watch|switch)|\/subagents|alt\+s|session/.test(JSON.stringify([h.tool.description, h.tool.promptSnippet, h.tool.promptGuidelines, h.tool.parameters])), false);
 	const sections = {};
 	await h.handlers.before_agent_start({ prompt: "fix the typo", systemPromptOptions: { sections } }, { getContextUsage: () => ({ percent: 1 }) });
@@ -465,17 +509,15 @@ async function load(env = {}) {
 	let d1; for (let i = 0; i < 100 && !((d1 = reg().runs.find((r) => r.task === "stream d1")) && d1.events.length > 1 && existsSync(d1.sessionFile)); i++) await new Promise((r) => setTimeout(r, 20));
 	await h.commands.subagents.handler("1", ctxFor());
 	const res = await call;
-	t("switch: into the run's own session file, with reg.switching set while pi tears the turn down", switched[0], [d1.sessionFile, true]);
+	t("switch: into a copy of the run's own session file, with reg.switching set while pi tears the turn down", [switched[0], existsSync(mod.viewFile(d1.sessionFile))], [[mod.viewFile(d1.sessionFile), true], true]);
 	t("switch: reg.switching is cleared after", reg().switching, false);
 	t("detach: the call returns at once, says its runs go on, not an error", [/Still running in the background/.test(res.content[0].text), /worker, scout/.test(res.content[0].text), res.isError], [true, true, false]);
 	t("detach: the children were not stopped", reg().runs.filter((r) => /stream d[12]/.test(r.task)).map((r) => r.status), ["running", "running"]);
-	t("in a run's session: the status names it, read-only, the way back", statuses.at(-1)?.[1], "subagent worker · running · read-only · alt+s back");
+	t("in a run's session: the status names it and the way back", statuses.at(-1)?.[1], "subagent worker · running · alt+s back");
 	t("in a run's session: the live widget is set", typeof widgets["subagent-live"], "function");
-	// read-only: a prompt and a ! command are refused there, the text stays in the editor
+	// a prompt there goes to the child: a steer while it works
 	const inp = await h.handlers.input({ text: "hello", source: "interactive" }, { ui });
-	t("read-only: a prompt is refused and kept in the editor", [inp?.action, editor, /read-only/.test(notes.at(-1)?.[1] ?? "")], ["handled", "hello", true]);
-	let threw = false; try { h.handlers.user_bash({ command: "ls" }); } catch { threw = true; }
-	t("read-only: a ! command is refused", threw, true);
+	t("a prompt in a working child's session: a steer of the child", [inp?.action, reg().children.get(d1.id).queued.includes("hello")], ["handled", true]);
 	t("the view's own command text never goes to the model", (await h.handlers.input({ text: "/subagents back", source: "extension" }, { ui }))?.action, "handled");
 	// the reports wait while the run's session is open
 	for (let i = 0; i < 200 && reg().runs.some((r) => /stream d[12]/.test(r.task) && r.status === "running"); i++) await new Promise((r) => setTimeout(r, 20));
@@ -518,6 +560,81 @@ async function load(env = {}) {
 	t("toggle: the next launch starts with it", mod.readFooterOn(stateFile), true);
 	await again.commands.subagents.handler("toggle", ctxFor());
 	t("toggle: off again", [JSON.parse(readFileSync(stateFile, "utf8")).subagentsFooter, block(120, (_c, s) => s)], [false, []]);
+}
+
+// --- the child process (RPC): steer, Esc, going on, a new start, reports, ! and friends, dialogs, cleanup
+{
+	const reg = () => globalThis[Symbol.for("lets-code.subagent-runs")];
+	const h = await load({});
+	const { mod } = h;
+	const home = join(work, "sessions", "home2.jsonl"); writeFileSync(home, "{}\n");
+	const notes = [], statuses = [], selects = []; let termHandler;
+	const ui = { setStatus: (k, v) => statuses.push([k, v]), notify: (m, ty) => notes.push([ty, m]), theme: { fg: (_c, s) => s }, setWidget() {}, getEditorText: () => "", setEditorText() {},
+		onTerminalInput: (f) => { termHandler = f; return () => {}; }, select: async (title, opts) => { selects.push([title, opts]); return "Allow once"; } };
+	const sm = (file, id, entries = []) => ({ getSessionFile: () => file, getSessionId: () => id, getEntries: () => entries });
+	await h.handlers.session_start({ reason: "startup" }, { hasUI: true, ui, sessionManager: sm(home, "sess-r") });
+	const cmds = () => (existsSync(join(fake, "cmds")) ? readFileSync(join(fake, "cmds"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
+	const wait = async (f, ms = 3000) => { for (let i = 0; i < ms / 20 && !f(); i++) await new Promise((r) => setTimeout(r, 20)); return f(); };
+
+	// a prompt while it works: pi's steer
+	const p = h.run({ agent: "worker", task: "steer me" });
+	let s1; await wait(() => (s1 = reg().runs.find((r) => r.task === "steer me")) && s1.events.length > 1);
+	const res = await mod.childOf(s1).steer("go left");
+	const out = await p;
+	t("steer: queued by the child while it works", [res.success, res.data?.disposition, cmds().some((c) => c.type === "prompt" && c.message === "go left" && c.streamingBehavior === "steer")], [true, "queued", true]);
+	t("steer: the user's message and the child's answer in the transcript", [s1.events.some((e) => e.t === "user" && e.text === "go left"), s1.events.some((e) => e.t === "assistant" && e.blocks?.some((b) => b.text === "Steered: go left"))], [true, true]);
+	t("steer: the call still gets the turn's last reply", /Result for: steer me/.test(out.content[0].text), true);
+
+	// going on with a finished child: the same process, a new turn; its reply goes to the main session, quietly
+	const c1 = mod.childOf(s1);
+	const pid = c1.proc?.pid;
+	h.sent.length = 0;
+	const more = await c1.prompt("and more");
+	t("going on: the same process answers", [c1.proc?.pid === pid, more.text, s1.status], [true, "Result for: and more", "done"]);
+	t("going on: the reply goes to the main session as a quiet message", [h.sent.length, (h.sent[0]?.[0]?.content ?? "").startsWith("worker (a subagent the user went on with in its own session) replied:"), /Result for: and more/.test(h.sent[0]?.[0]?.content ?? ""), h.sent[0]?.[1]], [1, true, true, { triggerTurn: false }]);
+
+	// at rest it goes after the idle time; the next prompt starts it again with the same settings
+	await wait(() => !c1.alive, 5000);
+	t("idle: the process goes after LETS_CODE_SUBAGENT_IDLE_S", c1.alive, false);
+	const again = await c1.prompt("once more");
+	const rc = calls().find((x) => x.task === "once more"), orig = calls().find((x) => x.task === "Task: steer me");
+	t("respawn: a new process with the same args (session file, tools, instructions) and role", [again.text, !!rc, JSON.stringify(rc?.argv) === JSON.stringify(orig?.argv), rc?.env.role === orig?.env.role, rc?.prompt === orig?.prompt], ["Result for: once more", true, true, true, true]);
+
+	// Esc in its session: the turn stops, the process stays
+	const ph = h.run({ agent: "worker", task: "hang about" });
+	let hr; await wait(() => (hr = reg().runs.find((r) => r.task === "hang about")) && hr.events.length > 1);
+	await h.handlers.session_start({ reason: "resume" }, { hasUI: true, ui, sessionManager: sm(mod.viewFile(hr.sessionFile), "child", []) });
+	t("in a child's session: the status has no read-only any more", statuses.at(-1)?.[1], "subagent worker · running · alt+s back");
+	t("in a child's session: a key hook for Esc", typeof termHandler, "function");
+	t("Esc while the child works: consumed", termHandler("\x1b")?.consume, true);
+	const ho = await ph;
+	t("Esc: the turn is stopped, the process stays to go on", [hr.status, /stopped by the user/.test(ho.content[0].text), mod.childOf(hr).alive], ["aborted", true, true]);
+	t("Esc at rest: left to pi", termHandler("\x1b"), undefined);
+
+	// a prompt in its session at rest: a new turn of the child
+	const inp = await h.handlers.input({ text: "next step", source: "interactive" }, { ui });
+	await wait(() => hr.status === "done" && hr.events.some((e) => e.t === "user" && e.text === "next step"));
+	t("input in a child's session at rest: a new turn of the child", [inp?.action, hr.status, hr.events.some((e) => e.t === "assistant" && e.blocks?.some((b) => b.text === "Result for: next step"))], ["handled", "done", true]);
+
+	// ! / /model / thinking / /compact act on the child
+	const cpid = mod.childOf(hr).proc?.pid;
+	const b = h.handlers.user_bash({ command: "ls -la", excludeFromContext: false });
+	h.handlers.model_select({ model: { provider: "lets-code", id: "other-model" }, source: "set" });
+	h.handlers.thinking_level_select({ level: "high" });
+	const comp = h.handlers.session_before_compact({ reason: "manual", customInstructions: "keep it short" });
+	await wait(() => ["bash", "set_model", "set_thinking_level", "compact"].every((k) => cmds().some((c) => c.type === k && c.pid === cpid)));
+	t("! in a child's session: runs in the child", [/own process/.test(b?.result?.output ?? ""), cmds().some((c) => c.type === "bash" && c.command === "ls -la" && c.pid === cpid)], [true, true]);
+	t("/model, thinking, /compact: passed on to the child; the copy is never compacted", [cmds().some((c) => c.type === "set_model" && c.modelId === "other-model"), cmds().some((c) => c.type === "set_thinking_level" && c.level === "high"), cmds().some((c) => c.type === "compact"), comp?.cancel], [true, true, true, true]);
+	await h.handlers.session_start({ reason: "resume" }, { hasUI: true, ui, sessionManager: sm(home, "sess-r") });
+
+	// a dialog of a child's extension: asked here, with the agent's name
+	const ask = await h.run({ agent: "worker", task: "ask first" });
+	t("a child's dialog is asked here, with the agent's name", [selects[0]?.[0], ask.content[0].text.includes("Answer: Allow once")], ["worker: Allow?", true]);
+
+	// the main session ends: no child is left
+	await h.handlers.session_shutdown({ reason: "quit" });
+	await wait(() => [...(reg().children?.values() ?? [])].every((c) => !c.alive), 6000);
+	t("quit: every child process goes", [...(reg().children?.values() ?? [])].filter((c) => c.alive).length, 0);
 }
 
 rmSync(work, { recursive: true, force: true });

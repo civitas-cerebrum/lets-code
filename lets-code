@@ -3327,7 +3327,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_e: any, ctx: any) => {
 		// a subagent's own session, opened from /subagents: read-only, and its
 		// process may still be writing it, so nothing here may append to it
-		if (/[\\/]lets-code-runs[\\/][^\\/]+[\\/][^\\/]+\.pi\.jsonl$/.test(String(ctx?.sessionManager?.getSessionFile?.() ?? ""))) return;
+		if (/[\\/]lets-code-runs[\\/][^\\/]+[\\/][^\\/]+\.(pi|view)\.jsonl$/.test(String(ctx?.sessionManager?.getSessionFile?.() ?? ""))) return;
 		if (AUTO && pi.getThinkingLevel() !== BASE) pi.setThinkingLevel(BASE as any);
 		if (AUTO && PLAN) {
 			planning = true;
@@ -4099,16 +4099,17 @@ pi_write_subagent_extension() {
 // lacks are dropped), effort -> thinking, permissionMode plan -> the
 // readonly role; model, color and the rest are ignored (one model here).
 //
-// Subagent sessions: each child runs on a real pi session file of its own
-// (--session, under lets-code-runs/), and /subagents (or
-// LETS_CODE_SUBAGENT_KEY, default alt+s; "none" turns the key off) switches
-// the TUI into it, live while it works, and back (see "subagent sessions"
+// Subagent sessions: each child is a pi in RPC mode on a real session file of
+// its own (--session, under lets-code-runs/; see "the child process"), and
+// /subagents (or LETS_CODE_SUBAGENT_KEY, default alt+s; "none" turns the key
+// off) switches the TUI into it, live while it works, and back; there you
+// go on with the child as with the main session (see "subagent sessions"
 // below; subagent-view.ts draws the picker, the footer list and the live
-// part). While one runs, the footer says so, with the key. UI only: no tool
-// text, prompt or context changes.
+// part). While one runs, the footer says so, with the key. No tool text,
+// prompt or context changes.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -4282,6 +4283,8 @@ export interface RunRecord {
 	started: number; ended?: number; status: RunStatus; exitCode?: number; turns: number; input: number; output: number; live?: number;
 	parent?: RunMeta; events: RunEvent[]; dropped: number; final?: string; ver: number; seenTask?: boolean;
 	sessionFile?: string;   // the child's own pi session file
+	spawn?: Spawn;          // how its process starts (again): args, environment, folder
+	home?: string;          // the session file of the main session it belongs to
 }
 export const TOOL_OUT_CAP = 6000;
 export const TEXT_CAP = 32000;
@@ -4350,7 +4353,7 @@ export function addRun(rec: RunRecord): void {
 	reg.runs.push(rec);
 	const done = reg.runs.filter((r) => r.status !== "running").sort((a, b) => (b.ended ?? b.started) - (a.ended ?? a.started));
 	const drop = new Set(done.slice(KEEP_RUNS).map((r) => r.id));
-	if (drop.size) reg.runs = reg.runs.filter((r) => !drop.has(r.id));
+	if (drop.size) { reg.runs = reg.runs.filter((r) => !drop.has(r.id)); for (const id of drop) killChild(id); }
 }
 const openAssistant = (rec: RunRecord) => { for (let i = rec.events.length - 1; i >= 0; i--) { const e = rec.events[i]; if (e.t === "assistant") return e.done ? undefined : e; } return undefined; };
 const toolEv = (rec: RunRecord, id: string | undefined, name?: string) => {
@@ -4462,7 +4465,8 @@ export function pruneRuns(session: string): void {
 		// a run is its transcript and its session file: pruned together
 		for (const { n } of byTime(dir, readdirSync(dir).filter((f) => f.endsWith(".json"))).slice(KEEP_RUNS)) {
 			rmSync(join(dir, n), { force: true });
-			rmSync(join(dir, n.replace(/\.json$/, ".pi.jsonl")), { force: true });
+			for (const ext of [".pi.jsonl", ".view.jsonl", ".prompt.md"]) rmSync(join(dir, n.replace(/\.json$/, ext)), { force: true });
+			killChild(n.replace(/\.json$/, ""));
 		}
 		for (const { n } of byTime(root, readdirSync(root)).slice(RUNS_SESSIONS)) rmSync(join(root, n), { recursive: true, force: true });
 	} catch { /* nothing to prune */ }
@@ -4498,74 +4502,261 @@ export function useSession(session: string): void {
 }
 
 
+// ------------------------------------------------------------ the child process
+// Each run is one pi in RPC mode (--mode rpc) on its own session file, with
+// the agent's tools, thinking level, skills, role and instructions. The
+// first prompt is the task; the call that started it gets the child's last
+// reply when that turn settles (agent_settled), as with -p before. The
+// process then stays, idle, so the user can go on with it from its session
+// (see "subagent sessions"): a prompt while it works is a steer, one while
+// it is idle a new turn, Esc aborts the turn. An idle child goes after
+// IDLE_MS, when its run is pruned, when the main session ends or pi quits;
+// the next prompt starts it again on the same file with the same settings
+// (rec.spawn, saved with the transcript, so this also works after a
+// restart). A turn the user started gets its reply to the main session as a
+// message (reportContinuation), so the model there stays informed.
+//
+// Dialogs a child's extensions open (the mandate asking before a command,
+// say) come over RPC as extension_ui_request and are shown in this TUI with
+// the agent's name; without a UI they are answered as cancelled (the
+// mandate then denies, as it did without a UI before).
+export const IDLE_MS = Math.max(50, Math.round(Number(process.env.LETS_CODE_SUBAGENT_IDLE_S ?? "300") * 1000) || 300_000);
+export const ABORT_WAIT_MS = 5000;
+export interface Spawn { args: string[]; env: Record<string, string>; unset?: string[]; cwd: string }
+interface Turn {
+	r: RunResult; resolve: (r: RunResult) => void; first: boolean;
+	stopped: boolean; aborting: boolean; stopReason?: string; error?: string;
+	onProgress?: (line: string) => void; timer?: ReturnType<typeof setTimeout>; killTimer?: ReturnType<typeof setTimeout>; cleanup?: () => void;
+}
+const lastText = (c: unknown) => (typeof c === "string" ? c : Array.isArray(c) ? c.filter((x: any) => x?.type === "text").map((x: any) => x.text).join("\n") : "");
+export class Child {
+	rec: RunRecord; proc?: ReturnType<typeof spawn>; buf = ""; seq = 0; stderr = "";
+	waiting = new Map<string, (res: any) => void>();
+	turn?: Turn; idle?: ReturnType<typeof setTimeout>;
+	queued: string[] = [];   // steers sent, not yet in the conversation
+	constructor(rec: RunRecord) { this.rec = rec; }
+	get alive(): boolean { return !!this.proc && this.proc.exitCode === null && this.proc.signalCode === null; }
+	get busy(): boolean { return !!this.turn; }
+	// a child at rest must not keep pi running (print mode exits; the pipes close it)
+	private hold(on: boolean) {
+		const p: any = this.proc; if (!p) return;
+		for (const x of [p, p.stdin, p.stdout, p.stderr]) { try { on ? x?.ref?.() : x?.unref?.(); } catch { /* gone */ } }
+	}
+	start(): boolean {
+		if (this.alive) return true;
+		const s = this.rec.spawn;
+		if (!s) { this.stderr = "this run predates restartable subagents"; return false; }
+		const env: Record<string, string | undefined> = { ...process.env, ...s.env };
+		for (const k of s.unset ?? []) delete env[k];
+		let p: ReturnType<typeof spawn>;
+		try { p = spawn("pi", s.args, { cwd: s.cwd, env: env as NodeJS.ProcessEnv, stdio: ["pipe", "pipe", "pipe"] }); }
+		catch (e) { this.stderr = e instanceof Error ? e.message : String(e); return false; }
+		this.proc = p; this.buf = ""; this.stderr = "";
+		p.stdout!.setEncoding("utf8");
+		p.stdout!.on("data", (d: string) => {
+			this.buf += d;
+			for (let i = this.buf.indexOf("\n"); i >= 0; i = this.buf.indexOf("\n")) { const line = this.buf.slice(0, i).replace(/\r$/, ""); this.buf = this.buf.slice(i + 1); this.handle(line); }
+		});
+		p.stderr!.on("data", (d) => { this.stderr = (this.stderr + d.toString()).slice(-4000); });
+		p.stdin!.on("error", () => { /* it went away; close says how */ });
+		p.on("error", (e) => { this.stderr += `\n${e.message}`; this.exited(p, 1); });
+		p.on("close", (code) => { if (this.buf.trim()) this.handle(this.buf); this.buf = ""; this.exited(p, code); });
+		this.hold(true);
+		return true;
+	}
+	write(o: unknown): void { try { this.proc?.stdin?.write(JSON.stringify(o) + "\n"); } catch { /* gone */ } }
+	send(cmd: Record<string, unknown>): Promise<any> {
+		if (!this.alive) return Promise.resolve({ success: false, error: `${this.rec.agent} is not running` });
+		const id = `lc${++this.seq}`;
+		return new Promise((res) => { this.waiting.set(id, res); this.write({ ...cmd, id }); });
+	}
+	handle(line: string): void {
+		if (!line.trim()) return;
+		let ev: any; try { ev = JSON.parse(line); } catch { return; }
+		if (ev?.type === "response") { const w = this.waiting.get(ev.id); if (w) { this.waiting.delete(ev.id); w(ev); } return; }
+		if (ev?.type === "extension_ui_request") { void childDialog(this, ev); return; }
+		if (ev?.type === "message_end" && ev.message?.role === "user" && this.queued.length) {
+			const t = lastText(ev.message.content).trim(), i = this.queued.findIndex((q) => q.trim() === t);
+			if (i >= 0) this.queued.splice(i, 1);
+		}
+		if (recordEvent(this.rec, ev)) { saveRun(this.rec); notifyRuns(this.rec); }
+		const t = this.turn;
+		if (!t) return;
+		if (ev.type === "message_end" && ev.message?.role === "assistant") {
+			const r = t.r, m = ev.message;
+			r.turns++; const u = m.usage; if (u) { r.input += u.input || 0; r.output += u.output || 0; }
+			const text = lastText(m.content); if (text.trim()) r.text = text;
+			t.stopReason = m.stopReason; t.error = m.errorMessage;
+		}
+		if (ev.type === "tool_execution_start" && t.onProgress) t.onProgress(`${this.rec.agent}: ${ev.toolName} ${ev.toolName === "bash" ? String(ev.args?.command ?? "").slice(0, 60) : String(ev.args?.path ?? "")}`);
+		if (ev.type === "agent_settled") this.endTurn();
+	}
+	// one turn: the task (first) or the user's next prompt; resolves when it settles
+	prompt(text: string, o: { first?: boolean; signal?: AbortSignal; timeout?: number; onProgress?: (line: string) => void } = {}): Promise<RunResult> {
+		const rec = this.rec, reg = registry();
+		if (this.idle) { clearTimeout(this.idle); this.idle = undefined; }
+		const r: RunResult = { agent: rec.agent, task: text, text: "", exitCode: 0, stderr: "", turns: 0, input: 0, output: 0 };
+		if (!o.first) {   // going on: the clock goes on from the time it ran
+			rec.started = Date.now() - (rec.ended !== undefined ? rec.ended - rec.started : 0);
+			rec.ended = undefined; rec.status = "running"; rec.exitCode = undefined; rec.live = 0;
+			saveRun(rec, true); notifyRuns(rec);
+		}
+		return new Promise((resolve) => {
+			const t: Turn = { r, resolve, first: !!o.first, stopped: false, aborting: false, onProgress: o.onProgress };
+			this.turn = t;
+			// the stop of the picker, /subagents stop and Esc in its session: this child only
+			reg.stops.set(rec.id, () => this.abort(true));
+			if (!this.start()) { r.exitCode = 1; r.stderr = this.stderr || "pi did not start"; this.endTurn(); return; }
+			this.hold(true);
+			if (o.timeout) t.timer = setTimeout(() => { r.timedOut = o.timeout; this.abort(); }, o.timeout * 1000);
+			if (o.signal) {
+				const onAbort = () => this.abort();
+				if (o.signal.aborted) onAbort(); else { o.signal.addEventListener("abort", onAbort, { once: true }); t.cleanup = () => o.signal!.removeEventListener("abort", onAbort); }
+			}
+			void this.send({ type: "prompt", message: text }).then((res) => {
+				if (this.turn !== t) return;
+				if (!res?.success) { r.exitCode = 1; r.stderr = String(res?.error ?? this.stderr ?? "the prompt was refused"); this.endTurn(); }
+				else if (res.data?.disposition === "handled") this.endTurn();   // an extension command: no turn
+			});
+		});
+	}
+	// a prompt while it works: a steer (pi's Enter while the main session streams)
+	steer(text: string): Promise<any> {
+		this.queued.push(text); notifyRuns(this.rec);
+		return this.send({ type: "prompt", message: text, streamingBehavior: "steer" }).then((res) => {
+			if (!res?.success) { const i = this.queued.indexOf(text); if (i >= 0) this.queued.splice(i, 1); notifyRuns(this.rec); }
+			return res;
+		});
+	}
+	// stop the turn (the process stays); one that does not settle in time goes with its process
+	abort(stopped = false): void {
+		const t = this.turn; if (!t) return;
+		if (stopped) t.stopped = true;
+		if (t.aborting) return;
+		t.aborting = true;
+		void this.send({ type: "abort" });
+		t.killTimer = setTimeout(() => { if (this.turn === t) this.kill(true); }, ABORT_WAIT_MS);
+		(t.killTimer as any).unref?.();
+	}
+	endTurn(): void {
+		const t = this.turn; if (!t) return;
+		this.turn = undefined;
+		if (t.timer) clearTimeout(t.timer); if (t.killTimer) clearTimeout(t.killTimer); t.cleanup?.();
+		const r = t.r, rec = this.rec;
+		registry().stops.delete(rec.id);
+		this.queued = [];
+		if (r.timedOut) r.exitCode = r.exitCode || 124;
+		else if (r.exitCode === 0 && (t.aborting || t.stopReason === "aborted")) r.exitCode = 130;
+		else if (r.exitCode === 0 && t.stopReason === "error") { r.exitCode = 1; r.stderr ||= String(t.error ?? "the model request failed"); }
+		if (t.stopped && !r.timedOut) r.stopped = true;
+		finishRun(rec, r, !r.timedOut && (t.stopped || t.aborting || t.stopReason === "aborted")); saveRun(rec, true); pruneRuns(rec.session); notifyRuns(rec);
+		t.resolve(r);
+		if (!t.first) reportContinuation(rec, r);
+		if (!this.alive) return;
+		// at rest: without a UI no one can go on with it; else it waits IDLE_MS
+		if (!(registry() as any).ui) { this.kill(); return; }
+		this.hold(false);
+		this.idle = setTimeout(() => this.kill(), IDLE_MS);
+		(this.idle as any).unref?.();
+	}
+	exited(p: ReturnType<typeof spawn>, code: number | null): void {
+		if (p !== this.proc) return;
+		this.proc = undefined;
+		if (this.idle) { clearTimeout(this.idle); this.idle = undefined; }
+		for (const w of this.waiting.values()) w({ success: false, error: `${this.rec.agent} exited` });
+		this.waiting.clear();
+		if (this.turn) { const r = this.turn.r; r.exitCode = r.timedOut ? code || 124 : code || 1; r.stderr = this.stderr; this.endTurn(); }
+	}
+	// close its input (pi's orderly exit), then the signals
+	kill(now = false): void {
+		const p = this.proc; if (!p) return;
+		if (this.idle) { clearTimeout(this.idle); this.idle = undefined; }
+		try { p.stdin?.end(); } catch { /* gone */ }
+		const term = setTimeout(() => { try { p.kill("SIGTERM"); } catch { /* gone */ } }, now ? 0 : 2000); (term as any).unref?.();
+		const hard = setTimeout(() => { try { p.kill("SIGKILL"); } catch { /* gone */ } }, now ? 3000 : 5000); (hard as any).unref?.();
+	}
+}
+type ChildReg = Registry & { children?: Map<string, Child>; exitHook?: boolean; ui?: any };
+export function childOf(rec: RunRecord): Child {
+	const reg = registry() as ChildReg;
+	const m = (reg.children ??= new Map());
+	let c = m.get(rec.id);
+	if (!c) { c = new Child(rec); m.set(rec.id, c); }
+	else if (c.rec !== rec && !c.busy) c.rec = rec;   // the same run, read again from disk
+	if (!reg.exitHook) {   // pi quits: no child outlives it
+		reg.exitHook = true;
+		process.once("exit", () => { for (const x of (registry() as ChildReg).children?.values() ?? []) { try { x.proc?.kill("SIGTERM"); } catch { /* gone */ } } });
+	}
+	return c;
+}
+export function killChild(id: string): void { const reg = registry() as ChildReg; reg.children?.get(id)?.kill(); reg.children?.delete(id); }
+export function killChildren(): void { const reg = registry() as ChildReg; for (const [id, c] of reg.children ?? []) { c.abort(); c.kill(); reg.children!.delete(id); } }
+// a dialog of a child's extension, shown here with the agent's name
+async function childDialog(c: Child, ev: any): Promise<void> {
+	const reg = registry() as ChildReg & { view?: { viewing?: string } }, ui = reg.ui, name = c.rec.agent;
+	const reply = (o: Record<string, unknown>) => c.write({ type: "extension_ui_response", id: ev.id, ...o });
+	const m = String(ev.method ?? "");
+	if (m === "notify") { if (ui && reg.view?.viewing === c.rec.id) { try { ui.notify(`${name}: ${ev.message ?? ""}`, ev.notifyType ?? "info"); } catch { /* no UI */ } } return; }
+	if (!["select", "confirm", "input", "editor"].includes(m)) return;   // statuses, widgets, titles: this TUI has its own
+	if (!ui) { reply({ cancelled: true }); return; }
+	const title = `${name}: ${ev.title ?? ""}`, opts = ev.timeout ? { timeout: ev.timeout } : undefined;
+	try {
+		if (m === "select") { const v = await ui.select(title, ev.options ?? [], opts); reply(v === undefined ? { cancelled: true } : { value: v }); }
+		else if (m === "confirm") { const v = await ui.confirm(title, ev.message ?? "", opts); reply({ confirmed: !!v }); }
+		else if (m === "input") { const v = await ui.input(title, ev.placeholder, opts); reply(v === undefined ? { cancelled: true } : { value: v }); }
+		else { const v = await ui.editor(title, ev.prefill); reply(v === undefined ? { cancelled: true } : { value: v }); }
+	} catch { reply({ cancelled: true }); }
+}
+
 // also the runner of the Claude Code adapter's workflow agents
 export function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSignal | undefined, onProgress?: (line: string) => void, meta?: RunMeta): Promise<RunResult> {
-	const r: RunResult = { agent: agent.name, task, text: "", exitCode: 0, stderr: "", turns: 0, input: 0, output: 0 };
 	const rec = newRun(agent, task, cwd, meta);
 	// the child's own session, next to its transcript: a real pi session file
-	// outside pi's session store, so not in /resume
-	const sessionDir = join(runsRoot(), rec.session || "no-session");
-	// (created empty and 0600 first: pi writes its header into an empty file)
-	try { mkdirSync(sessionDir, { recursive: true, mode: 0o700 }); const f = join(sessionDir, `${rec.id}.pi.jsonl`); writeFileSync(f, "", { mode: 0o600, flag: "wx" }); rec.sessionFile = f; } catch { /* no session file: --no-session */ }
-	const args = ["--mode", "json", "-p", ...(rec.sessionFile ? ["--session", rec.sessionFile] : ["--no-session"])];
+	// outside pi's session store, so not in /resume (created empty and 0600
+	// first: pi writes its header into an empty file); its instructions too,
+	// so a later start finds them
+	const dir = join(runsRoot(), rec.session || "no-session");
+	let sessionArgs = ["--no-session"], promptFile = "";
+	try {
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const f = join(dir, `${rec.id}.pi.jsonl`); writeFileSync(f, "", { mode: 0o600, flag: "wx" });
+		rec.sessionFile = f; sessionArgs = ["--session", f]; promptFile = join(dir, `${rec.id}.prompt.md`);
+	} catch { promptFile = join(mkdtempSync(join(tmpdir(), "lets-code-agent-")), "prompt.md"); }
+	const args = ["--mode", "rpc", ...sessionArgs];
 	if (MODEL) args.push("--provider", process.env.LETS_CODE_PROVIDER || "lets-code", "--model", MODEL);
 	// medium unless the agent file says otherwise: without --thinking a child takes the level
 	// pi last saved in settings.json, i.e. whatever a session last switched to (xhigh included)
 	args.push("--thinking", agent.thinking || "medium");
 	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
 	for (const s of agent.skills ?? []) args.push("--skill", s);
-	const tmp = mkdtempSync(join(tmpdir(), "lets-code-agent-"));
-	const promptFile = join(tmp, "prompt.md");
 	// An agent that brings its own instructions (append_prompt) and has no body
 	// gets exactly those, without the generic preamble (REA: the child sees the
 	// same instructions as through rea/run).
 	if (agent.prompt.trim() || !agent.appendPrompt) {
-		writeFileSync(promptFile, `You are the "${agent.name}" agent. ${agent.description}\n\n${agent.prompt}\n`);
+		writeFileSync(promptFile, `You are the "${agent.name}" agent. ${agent.description}\n\n${agent.prompt}\n`, { mode: 0o600 });
 		args.push("--append-system-prompt", promptFile);
 	}
 	if (agent.appendPrompt) args.push("--append-system-prompt", agent.appendPrompt);
-	args.push(`Task: ${task}`);
-	const env = { ...process.env, LETS_CODE_SUBAGENT_DEPTH: String(DEPTH + 1), LETS_CODE_AGENT_NAME: agent.name, LETS_CODE_ROLE: agent.role || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "" };
-	if (!env.LETS_CODE_ROLE) delete (env as any).LETS_CODE_ROLE;
+	const env: Record<string, string> = { LETS_CODE_SUBAGENT_DEPTH: String(DEPTH + 1), LETS_CODE_AGENT_NAME: agent.name };
+	const role = agent.role || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "";
+	if (role) env.LETS_CODE_ROLE = role;
 	if (agent.agentDir) env.PI_CODING_AGENT_DIR = agent.agentDir;
+	rec.spawn = { args, env, unset: role ? [] : ["LETS_CODE_ROLE"], cwd };
+	const vs = (registry() as any).view;
+	rec.home = vs && !isChildSession(vs.current) ? vs.current || vs.home || undefined : vs?.home || undefined;
 	addRun(rec); saveRun(rec, true); notifyRuns(rec);
-	let stopped = false, finished = false;
-	return new Promise((resolve) => {
-		const child = spawn("pi", args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
-		const timer = agent.timeout ? setTimeout(() => {
-			r.timedOut = agent.timeout;
-			try { child.kill("SIGTERM"); } catch { /* gone */ }
-			setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* gone */ } }, 5000).unref();
-		}, agent.timeout * 1000) : undefined;
-		let buf = "";
-		const handle = (line: string) => {
-			if (!line.trim()) return;
-			let ev: any; try { ev = JSON.parse(line); } catch { return; }
-			if (recordEvent(rec, ev)) { saveRun(rec); notifyRuns(rec); }
-			if (ev.type === "message_end" && ev.message?.role === "assistant") {
-				r.turns++; const u = ev.message.usage; if (u) { r.input += u.input || 0; r.output += u.output || 0; }
-				const c = ev.message.content; const text = typeof c === "string" ? c : Array.isArray(c) ? c.filter((x: any) => x?.type === "text").map((x: any) => x.text).join("\n") : "";
-				if (text.trim()) r.text = text;
-			}
-			if (ev.type === "tool_execution_start" && onProgress) onProgress(`${agent.name}: ${ev.toolName} ${ev.toolName === "bash" ? String(ev.args?.command ?? "").slice(0, 60) : String(ev.args?.path ?? "")}`);
-		};
-		child.stdout.on("data", (d) => { buf += d.toString(); const lines = buf.split("\n"); buf = lines.pop() ?? ""; lines.forEach(handle); });
-		child.stderr.on("data", (d) => { r.stderr += d.toString().slice(0, 4000); });
-		const onAbort = () => { try { child.kill("SIGTERM"); } catch { /* gone */ } };
-		signal?.addEventListener("abort", onAbort, { once: true });
-		// the picker's stop (x): this child only; the others of the call go on
-		registry().stops.set(rec.id, () => { stopped = true; onAbort(); });
-		child.on("error", (e) => { r.exitCode = 1; r.stderr += `\n${e.message}`; finish(); });
-		child.on("close", (code) => { if (buf) handle(buf); r.exitCode = r.timedOut ? (code || 124) : code ?? 1; finish(); });
-		const finish = () => {
-			if (finished) return; finished = true;
-			if (timer) clearTimeout(timer); signal?.removeEventListener("abort", onAbort); try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ok */ }
-			registry().stops.delete(rec.id);
-			if (stopped && !signal?.aborted) r.stopped = true;
-			finishRun(rec, r, stopped || !!signal?.aborted); saveRun(rec, true); pruneRuns(rec.session); notifyRuns(rec);
-			resolve(r);
-		};
-	});
+	return childOf(rec).prompt(`Task: ${task}`, { first: true, signal, timeout: agent.timeout, onProgress });
+}
+// a turn the user started in a run's own session: its reply goes to the main
+// session too (one line of where it comes from, then the reply), held while
+// another session is open; it does not start a turn there
+export const CONTINUED_HEAD = (agent: string) => `${agent} (a subagent the user went on with in its own session) replied:`;
+export function reportContinuation(rec: RunRecord, r: RunResult): void {
+	if (!rec.home) return;
+	const reg = registry() as any;
+	const reply = r.text.trim() || (r.stopped ? "(stopped by the user)" : r.stderr.trim() ? `(no reply; ${r.stderr.trim().slice(-300)})` : "(no reply)");
+	(reg.pending ??= []).push({ home: rec.home, text: `${CONTINUED_HEAD(rec.agent)}\n\n${cap(reply)}`, isError: r.exitCode !== 0, quiet: true });
+	notifyRuns(); flushPending();
 }
 export function cap(s: string): string { if (Buffer.byteLength(s, "utf8") <= OUTPUT_CAP) return s; let t = s.slice(0, OUTPUT_CAP); while (Buffer.byteLength(t, "utf8") > OUTPUT_CAP) t = t.slice(0, -1); return `${t}\n\n[output truncated at 50 KB]`; }
 export function render(r: RunResult): string {
@@ -4626,30 +4817,37 @@ export function orchestration(agents: AgentDef[]): string {
 
 // ------------------------------------------------------------ subagent sessions
 // UI only: a command, a shortcut, a status, a widget and footer lines; no
-// tool, prompt or context change (the one exception, a note in a call that
-// detaches, is below). Every child runs with --session on <run id>.pi.jsonl
-// next to its transcript: a real pi session file, outside pi's session
-// store, so it is not in /resume's list. /subagents (or LETS_CODE_SUBAGENT_KEY,
-// default alt+s; "none" turns the key off) opens a picker in place of the
-// editor: the main session, then the runs, running first. Enter switches
-// the TUI into that session with pi's own switchSession, the way /resume
-// does: pi draws it as it draws any session. In a subagent's session the
-// status says whose it is and that it is read-only; alt+s or /subagents
-// back returns to the main session. Prompts and ! commands are refused
-// there: while the child runs, its process owns the file, and continuing a
-// finished one here would run under the main session's tools and role, not
-// the agent's. /subagents <n | name> switches straight to a run;
-// /subagents toggle shows the runs in the footer (remembered).
+// tool, prompt or context change (the exceptions, a note in a call that
+// detaches and the reply of a turn the user started in a child, are below).
+// Every child runs on its own pi session file, <run id>.pi.jsonl next to its
+// transcript, outside pi's session store, so it is not in /resume's list.
+// /subagents (or LETS_CODE_SUBAGENT_KEY, default alt+s; "none" turns the key
+// off) opens a picker in place of the editor: the main session, then the
+// runs, running first. Enter switches the TUI into that run's session with
+// pi's own switchSession, the way /resume does: pi draws it as it draws any
+// session. The status says whose session it is; alt+s or /subagents back
+// returns to the main session; /subagents <n | name> switches straight to
+// a run; /subagents toggle shows the runs in the footer (remembered).
 //
-// How live a running child's session is: pi reads a session file when it
-// opens it, and the child writes each message to it once the message is
-// complete. So pi's own view holds the completed messages, and the message
-// on its way (thinking, text and tool calls token by token, a tool's output
-// as it streams) is drawn under them in a widget above the editor, with
-// pi's own message and tool components, from the child's JSON event stream.
-// Each time the child completes a message, the session is opened again (at
-// most every REFRESH_MS, and once more when it ends), so pi's view catches
-// up and the widget keeps only what is still on its way.
+// The child's session works as the main one does, through the child's own
+// process (its RPC, see "the child process"): a prompt while it works is a
+// steer, one while it rests a new turn (its process starts again when it
+// has gone), Esc aborts its turn, ! and !! run in its process and land in
+// its session, /model and the thinking level are passed on to it, /compact
+// compacts its session. The TUI itself never writes to a child's file: the
+// child is that file's one writer, so the TUI opens a copy of it
+// (<run id>.view.jsonl, copied again at each refresh), and whatever pi
+// appends to the copy (a model or thinking change, a ! command's record)
+// is dropped with it.
+//
+// How live: pi reads a session file when it opens it, and the child writes
+// each message once it is complete. So pi's own view holds the completed
+// messages, and the message on its way (thinking, text and tool calls token
+// by token, a tool's output as it streams, steers not yet taken) is drawn
+// under them in a widget above the editor, with pi's own message and tool
+// components, from the child's event stream. Each time the child's file
+// grows, the session is opened again (at most every REFRESH_MS), so pi's
+// view catches up and the widget keeps only what is still on its way.
 //
 // switchSession exists on a command's ctx only: the shortcut and the
 // refresh send the command (/subagents, /subagents back, /subagents
@@ -4676,9 +4874,9 @@ export function hintText(n: number, key = VIEW_KEY): string {
 // the status in a subagent's session
 export function markerText(r: { agent: string; status: string; exitCode?: number } | undefined, key = VIEW_KEY): string {
 	const back = keyOn(key) ? `${key} back` : "/subagents back";
-	if (!r) return `subagent session · read-only · ${back}`;
+	if (!r) return `subagent session · ${back}`;
 	const st = r.status === "failed" ? (r.exitCode ? `failed (exit ${r.exitCode})` : "failed") : ({ running: "running", done: "done", aborted: "stopped", timeout: "timed out" } as Record<string, string>)[r.status] ?? r.status;
-	return `subagent ${r.agent} · ${st} · read-only · ${back}`;
+	return `subagent ${r.agent} · ${st} · ${back}`;
 }
 // /subagents <arg>: a number (its row in the picker, the main session is 0) or an agent name
 export function pickRun(runs: RunRecord[], arg: string, ordered: (r: RunRecord[]) => RunRecord[]): RunRecord | undefined {
@@ -4687,22 +4885,25 @@ export function pickRun(runs: RunRecord[], arg: string, ordered: (r: RunRecord[]
 	if (/^\d+$/.test(a)) return rs[Number(a) - 1];
 	return rs.find((r) => r.agent === a) ?? rs.find((r) => r.agent.startsWith(a));
 }
-// a child's own session file (under the runs dir) is never the main session
+// a child's own session file, or the copy the TUI opens of it (under the runs dir)
 export function isChildSession(p: string): boolean {
-	return !!p && p.startsWith(`${runsRoot()}${sep}`) && p.endsWith(".pi.jsonl");
+	return !!p && p.startsWith(`${runsRoot()}${sep}`) && /\.(pi|view)\.jsonl$/.test(p);
 }
+export const viewFile = (sessionFile: string) => sessionFile.replace(/\.pi\.jsonl$/, ".view.jsonl");
 export function detachNote(names: string[]): string {
 	return `Still running in the background (the user opened a subagent's session, which ended this turn): ${names.join(", ") || "the runs of this call"}. Their reports follow in a message when they finish; do not start them again.`;
 }
 export const DELIVER_HEAD = "Reports of the subagent call that went on in the background:";
 
-interface Pending { home: string; text: string; isError: boolean }
+// quiet: a reply to a turn the user started in a child; it informs, it starts no turn
+interface Pending { home: string; text: string; isError: boolean; quiet?: boolean }
 interface ViewState {
 	home: string; homeId: string;        // the main session (its file and id)
 	current: string;                     // the session file open now
 	viewing?: string;                    // the run whose session is open
-	loaded?: any;                        // what that session file held when it opened (view.loadedOf)
-	picker: boolean; lastRefresh: number; refreshTimer?: ReturnType<typeof setTimeout>; endRefreshed?: string;
+	loaded?: any;                        // what that session held when it opened (view.loadedOf)
+	loadedSize?: number;                 // the size of the child's file then
+	picker: boolean; lastRefresh: number; refreshTimer?: ReturnType<typeof setTimeout>;
 	footer: boolean;
 }
 type Reg = Registry & { status?: (r?: RunRecord) => void; view?: ViewState; pending?: Pending[]; switching?: boolean; pi?: any; ui?: any };
@@ -4755,8 +4956,8 @@ export function detachable(signal: AbortSignal | undefined, callId: string, work
 		work(inner.signal, job).then(end, (e) => end({ text: `The call failed: ${e instanceof Error ? e.message : String(e)}`, isError: true }));
 	});
 }
-// detached reports for the session that is open now: sent as a message that
-// continues it (a follow-up when it is busy)
+// reports for the session that is open now: a detached call's continues it
+// (a follow-up when it is busy); a continued child's reply only informs it
 export function flushPending(): void {
 	const reg = registry() as Reg, vs = viewState(reg);
 	if (!reg.pending?.length || !reg.pi || !vs.current || isChildSession(vs.current)) return;
@@ -4764,7 +4965,7 @@ export function flushPending(): void {
 	if (!mine.length) return;
 	reg.pending = reg.pending.filter((p) => p.home !== vs.current);
 	for (const p of mine) {
-		try { reg.pi.sendMessage({ customType: CUSTOM_TYPE, content: p.text, display: true }, { triggerTurn: true, deliverAs: "followUp" }); }
+		try { reg.pi.sendMessage({ customType: CUSTOM_TYPE, content: p.text, display: true }, p.quiet ? { triggerTurn: false } : { triggerTurn: true, deliverAs: "followUp" }); }
 		catch { (reg.pending ??= []).push(p); }   // a stale pi (mid-switch): the next session_start sends it
 	}
 }
@@ -4774,12 +4975,14 @@ let view: any;   // subagent-view.ts, once loaded
 const loadView = async () => (view ??= await import(pathToFileURL(join(HERE, "subagent-view.ts")).href));
 let deps: any;
 const loadDeps = async () => { const v = await loadView(); return (deps ??= await v.piDeps()); };
+const sizeOf = (f?: string) => { try { return f ? statSync(f).size : -1; } catch { return -1; } };
 
 function setupSessions(pi: ExtensionAPI) {
 	const api = pi as any;
 	const reg = registry() as Reg;
 	const vs = viewState(reg);
 	const viewed = () => (vs.viewing ? reg.runs.find((r) => r.id === vs.viewing) : undefined);
+	const inChild = () => isChildSession(vs.current);
 	const FOOTER = Symbol.for("lets-code.footer-blocks");
 	const viaFooter = process.env.LETS_CODE_METRICS_ON !== undefined;   // lets-code's footer draws the list
 	let liveTui: any, footTui: any, lastStatus: string | undefined, transcript: any, clock: ReturnType<typeof setInterval> | undefined;
@@ -4790,14 +4993,14 @@ function setupSessions(pi: ExtensionAPI) {
 		if (!reg.ui) return;
 		const running = reg.runs.filter((r) => r.status === "running").length;
 		let text = "";
-		if (isChildSession(vs.current)) {
+		if (inChild()) {
 			text = markerText(viewed());
 			const waiting = (reg.pending ?? []).filter((p) => p.home === vs.home).length;
 			if (waiting) text += ` · ${waiting} report${waiting === 1 ? "" : "s"} waiting in the main session`;
 		} else if (!vs.footer) text = hintText(running);
 		if (text === lastStatus) return;
 		lastStatus = text;
-		try { reg.ui.setStatus("subagents", text ? theme().fg(isChildSession(vs.current) ? "accent" : "dim", text) : undefined); } catch { /* no footer */ }
+		try { reg.ui.setStatus("subagents", text ? theme().fg(inChild() ? "accent" : "dim", text) : undefined); } catch { /* no footer */ }
 	};
 	// the footer list: drawn by lets-code's footer (a block it asks for on
 	// every render), else by a widget below the editor
@@ -4810,16 +5013,16 @@ function setupSessions(pi: ExtensionAPI) {
 			reg.ui.setWidget("subagents-footer", vs.footer ? (tui: any) => { footTui = tui; return { render: (w: number) => footerBlock(w), invalidate() {}, dispose() { if (footTui === tui) footTui = undefined; } }; } : undefined, { placement: "belowEditor" });
 		} catch { /* no widgets */ }
 	};
-	// the live widget of a running child's session
+	// the live widget of a child's session
 	const applyLive = () => {
 		if (!reg.ui) return;
 		const r = viewed();
-		if (!r || !view || !isChildSession(vs.current)) { try { reg.ui.setWidget("subagent-live", undefined); } catch { /* none */ } return; }
+		if (!r || !view || !inChild()) { try { reg.ui.setWidget("subagent-live", undefined); } catch { /* none */ } return; }
 		try {
 			reg.ui.setWidget("subagent-live", (tui: any, th: any) => {
 				liveTui = tui; transcript = new view.Transcript(deps, th?.fg ? th : theme(), tui);
 				return {
-					render: (w: number) => { const x = viewed(); return x ? view.liveLines(x, vs.loaded ?? view.loadedOf([]), { width: w, now: Date.now(), transcript, theme: th?.fg ? th : theme(), deps }) : []; },
+					render: (w: number) => { const x = viewed(); return x ? view.liveLines(x, vs.loaded ?? view.loadedOf([]), { width: w, now: Date.now(), transcript, theme: th?.fg ? th : theme(), deps, queued: (reg as any).children?.get(x.id)?.queued }) : []; },
 					invalidate: () => transcript?.clear(),
 					dispose: () => { if (liveTui === tui) liveTui = undefined; },
 				};
@@ -4828,19 +5031,15 @@ function setupSessions(pi: ExtensionAPI) {
 	};
 	// the view's command, sent from places without a command ctx
 	const command = (args: string) => { try { (reg.pi ?? pi).sendUserMessage(`/subagents${args ? ` ${args}` : ""}`, { expandPromptTemplates: true }); } catch (e) { notify(`subagents: ${e instanceof Error ? e.message : String(e)}`, "error"); } };
-	// open the session again once the child has completed messages it does not show
-	const refreshDue = (r: RunRecord) => {
-		if (r.status !== "running") return vs.endRefreshed !== r.id;
-		return view.tailEvents(r, vs.loaded ?? view.loadedOf([])).some((e: any) => (e.t === "assistant" || e.t === "tool") && e.done);
-	};
+	// open the session again once the child's file has grown
 	const maybeRefresh = () => {
 		const r = viewed();
-		if (!r || !view || !isChildSession(vs.current) || vs.picker || vs.refreshTimer || !refreshDue(r)) return;
+		if (!r?.sessionFile || !inChild() || vs.picker || vs.refreshTimer || sizeOf(r.sessionFile) === vs.loadedSize) return;
 		const wait = Math.max(50, vs.lastRefresh + REFRESH_MS - Date.now());
-		vs.refreshTimer = setTimeout(() => { vs.refreshTimer = undefined; const x = viewed(); if (x && isChildSession(vs.current) && !vs.picker && refreshDue(x)) command("refresh"); }, wait);
+		vs.refreshTimer = setTimeout(() => { vs.refreshTimer = undefined; const x = viewed(); if (x?.sessionFile && inChild() && !vs.picker && sizeOf(x.sessionFile) !== vs.loadedSize) command("refresh"); }, wait);
 		(vs.refreshTimer as any).unref?.();
 	};
-	const onRuns = () => { status(); repaint(); maybeRefresh(); if (!isChildSession(vs.current)) flushPending(); };
+	const onRuns = () => { status(); repaint(); maybeRefresh(); if (!inChild()) flushPending(); };
 	// one listener per process: a reload or a switch loads this module again and replaces the old one's
 	if (reg.status) reg.listeners.delete(reg.status);
 	reg.status = onRuns; reg.listeners.add(onRuns);
@@ -4854,41 +5053,92 @@ function setupSessions(pi: ExtensionAPI) {
 		lastStatus = undefined;
 		if (isChildSession(file)) {
 			// a run's own session: the main session (and its runs) stay as they were
-			const r = reg.runs.find((x) => x.sessionFile === file);
-			vs.viewing = r?.id ?? basename(file).replace(/\.pi\.jsonl$/, "");
+			const r = reg.runs.find((x) => x.sessionFile && (x.sessionFile === file || viewFile(x.sessionFile) === file));
+			vs.viewing = r?.id ?? basename(file).replace(/\.(pi|view)\.jsonl$/, "");
 		} else {
 			vs.home = file; vs.homeId = String(sm?.getSessionId?.() ?? "");
-			vs.viewing = undefined;
+			vs.viewing = undefined; vs.loadedSize = undefined;
 			useSession(vs.homeId);
 		}
 		if (clock) { clearInterval(clock); clock = undefined; }
 		if (isTui(ctx)) {
 			try { await loadDeps(); } catch { /* the view's parts did not load: no picker, no live part */ }
 			if (view) vs.loaded = view.loadedOf(isChildSession(file) ? (sm?.getEntries?.() ?? []) : []);
-			const r = viewed();
-			if (r && r.status !== "running") vs.endRefreshed = r.id;   // opened after its end: nothing more will come
 			applyFooter(); applyLive();
-			// the clocks of running runs move once a second
-			clock = setInterval(() => { if (reg.runs.some((x) => x.status === "running") && (vs.footer || isChildSession(vs.current))) repaint(); }, 1000);
+			// Esc in a child's session aborts the child's turn, as Esc does in the main session
+			if (isChildSession(file) && typeof ctx.ui.onTerminalInput === "function") {
+				try {
+					ctx.ui.onTerminalInput((data: string) => {
+						if (!inChild() || vs.picker || !(deps?.matchesKey ?? ((d: string) => d === "\x1b"))(data, "escape")) return undefined;
+						const r = viewed();
+						if (r?.status !== "running") return undefined;
+						childOf(r).abort(true);
+						notify(`Stopping ${r.agent}'s turn.`, "warning");
+						return { consume: true };
+					});
+				} catch { /* no key hook here */ }
+			}
+			// the clocks of running runs move once a second; a child's file is watched
+			clock = setInterval(() => { if (reg.runs.some((x) => x.status === "running") && (vs.footer || inChild())) repaint(); if (inChild()) maybeRefresh(); }, 1000);
 			(clock as any).unref?.();
 			maybeRefresh();
 		}
 		status();
 		if (!isChildSession(file)) setTimeout(flushPending, 50);
 	});
-	pi.on("session_shutdown", () => { if (clock) { clearInterval(clock); clock = undefined; } if (vs.refreshTimer) { clearTimeout(vs.refreshTimer); vs.refreshTimer = undefined; } });
-	// read-only in a subagent's session; this view's own command text never reaches the model
-	pi.on("input", (event: any, ctx: any) => {
+	pi.on("session_shutdown", (event: any) => {
+		if (clock) { clearInterval(clock); clock = undefined; }
+		if (vs.refreshTimer) { clearTimeout(vs.refreshTimer); vs.refreshTimer = undefined; }
+		// the main session ends (quit, /new, /resume elsewhere): its children go; our own switches and /reload keep them
+		if (!reg.switching && event?.reason !== "reload") killChildren();
+	});
+	// in a child's session, the editor talks to the child; this view's own command text never reaches the model
+	pi.on("input", (event: any) => {
 		const text = String(event?.text ?? "");
 		if (/^\/subagents(\s|$)/.test(text.trim())) return { action: "handled" };
-		if (!isChildSession(vs.current)) return undefined;
-		notify(`This is ${viewed()?.agent ?? "a subagent"}'s session: read-only. ${keyOn() ? `${VIEW_KEY} or ` : ""}/subagents back returns to the main session.`, "warning");
-		try { if (event?.source === "interactive" && text && !ctx?.ui?.getEditorText?.()) ctx?.ui?.setEditorText?.(text); } catch { /* keep going */ }
+		if (!inChild()) return undefined;
+		const r = viewed();
+		if (!r) { notify("This subagent's run is not known here any more.", "warning"); return { action: "handled" }; }
+		if (!text.trim()) return { action: "handled" };
+		const c = childOf(r);
+		if (c.busy) void c.steer(text).then((res) => { if (!res?.success) notify(`${r.agent}: ${res?.error ?? "the steer was refused"}`, "error"); });
+		else {
+			if (!r.spawn) { notify("This run predates restartable subagents; it cannot go on.", "warning"); return { action: "handled" }; }
+			void c.prompt(text).then((x) => { if (x.exitCode !== 0 && !x.stopped && x.exitCode !== 130) notify(`${r.agent}: ${(x.stderr || "the turn failed").trim().slice(-200)}`, "error"); });
+		}
+		repaint();
 		return { action: "handled" };
 	});
-	pi.on("user_bash", () => {
-		if (isChildSession(vs.current)) throw new Error(`read-only: this is a subagent's session (${keyOn() ? `${VIEW_KEY} or ` : ""}/subagents back)`);
-		return undefined;
+	// ! and !! in a child's session run in the child (and land in its session);
+	// pi records what this returns in the copy it has open, which the next refresh replaces
+	pi.on("user_bash", (event: any) => {
+		if (!inChild()) return undefined;
+		const r = viewed(), c = r && childOf(r);
+		if (!r || !c || !(c.alive || c.start())) return { result: { output: `${r?.agent ?? "the subagent"} could not start: ${c?.stderr ?? ""}`, exitCode: 1, cancelled: false, truncated: false } };
+		void c.send({ type: "bash", command: String(event?.command ?? ""), excludeFromContext: !!event?.excludeFromContext }).then(() => { maybeRefresh(); });
+		return { result: { output: `(runs in ${r.agent}'s own process; its output shows in its session in a moment)`, exitCode: 0, cancelled: false, truncated: false } };
+	});
+	// /model, the thinking level and /compact in a child's session act on the child
+	const forward = async (cmd: Record<string, unknown>, what: string) => {
+		const r = viewed(); if (!r) return;
+		const c = childOf(r);
+		if (!c.alive && !c.start()) { notify(`${r.agent} could not start: ${c.stderr}`, "error"); return; }
+		const res = await c.send(cmd);
+		notify(res?.success ? `${r.agent}: ${what}` : `${r.agent}: ${res?.error ?? `${what} failed`}`, res?.success ? "info" : "error");
+		maybeRefresh();
+	};
+	pi.on("model_select", (event: any) => {
+		if (!inChild() || !event?.model) return;
+		void forward({ type: "set_model", provider: event.model.provider, modelId: event.model.id }, `model ${event.model.id}`);
+	});
+	pi.on("thinking_level_select", (event: any) => {
+		if (!inChild() || !event?.level) return;
+		void forward({ type: "set_thinking_level", level: event.level }, `thinking ${event.level}`);
+	});
+	pi.on("session_before_compact", (event: any) => {
+		if (!inChild()) return undefined;
+		if (event?.reason === "manual") void forward({ type: "compact", ...(event.customInstructions ? { customInstructions: event.customInstructions } : {}) }, "session compacted");
+		return { cancel: true };   // the copy is never compacted here
 	});
 
 	// switch the TUI to a session file; a call in flight detaches (see above)
@@ -4908,9 +5158,13 @@ function setupSessions(pi: ExtensionAPI) {
 			return false;
 		} finally { reg.switching = false; }
 	};
-	const switchToRun = async (ctx: any, r: RunRecord) => {
-		if (!r.sessionFile) { notify("That run has no session file (it predates this version).", "warning"); return; }
-		await switchTo(ctx, r.sessionFile);
+	// a child's session is opened as a fresh copy of its file (the child writes the file)
+	const switchToRun = async (ctx: any, r: RunRecord, refresh = false) => {
+		if (!r.sessionFile || !existsSync(r.sessionFile)) { notify("That run has no session file (it predates this version).", "warning"); return; }
+		const copy = viewFile(r.sessionFile);
+		try { const size = sizeOf(r.sessionFile); copyFileSync(r.sessionFile, copy); chmodSync(copy, 0o600); vs.loadedSize = size; }
+		catch (e) { notify(`Could not open that session: ${e instanceof Error ? e.message : String(e)}`, "error"); return; }
+		await switchTo(ctx, copy, refresh);
 	};
 	const listText = () => {
 		const rs = view ? view.order(reg.runs) : reg.runs;
@@ -4939,11 +5193,11 @@ function setupSessions(pi: ExtensionAPI) {
 			if (!isTui(ctx)) return say(listText());
 			reg.ui = ctx.ui;
 			if (a === "back" || a === "main") {
-				if (!isChildSession(vs.current)) return say("This is the main session.");
+				if (!inChild()) return say("This is the main session.");
 				await switchTo(ctx, vs.home);
 				return;
 			}
-			if (a === "refresh") { if (isChildSession(vs.current)) { const r = viewed(); if (r && r.status !== "running") vs.endRefreshed = r.id; await switchTo(ctx, vs.current, true); } return; }
+			if (a === "refresh") { const r = viewed(); if (inChild() && r) await switchToRun(ctx, r, true); return; }
 			if (a) {
 				const r = pickRun(reg.runs, a, view?.order ?? ((x: RunRecord[]) => x));
 				if (!r) return say(`No run "${a}". /subagents lists them.`, "warning");
@@ -4961,14 +5215,14 @@ function setupSessions(pi: ExtensionAPI) {
 				return say(`subagents: ${e instanceof Error ? e.message : String(e)}`, "error");
 			} finally { vs.picker = false; }
 			if (!row) { maybeRefresh(); return; }
-			if (row.kind === "main") { if (isChildSession(vs.current)) await switchTo(ctx, vs.home); return; }
+			if (row.kind === "main") { if (inChild()) await switchTo(ctx, vs.home); return; }
 			const r = reg.runs.find((x) => x.id === row.id);
-			if (r) await switchToRun(ctx, r);
+			if (r && r.id !== vs.viewing) await switchToRun(ctx, r);
 		},
 	});
 	if (keyOn()) api.registerShortcut?.(VIEW_KEY, {
 		description: "Subagent sessions: pick one (in a subagent's session: back to the main one)",
-		handler: async () => command(isChildSession(vs.current) ? "back" : ""),
+		handler: async () => command(inChild() ? "back" : ""),
 	});
 }
 
@@ -5466,12 +5720,14 @@ export class Transcript {
 
 // The live widget of a run's session: the part on its way, then one line
 // while the run works (its clock and tokens: the session file has neither).
-export function liveLines(r: Run, loaded: Loaded, o: { width: number; now: number; transcript?: Transcript; theme?: Theme; deps?: Deps; flags?: Flags }): string[] {
+export function liveLines(r: Run, loaded: Loaded, o: { width: number; now: number; transcript?: Transcript; theme?: Theme; deps?: Deps; flags?: Flags; queued?: string[] }): string[] {
 	if (!r) return [];
 	const th = o.theme ?? ident, deps = o.deps ?? plainDeps(), W = Math.max(20, o.width);
 	const flags = o.flags ?? { expanded: false, thinking: true };
 	const evs = tailEvents(r, loaded);
 	const out = o.transcript ? o.transcript.lines(evs, r, W, flags) : evs.flatMap((ev, i) => [...(i ? [""] : []), ...plainEvent(ev, W, flags, th, deps)]);
+	// steers sent and not yet taken (pi shows the main session's the same way, under the chat)
+	for (const q of o.queued ?? []) out.push(...plainWrap(`Steering: ${q}`, W - 1).map((l) => th.fg("dim", l)));
 	if (r.status === "running") out.push("", cutTo(`${th.fg("accent", "●")} ${th.fg("dim", `${r.agent} working · ${elapsed(runMs(r, o.now))} · ${io(r)} · live`)}`, W, deps));
 	return out.map((l) => cutTo(l, W, deps));
 }
@@ -7806,7 +8062,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ----------------------------------------------------------- lifecycle
 	// a subagent's own session file, opened from /subagents (see the subagents module)
-	const childView = (f: unknown) => /[\\/]lets-code-runs[\\/][^\\/]+[\\/][^\\/]+\.pi\.jsonl$/.test(String(f ?? ""));
+	const childView = (f: unknown) => /[\\/]lets-code-runs[\\/][^\\/]+[\\/][^\\/]+\.(pi|view)\.jsonl$/.test(String(f ?? ""));
 	pi.on("session_start", async (event: any, ctx: ExtensionContext) => {
 		cwd = ctx.cwd; currentCtx = ctx;
 		if (event?.reason !== "reload") await settleTrust(ctx);

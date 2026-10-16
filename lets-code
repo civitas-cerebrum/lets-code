@@ -6001,7 +6001,8 @@ export function template(s: Spec, full = false): string {
 
 // ------------------------------------------------------------------ setup
 // runs the expert's setup script with bash; progress lines (stderr) go
-// to onLine, the last stdout line is the note when it fails
+// to onLine, the last stdout line is the note: why it failed, or what the
+// user should know once it succeeded (e.g. an app to install by hand)
 export function runSetup(script: string, onLine: (l: string) => void, signal?: AbortSignal): Promise<{ ok: boolean; note: string }> {
 	return new Promise((resolve) => {
 		let out = ""; let err = ""; let done = false;
@@ -6013,7 +6014,7 @@ export function runSetup(script: string, onLine: (l: string) => void, signal?: A
 		child.stdout.on("data", (d) => { out += d.toString(); });
 		child.stderr.on("data", (d) => { err += d.toString(); const lines = err.split("\n"); err = lines.pop() ?? ""; lines.filter((l) => l.trim()).forEach((l) => onLine(l.trim())); });
 		child.on("error", (e) => finish(false, e.message));
-		child.on("close", (code) => { const last = out.trim().split("\n").pop() ?? ""; finish(code === 0, code === 0 ? "" : last || err.trim() || `setup exited ${code}`); });
+		child.on("close", (code) => { const last = out.trim().split("\n").pop() ?? ""; finish(code === 0, code === 0 ? last.trim() : last || err.trim() || `setup exited ${code}`); });
 	});
 }
 
@@ -6060,6 +6061,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 	const session = new Map<string, boolean>();   // decided in this session (dialog, /experts)
 	const declined = new Set<string>();            // said no in this session: not asked again
+	const setupNotes = new Map<string, string>();  // a setup's note on success, for the result of the call that ran it
 	const enabled = (n: string) => session.has(n) ? session.get(n)! : remembered()[n] === true;
 	const find = (n: string) => discover().find((s) => s.name === n);
 	const unknown = (n: string) => `Unknown expert "${n}". Experts: ${discover().map((s) => s.name).join(", ") || "none"}.`;
@@ -6145,12 +6147,14 @@ export default async function (pi: ExtensionAPI) {
 			const r = await runSetup(s.expert.setup, (l) => progress(`${name} setup: ${l}`), signal);
 			s = find(name);
 			if (!r.ok || !s?.expert.ready) return `Setting up the ${name} expert failed: ${r.note || "it is still not ready"}.`;
-			if (ctx.hasUI) ctx.ui.notify(`The ${name} expert is set up.`, "info");
+			if (r.note) setupNotes.set(name, r.note);
+			if (ctx.hasUI) ctx.ui.notify(`The ${name} expert is set up.${r.note ? ` ${r.note}` : ""}`, "info");
 		}
 		if (yesNow) { declined.delete(name); session.set(name, true); remember(name, true); }
 		return null;
 	}
 	const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], isError });
+	const noteOf = (n: string) => { const v = setupNotes.get(n); setupNotes.delete(n); return v ? ` Setup: ${v}` : ""; };
 	const Brief = (o = {}) => Type.Object({}, { additionalProperties: true, ...o });
 	pi.registerTool({
 		name: "expert",
@@ -6179,7 +6183,7 @@ export default async function (pi: ExtensionAPI) {
 			if (action === "enable") {
 				if (!params.name) return text(`Give the name. ${listText()}`, true);
 				const why = await ensure(params.name, ctx, progress, false, signal);
-				return why ? text(why, true) : text(`The ${params.name} expert is enabled.`);
+				return why ? text(why, true) : text(`The ${params.name} expert is enabled.${noteOf(params.name)}`);
 			}
 			if (action !== "run") return text(`action is list, enable or run. ${listText()}`, true);
 			const runs: { name: string; brief: unknown }[] = Array.isArray(params.runs) && params.runs.length ? params.runs : params.name ? [{ name: params.name, brief: params.brief }] : [];
@@ -6204,7 +6208,8 @@ export default async function (pi: ExtensionAPI) {
 				const results = await sub.mapLimit(runs, sub.CONCURRENCY, (r: any, i: number) => sub.runAgent(find(r.name)!, renderBrief(find(r.name)!, asBrief(r.brief)!), ctx.cwd, sig, quiet, { tool: "expert", callId: _id, mode: runs.length > 1 ? "parallel" : "single", index: i, of: runs.length }));
 				return { text: results.map(sub.render).join("\n\n"), isError: results.every((r: any) => r.exitCode !== 0) };
 			});
-			return text(out.text, out.isError);
+			const notes = [...new Set(runs.map((r) => r.name))].map((n) => noteOf(n).trim()).filter(Boolean);
+			return text(notes.length ? `${notes.join("\n")}\n\n${out.text}` : out.text, out.isError);
 		},
 	});
 	pi.registerCommand("experts", {
@@ -6225,6 +6230,7 @@ export default async function (pi: ExtensionAPI) {
 			if (verb === "disable") { session.set(name, false); remember(name, false); return say(`The ${name} expert is dormant again (remembered).`); }
 			const why = await ensure(name, ctx, (l) => ctx.ui?.setStatus?.("expert", l), true);
 			ctx.ui?.setStatus?.("expert", undefined);
+			setupNotes.delete(name);   // the setup's notification already showed it
 			say(why ?? `The ${name} expert is enabled (remembered).`, why ? "error" : "info");
 		},
 	});
@@ -6315,15 +6321,23 @@ MD
 # shell-uid channel exists (Shizuku's rish, or adb to the phone itself) read
 # the screen and tap and type. Its knowledge: the agent file, helpers in
 # termux/bin (probe: which tiers this phone has, read-only; ui: the screen
-# as text, tap, type; uitext.py: the uiautomator XML parser) and references
-# in termux/ref, read on demand (tiers and setup steps, screen, messaging).
+# as text, tap, type; uitext.py: the uiautomator XML parser; setup: tier 1,
+# below) and references in termux/ref, read on demand (tiers and setup
+# steps, every Termux:API command, screen, messaging).
 # Written on every launch on Termux with experts on, reached through the
 # expert tool, dormant until the user enables it. A user's own agent of that
 # name is left alone (and no helpers are written for it).
+# Its setup (bin/setup, gated by termux/runtime/.installed) runs once the
+# user enables it: pkg install termux-api when the commands are missing, and
+# a read-only check for the Termux:API app, which pkg cannot install (the
+# note says where to get it). Both already present at launch: marked done
+# without a word, so the enable dialog names no setup.
 write_termux_agent() {
     local af="${PI_AGENT_DIR}/agents/termux-device.md" t="${PI_AGENT_DIR}/termux" tmp
     if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
     termux_write_knowledge "${t}" || return 0
+    # tier 1 already complete (commands and app): its setup has nothing to do
+    [ -e "${t}/runtime/.installed" ] || bash "${t}/bin/setup" --if-ready >/dev/null 2>&1 || true
     mkdir -p "${PI_AGENT_DIR}/agents"
     tmp="$(mktemp "${af}.XXXXXX")" || return 0
     sed "s|@@T@@|${t}|g" > "${tmp}" <<'MD'
@@ -6339,6 +6353,9 @@ job: Does a phone task end to end (launch an app, open a file, fire an intent, p
 keywords: phone, apps, messages
 dispatch_rule: Acting on this phone or reading its state (launch or open an app, a message, notification, intent or tap; what is installed or signed in) goes to expert termux-device with the whole goal; don't run am, pm, cmd or termux-* first. Your own commands only check its result or do Termux file work.
 platform: termux
+requires: termux/runtime/.installed
+setup: termux/bin/setup
+setup_note: installs the termux-api package (the termux-* commands, under 1 MB) with pkg if they are missing; the Termux:API app you install yourself, the setup says from where
 brief:
   - goal (required): the user's goal, verbatim
   - confirmed: leave out unless the user approved the exact final step you reported (app, recipient, text); then yes, plus that step
@@ -6353,12 +6370,17 @@ Run `@@T@@/bin/probe` (read-only, a few seconds). It reports:
 - **tier 0 intents** (always): launch apps, open files, pre-filled
   messages and compose screens. You cannot see the screen; the user taps
   the final button.
-- **tier 1 termux-api**: contacts, clipboard, notifications, SMS, dialogs
-  on the phone. Still no screen.
+- **tier 1 termux-api**: battery, clipboard, toasts, notifications,
+  dialogs, location, contacts, SMS, volume, wifi, sensors, camera, TTS.
+  Still no screen. Every command: `ref/api.md` (rules first; for one
+  command, `grep -A3 'termux-<name>'` it).
 - **tier 2 shell** (Shizuku's rish, or adb to the phone itself): read the
   screen, tap, type, with `@@T@@/bin/ui`. See `ref/screen.md`.
 
-Use the lowest tier that does the job. When the goal needs a tier that is
+Use the lowest tier that does the job; what a termux-api command does
+(battery, clipboard, toast, notification, location, contacts, volume)
+goes through it at tier 1, not hand-rolled `am`, `dumpsys` or `settings`.
+When the goal needs a tier that is
 missing, do what the present tiers allow (a pre-fill the user finishes) and
 give the user the unlock step from `ref/tiers.md`, with its trade-off.
 Messages, mail, calls: `ref/messaging.md`.
@@ -6432,7 +6454,8 @@ Report only the account the goal asks about, and always its source:
   `dumpsys` fail (no rights, or `app_process` not found). Do not try them;
   the probe already knows.
 - `termux-*` API commands hang when the Termux:API app is missing, even if
-  the commands are installed. Trust the probe's tier 1 line.
+  the commands are installed. Without the probe's `tier 1 termux-api: yes`
+  call none of them; with it, wrap each in `timeout 20`.
 - `termux-open` on files in `~` fails unless `allow-external-apps=true`
   (recommend only, never set it). `termux-am` is dead unless Termux's
   server runs. `monkey` fails.
@@ -6469,7 +6492,8 @@ First line: `tiers: <the probe's tiers line>`. Then for each action:
 - **Verification:** `screen-verified` (a fresh `ui dump` shows the expected
   state), `system-accepted` (rc=0, no error, and the control check behaved
   differently), `foreground-confirmed` (the "brought to the front" warning,
-  or a fresh start with rc=0 plus a sane control), `awaiting-confirmation`
+  or a fresh start with rc=0 plus a sane control), `api-read` (a termux-api
+  command's JSON: quote the fields used), `awaiting-confirmation`
   (prepared; the final step is the user's), or `on-screen-unverifiable`
 End with what the user must do next, if anything (tap Send, confirm, a
 setup step). Quote errors; don't paraphrase them.
@@ -6548,6 +6572,74 @@ echo "tiers: ${tiers:-none}"
 if [ "${t2}" = 0 ]; then
     echo "next: screen, taps and typing need tier 2 (Shizuku + rish, or adb over wireless debugging); contacts and clipboard need tier 1. Steps and trade-offs: ${ref}"
 fi
+exit 0
+SH
+    cat > "${t}/bin/setup" <<'SH'
+#!/usr/bin/env bash
+# Written by lets-code (termux); regenerated on launch, edits are overwritten.
+# setup: tier 1 for the termux-device expert. lets-code runs it once the user
+# enables the expert (the enable dialog names it) while runtime/.installed is
+# missing; at launch, `setup --if-ready` only marks it done when nothing is
+# left to do (no install, no message).
+#   1. the termux-* commands: `pkg install termux-api`, only when missing
+#   2. the Termux:API app: pkg cannot install it, so it is checked read-only
+#      (cmd package list packages), never by calling a termux-* command (they
+#      hang without the app), and the user is told where to get it
+# Progress goes to stderr; the last stdout line is the note the user sees.
+# Exits 0 whenever the expert can run: tier 0 needs neither, so a missing
+# app or an offline pkg does not block it (the probe reports tier 1 on every
+# run, with the step still to do).
+set -u
+to() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }   # no timeout on macOS
+here="$(cd "$(dirname "$0")" && pwd)"; t="$(cd "${here}/.." && pwd)"
+syscmd="${TERMUX_PROBE_SYSCMD:-/system/bin/cmd}"
+mark="${t}/runtime/.installed"
+cli() { command -v termux-toast >/dev/null 2>&1 && command -v termux-battery-status >/dev/null 2>&1; }
+app() {   # yes, no, or unknown (the package list is unreadable)
+    local pk; pk="$(to 15 "${syscmd}" package list packages 2>/dev/null | tr -d '\r')"
+    if [ -z "${pk}" ]; then echo unknown; elif printf '%s\n' "${pk}" | grep -qx 'package:com.termux.api'; then echo yes; else echo no; fi
+}
+done_() { mkdir -p "${t}/runtime" && printf '%s\n' "$1" > "${mark}"; }
+
+if [ "${1:-}" = --if-ready ]; then
+    cli && [ "$(app)" = yes ] && done_ "commands: yes; app: yes (found at launch)"
+    exit 0
+fi
+
+c=yes
+if ! cli; then
+    echo "installing the termux-api package (pkg install termux-api) ..." >&2
+    log="$(mktemp "${TMPDIR:-/tmp}/lc-termux-setup.XXXXXX")"
+    if DEBIAN_FRONTEND=noninteractive to 600 pkg install -y termux-api </dev/null >"${log}" 2>&1 && cli; then
+        c=installed
+    else
+        c="failed ($(grep -v '^\s*$' "${log}" | tail -n 1 | cut -c1-160))"
+    fi
+    rm -f "${log}"
+fi
+a="$(app)"
+
+src="${TERMUX_APK_RELEASE:-}"
+case "${src}" in
+    F_DROID) where="F-Droid, https://f-droid.org/packages/com.termux.api/ (your Termux is the F-Droid build)" ;;
+    GITHUB) where="GitHub, https://github.com/termux/termux-api/releases (your Termux is the GitHub build)" ;;
+    GOOGLE_PLAY_STORE) where="Google Play, the Termux:API listing (your Termux is the Play build; F-Droid and GitHub builds do not pair with it)" ;;
+    *) where="the same place your Termux came from: F-Droid https://f-droid.org/packages/com.termux.api/ or GitHub https://github.com/termux/termux-api/releases (the two do not mix)" ;;
+esac
+case "${c}" in
+    yes|installed) cmds="the termux-* commands are $([ "${c}" = yes ] && echo there || echo installed)" ;;
+    *) cmds="pkg install termux-api ${c}: run it yourself in Termux" ;;
+esac
+case "${a}" in
+    yes) appl="the Termux:API app is installed; Android asks for each permission on first use" ;;
+    no) appl="the Termux:API app is missing (the commands hang without it, so the expert will not call them): install it from ${where}, open it once, then allow each permission when Android asks" ;;
+    *) appl="whether the Termux:API app is installed could not be checked; the expert's probe checks it on every run" ;;
+esac
+[ "${a}" = no ] && echo "Termux:API app: not installed; get it from ${where}" >&2
+done_ "commands: ${c}; app: ${a}"
+tail=""
+case "${c}:${a}" in yes:no|installed:no|failed*) tail=" Until then the expert works through intents (tier 0)." ;; esac
+echo "termux-api: ${cmds}; ${appl}.${tail}"
 exit 0
 SH
     cat > "${t}/bin/ui" <<'SH'
@@ -6984,7 +7076,7 @@ yourself: give the user the steps below, quoted, with the trade-off.
 | Tier | Needs | Gives | Does not give |
 |---|---|---|---|
 | 0 intents | nothing (Termux's `am`) | launch apps, open files, pre-filled WhatsApp/SMS/mail/share screens, deep links | the screen, taps, contacts; the user taps the final button |
-| 1 termux-api | Termux:API app + `pkg install termux-api` | contacts (name to number), clipboard, dialogs and toasts on the phone, notifications list, SMS send, share | the screen, taps |
+| 1 termux-api | Termux:API app + `pkg install termux-api` | battery, clipboard, toasts, notifications, dialogs, location, contacts, SMS, volume, wifi, sensors, camera, TTS, share (all: `ref/api.md`) | the screen, taps |
 | 2 shell | Shizuku + rish, or adb to the phone itself | read the screen (`ui dump`), tap, type, keys, swipe, `dumpsys`, screenshot | non-ASCII typing (needs tier 1's clipboard) |
 
 Without tier 2 these fail for Termux's uid; do not try them: `screencap`
@@ -7000,7 +7092,8 @@ Steps for the user:
    from https://github.com/termux/termux-api/releases, an F-Droid Termux the
    F-Droid build, a Play Termux the Play build. Mixing them fails to
    install or to talk to Termux.
-2. In Termux: `pkg install termux-api` (the commands).
+2. In Termux: `pkg install termux-api` (the commands; lets-code's setup
+   installs them when the user enables this expert).
 3. Android asks for each permission on first use (Contacts, SMS, Phone).
    The notification list needs Settings > Notifications > Device & app
    notifications (Notification access) > Termux:API.
@@ -7008,16 +7101,7 @@ Steps for the user:
 Trade-off: every script that runs in Termux can then use what was granted
 (all contacts, sending SMS that may cost money). Grant only what is used.
 
-Useful commands (each prints JSON): `termux-contact-list` (all contacts:
-filter it with python/jq, report only the one you need),
-`termux-clipboard-set <text>` / `termux-clipboard-get`,
-`termux-dialog confirm -t <title> -i <text>` (asks the user on the phone),
-`termux-toast <text>`, `termux-share`, `termux-open-url <url>`,
-`termux-notification-list` (private: only when the goal needs it),
-`termux-sms-send -n <number> <text>` (sends at once: a final step, needs
-`confirmed`), `termux-telephony-call <number>` (calls at once: same).
-If a command hangs more than ~10 s, the app is missing or its permission
-dialog is waiting: stop and say so.
+Every command, with its flags, permission and caveats: `ref/api.md`.
 
 ## Tier 2, recommended: Shizuku + rish
 Shizuku (open source, RikkaApps, Apache-2.0) runs a small server as the
@@ -7204,10 +7288,192 @@ opens a compose screen; the user taps send. Attachments: copy the file to
 - A call: `am start --user 0 -a android.intent.action.DIAL -d tel:<number>`
   fills the dialer; the user presses call. Never `ACTION_CALL`.
 MD
+    cat > "${t}/ref/api.md" <<'MD'
+# Termux:API: every command, by category
+
+Tier 1 only: call these only when the probe says `tier 1 termux-api: yes`.
+The commands talk to the Termux:API app; without it they hang, even when
+`pkg termux-api` is installed. Read the category the goal needs, not all.
+
+## Rules for every call
+- **Wrap it:** `timeout 20 termux-<cmd> ...`. A hang (rc 124) means the
+  app is missing, a permission prompt is waiting on the phone, or (for
+  location) no fix yet. Stop and say which; do not loop.
+- **Output:** reads print JSON (parse with `python3 -c` or `jq`); actions
+  print nothing and rc 0. An error comes back as JSON with an `error` key,
+  or as a line naming the missing permission.
+- **Permissions:** the first call that needs one opens Android's prompt on
+  the phone (the user taps Allow). Denied: the command fails or returns
+  nothing; tell the user where to allow it (Settings > Apps > Termux:API >
+  Permissions). Special access (below) is a settings screen, not a prompt.
+- **Needs the user (UI):** marked "UI": shows a dialog, picker or activity
+  on the phone, so the screen must be on and unlocked, and the call blocks
+  until the user answers.
+- **Private** (marked): read only what the goal needs, filter before you
+  print, report only that item (the Privacy section of your agent file).
+- **Final steps** (marked): reach other people, cost money or cannot be
+  undone: only with the brief's `confirmed` (the Consent section).
+- **Changes** (marked): change device state; do exactly what the goal asks,
+  read the before value where a read exists, never on your own.
+
+## Prefer it over hand-rolled commands
+| task | use | not |
+|---|---|---|
+| battery level, charging | `termux-battery-status` | `dumpsys battery`, /sys files |
+| clipboard | `termux-clipboard-get` / `-set` | `ui type`, `am broadcast` |
+| show the user something | `termux-toast`, `termux-notification` | (tier 0 has nothing) |
+| ask the user | `termux-dialog` | a chat question when they are at the phone |
+| where am I | `termux-location -p network -r last` | IP geolocation |
+| a contact's number | `termux-contact-list` filtered | `content query` (tier 2) |
+| volume | `termux-volume` | `cmd audio`, `media volume` |
+| wifi network | `termux-wifi-connectioninfo` | `dumpsys wifi` |
+| open a URL | `termux-open-url` (core, no app) | — |
+| speak text | `termux-tts-speak` | — |
+Evidence: a read's JSON is the evidence (`api-read`). A toast or
+notification can't be seen from here: check a notification with
+`termux-notification-list` (needs Notification access), else report the
+rc. Control check for the channel itself: `timeout 20 termux-battery-status`
+must print JSON.
+
+## Device state and sensors
+- `termux-battery-status`: JSON percentage, status, plugged, health,
+  temperature, current. No permission.
+- `termux-audio-info`: audio output, sample rate, buffer sizes; whether
+  music is playing. No permission.
+- `termux-volume` (no args): JSON of each stream's volume and max.
+  `termux-volume <alarm|music|notification|ring|system|call> <n>`: sets
+  one (Changes). In Do Not Disturb, ring/notification may need DND access.
+- `termux-brightness <0-255|auto>`: screen brightness (Changes). Special
+  access: "Modify system settings" for Termux:API (first use opens it).
+- `termux-torch <on|off>`: the flashlight (Changes). No permission.
+- `termux-vibrate [-d ms] [-f]`: vibrate (default 1000 ms; `-f` even in
+  silent mode). VIBRATE (no prompt).
+- `termux-sensor -l`: list sensors. `-s <name[,name]> -n 1`: one reading
+  (partial names match). Without `-n` it streams forever; `-a` all sensors
+  (battery cost); `-c` releases them after an interrupted run.
+- `termux-camera-info`: JSON per camera (id, facing, sizes). No prompt.
+- `termux-camera-photo [-c id] <file.jpg>`: takes a photo, no preview
+  (Private; CAMERA). Some phones give a dark first shot.
+- `termux-microphone-record -f <file> [-l secs] [-e aac|opus|amr_wb|amr_nb]`:
+  records in the background (Private; RECORD_AUDIO). `-i` info, `-q` stop.
+  Always give `-l` or stop it with `-q`.
+- `termux-location [-p gps|network|passive] [-r once|last|updates]`: JSON
+  latitude, longitude, accuracy (Private; ACCESS_FINE_LOCATION, and
+  location must be on). gps indoors can take minutes: try `-p network` or
+  `-r last` first; `-r updates` streams forever.
+- `termux-infrared-frequencies`: the IR blaster's ranges (empty: none).
+  `termux-infrared-transmit -f <hz> <on,off,...µs>`: sends a pattern
+  under 2 s (Changes a device, e.g. a TV).
+- `termux-fingerprint [-t title] [-d desc]`: UI; asks for a fingerprint;
+  JSON `auth_result` (AUTH_RESULT_SUCCESS / _FAILURE). Android 6+.
+- `termux-wifi-connectioninfo`: JSON ssid, bssid, ip, link speed, rssi.
+  The SSID shows as `<unknown ssid>` without location permission and
+  location on.
+- `termux-wifi-scaninfo`: the last scan's networks (ACCESS_FINE_LOCATION,
+  location on; Android throttles scans, so it may be old).
+- `termux-wifi-enable <true|false>`: wifi on or off (Changes); newer
+  Android may ignore it: then open `android.settings.WIFI_SETTINGS`.
+- `termux-telephony-deviceinfo`: JSON operator, SIM state, network type,
+  phone type (READ_PHONE_STATE).
+- `termux-telephony-cellinfo`: the serving and nearby cells, signal
+  (ACCESS_FINE_LOCATION).
+
+## Communication
+- `termux-contact-list`: every contact as JSON `[{name, number}]`
+  (Private; READ_CONTACTS). Filter by name in python and print only the
+  match: `timeout 20 termux-contact-list | python3 -c 'import json,sys; print([c for c in json.load(sys.stdin) if "taha" in c["name"].lower()])'`.
+  Several matches: names only, and ask.
+- `termux-call-log [-l n] [-o offset]`: the latest calls (default 10):
+  name, number, type, date, duration (Private; READ_CALL_LOG).
+- `termux-sms-list [-l n] [-o offset] [-t all|inbox|sent|draft|outbox|failed|queued] [-f number] [-c]`:
+  messages as JSON (Private; READ_SMS). `-c` one per conversation. Default
+  10 messages; keep `-l` small. (`termux-sms-inbox` is the old name: it
+  only prints that.)
+- `termux-sms-send -n <number[,number]> [-s slot] <text>`: sends at once,
+  no screen (Final step; SEND_SMS; may cost money). Prefer the tier 0
+  `smsto:` pre-fill unless `confirmed`.
+- `termux-telephony-call <number>`: calls at once (Final step;
+  CALL_PHONE). Prefer the tier 0 `DIAL` pre-fill.
+
+## UI and notifications
+- `termux-toast [-s] [-g top|middle|bottom] [-b color] [-c color] <text>`:
+  a short popup on the phone. No permission. Text from args or stdin.
+- `termux-notification -t <title> -c <text> [--id <id>] [--priority high] [--sound] [--vibrate 500,200]`:
+  a notification (Android 13+: POST_NOTIFICATIONS prompt). Buttons:
+  `--button1 <label> --button1-action '<shell cmd>'`; `--action` on tap;
+  `--ongoing` pins it (needs `--id`); `--image-path`; `--type media` adds
+  media buttons; `--channel <id>`. Actions run with `dash -c` later, so
+  their output is lost: make them show it (`... | termux-toast`).
+- `termux-notification-remove <id>`: removes one you posted with `--id`.
+- `termux-notification-channel <id> <name>` / `-d <id>`: creates or deletes
+  a channel (Android 8+).
+- `termux-notification-list`: every notification shown, as JSON (Private;
+  special access: Settings > Notifications > Device & app notifications >
+  Termux:API). Filter to the one the goal names.
+- `termux-dialog <widget> [-t title] [...]`: UI; asks the user, prints JSON
+  `{code, text}` (cancel: code -2). Widgets: `confirm -i <question>`
+  (text yes/no), `text [-i hint] [-m | -n] [-p]`, `radio|spinner|sheet -v "a,b,c"`,
+  `checkbox -v "a,b,c"`, `counter -r min,max,start`, `date [-d format]`,
+  `time`, `speech`. `termux-dialog -l` lists them.
+- `termux-share [-a send|view|edit] [-c mime] [-d] [-t title] [file]`: UI;
+  shares a file, or stdin as text, through Android's chooser (`-d`: the
+  default app).
+- `termux-wallpaper -f <file> | -u <url> [-l]`: sets the wallpaper, `-l`
+  the lock screen (Changes; can't be read back).
+- Core (termux-tools, no Termux:API app needed, tier 0):
+  `termux-open-url <url>`, `termux-open [--send|--chooser] [--content-type t] <file|url>`
+  (files in ~ need `allow-external-apps`: see your Traps).
+
+## Clipboard
+- `termux-clipboard-get`: the clipboard text (Private). Android 10+ may
+  give nothing unless Termux is in the foreground.
+- `termux-clipboard-set <text>` (or stdin): sets it (Changes: it replaces
+  what the user copied). With tier 2: set it, then `ui key paste` to type
+  non-ASCII text.
+
+## Storage and media
+- `termux-download [-t title] [-d desc] [-p path] <url>`: Android's
+  download manager, with its notification; default folder Download.
+- `termux-storage-get <out-file>`: UI; the user picks a file in the system
+  picker, it is copied to out-file.
+- `termux-media-scan [-r] [-v] <file...>`: makes files on /sdcard show in
+  the gallery and music apps.
+- `termux-media-player play <file> | play | pause | stop | info`: plays
+  audio in the background (Termux:API's service).
+- SAF (folders the user granted, also SD cards and cloud providers;
+  URIs, not paths):
+  `termux-saf-managedir` (UI; the user picks a folder; prints its URI),
+  `termux-saf-dirs` (the granted folders), `termux-saf-ls <uri>`,
+  `termux-saf-stat <uri>`, `termux-saf-read <uri> > file`,
+  `termux-saf-write <uri> < file` (overwrites), `termux-saf-create [-t mime] <dir-uri> <name>`,
+  `termux-saf-mkdir <dir-uri> <name>`, `termux-saf-rm <uri>` (Final step:
+  deletes).
+
+## System and background
+- `termux-job-scheduler -s <script> [--job-id n] [--period-ms ms] [--network any|unmetered] [--charging true] [--persisted true]`:
+  runs a script later or periodically (minimum period 15 min);
+  `-p` pending jobs, `--cancel --job-id n`, `--cancel-all` (Changes).
+- `termux-wake-lock` / `termux-wake-unlock` (core): keep the CPU awake for
+  long Termux jobs; unlock afterwards (battery).
+- `termux-keystore list [-d] | generate <alias> [-a RSA|EC] [-s bits] | sign <alias> <alg> | verify <alias> <alg> <sigfile> | delete <alias>`:
+  keys in the hardware keystore that never leave it; `delete` is a Final
+  step.
+- `termux-nfc -r short|full` / `-w -t <text>`: UI; waits for a tag to be
+  held to the phone (NFC must be on).
+- `termux-usb -l`: USB devices; `-r <device>` asks the user for access
+  (UI); `-e <cmd> <device>` runs cmd with the device's fd.
+- `termux-speech-to-text [-p]`: listens on the mic and prints the text
+  (Private; RECORD_AUDIO; needs a speech service).
+- `termux-tts-engines`: TTS engines as JSON. `termux-tts-speak [-e engine] [-l lang] [-r rate] [-p pitch] [-s stream] <text>`:
+  says it aloud.
+- `termux-api-start` / `termux-api-stop`: start or stop Termux:API's
+  keep-alive service; try a start when calls time out right after the app
+  was killed.
+MD
     for f in "${t}"/ref/*.md; do
         sed "s|@@T@@|${t}|g" "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
     done
-    chmod 755 "${t}/bin/probe" "${t}/bin/ui"
+    chmod 755 "${t}/bin/probe" "${t}/bin/ui" "${t}/bin/setup"
     chmod 644 "${t}/bin/uitext.py" "${t}"/ref/*.md
 }
 on_termux() { case "${PREFIX:-}" in */com.termux/*) return 0 ;; esac; [ -d /data/data/com.termux/files/usr ]; }
@@ -10463,7 +10729,10 @@ or a tool that is not there.
   as the last step, so a finished setup counts as done and a failed one is
   retried on the next enable.
 - Progress lines go to stderr (shown live). On failure, exit non-zero and
-  print the reason as the last stdout line (shown to the user).
+  print the reason as the last stdout line (shown to the user). On
+  success a last stdout line is a note: shown to the user and put first in
+  the result of the run that set it up (e.g. an app only the user can
+  install). Print nothing there when there is nothing to say.
 - 15 minutes at most. No prompts: it runs unattended, without a terminal.
 - The enable dialog shows `setup_note`: what it installs, where, how big
   ("installs yaml 2.8.1 with npm into ~/.pi/agent/config-convert, 1 MB").

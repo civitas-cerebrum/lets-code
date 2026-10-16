@@ -4823,10 +4823,10 @@ export function wantsOrchestration(prompt: string): boolean {
 // The method, about 170 tokens.
 export function orchestration(agents: AgentDef[]): string {
 	const has = (n: string) => agents.some((a) => a.name === n);
-	const flow = (has("scout") && has("worker") && has("reviewer")
+	const work = has("scout") && has("worker") && has("reviewer")
 		? "scouts in parallel map the code (one per area) -> you decide -> workers in parallel on disjoint files -> reviewer -> you run the tests"
-		: "gather in parallel -> you decide -> act in parallel on disjoint parts -> check -> you run the tests")
-		+ (has("general") ? "; open questions -> general" : "");
+		: "gather in parallel -> you decide -> act in parallel on disjoint parts -> check -> you run the tests";
+	const flow = has("general") ? `a question -> general (it answers); a change -> ${work}` : work;
 	return [
 		"Orchestration (lets-code): you are the orchestrator; subagents read and work in fresh contexts, you keep the plan and the decisions.",
 		...(agents.length ? [`- Agents: ${agentJobs(agents)}.`] : []),

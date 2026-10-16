@@ -338,8 +338,8 @@ async function load(env = {}) {
 	t("description < 440 with the starters and reverse-engineer", mod.agentsBlurb(four).length < 440, true);
 	// the method routes research to general, only when there is one
 	const m = mod.orchestration(four), m3 = mod.orchestration(four.filter((a) => a.name !== "general"));
-	t("method: open questions -> general", /scouts in parallel .* you run the tests; open questions -> general\./.test(m), true);
-	t("method: no general, no route to it", [/-> general/.test(m3), /scouts in parallel .* you run the tests\./.test(m3)], [false, true]);
+	t("method: a question -> general", /Usual flow: a question -> general \(it answers\); a change -> scouts in parallel .* you run the tests\./.test(m), true);
+	t("method: no general, no route to it", [/general/.test(m3), /Usual flow: scouts in parallel .* you run the tests\./.test(m3)], [false, true]);
 	t("method: one line longer at most", m.split("\n").length, m3.split("\n").length);
 
 	// the reverse-engineer file lets-code writes, as this extension reads it

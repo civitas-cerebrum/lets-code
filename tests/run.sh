@@ -57,6 +57,34 @@ PYX
     done
 ) || { echo "could not extract the extensions from lets-code"; exit 1; }
 
+# the built-in experts, written by lets-code's own writers into a scratch
+# agent dir (files only: nothing is installed) and linted as built-ins with
+# the expert builder's expert-lint, the same check a new expert gets
+python3 - "${root}/lets-code" > "${agent}/experts.sh" <<'PYX'
+import sys
+s = open(sys.argv[1]).read()
+def cut(start, last_fn, end="\n}\n"):
+    i = s.find(start)
+    j = s.find(end, s.find(last_fn, i))
+    if i < 0 or j < 0:
+        sys.exit("cannot find %s in lets-code" % last_fn.strip())
+    return s[i:j + len(end)]
+sys.stdout.write(cut("\nREA_VERSION=", "\nrea_write_agent() {"))
+sys.stdout.write(cut("\nTESTER_PINS=", "\ntester_write_agent() {"))
+sys.stdout.write(cut("\nJUDGE_DIR=", "\njudge_write_agent() {"))
+i = s.find("\n# Termux device expert:"); j = s.find("\non_termux() {", i)   # its writer, knowledge and on_termux
+sys.stdout.write(s[i:s.find("\n", j + 1) + 1])
+sys.stdout.write(cut("\npi_write_expert_builder() {", "\npi_write_expert_builder() {", "\n}  # end of pi_write_expert_builder\n"))
+PYX
+(
+    set -e
+    PI_AGENT_DIR="${agent}/builtin"; mkdir -p "${PI_AGENT_DIR}"
+    LOG_PREFIX="[lets-code]"; log() { :; }
+    . "${agent}/experts.sh"
+    pi_write_rea files; pi_write_tester files; pi_write_judge; write_termux_agent; pi_write_expert_builder
+) || { echo "could not write the built-in experts from lets-code"; exit 1; }
+run "built-in experts: expert-lint --builtin" node "${agent}/builtin/expert-builder/bin/expert-lint" --builtin "${agent}/builtin/agents"
+
 for t in "${here}"/*.test.mjs; do
     [ -e "${t}" ] || continue
     case "$(basename "${t}")" in

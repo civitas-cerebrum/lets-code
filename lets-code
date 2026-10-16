@@ -8070,7 +8070,7 @@ if [ "${have}" != "${version}" ]; then
     [ "${1:-}" = --no-install ] && exit 3
     command -v npm >/dev/null 2>&1 || { echo "npm not found; run: cd ${rt} && npm install"; exit 2; }
     echo "${SETUP_LOG_PREFIX:+${SETUP_LOG_PREFIX} }rea: installing rea-agents ${version} into ${rt} (first run only, ~160 MB) ..." >&2
-    (cd "${rt}" && npm install --omit=dev --no-audit --no-fund --loglevel=error >/dev/null 2>&1) || { echo "install failed; run: cd ${rt} && npm install"; exit 1; }
+    (cd "${rt}" && npm install --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error >/dev/null 2>&1) || { echo "install failed; run: cd ${rt} && npm install --omit=dev --ignore-scripts"; exit 1; }
 fi
 mkdir -p "${agent}"
 for e in "${main}"/* "${main}"/.[!.]*; do
@@ -9291,6 +9291,1318 @@ MD
     if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
     JUDGE_AGENT=1
 }
+
+# Expert builder: an expert whose job is building experts, so that adding one
+# (the user's own in ~/.pi/agent, or a built-in for lets-code) follows one
+# method and gets the same checks. The child designs the expert (name,
+# use_for and keywords that route, a brief, least-privilege tools, setup only
+# when it installs something, platform gating, safety rules), distills its
+# sources into instructions a 27B child follows plus refs read on demand,
+# scaffolds the files, lints them and measures routing. The reusable pieces
+# ship in expert-builder/: bin/expert-lint (what parseAgentFile accepts and
+# what makes an expert work; tests/run.sh lints every built-in with it),
+# bin/expert-new (init: a user's scaffold, never with the lets-code line;
+# pack: a built-in's writer function), bin/route-check (each prompt in its
+# own print-mode session in a scratch agent dir, every expert dormant,
+# stopped at the routing decision: PR #38's and #41's method) and ref/*.md
+# (the format, use_for, distilling, setup and pinning, safety, the
+# contribution checklist), which are also the human documentation. No setup
+# and no platform: it is files only, so it works on the phone too. It never
+# enables an expert, never runs a setup, and writes only under the agent dir
+# or a git worktree it made.
+pi_write_expert_builder() {
+    local d="${PI_AGENT_DIR}/expert-builder" af="${PI_AGENT_DIR}/agents/expert-builder.md" tmp f
+    EB_AGENT=""
+    mkdir -p "${d}/bin" "${d}/ref" "${d}/work"
+    cat > "${d}/prompt.md" <<'MD'
+You are the expert-builder of a lets-code session: you build new experts
+(subagents with their own knowledge, brief and routing line) and change
+existing ones. Another agent gave you one brief and will see only your final
+message. You have bash, read, write, edit, grep, find and ls.
+
+The agent dir is `@@AGENT@@`. Expert files are `@@AGENT@@/agents/<name>.md`; an
+expert's own files are under `@@AGENT@@/<name>/` (`ref/`, `bin/`, `setup`).
+
+## Tools here
+- `@@EB@@/bin/expert-lint [--user|--builtin] [--tokens] <file.md>`: checks
+  a file the way lets-code reads it; also reports the entry's token cost.
+  `--list` prints every expert and agent already there, with its use_for.
+- `@@EB@@/bin/expert-new init <name> --description .. --job .. --use-for ..
+  --keywords .. --tools a,b --brief "field (required): hint" (repeat)
+  [--ref f.md]... [--bin f]... [--setup] [--platform P] [--timeout S]`:
+  scaffolds the files; what you leave out is a TODO marker that
+  expert-lint reports until you fill it in.
+  `expert-new pack <name>` prints a lets-code writer function (built-ins).
+- `@@EB@@/bin/route-check <prompts-file> --expert <name>`: runs each prompt
+  in a scratch lets-code session, stops at the routing decision, prints
+  recall, false triggers and precision. Slow (up to a minute a prompt): give
+  bash `timeout: 1800`.
+- References; read the one a step needs, not all of them:
+  - `@@EB@@/ref/format.md`: every frontmatter field, its meaning and limits
+  - `@@EB@@/ref/use-for.md`: use_for, keywords and job that route well; the prompts file
+  - `@@EB@@/ref/distill.md`: turning docs, a repo or a method into instructions a 27B model follows
+  - `@@EB@@/ref/setup.md`: setup scripts, pinning, helpers, platform gating
+  - `@@EB@@/ref/safety.md`: rules for irreversible or outward actions, consent
+  - `@@EB@@/ref/contribute.md`: a built-in expert for lets-code (scope builtin)
+
+## Order of work
+1. Read the brief. Scope is `user` unless it says `builtin`.
+2. Survey: `expert-lint --list`. Your expert must not take another one's
+   tasks, nor a plain subagent's (scout, worker, reviewer).
+3. Read the sources the brief names: docs, repo, scripts. Read only what
+   the expert needs; note exact commands, flags, traps and versions.
+4. Design, before writing (format.md, use-for.md, safety.md):
+   - name: lower-case, a noun for the job (`config-convert`, not `helper`)
+   - use_for: the tasks a user asks for, 6 to 14 words; keywords: 2-3 words
+   - job: one line, what it does and how long it may take
+   - brief: 2 to 5 fields; required only what it cannot start without
+   - tools: the least it needs; `bash, read` for most
+   - refs for knowledge only some steps need; helpers in `bin/` for any
+     command sequence it would otherwise retype; a setup only if it needs
+     something installed (setup.md); `platform` if it only works on one
+   - the rules for anything irreversible or outward (safety.md)
+5. Scaffold with `expert-new init`, then write the instructions (the body
+   of the agent file) and each ref with write/edit (distill.md). Write the
+   helpers and run each one once on a tiny sample.
+6. Lint: `expert-lint --user --tokens <file>` (`--builtin` for scope
+   builtin). Fix every error; fix warnings unless you can say why not.
+7. Routing: write `@@EB@@/work/<name>.prompts` (use-for.md: 6 positives
+   that do not name the expert, 6 near-misses, 1 or 2 for a neighbouring
+   expert), then run route-check with bash `timeout: 1800`. If recall is
+   under 4/6 or any near-miss went to it, change use_for (and keywords)
+   once, lint again and rerun once. Keep the better wording of the two and
+   report both lines; never run it a third time. Prompts that name files
+   need those files: create them in a folder and pass `--cwd`.
+8. Builtin scope only: contribute.md, on a new branch in a git worktree.
+9. Report.
+
+## Rules
+- Write only under `@@AGENT@@` (scope user) or inside the git worktree you made
+  (scope builtin), plus `@@EB@@/work`. Never edit the installed lets-code.
+- A user's expert never carries the line `# Written by lets-code`: with it,
+  lets-code would overwrite the file on the next launch.
+- Never enable an expert (only the user does: `/experts enable <name>`),
+  never run its setup, and never install packages for it.
+- Never overwrite another expert's or agent's file; pick another name.
+- Never run the new expert's actions on real data while testing it.
+- Builtin scope: commit on the new branch; push or open a PR only if the
+  brief says so.
+- route-check one run at a time, thinking low, never xhigh: the GPU is
+  shared.
+- Delete `@@EB@@/work/<name>.*` files you no longer need, but keep the
+  prompts file for the report.
+
+## Final message, for an agent that has not seen any of it
+## Built
+The expert's name, its use_for and job, the brief fields, and every file
+written (absolute paths).
+## Checks
+The lint result (errors and warnings left, with why), the entry's tokens,
+and route-check's summary line (both runs if you tuned), with any misses.
+## Enable
+`/experts enable <name>` (what its setup would do, if it has one), and a
+sample `expert({action: "run", name, brief})` call.
+## Not done
+What was out of scope or out of reach, and why.
+MD
+    cat > "${d}/ref/format.md" <<'MD'
+# The expert file format
+
+An expert is one Markdown file, `~/.pi/agent/agents/<name>.md`, with YAML
+frontmatter and `expert: true`, plus optional files under
+`~/.pi/agent/<name>/`. Only the user's agent dir counts: a project's
+`.pi/agents` files are never experts. `list`, `run` and `/experts` read
+the files on every call, so a new or edited expert works at once; the
+always-on line is built when a session starts, so a new one enters it in
+the next session.
+
+## Layout
+```
+~/.pi/agent/agents/<name>.md     frontmatter + instructions (the child's system prompt)
+~/.pi/agent/<name>/ref/*.md      knowledge read on demand (the instructions name each one)
+~/.pi/agent/<name>/bin/*         helper scripts the child runs
+~/.pi/agent/<name>/setup         run once when the user enables it (only if it installs something)
+~/.pi/agent/<name>/runtime/      what setup installs; .installed marks it done
+```
+
+## The parser
+lets-code reads a small YAML subset: `key: value` (one line; quotes around
+the whole value are dropped), `key: >` or `key: |` followed by indented
+lines (joined with spaces), and a block list under a key (`  - item`
+lines). No nested maps, no inline `[a, b]` for `brief`. Lines starting
+with `#` are comments. A file that fails a check below is ignored
+entirely (it is not listed anywhere), so lint before you rely on it.
+
+## Fields of every agent
+| field | meaning | limits |
+|---|---|---|
+| `name` | the name in the line and in `expert({name})` | letters, digits, `. _ -`, starts with a letter or digit; default: the file name. Use lower-case with `-`, and name the file `<name>.md` |
+| `description` | one line; the child's prompt starts `You are the "<name>" agent. <description>` | required in practice |
+| `tools` | the child's tools, comma list or block list | pi's: `read, bash, edit, write, grep, find, ls`; MCP tools as `mcp__<server>_<tool>`. None given: all tools. Give the least it needs |
+| `thinking` | the child's thinking level | `off minimal low medium high xhigh`; default medium. Avoid xhigh on a local GPU |
+| `role` | the mandate role the child runs under | built-ins: `readonly` (reads and read-only commands only), `reviewer` (runs tests and commands, writes only under the temp dir, no git writes or installs: reviewers and judges), `plan`, `auto`, `ask`, `yolo`; or a role from your `mandate.json`. Default: the session's mode |
+| `agent_dir` | the child's own `PI_CODING_AGENT_DIR` (own mcp.json, settings) | a directory under the agent dir |
+| `skills` | paths passed as `--skill` | under the agent dir |
+| `append_prompt` | a file appended to the system prompt | under the agent dir. With an empty body, only this file is the prompt |
+| `timeout` | seconds before the child is stopped | whole number, 1 to 86400; none: no limit. 1800 or 3600 is usual |
+| `requires` | a path that must exist for the expert to be ready | under the agent dir; what setup creates |
+| `requires_env` | an environment variable that must be set | a variable name |
+
+Every path is relative to the agent dir (or absolute under it). A path
+outside it rejects the file. For an expert, a missing `agent_dir`,
+`skills`, `append_prompt` or `requires` does not hide it: it is listed as
+"not set up", and its setup runs when it is enabled.
+
+## Fields of an expert
+| field | meaning | limits |
+|---|---|---|
+| `expert` | `true` makes it an expert (not a plain subagent) | `true`, `yes` or `on` |
+| `use_for` | the few words in the always-on line: `name (use_for)` | cut at 100 characters; aim for 6 to 14 words. The routing signal: see use-for.md |
+| `keywords` | replace use_for once the line passes 900 characters (about a dozen experts) | cut at 40 characters; 2 or 3 words. None: the first 4 words of use_for |
+| `job` | one line in `list` and in the enable dialog | default: description. Say what it does and how long it may take |
+| `brief` | the template its caller fills in | block list of `- name (required): hint` or `- name: hint`; a bad item or a duplicate name rejects the file. None: one required `task` |
+| `platform` | where it is listed | `termux`, or Node platform names (`linux`, `darwin`, ...), comma separated; none: everywhere. On Termux Node says `android`, so `linux` does not include the phone |
+| `setup` | a script run with bash when the user enables it and a gated path (`requires`, ...) is missing | under the agent dir; see setup.md |
+| `setup_note` | what the setup does, in the enable dialog | say what it installs, where, how big |
+
+## What the caller sees
+- Always, in the `expert` tool's line: `<name> (<use_for>)` for each expert
+  usable on this platform. About 15 to 30 tokens each.
+- `expert({action: "list"})`: job, state and the brief template of each.
+- `expert({action: "run", name, brief: {field: value}})`: a missing
+  required field returns the template and nothing runs. A dormant expert
+  first gets the user's yes/no dialog (print mode: refused with a note).
+
+## What the child gets
+- System prompt: pi's, then `You are the "<name>" agent. <description>`,
+  the body of the file, then the `append_prompt` file if any.
+- Task: `Brief for the <name> expert.` and one `## Field` heading per brief
+  field, in template order, then any extra field the caller added.
+- Its own fresh context, the tools listed, the session's provider, guards
+  and mandate role, its working folder = the caller's. It cannot start
+  subagents or experts. Its last message is all the caller sees, capped at
+  50 KB.
+
+## Ownership
+A file with the line `# Written by lets-code` (inside the frontmatter) is
+lets-code's: it is rewritten on every launch. A user's own expert must
+not carry it. Deleting the line from a built-in keeps your edited copy.
+Names already taken: the built-ins (`termux-device`, `reverse-engineer`,
+`tester`, `expert-builder`, ...) and the starter agents (`scout`,
+`worker`, `reviewer`).
+
+## State
+Dormant until the user enables it (`/experts enable <name>`, or the dialog
+on its first run); remembered in `~/.pi/agent/lets-code-state.json` under
+`experts`. `/experts disable <name>` makes it dormant again. `/experts`
+lists them; `/experts <name>` shows one with its brief.
+MD
+    cat > "${d}/ref/use-for.md" <<'MD'
+# use_for, keywords and job: routing
+
+The main model sees one line for all experts, always:
+```
+expert: these tasks go to the expert named, not done by hand, even quick ones: <name> (<use_for>); <name> (<use_for>). Actions: list | enable | run
+```
+That entry is the only thing that makes the model hand a task over. It
+does not see the job, the brief or the instructions until it calls `list`.
+
+## Writing use_for
+- Name the tasks a user asks for, in the user's words, not what the expert
+  is: `converting and validating JSON, YAML and TOML config files`, not
+  `a config-format specialist`.
+- Lead with the domain noun the user would say ("reverse engineering:",
+  "phone tasks:", "anything on a web app that needs a browser:"), then 2 to
+  4 concrete tasks.
+- Name the artifact or surface that marks the task as this expert's (a
+  compiled binary, an APK, a browser, a config file), so near-misses on
+  the same topic stay with the model.
+- 6 to 14 words, under 100 characters (cut there). Each entry costs about
+  15 to 30 tokens in every session, dormant or not.
+- No overlap: `expert-lint --list` shows the others. If two experts could
+  both claim a prompt, the line must say what splits them.
+- Not "an expert for" or "helps with": every entry is an expert.
+
+## keywords
+2 or 3 words that stand for the expert once the line is compact (more than
+about a dozen experts): the domain nouns from use_for, e.g. `config files,
+YAML`.
+
+## job
+One line for `list` and the enable dialog: what it does, what it returns,
+and how long it may take ("up to 30 minutes").
+
+## What the measurements so far showed
+- Names alone in the line failed: the model did a phone task by hand next
+  to a tool listing `termux-device`. The few words of use_for fixed it.
+- "even quick ones" in the line raised recall; tasks one shell command
+  answers (`file`, `ldd`, `--version`) still stay with the model. That is
+  usually the cheaper answer, so do not fight it.
+- The model looks at the project first (ls, read) before it delegates; a
+  route-check counts up to 8 of its own tool calls before calling it "own".
+- Precision has been 100% for every built-in: near-misses do not route.
+  Recall of 60 to 100% is normal; under 4/6 means use_for does not say the
+  user's words.
+
+## The prompts file for route-check
+One prompt per line; `#` comments.
+```
+# positives: should go to the expert; never name the expert
++ convert config.yaml in this folder to TOML and check it parses
++ is settings.json valid? it fails to load
+# near-misses: same topic, but the model should do it itself (or a subagent)
+- what is the difference between YAML and TOML?
+- add a "port" key to config.json
+# another expert's task: should go there, not here
+=tester check in a browser that the signup form shows an error
+```
+- 6 positives: varied wording, short and long, some that name the
+  artifact and some that only describe the goal. Never the expert's name.
+- 6 near-misses: a question about the topic (explain, compare), a
+  one-command task, an edit of one value, an unrelated coding task.
+- 1 or 2 `=<expert>` lines for the neighbour nearest to yours, so you see
+  if yours steals its tasks.
+- Put sample files the prompts mention in a folder and pass `--cwd`.
+
+Run it:
+```
+route-check @@EB@@/work/<name>.prompts --expert <name> [--cwd <folder>]
+```
+(bash `timeout: 1800`). Each prompt starts a lets-code session in a
+scratch copy of the agent dir with every expert dormant, so no expert
+actually runs. The last line is the score:
+```
+route-check: <name>: recall 5/6, false triggers 0/7, precision 100%; 212 s, tokens in 61234 out 4210
+```
+Tune once if recall is under 4/6 or anything false-triggered: add the
+user's word the misses used, or the artifact that splits a near-miss off.
+Then rerun the whole file, and report both lines.
+MD
+    cat > "${d}/ref/distill.md" <<'MD'
+# Distilling sources into an expert's knowledge
+
+The child is a 27B model (Qwen3.8-27B) in a fresh context, with pi's tools
+and nothing else: no skills tree, no hooks, no web search unless the
+expert has a tool for it. It follows short imperative instructions well,
+and loses long discursive ones. What it needs from you is what it would
+otherwise guess wrong.
+
+## What to keep
+- Exact commands, flags and versions that work, with the output that
+  means success and the output that means failure.
+- Traps: what looks right and is not (the wrong binary on PATH, a flag
+  that silently does nothing, a default that bites). Say what to do instead.
+- The order of work: numbered steps, each one a verb.
+- How to check the result by running something, not by reading it.
+- The report format: what the caller needs back, in fixed headings.
+
+## What to drop
+- History, motivation, marketing, alternatives the expert will not use.
+- Anything the model already knows (what JSON is, how git works).
+- Harness machinery of the source: hooks, gates, ledgers, phases, other
+  agents' roles, Claude Code tool names (Skill, Task, TodoWrite, WebFetch).
+  Map each step onto pi's tools: read, bash, edit, write, grep, find, ls.
+- Long examples: keep one short one per pattern.
+
+## Where it goes
+- The body of the agent file (always in the child's prompt): who it is,
+  "Tools here" (helpers and refs, each with its absolute path and one line
+  on when to use it), "Order of work", "Rules", "Final message". Aim for
+  300 to 700 words; lint warns past 1500.
+- `ref/*.md` (read on demand): a cheat sheet per topic (an API, a file
+  format, a method step), 300 to 1500 words each. The body names each ref
+  with the step that needs it: "before step 4, read ref/x.md". A ref the
+  body never names is never read.
+- `bin/*`: a command sequence the child would retype or get wrong (a
+  conversion with the right flags, a check that prints a verdict). Each
+  prints a short result and exits non-zero on failure. Usage in its first
+  comment lines.
+
+## Writing for the child
+- Second person, imperative: "Run X. If it prints Y, stop and report Z."
+- One instruction per line or bullet; no paragraph holds two rules.
+- Say what done means: the check that must pass, and when to stop.
+- Say what not to do, with the reason in a few words.
+- Name absolute paths (`@@AGENT@@/<name>/ref/x.md`), never "the docs".
+- Concrete over abstract: a sample command beats a description of one.
+
+## From a method (a QA process, a review checklist, a playbook)
+1. List its steps and, for each, the decision it makes and the evidence it
+   needs. That list becomes "Order of work".
+2. Keep its definitions of done and its evidence rules; they become
+   "Rules" and the report format.
+3. Move tables, catalogues and long criteria into refs, one per step.
+4. Pin the version you distilled from (repo and commit, or a date) in a
+   comment of the agent file, so it can be refreshed later.
+
+## From a repo or a tool's docs
+1. Find the entry points: README, the CLI's `--help`, the main config.
+2. Try the commands on a tiny sample and keep what worked, verbatim.
+3. A cheat sheet ref: the 10 to 20 calls the expert will use, with
+   arguments; nothing else.
+
+## From existing scripts
+Copy them into `bin/` (they are the user's own; keep their license
+header), add a usage comment, and have the body say when to run each.
+MD
+    cat > "${d}/ref/setup.md" <<'MD'
+# Setup, pinning, helpers and platforms
+
+Most experts need no setup: instructions, refs and helpers that use what
+is already on the machine. Add one only when the expert needs a package
+or a tool that is not there.
+
+## How setup runs
+- lets-code runs `bash <setup>` (cwd: the setup's folder) when the user
+  enables the expert and a gated path is missing: `requires`, `agent_dir`,
+  `skills` or `append_prompt`. Without one of those, it never runs.
+- Gate it with `requires: <name>/runtime/.installed` and write that file
+  as the last step, so a finished setup counts as done and a failed one is
+  retried on the next enable.
+- Progress lines go to stderr (shown live). On failure, exit non-zero and
+  print the reason as the last stdout line (shown to the user).
+- 15 minutes at most. No prompts: it runs unattended, without a terminal.
+- The enable dialog shows `setup_note`: what it installs, where, how big
+  ("installs yaml 2.8.1 with npm into ~/.pi/agent/config-convert, 1 MB").
+
+## Pinning
+- Exact versions only: `yaml@2.8.1`, `pip install ruamel.yaml==0.18.6`, a
+  git clone at a fixed commit (`git -C dir checkout <sha>`). Never
+  `@latest`, a range, or a branch.
+- npm always with `--ignore-scripts` (postinstall scripts have copied files
+  into ~/.claude and downloaded drivers): `npm install --ignore-scripts
+  --no-audit --no-fund --loglevel=error <pins>`.
+- Install into `<name>/runtime/`, never globally, never with sudo.
+- Write the pins into the marker (`echo "${pins}" > runtime/.installed`)
+  and compare on the next run, so a change of pins reinstalls.
+- No `curl | sh`. Download a file, check its sha256, then run it.
+
+## Helpers
+- `bin/<tool>`: executable (`chmod 755`), a shebang, usage in the first
+  comment lines, a short result on stdout, non-zero exit on failure.
+- Node helpers can load the runtime's packages with
+  `createRequire(<name>/runtime/package.json)`.
+- Prefer what the platform has: bash, python3 and node exist wherever
+  lets-code runs.
+
+## Platforms
+- `platform: termux` for the phone (Termux on Android), `linux, darwin`
+  for desktops. On Termux Node reports `android`, so `linux` excludes it.
+- Gate when the expert cannot work elsewhere (no browser on Android, no
+  `am` on Linux); otherwise leave it unset so it works everywhere.
+MD
+    cat > "${d}/ref/safety.md" <<'MD'
+# Safety and consent
+
+An expert runs unattended in a child: no one sees its tool calls as they
+happen, and its caller sees only the final message. Its instructions are
+the only brake.
+
+## What the platform already does
+- The user enables each expert (dialog or `/experts enable`); the model
+  never can. The setup runs only then.
+- The child runs under the session's mandate role and guards. `role:
+  readonly` in the frontmatter makes it read-only whatever the session;
+  `role: reviewer` lets it run tests and commands but write only under the
+  temp dir, with no git writes, installs or destructive commands (for an
+  expert that checks work rather than changes it).
+- `tools` limits what it can call: an expert that only reads and reports
+  needs `read, grep, find, ls`, plus `bash` if it runs commands.
+
+## What the instructions must say
+- Irreversible actions (delete, overwrite, `git push`, `rm`, a database
+  write, a factory reset, a payment): do not do them unless the brief asks
+  for exactly that action on exactly that target. Otherwise report the
+  command it would run.
+- Outward actions (sending a message or mail, posting, opening a PR,
+  uploading, calling a paid API): never on its own initiative. A brief
+  field such as `send: yes` or the user's words verbatim must ask for it.
+- Prefer a dry run when the tool has one (`--dry-run`, `--check`, `-n`),
+  show its result, then act.
+- Work on a copy or a new file instead of in place, unless the brief says
+  in place; say which files changed.
+- Secrets: never print tokens, keys or passwords; never write them into
+  reports, logs or new files.
+- Stay inside the brief's scope and folder; stop and report when the task
+  needs more.
+- Clean up what it started: servers, temp files, background processes.
+
+## Consent patterns in the brief
+- A `target` field with the exact file, URL or device; nothing else is
+  touched.
+- An `allow` or `constraints` field for what it may do beyond reading.
+- A `goal` field with the user's words verbatim, so the child sees what
+  the user actually asked, not a paraphrase.
+
+## Examples
+- "Never delete or overwrite an input file. Write the converted file next
+  to it (`<name>.toml`) unless the brief's `output` names another path."
+- "Do not commit or push. Print the message; the user commits."
+- "Do not send anything. Draft it and return the draft."
+MD
+    cat > "${d}/ref/contribute.md" <<'MD'
+# A built-in expert for lets-code (scope builtin)
+
+A built-in is written by the `lets-code` script itself, on every launch
+with experts on, from a writer function in that one file. Build and
+measure it as a user expert first, then pack it.
+
+## Never in the shared checkout
+The user's lets-code clone may be in use by other sessions. Never
+checkout, switch, pull, reset or commit there. Make a worktree:
+```
+cd <repo> && git fetch -q origin
+git worktree add -b expert-<name> <repo>-<name> origin/main
+```
+and work only in `<repo>-<name>`.
+
+## Checklist
+1. Build the expert as for scope user, but in a draft agent dir,
+   `@@EB@@/work/draft`: `expert-new init <name> --agent-dir
+   @@EB@@/work/draft ...`, `expert-lint --agent-dir @@EB@@/work/draft
+   --user ...`, `route-check <prompts> --expert <name> --draft
+   @@EB@@/work/draft`. Nothing lands in `@@AGENT@@/agents`: a user's own
+   file of that name would keep the built-in from being written.
+2. Pack it: `@@EB@@/bin/expert-new pack <name> --agent-dir @@EB@@/work/draft > @@EB@@/work/<name>.sh` prints a
+   bash function `pi_write_<name>()` that writes every file with the
+   `# Written by lets-code (<name>)` line, the expert's paths as `@@D@@`
+   (filled in on launch), and leaves a user's own file of that name alone.
+   It ends with `}  # end of pi_write_<name>`.
+3. Paste the function into `lets-code` next to the other expert writers
+   (`write_termux_agent`, `pi_write_rea`, `pi_write_tester`,
+   `pi_write_expert_builder`), with a comment block above it: what the
+   expert does, where its knowledge comes from (repo and commit), why
+   these tools and this platform.
+4. Call it in the experts block of main (search `pi_write_expert_builder`
+   in the experts `case`): unconditionally, or under `on_termux` /
+   `! on_termux` for a platform-gated one. An expert with a setup that
+   should stay current once enabled follows `pi_write_tester` (`on` when
+   `lc_expert_remembered <name>` is true, else `files`).
+5. Tests: `expert-new pack <name> --test > tests/<name>.sh`, then add
+   checks of its helpers with fakes for whatever they install or call.
+   `tests/run.sh` lints every built-in with `expert-lint --builtin`; add
+   the writer to the built-in list there (search `expert-lint`).
+6. README: a row in the features table, the brief in the Experts
+   templates table, a paragraph in the Experts section. DESIGN.md: why it
+   is built this way, what was measured.
+7. Context cost: `expert-lint --builtin --tokens agents/<name>.md` gives
+   the entry's tokens and the line before and after; put the delta in the
+   PR.
+8. `bash tests/run.sh` must pass (CI runs it on Linux and macOS: bash 3.2,
+   so no `${x,,}`, no `mapfile`, no `declare -A`).
+9. Commit on the branch with a message that says what and why. Push or
+   open a PR only if the brief says so. The PR body: what and why, the
+   brief template, the knowledge sources, context cost, route-check
+   numbers (positives, near-misses, precision), tests, a live run.
+
+## The pattern a writer follows
+- Files under `${PI_AGENT_DIR}/<name>/`, the agent file at
+  `${PI_AGENT_DIR}/agents/<name>.md` written through a temp file and
+  `cmp -s` (no rewrite when unchanged).
+- `if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}"; then
+  return 0; fi`: a user's own file of that name is never touched.
+- Installs only in its setup (run when the user enables it), pinned, npm
+  with `--ignore-scripts`.
+MD
+    cat > "${d}/bin/expert-lint" <<'JS'
+#!/usr/bin/env node
+// Written by lets-code (expert-builder); regenerated on launch, edits are overwritten.
+// expert-lint [options] <agent-file.md | agents-dir>...: checks expert files
+// the way lets-code reads them (the subagents module's parseAgentFile) and
+// what makes one work well: required fields, the brief syntax, pi's tool
+// names, paths that resolve under the agent dir, the setup script (bash -n,
+// pinning, --ignore-scripts), refs and helpers, the use_for budget, overlap
+// with the other experts and agents, and the cost of its entry in the
+// always-on expert line.
+//   --agent-dir A  root for relative paths (default: the file's ../, else
+//                  $PI_CODING_AGENT_DIR, else ~/.pi/agent)
+//   --user         the user's own file: no "Written by lets-code" line
+//   --builtin      a lets-code built-in: must carry that line
+//   --tokens       count tokens with the configured server (models.json,
+//                  provider lets-code, POST /tokenize); else estimated
+//   --list         print the experts and agents in the agent dir and exit
+//   --json         one JSON object per file instead of text
+// Exit 0: no errors (warnings allowed); 1: errors; 2: usage.
+"use strict";
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const { spawnSync } = require("child_process");
+
+const PI_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const PLATFORMS = ["termux", "linux", "darwin", "win32", "freebsd", "openbsd", "android", "aix", "sunos"];
+const KNOWN = ["name", "description", "tools", "thinking", "role", "model", "agent_dir", "skills", "append_prompt", "timeout", "requires", "requires_env",
+	"expert", "job", "use_for", "keywords", "platform", "setup", "setup_note", "brief"];
+const USE_FOR_MAX = 100, KEYWORDS_MAX = 40, USE_FOR_WORDS = 16, BODY_WORDS = 1500, ENTRY_TOKENS = 40, MAX_TIMEOUT = 24 * 3600;
+const MARKER = /^# Written by lets-code/m;
+const TODO = "TODO" + "(expert-new)";   // split, so this file does not carry the marker itself
+const STOP = new Set("a an and the or of to in on for with by from at as is are be it its this that what which your you my me i".split(" "));
+
+// --------------------------------------------------- the parser, as lets-code's
+// same regexes as parseAgentFile: key: value, quoted strings, >/| blocks,
+// a block list under the last key
+function parseFrontmatter(text) {
+	const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
+	const fm = {}, items = {}, inline = {}, keys = [];
+	if (!m) return { ok: false, fm, items, inline, keys, body: text };
+	let last = "", block = "";
+	for (const line of m[1].split(/\r?\n/)) {
+		const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line);
+		if (kv) { last = kv[1]; keys.push(last); fm[last] = kv[2].trim().replace(/^["']|["']$/g, ""); inline[last] = fm[last]; block = /^[>|][+-]?$/.test(fm[last]) ? last : ""; if (block) fm[last] = ""; continue; }
+		const item = /^\s+-\s+(.*)$/.exec(line);
+		if (item && last && !block) { (items[last] = items[last] || []).push(item[1].trim()); fm[last] = [fm[last], item[1].trim().replace(/^["']|["']$/g, "")].filter(Boolean).join(","); continue; }
+		if (block && /^\s+\S/.test(line)) fm[block] = [fm[block], line.trim()].filter(Boolean).join(" ");
+	}
+	return { ok: true, fm, items, inline, keys, body: m[2] };
+}
+const list = (v) => v ? v.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean) : [];
+const squash = (s) => (s || "").replace(/\s+/g, " ").trim();
+function parseBrief(itemsOf) {
+	const out = []; const bad = [];
+	for (const it of itemsOf || []) {
+		const b = /^([A-Za-z_][\w-]*)\s*(\(required\))?\s*:\s*(.*)$/.exec(it.replace(/^["']|["']$/g, ""));
+		if (!b) { bad.push(`"${it}" is not "name (required): hint" or "name: hint"`); continue; }
+		if (out.some((f) => f.name === b[1])) { bad.push(`field ${b[1]} twice`); continue; }
+		out.push({ name: b[1], required: !!b[2], hint: b[3].trim() });
+	}
+	return { fields: out, bad };
+}
+function underRoot(p, root) {
+	if (!p || /[\0\r\n]/.test(p)) return null;
+	const abs = path.isAbsolute(p) ? path.resolve(p) : path.resolve(root, p);
+	const r = path.resolve(root);
+	return abs === r || abs.startsWith(r.endsWith(path.sep) ? r : r + path.sep) ? abs : null;
+}
+function platformOk(p) {
+	if (!p) return true;
+	if (p === "termux") return /\/com\.termux\//.test(process.env.PREFIX || "") || fs.existsSync("/data/data/com.termux/files/usr");
+	return p.split(/[,\s]+/).includes(process.platform);
+}
+const expand = (p) => p.replace(/^~(?=\/|$)/, os.homedir());
+
+// ------------------------------------------------------------- the agent dir
+function agentDirFor(file, opt) {
+	if (opt.agentDir) return path.resolve(expand(opt.agentDir));
+	const d = path.dirname(path.resolve(file));
+	if (path.basename(d) === "agents") return path.dirname(d);
+	return path.resolve(process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent"));
+}
+// every agent file in A/agents: {name, file, expert, useFor, keywords, description}
+function survey(A) {
+	const dir = path.join(A, "agents"); const out = [];
+	let names = []; try { names = fs.readdirSync(dir).filter((f) => f.endsWith(".md")).sort(); } catch { return out; }
+	for (const f of names) {
+		let text = ""; try { text = fs.readFileSync(path.join(dir, f), "utf8"); } catch { continue; }
+		const p = parseFrontmatter(text);
+		out.push({ name: (p.fm.name || f.replace(/\.md$/, "")).trim(), file: path.join(dir, f), expert: /^(true|yes|on)$/i.test(p.fm.expert || ""),
+			useFor: squash(p.fm.use_for).slice(0, USE_FOR_MAX), keywords: squash(p.fm.keywords), description: squash(p.fm.description), platform: p.fm.platform || "", ours: MARKER.test(text) });
+	}
+	return out;
+}
+const words = (s) => new Set((s || "").toLowerCase().split(/[^a-z0-9+#.]+/).map((w) => w.replace(/\.$/, "")).filter((w) => w.length > 2 && !STOP.has(w)));
+
+// ------------------------------------------------------------- tokens
+function server(A) {
+	try {
+		const m = JSON.parse(fs.readFileSync(path.join(A, "models.json"), "utf8"));
+		const p = (m.providers || {})["lets-code"]; if (!p || !p.baseUrl) return null;
+		let key = p.apiKey || ""; if (/^[A-Z_][A-Z0-9_]*$/.test(key) && process.env[key]) key = process.env[key];
+		const model = Array.isArray(p.models) && p.models[0] ? p.models[0].id : undefined;
+		return { url: p.baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "") + "/tokenize", key, model };
+	} catch { return null; }
+}
+async function countTokens(texts, srv) {
+	const est = (t) => Math.ceil(t.length / 3.6);   // English prose with Qwen's tokenizer: about 3.6 characters a token
+	if (srv) {
+		try {
+			const out = [];
+			for (const t of texts) {
+				const r = await fetch(srv.url, { method: "POST", headers: { "Content-Type": "application/json", ...(srv.key ? { Authorization: `Bearer ${srv.key}` } : {}) },
+					body: JSON.stringify({ ...(srv.model ? { model: srv.model } : {}), prompt: t, add_special_tokens: false }), signal: AbortSignal.timeout(10000) });
+				const j = await r.json(); if (typeof j.count !== "number") throw new Error("no count");
+				out.push(j.count);
+			}
+			return { counts: out, how: "server" };
+		} catch { /* fall back */ }
+	}
+	return { counts: texts.map(est), how: "estimate" };
+}
+// the always-on line as the experts module builds it (snippet(), full form)
+const LINE = (entries) => `expert: these tasks go to the expert named, not done by hand, even quick ones: ${entries.join("; ")}. Actions: list | enable | run`;
+const entry = (name, useFor) => useFor ? `${name} (${useFor})` : name;
+
+// ------------------------------------------------------------- one file
+function lintFile(file, opt) {
+	const R = { file, name: "", errors: [], warnings: [], notes: [], entry: "" };
+	const err = (rule, msg) => R.errors.push(`${rule}: ${msg}`);
+	const warn = (rule, msg) => R.warnings.push(`${rule}: ${msg}`);
+	const note = (rule, msg) => R.notes.push(`${rule}: ${msg}`);
+	let text; try { text = fs.readFileSync(file, "utf8"); } catch (e) { err("file", `cannot read: ${e.message}`); return R; }
+	const A = agentDirFor(file, opt); R.agentDir = A;
+	const p = parseFrontmatter(text); const fm = p.fm;
+	if (!p.ok) { err("frontmatter", "no frontmatter: the file must start with --- and close it with ---"); return R; }
+	const name = (fm.name || path.basename(file).replace(/\.md$/, "")).trim(); R.name = name;
+	if (!/^[A-Za-z0-9][\w.-]*$/.test(name)) err("name", `"${name}" is not a valid name (letters, digits, . _ -; lets-code ignores the file)`);
+	if (fm.name && path.basename(file) !== `${name}.md`) warn("name", `file is ${path.basename(file)}, name is ${name}: name the file ${name}.md`);
+	if (!/^(true|yes|on)$/i.test(fm.expert || "")) err("expert", "no `expert: true`: this is a plain subagent, not an expert");
+	for (const k of p.keys) if (!KNOWN.includes(k)) warn("field", `unknown field ${k} (ignored by lets-code; a typo of ${KNOWN.find((x) => x.replace(/_/g, "") === k.replace(/[-_]/g, "").toLowerCase()) || "?"})`);
+	const ours = MARKER.test(text);
+	if (opt.user && ours) err("marker", "has the \"# Written by lets-code\" line: lets-code would overwrite this file. A user's own expert must not carry it");
+	if (opt.builtin && !ours) err("marker", "a built-in must carry \"# Written by lets-code (<name>); regenerated on launch, edits are overwritten.\" in its frontmatter");
+
+	// text fields
+	if (!squash(fm.description)) err("description", "missing: the child's preamble and the default job come from it");
+	const job = squash(fm.job || fm.description);
+	if (!fm.job) warn("job", "missing: list shows the description instead; write one line on what it does and how long it may take");
+	else if (job.length > 300) warn("job", `${job.length} characters: keep it to one line (under 300)`);
+	const useFor = squash(fm.use_for);
+	if (!useFor) err("use_for", "missing: the always-on line would show the bare name, and the model would not know what goes there");
+	else {
+		if (useFor.length > USE_FOR_MAX) err("use_for", `${useFor.length} characters: lets-code cuts it at ${USE_FOR_MAX} ("${useFor.slice(USE_FOR_MAX - 20, USE_FOR_MAX)}|")`);
+		const n = useFor.split(/\s+/).length;
+		if (n > USE_FOR_WORDS) warn("use_for", `${n} words: keep it to the tasks, about 8 to ${USE_FOR_WORDS} words`);
+		if (/^(an? )?(expert|agent|subagent)\b/i.test(useFor)) warn("use_for", "starts with what it is: write the tasks a user asks for (\"converting config files: ...\")");
+	}
+	R.entry = entry(name, useFor.slice(0, USE_FOR_MAX));
+	const kw = squash(fm.keywords);
+	if (!kw) warn("keywords", "missing: past about a dozen experts the line shows the first 4 words of use_for instead");
+	else { if (kw.length > KEYWORDS_MAX) err("keywords", `${kw.length} characters: lets-code cuts it at ${KEYWORDS_MAX}`); if (list(kw).length > 4) warn("keywords", "more than 4: two or three words"); }
+
+	// brief
+	if (p.inline.brief) err("brief", "brief takes a block list (\"  - name (required): hint\" lines), not an inline value");
+	const brief = parseBrief(p.items.brief);
+	for (const b of brief.bad) err("brief", `${b} (lets-code ignores the whole file)`);
+	if (!p.items.brief) warn("brief", "none: the caller gets one required field, task; name what the expert needs to hear");
+	else {
+		if (!brief.fields.some((f) => f.required)) warn("brief", "no required field: mark what the expert cannot start without with (required)");
+		for (const f of brief.fields) { if (!f.hint) warn("brief", `${f.name} has no hint`); if (!/^[a-z][a-z0-9_]*$/.test(f.name)) warn("brief", `${f.name}: use lower_snake_case`); }
+		if (brief.fields.length > 7) warn("brief", `${brief.fields.length} fields: a caller fills in about 2 to 6 well`);
+	}
+
+	// agent fields
+	const tools = list(fm.tools);
+	if (!fm.tools) warn("tools", `none: the child gets every tool; name the least it needs (pi's: ${PI_TOOLS.join(", ")})`);
+	for (const t of tools) if (!PI_TOOLS.includes(t) && !/^mcp__\w+$/.test(t)) err("tools", `${t} is not a pi tool (${PI_TOOLS.join(", ")}, or mcp__<server>_<tool>)`);
+	if (/^(readonly|plan|reviewer)$/.test(fm.role || "") && tools.some((t) => t === "write" || t === "edit")) warn("tools", `role ${fm.role} with write/edit: the role refuses them${fm.role === "reviewer" ? " outside the temp dir" : ""}`);
+	if (fm.thinking && !THINKING.includes(fm.thinking)) err("thinking", `${fm.thinking}: one of ${THINKING.join(", ")}`);
+	if (fm.thinking === "xhigh") warn("thinking", "xhigh: very long thinking on a local GPU; medium (the default) or high");
+	if (fm.timeout) { const s = Number(fm.timeout); if (!/^\d+$/.test(fm.timeout) || s < 1 || s > MAX_TIMEOUT) err("timeout", `${fm.timeout}: whole seconds, 1 to ${MAX_TIMEOUT} (else lets-code ignores the file)`); }
+	else note("timeout", "none: a run is stopped only by the user");
+	if (fm.platform) for (const x of fm.platform.split(/[,\s]+/).filter(Boolean)) if (!PLATFORMS.includes(x)) err("platform", `${x}: termux or a Node platform (${PLATFORMS.filter((y) => y !== "termux").join(", ")})`);
+	if (fm.requires_env && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(fm.requires_env)) err("requires_env", `${fm.requires_env} is not a variable name`);
+
+	// paths: under the agent dir (else the file is rejected); missing ones gate readiness
+	const setupOn = !!fm.setup; let gated = false;
+	const checkPath = (key, value, kind) => {
+		const abs = underRoot(expand(value), A);
+		if (!abs) { err(key, `${value} is outside ${A} (lets-code ignores the file)`); return null; }
+		const st = fs.statSync(abs, { throwIfNoEntry: false });
+		const ok = st && (kind === "dir" ? st.isDirectory() : kind === "file" ? st.isFile() : true);
+		if (!ok) { if (setupOn) note(key, `${value} is missing: the expert shows as not set up until its setup creates it`); else err(key, `${value} does not exist and there is no setup to make it`); }
+		return abs;
+	};
+	if (fm.agent_dir) { gated = true; checkPath("agent_dir", fm.agent_dir, "dir"); }
+	for (const s of list(fm.skills)) { gated = true; checkPath("skills", s, "any"); }
+	let appendAbs = null;
+	if (fm.append_prompt) { gated = true; appendAbs = checkPath("append_prompt", fm.append_prompt, "file"); }
+	if (fm.requires) { gated = true; checkPath("requires", fm.requires, "any"); }
+	if (setupOn) {
+		const s = underRoot(expand(fm.setup), A);
+		if (!s) err("setup", `${fm.setup} is outside ${A} (lets-code ignores the file)`);
+		else if (!fs.existsSync(s)) err("setup", `${fm.setup} does not exist`);
+		else lintSetup(s, err, warn);
+		if (!fm.setup_note) warn("setup_note", "missing: the enable dialog cannot say what the setup does (what it installs, where, how big)");
+		if (!gated) warn("setup", "nothing gates it (requires, agent_dir, skills or append_prompt): lets-code runs setup only while one is missing, so it would never run. Add `requires: <name>/runtime/.installed` and touch that file at the end of setup");
+	} else if (fm.setup_note) warn("setup_note", "a setup_note without a setup");
+
+	// the body and what it points at
+	const body = p.body.trim();
+	let promptText = body;
+	if (appendAbs && fs.existsSync(appendAbs)) promptText += "\n" + fs.readFileSync(appendAbs, "utf8");
+	if (!body && !fm.append_prompt) err("body", "no instructions: write them below the frontmatter (or name an append_prompt file)");
+	const n = promptText.split(/\s+/).filter(Boolean).length;
+	if (n > BODY_WORDS) warn("body", `${n} words always in the child's prompt: move reference material into ${name}/ref/*.md, read on demand`);
+	if (/\b(Skill|Task|TodoWrite|WebFetch|WebSearch|MultiEdit|NotebookEdit|Glob)\s*(tool|\(|\{)/.test(promptText)) warn("body", "names a tool pi does not have (Skill, Task, TodoWrite, WebFetch, ...): the child has only its tools list");
+	const own = path.join(A, name);
+	// every path under the agent dir the instructions name must exist; the
+	// expert's own dir and any dir they point into have their refs checked
+	const mentioned = new Set(); const dirs = new Set([name]);
+	const re = new RegExp(`(@@D@@|~/\\.pi/agent|${escapeRe(A)})(/[\\w./-]*[\\w-])`, "g");
+	for (const m of promptText.matchAll(re)) {
+		if (m[1] === "@@D@@") continue;   // a built-in's template: filled in on launch
+		const abs = path.join(A, m[2]); mentioned.add(abs);
+		const top = m[2].split("/")[1]; if (top && top !== "agents" && /\/(ref|bin)\//.test(m[2])) dirs.add(top);
+		if (!fs.existsSync(abs)) err("refs", `the instructions name ${m[2].slice(1)}, which does not exist`);
+	}
+	for (const top of dirs) for (const sub of ["ref", "bin"]) {
+		const d = path.join(A, top, sub); let files = [];
+		try { files = fs.readdirSync(d).filter((f) => !f.startsWith(".")); } catch { continue; }
+		for (const f of files) {
+			const abs = path.join(d, f); const st = fs.statSync(abs);
+			if (!st.isFile()) continue;
+			if (sub === "ref" && f.endsWith(".md") && !mentioned.has(abs) && !promptText.includes(`${sub}/${f}`)) warn("refs", `${top}/ref/${f} is never named in the instructions: the child will not know to read it`);
+			if (sub === "bin") {
+				const head = fs.readFileSync(abs, "utf8").slice(0, 200);
+				if (!(st.mode & 0o111) && !/\.(mjs|cjs|js|py|ts)$/.test(f)) warn("bin", `${top}/bin/${f} is not executable (chmod 755)`);
+				if (/^#!.*\b(ba)?sh\b/.test(head)) { const r = spawnSync("bash", ["-n", abs], { encoding: "utf8" }); if (r.status !== 0) err("bin", `${top}/bin/${f}: bash -n: ${(r.stderr || "").trim().split("\n")[0]}`); }
+			}
+		}
+	}
+	// the scaffold's placeholders, anywhere in the expert's files
+	const todo = [file, ...walk(own)].filter((f) => { try { return fs.readFileSync(f, "utf8").includes(TODO); } catch { return false; } });
+	for (const f of todo) err("todo", `${path.relative(A, f)} still has ${TODO} placeholders`);
+
+	// neighbours: the same name, overlapping use_for
+	const others = survey(A).filter((o) => path.resolve(o.file) !== path.resolve(file));
+	for (const o of others) if (o.name === name) err("name", `${path.basename(o.file)} has the same name ${name}: only one of them is used`);
+	const mine = new Set([...words(useFor), ...words(kw)]);
+	for (const o of others) {
+		if (o.name === name || !platformOk(o.platform)) continue;
+		const theirs = o.expert ? new Set([...words(o.useFor), ...words(o.keywords)]) : words(o.description);
+		const shared = [...mine].filter((w) => theirs.has(w));
+		const ratio = shared.length / Math.max(1, Math.min(mine.size, theirs.size));
+		if (shared.length >= 2 && ratio >= 0.25) warn("overlap", `${o.expert ? "expert" : "agent"} ${o.name} shares ${shared.join(", ")}: say what sets this one apart, or route-check both`);
+	}
+	return R;
+}
+function lintSetup(s, err, warn) {
+	const r = spawnSync("bash", ["-n", s], { encoding: "utf8" });
+	if (r.status !== 0) { err("setup", `bash -n: ${(r.stderr || "").trim().split("\n")[0]}`); return; }
+	const src = fs.readFileSync(s, "utf8").split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+	// what a line runs: its comments and echo/printf messages left out
+	const code = (l) => l.replace(/\b(echo|printf)\s+("([^"\\]|\\.)*"|'[^']*')/g, "$1 ''").replace(/\s#.*$/, "");
+	for (const l of src.split("\n").map(code)) {
+		if (/\bnpm\s+(i|install|ci|add)\b/.test(l) && !/--ignore-scripts/.test(l)) err("setup", `npm without --ignore-scripts: ${l.trim()}`);
+		const x = /\bnpx\s+(?:--yes\s+|-y\s+)?(\S+)/.exec(l); if (x && !/@\d/.test(x[1].replace(/^@/, ""))) warn("setup", `npx of an unpinned package: ${l.trim()}`);
+		if (/@latest\b|@next\b/.test(l)) err("setup", `unpinned version: ${l.trim()}`);
+		if (/\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z)?sh\b/.test(l)) err("setup", `pipes a download into a shell: ${l.trim()}`);
+		if (/(^|[;&|]\s*|\s)sudo\s/.test(l)) err("setup", `sudo: a setup runs as the user, unattended: ${l.trim()}`);
+		if (/\bpip3?\s+install\b/.test(l) && !/==|-r\s|--requirement/.test(l)) warn("setup", `pip install without pinned versions (==): ${l.trim()}`);
+		if (/\bgit\s+clone\b/.test(l) && !/(checkout|--branch|-b)\s+\S/.test(src)) warn("setup", `git clone without a pinned ref (checkout <sha> or --branch <tag>): ${l.trim()}`);
+	}
+}
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function walk(d) { const out = []; let es = []; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { return out; }
+	for (const e of es) { if (["runtime", "node_modules", "work", ".git"].includes(e.name)) continue; const p = path.join(d, e.name); if (e.isDirectory()) out.push(...walk(p)); else if (e.isFile() && fs.statSync(p).size < 512 * 1024) out.push(p); } return out; }
+
+// ------------------------------------------------------------- main
+async function main(argv) {
+	const opt = { files: [] };
+	for (let i = 0; i < argv.length; i++) {
+		const a = argv[i];
+		if (a === "--agent-dir") opt.agentDir = argv[++i];
+		else if (a === "--user") opt.user = true;
+		else if (a === "--builtin") opt.builtin = true;
+		else if (a === "--tokens") opt.tokens = true;
+		else if (a === "--json") opt.json = true;
+		else if (a === "--list") opt.list = true;
+		else if (a === "-h" || a === "--help") { process.stdout.write(fs.readFileSync(__filename, "utf8").split("\n").filter((l) => l.startsWith("// ")).slice(1, 18).map((l) => l.slice(3)).join("\n") + "\n"); return 0; }
+		else if (a.startsWith("-")) { console.error(`expert-lint: unknown option ${a}`); return 2; }
+		else opt.files.push(a);
+	}
+	if (opt.list) {
+		const A = path.resolve(expand(opt.agentDir || process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent")));
+		for (const o of survey(A)) console.log(o.expert ? `expert ${o.name}${platformOk(o.platform) ? "" : ` [${o.platform} only]`}: ${o.useFor || "(no use_for)"}${o.keywords ? ` | keywords: ${o.keywords}` : ""}` : `agent  ${o.name}: ${o.description}`);
+		return 0;
+	}
+	if (!opt.files.length) { console.error("usage: expert-lint [--agent-dir A] [--user|--builtin] [--tokens] [--json] <file.md|agents-dir>... | --list"); return 2; }
+	const files = [];
+	for (const f of opt.files) {
+		const st = fs.statSync(f, { throwIfNoEntry: false });
+		if (st && st.isDirectory()) { for (const x of fs.readdirSync(f).sort()) if (x.endsWith(".md") && /^(true|yes|on)$/i.test(parseFrontmatter(fs.readFileSync(path.join(f, x), "utf8")).fm.expert || "")) files.push(path.join(f, x)); }
+		else files.push(f);
+	}
+	let errors = 0;
+	for (const f of files) {
+		const R = lintFile(f, opt);
+		if (R.entry && R.agentDir) {
+			// the line's cost: with every usable expert in the dir, and without this one
+			const others = survey(R.agentDir).filter((o) => o.expert && platformOk(o.platform) && path.resolve(o.file) !== path.resolve(f) && o.name !== R.name);
+			const all = [...others.map((o) => ({ n: o.name, e: entry(o.name, o.useFor) })), { n: R.name, e: R.entry }].sort((a, b) => a.n.localeCompare(b.n));
+			const withIt = LINE(all.map((x) => x.e)); const without = others.length ? LINE(others.map((o) => entry(o.name, o.useFor))) : "";
+			const t = await countTokens([`; ${R.entry}`, withIt, ...(without ? [without] : [])], opt.tokens ? server(R.agentDir) : null);
+			R.tokens = { entry: t.counts[0], line: t.counts[1], lineWithout: without ? t.counts[2] : 0, how: t.how };
+			R.notes.push(`cost: its entry "${R.entry}" is ${t.counts[0]} tokens; the expert line ${R.tokens.lineWithout ? `${R.tokens.lineWithout} -> ` : ""}${R.tokens.line} tokens (${t.how === "server" ? "the server's tokenizer" : "estimated, 3.6 chars a token"})`);
+			if (t.counts[0] > ENTRY_TOKENS) R.warnings.push(`cost: the entry is ${t.counts[0]} tokens, always in context: under ${ENTRY_TOKENS}`);
+		}
+		errors += R.errors.length;
+		if (opt.json) { console.log(JSON.stringify(R)); continue; }
+		const r0 = path.relative(process.cwd(), f); const rel = !r0 || r0.startsWith("..") ? f : r0;
+		for (const e of R.errors) console.log(`${rel}: error: ${e}`);
+		for (const w of R.warnings) console.log(`${rel}: warning: ${w}`);
+		for (const n of R.notes) console.log(`${rel}: note: ${n}`);
+		console.log(`expert-lint: ${R.name || rel}: ${R.errors.length} error${R.errors.length === 1 ? "" : "s"}, ${R.warnings.length} warning${R.warnings.length === 1 ? "" : "s"}`);
+	}
+	return errors ? 1 : 0;
+}
+module.exports = { parseFrontmatter, parseBrief, lintFile, survey, words, LINE, entry, PI_TOOLS };
+if (require.main === module) main(process.argv.slice(2)).then((c) => { process.exitCode = c; }, (e) => { console.error(`expert-lint: ${e.stack || e}`); process.exitCode = 2; });
+JS
+    cat > "${d}/bin/expert-new" <<'JS'
+#!/usr/bin/env node
+// Written by lets-code (expert-builder); regenerated on launch, edits are overwritten.
+// expert-new init <name> [options]: scaffolds a user's own expert in the
+// agent dir: agents/<name>.md (frontmatter and an instructions skeleton,
+// without the lets-code line, so lets-code never overwrites it) and, when
+// asked, <name>/ref/*.md, <name>/bin/* and <name>/setup. What is not given
+// is left as a TODO marker, which expert-lint reports until it is filled.
+//   --agent-dir A   default $PI_CODING_AGENT_DIR, else ~/.pi/agent
+//   --description T --job T --use-for T --keywords T --tools a,b
+//   --brief "field (required): hint"   (repeat; order kept)
+//   --platform P --timeout S --thinking L --role R
+//   --ref <file.md> (repeat)  --bin <file> (repeat)  --setup  --force
+// expert-new pack <name> [--agent-dir A] [--fn F] [--test]: prints a
+// lets-code writer function (bash) that writes the expert's files as a
+// built-in, with the lets-code line and its paths as @@D@@; --test prints a
+// test skeleton for tests/<name>.sh instead.
+"use strict";
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+
+const TODO = "TODO" + "(expert-new)";   // split, so this file does not carry the marker itself
+const MARK = "# Written by lets-code";
+const expand = (p) => p.replace(/^~(?=\/|$)/, os.homedir());
+const agentDir = (o) => path.resolve(expand(o.agentDir || process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent")));
+const yaml = (v) => { const t = v.replace(/\s+/g, " ").trim(); return /^[[{"'>|#&*!%@`-]/.test(t) ? JSON.stringify(t) : t; };
+
+function parseArgs(argv) {
+	const o = { brief: [], ref: [], bin: [], _: [] };
+	const multi = { "--brief": "brief", "--ref": "ref", "--bin": "bin" };
+	const one = { "--agent-dir": "agentDir", "--description": "description", "--job": "job", "--use-for": "useFor", "--keywords": "keywords", "--tools": "tools",
+		"--platform": "platform", "--timeout": "timeout", "--thinking": "thinking", "--role": "role", "--fn": "fn" };
+	for (let i = 0; i < argv.length; i++) {
+		const a = argv[i];
+		if (multi[a]) o[multi[a]].push(argv[++i] ?? "");
+		else if (one[a]) o[one[a]] = argv[++i] ?? "";
+		else if (a === "--setup") o.setup = true;
+		else if (a === "--force") o.force = true;
+		else if (a === "--test") o.test = true;
+		else if (a.startsWith("--")) throw new Error(`unknown option ${a}`);
+		else o._.push(a);
+	}
+	return o;
+}
+
+// ------------------------------------------------------------- init
+function init(name, o) {
+	if (!/^[a-z0-9][a-z0-9-]*$/.test(name || "")) throw new Error("the name is lower-case letters, digits and -, e.g. config-convert");
+	const A = agentDir(o); const af = path.join(A, "agents", `${name}.md`); const D = path.join(A, name);
+	if (fs.existsSync(af)) {
+		if (fs.readFileSync(af, "utf8").includes(MARK)) throw new Error(`${af} is lets-code's own (a built-in of that name): pick another name`);
+		if (!o.force) throw new Error(`${af} exists: --force overwrites it`);
+	}
+	for (const f of fs.existsSync(path.join(A, "agents")) ? fs.readdirSync(path.join(A, "agents")) : []) {
+		if (!f.endsWith(".md") || f === `${name}.md`) continue;
+		const m = /^name:\s*(.+)$/m.exec(fs.readFileSync(path.join(A, "agents", f), "utf8"));
+		if (m && m[1].trim().replace(/^["']|["']$/g, "") === name) throw new Error(`agents/${f} already has the name ${name}`);
+	}
+	for (const r of o.ref) if (!/^[a-z0-9][\w-]*\.md$/.test(r)) throw new Error(`--ref ${r}: a file name like method.md`);
+	for (const b of o.bin) if (!/^[a-z0-9][\w.-]*$/.test(b)) throw new Error(`--bin ${b}: a file name like convert or check.mjs`);
+	const brief = o.brief.length ? o.brief : [`${TODO} (required): what the caller must say`];
+	for (const b of brief) if (!/^[A-Za-z_][\w-]*\s*(\(required\))?\s*:\s*\S/.test(b) && !b.startsWith(TODO)) throw new Error(`--brief "${b}": "name (required): hint" or "name: hint"`);
+	const needsRuntime = !!o.setup;
+	const fm = [
+		"---",
+		`name: ${name}`,
+		`description: ${o.description ? yaml(o.description) : TODO}`,
+		`tools: ${o.tools ? o.tools.split(/[,\s]+/).filter(Boolean).join(", ") : "read, bash"}`,
+		...(o.thinking ? [`thinking: ${o.thinking}`] : []),
+		...(o.role ? [`role: ${o.role}`] : []),
+		...(o.timeout ? [`timeout: ${o.timeout}`] : ["timeout: 1800"]),
+		...(needsRuntime ? [`requires: ${name}/runtime/.installed`] : []),
+		"expert: true",
+		`use_for: ${o.useFor ? yaml(o.useFor) : TODO}`,
+		`keywords: ${o.keywords ? yaml(o.keywords) : TODO}`,
+		`job: ${o.job ? yaml(o.job) : TODO}`,
+		...(o.platform ? [`platform: ${o.platform}`] : []),
+		...(needsRuntime ? [`setup: ${name}/setup`, `setup_note: ${TODO} (what it installs, where, about how big)`] : []),
+		"brief:",
+		...brief.map((b) => `  - ${b}`),
+		"---",
+	];
+	const tools = [
+		...o.bin.map((b) => `- \`${D}/bin/${b}\`: ${TODO} (usage, what it prints)`),
+		...(o.ref.length ? ["- References; read the one a step needs, not all of them:", ...o.ref.map((r) => `  - \`${D}/ref/${r}\`: ${TODO} (what is in it)`)] : []),
+	];
+	const body = [
+		`You are the ${name} expert of a lets-code session. Another agent gave you`,
+		"one brief and will see only your final message.",
+		"",
+		...(tools.length ? ["## Tools here", ...tools, ""] : []),
+		"## Order of work",
+		`1. Read the brief. ${TODO}`,
+		`2. ${TODO}`,
+		"3. Check the result by running it, not by reading it.",
+		"4. Report.",
+		"",
+		"## Rules",
+		`- ${TODO} (what it must never do; what needs the user's yes first)`,
+		"- Stay inside the brief's scope.",
+		"",
+		"## Final message, for an agent that has not seen any of it",
+		"## Result",
+		"What was done, in two or three sentences.",
+		"## Evidence",
+		"Commands run and what they printed; files written.",
+		"## Not done",
+		"What was out of scope or out of reach, and why.",
+		"",
+	];
+	fs.mkdirSync(path.dirname(af), { recursive: true });
+	fs.writeFileSync(af, fm.join("\n") + "\n" + body.join("\n"), { mode: 0o644 });
+	const made = [af];
+	for (const r of o.ref) { const f = path.join(D, "ref", r); if (fs.existsSync(f) && !o.force) continue; fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, `# ${r.replace(/\.md$/, "").replace(/[-_]/g, " ")}\n\n${TODO}: the knowledge one step needs, imperative, with exact commands.\n`); made.push(f); }
+	for (const b of o.bin) {
+		const f = path.join(D, "bin", b); if (fs.existsSync(f) && !o.force) continue; fs.mkdirSync(path.dirname(f), { recursive: true });
+		const js = /\.(mjs|js|cjs)$/.test(b);
+		fs.writeFileSync(f, js ? `#!/usr/bin/env node\n// ${b}: ${TODO} (usage, what it prints)\n` : `#!/usr/bin/env bash\n# ${b}: ${TODO} (usage, what it prints)\nset -eu\n`, { mode: 0o755 });
+		made.push(f);
+	}
+	if (needsRuntime) {
+		const f = path.join(D, "setup");
+		if (!fs.existsSync(f) || o.force) {
+			fs.mkdirSync(D, { recursive: true });
+			fs.writeFileSync(f, [
+				"#!/usr/bin/env bash",
+				`# setup for the ${name} expert: run by lets-code when the user enables it,`,
+				"# while runtime/.installed is missing. Progress on stderr; on failure the",
+				"# last stdout line says why. Pinned versions only; npm with --ignore-scripts.",
+				"set -u",
+				'here="$(cd "$(dirname "$0")" && pwd)"; rt="${here}/runtime"',
+				`pins="${TODO}"   # e.g. "yaml@2.8.1 smol-toml@1.4.2"`,
+				'mkdir -p "${rt}"',
+				'command -v npm >/dev/null 2>&1 || { echo "npm not found"; exit 2; }',
+				`echo "${name}: installing \${pins} into \${rt} ..." >&2`,
+				'(cd "${rt}" && npm init -y >/dev/null 2>&1 && npm install --ignore-scripts --no-audit --no-fund --loglevel=error ${pins} >/dev/null 2>&1) || { echo "install failed; run: cd ${rt} && npm install --ignore-scripts ${pins}"; exit 1; }',
+				'echo "${pins}" > "${rt}/.installed"',
+				"",
+			].join("\n"), { mode: 0o755 });
+			made.push(f);
+		}
+	}
+	return made;
+}
+
+// ------------------------------------------------------------- pack
+function files(d) { const out = []; let es = []; try { es = fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)); } catch { return out; }
+	for (const e of es) { if (["runtime", "node_modules", "work", ".git"].includes(e.name) || e.name.startsWith(".")) continue; const p = path.join(d, e.name); if (e.isDirectory()) out.push(...files(p)); else if (e.isFile()) out.push(p); } return out; }
+function terminator(texts) { let t = "LC_EOF"; for (let i = 2; texts.some((x) => x.split("\n").includes(t)); i++) t = `LC_EOF${i}`; return t; }
+function pack(name, o) {
+	const A = agentDir(o); const af = path.join(A, "agents", `${name}.md`); const D = path.join(A, name);
+	if (!fs.existsSync(af)) throw new Error(`${af} does not exist`);
+	const fn = o.fn || `pi_write_${name.replace(/-/g, "_")}`;
+	const sub = (t) => t.split(D).join("@@D@@").split(`~/.pi/agent/${name}`).join("@@D@@");
+	let agent = sub(fs.readFileSync(af, "utf8"));
+	if (!agent.includes(MARK)) agent = agent.replace(/^---\n/, `---\n${MARK} (${name}); regenerated on launch, edits are overwritten.\n# To keep your own version, delete this line: lets-code then leaves it alone.\n`);
+	const own = files(D).map((f) => ({ rel: path.relative(D, f), text: sub(fs.readFileSync(f, "utf8")), exec: !!(fs.statSync(f).mode & 0o111) }));
+	if (own.some((f) => f.text.includes("\0"))) throw new Error("a binary file in the expert's dir: built-ins carry text only");
+	const T = terminator([agent, ...own.map((f) => f.text)]);
+	const job = (/^job:\s*(.*)$/m.exec(agent) || [])[1] || name;
+	if (o.test) return testSkeleton(name, fn);
+	const dirs = [...new Set(own.map((f) => path.dirname(f.rel)).filter((d) => d !== "."))];
+	const out = [
+		`# ${name} expert: ${job.replace(/^["']|["']$/g, "")}`,
+		"# Written on every launch with experts on; dormant until the user enables it.",
+		`${fn}() {`,
+		`    local d="\${PI_AGENT_DIR}/${name}" af="\${PI_AGENT_DIR}/agents/${name}.md" tmp f`,
+		`    mkdir -p "\${d}"${dirs.map((x) => ` "\${d}/${x}"`).join("")} "\${PI_AGENT_DIR}/agents"`,
+	];
+	for (const f of own) {
+		out.push(`    cat > "\${d}/${f.rel}" <<'${T}'`, f.text.replace(/\n$/, ""), T);
+		out.push(`    chmod ${f.exec ? 755 : 644} "\${d}/${f.rel}"`);
+	}
+	if (own.some((f) => f.text.includes("@@D@@")))
+		out.push(`    for f in ${own.filter((f) => f.text.includes("@@D@@")).map((f) => `"\${d}/${f.rel}"`).join(" ")}; do`,
+			`        sed "s|@@D@@|\${d}|g" "\${f}" > "\${f}.tmp" && cat "\${f}.tmp" > "\${f}" && rm -f "\${f}.tmp"`, "    done");
+	out.push("    # the expert; a user's own agent of that name is left alone",
+		`    if [ -e "\${af}" ] && ! grep -q '^# Written by lets-code' "\${af}" 2>/dev/null; then return 0; fi`,
+		`    tmp="$(mktemp "\${af}.XXXXXX")" || return 0`,
+		`    cat > "\${tmp}" <<'${T}'`, agent.replace(/\n$/, ""), T);
+	if (agent.includes("@@D@@")) out.push(`    sed "s|@@D@@|\${d}|g" "\${tmp}" > "\${tmp}.s" && mv "\${tmp}.s" "\${tmp}"`);
+	out.push(`    chmod 644 "\${tmp}"`, `    if cmp -s "\${tmp}" "\${af}"; then rm -f "\${tmp}"; else mv "\${tmp}" "\${af}"; fi`, `}  # end of ${fn}`, "");
+	return out.join("\n");
+}
+function testSkeleton(name, fn) {
+	return `#!/usr/bin/env bash
+# Unit test for ${fn}: extracts the writer from ./lets-code, runs it against a
+# scratch agent dir, and lints the expert it writes as a built-in.
+set -eu
+here="$(cd "$(dirname "$0")" && pwd)"
+eval "$(python3 - "\${here}/../lets-code" <<'PY'
+import sys
+s = open(sys.argv[1]).read()
+i = s.find("\\n${fn}() {")
+j = s.find("\\n}  # end of ${fn}\\n", i)
+sys.stdout.write(s[i:j + len("\\n}  # end of ${fn}\\n")])
+PY
+)"
+PI_AGENT_DIR="$(cd "$(mktemp -d "\${TMPDIR:-/tmp}/${name}-test.XXXXXX")" && pwd)"; trap 'rm -rf "\${PI_AGENT_DIR}"' EXIT
+fail=0
+t() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1 -> $2 (want $3)"; fail=1; fi; }
+af="\${PI_AGENT_DIR}/agents/${name}.md"
+${fn}
+t "agent file written"      "$(grep -c '^# Written by lets-code' "\${af}")" 1
+t "an expert"               "$(sed -n 's/^expert: //p' "\${af}")" true
+t "paths filled in"         "$(grep -rc '@@D@@' "\${af}" "\${PI_AGENT_DIR}/${name}" | grep -vc ':0$' || true)" 0
+before="$(cat "\${af}")"; ${fn}
+t "rewrite is stable"       "$(cat "\${af}")" "\${before}"
+printf -- '---\\nname: ${name}\\ndescription: mine\\n---\\nmine\\n' > "\${af}"; ${fn}
+t "user's own file kept"    "$(grep -c 'description: mine' "\${af}")" 1
+rm -f "\${af}"; ${fn}
+t "no temp files left"      "$(ls "\${PI_AGENT_DIR}/agents" | tr '\\n' ' ')" "${name}.md "
+# the builder's lint, as CI runs it for every built-in (tests/run.sh)
+# ${TODO}: behaviour checks of the expert's helpers, with fakes for anything it installs or calls
+exit "\${fail}"
+`;
+}
+
+function main(argv) {
+	const [cmd, ...rest] = argv;
+	let o; try { o = parseArgs(rest); } catch (e) { console.error(`expert-new: ${e.message}`); return 2; }
+	try {
+		if (cmd === "init") { const made = init(o._[0], o); console.log(made.map((f) => `wrote ${f}`).join("\n")); console.log(`next: fill in every ${TODO}, then: expert-lint --user ${made[0]}`); return 0; }
+		if (cmd === "pack") { process.stdout.write(pack(o._[0], o)); return 0; }
+	} catch (e) { console.error(`expert-new: ${e.message}`); return 1; }
+	console.error("usage: expert-new init <name> [--agent-dir A] [--description T] [--job T] [--use-for T] [--keywords T] [--tools a,b] [--brief 'f (required): hint']... [--platform P] [--timeout S] [--ref f.md]... [--bin f]... [--setup] [--force]\n       expert-new pack <name> [--agent-dir A] [--fn F] [--test]");
+	return 2;
+}
+module.exports = { init, pack, parseArgs, terminator, yaml };
+if (require.main === module) process.exitCode = main(process.argv.slice(2));
+JS
+    cat > "${d}/bin/route-check" <<'JS'
+#!/usr/bin/env node
+// Written by lets-code (expert-builder); regenerated on launch, edits are overwritten.
+// route-check <prompts-file> [<scratch-agent-dir>] --expert <name> [options]:
+// does the main model send these prompts to the expert? Each prompt runs in
+// its own lets-code session in print mode (--mode json, thinking low), one at
+// a time, in a scratch agent dir where every expert is dormant, and is
+// stopped at the routing decision, so no expert and no task really runs:
+//   expert run/enable    routed to that expert
+//   subagent             routed to a plain subagent
+//   write or edit, or --max-own tool calls of its own, or an answer: own
+// The prompts file, one per line (# comments):
+//   + <prompt>           should go to the expert (recall)
+//   - <prompt>           should not (a near-miss or unrelated: false triggers)
+//   =<other> <prompt>    should go to the expert <other> (not stolen)
+// Prints a line per prompt and recall, false triggers and precision.
+//   --from A        agent dir the scratch is copied from when it is new or
+//                   empty (default $PI_CODING_AGENT_DIR, else ~/.pi/agent);
+//                   sessions, the state file (so all dormant) and installs
+//                   are left out. Without a scratch dir: a temporary one
+//                   under A/expert-builder/work, removed at the end
+//   --draft D       also copy D/agents/<name>.md and D/<name>/ into the
+//                   scratch (an expert drafted outside the agent dir)
+//   --cwd DIR       the sessions' folder (default: <scratch>/project, empty)
+//   --timeout S     per prompt (default 240)   --max-own N (default 8)
+//   --thinking L    (default low)   --launcher CMD (default $LETS_CODE_LAUNCHER, else lets-code)
+//   --json FILE     the results as JSON   --keep   --dry-run
+// Exit 0 when it ran (whatever the scores), 1 on a failure to run, 2 usage.
+"use strict";
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const { spawn } = require("child_process");
+
+const expand = (p) => p.replace(/^~(?=\/|$)/, os.homedir());
+// what lets-code exports into its own session (and so into a child): left out,
+// so the nested session starts as a fresh top-level one (depth 0, its own mode)
+const SCRUB = /^LETS_CODE_(.*_ON|SUBAGENT_DEPTH|SUBAGENT_MAX_DEPTH|AGENT_NAME|ROLE|MODE|SESSION|SESSION_ID|STATE_FILE|MODEL|PROVIDER|BACKEND|CLAUDE_(TRUST|ENV|SCOPE|SYNCED_SKILLS)|THINKING_\w+|METRICS_(LOG|SAVE)|AGENT_GUARD_LOG|PLAN_BURST|FINAL_REVIEW|GIT_CHECKPOINTS|THEME_PROMPT|VERSION)$/;
+
+function parsePrompts(text) {
+	const out = [];
+	for (const [i, raw] of text.split(/\r?\n/).entries()) {
+		const l = raw.trim(); if (!l || l.startsWith("#")) continue;
+		let m;
+		if ((m = /^\+\s+(.+)$/.exec(l))) out.push({ kind: "pos", prompt: m[1], line: i + 1 });
+		else if ((m = /^-\s+(.+)$/.exec(l))) out.push({ kind: "neg", prompt: m[1], line: i + 1 });
+		else if ((m = /^=([A-Za-z0-9][\w.-]*)\s+(.+)$/.exec(l))) out.push({ kind: "other", want: m[1], prompt: m[2], line: i + 1 });
+		else throw new Error(`line ${i + 1}: start with "+ ", "- " or "=<expert> ": ${l.slice(0, 60)}`);
+	}
+	return out;
+}
+
+// one event of pi's JSON stream -> the state; state.done once decided
+function step(state, ev, opt) {
+	if (!ev || typeof ev !== "object" || state.done) return state;
+	if (ev.type === "message_end" && ev.message && ev.message.role === "assistant") {
+		const u = ev.message.usage || {}; state.input += u.input || 0; state.output += u.output || 0;
+	}
+	if (ev.type !== "tool_execution_start") return state;
+	const tool = ev.toolName; const args = ev.args || {};
+	if (tool === "expert") {
+		const action = String(args.action || "").toLowerCase();
+		if (action === "run" || action === "enable") {
+			const names = Array.isArray(args.runs) && args.runs.length ? args.runs.map((r) => r && r.name).filter(Boolean) : [args.name].filter(Boolean);
+			return Object.assign(state, { done: true, verdict: "expert", routed: names[0] || "?", all: names });
+		}
+		state.lists++; return state;   // list: still deciding
+	}
+	if (tool === "subagent") return Object.assign(state, { done: true, verdict: "subagent", routed: `subagent:${args.agent || (args.tasks && args.tasks[0] && args.tasks[0].agent) || "?"}` });
+	state.own++; state.tools.push(tool);
+	if (tool === "write" || tool === "edit") return Object.assign(state, { done: true, verdict: "own", why: `its own ${tool}` });
+	if (state.own >= opt.maxOwn) return Object.assign(state, { done: true, verdict: "own", why: `${state.own} tool calls of its own` });
+	return state;
+}
+const fresh = () => ({ done: false, verdict: "", routed: "", why: "", own: 0, lists: 0, tools: [], input: 0, output: 0 });
+function finish(state, how) { if (!state.done) Object.assign(state, { done: true, verdict: how === "timeout" ? "timeout" : "own", why: how === "timeout" ? "timed out" : state.own ? `${state.own} tool calls, then answered` : "answered without tools" }); return state; }
+
+function score(results, expert) {
+	const pos = results.filter((r) => r.kind === "pos"), neg = results.filter((r) => r.kind === "neg"), other = results.filter((r) => r.kind === "other");
+	const toIt = (r) => r.verdict === "expert" && r.routed === expert;
+	const tp = pos.filter(toIt).length;
+	const fp = [...neg, ...other].filter(toIt).length;
+	const falseAny = neg.filter((r) => r.verdict === "expert").length;
+	return {
+		expert, recall: [tp, pos.length], falseTriggers: [fp, neg.length + other.length], otherExpertOnNegatives: falseAny - neg.filter(toIt).length,
+		precision: tp + fp ? tp / (tp + fp) : null, othersKept: [other.filter((r) => r.verdict === "expert" && r.routed === r.want).length, other.length],
+		timeouts: results.filter((r) => r.verdict === "timeout").length,
+		input: results.reduce((a, r) => a + r.input, 0), output: results.reduce((a, r) => a + r.output, 0), seconds: results.reduce((a, r) => a + r.seconds, 0),
+	};
+}
+const pct = (x) => (x === null ? "n/a" : `${Math.round(x * 100)}%`);
+function summaryLine(s) {
+	return `route-check: ${s.expert}: recall ${s.recall[0]}/${s.recall[1]}, false triggers ${s.falseTriggers[0]}/${s.falseTriggers[1]}, precision ${pct(s.precision)}` +
+		(s.othersKept[1] ? `, other experts kept ${s.othersKept[0]}/${s.othersKept[1]}` : "") + (s.otherExpertOnNegatives ? `, near-misses sent to another expert ${s.otherExpertOnNegatives}` : "") +
+		(s.timeouts ? `, timeouts ${s.timeouts}` : "") + `; ${Math.round(s.seconds)} s, tokens in ${s.input} out ${s.output}`;
+}
+function verdictOk(r, expert) {
+	if (r.kind === "pos") return r.verdict === "expert" && r.routed === expert;
+	if (r.kind === "other") return r.verdict === "expert" && r.routed === r.want;
+	return !(r.verdict === "expert");
+}
+
+// ------------------------------------------------------------- the scratch dir
+function makeScratch(from, dir) {
+	const src = path.resolve(from); const dst = path.resolve(dir);
+	const skipTop = new Set(["sessions", "rea", "tester", "lets-code-state.json"]);
+	const work = path.join(src, "expert-builder", "work");
+	const copy = (s, d, rel) => {
+		for (const e of fs.readdirSync(s, { withFileTypes: true })) {
+			const sp = path.join(s, e.name), dp = path.join(d, e.name), r = rel ? `${rel}/${e.name}` : e.name;
+			if ((!rel && skipTop.has(e.name)) || sp === dst || sp === work) continue;
+			if (!r.startsWith("extensions/") && (e.name === "runtime" || e.name === "node_modules")) continue;
+			if (e.isSymbolicLink()) { try { fs.symlinkSync(fs.readlinkSync(sp), dp); } catch { /* skip */ } }
+			else if (e.isDirectory()) { fs.mkdirSync(dp, { recursive: true }); copy(sp, dp, r); }
+			else if (e.isFile()) { fs.copyFileSync(sp, dp); fs.chmodSync(dp, fs.statSync(sp).mode & 0o7777); }
+		}
+	};
+	fs.mkdirSync(dst, { recursive: true });
+	copy(src, dst, "");
+}
+function sameDir(a, b) { try { return fs.realpathSync(a) === fs.realpathSync(b); } catch { return path.resolve(a) === path.resolve(b); } }
+
+function runOne(p, opt) {
+	return new Promise((resolve) => {
+		const state = fresh(); const t0 = Date.now();
+		const env = {}; for (const [k, v] of Object.entries(process.env)) if (!SCRUB.test(k)) env[k] = v;
+		env.PI_CODING_AGENT_DIR = opt.scratch;
+		const [cmd, ...pre] = opt.launcher;
+		const args = [...pre, "--thinking-level", opt.thinking, "--mode", "json", "--no-session", "-p", p.prompt];
+		const child = spawn(cmd, args, { cwd: opt.cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+		let buf = "", err = "", ended = false;
+		const kill = () => { try { process.kill(-child.pid, "SIGTERM"); } catch { /* gone */ } setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch { /* gone */ } }, 3000).unref(); };
+		const timer = setTimeout(() => { finish(state, "timeout"); kill(); }, opt.timeout * 1000);
+		const line = (l) => { if (!l.trim()) return; let ev; try { ev = JSON.parse(l); } catch { return; } step(state, ev, opt); if (state.done) kill(); };
+		child.stdout.on("data", (d) => { buf += d.toString(); const ls = buf.split("\n"); buf = ls.pop() || ""; ls.forEach(line); });
+		child.stderr.on("data", (d) => { err = (err + d.toString()).slice(-2000); });
+		const done = (code) => { if (ended) return; ended = true; clearTimeout(timer); if (buf) line(buf); finish(state, "end");
+			if (state.verdict === "own" && !state.own && !state.input && code) Object.assign(state, { verdict: "error", why: `exit ${code}: ${err.trim().split("\n").pop() || ""}` });
+			resolve({ ...p, ...state, seconds: (Date.now() - t0) / 1000 }); };
+		child.on("error", (e) => { err += e.message; done(127); });
+		child.on("close", (code) => done(code));
+	});
+}
+
+async function main(argv) {
+	const opt = { timeout: 240, maxOwn: 8, thinking: "low", _: [] };
+	for (let i = 0; i < argv.length; i++) {
+		const a = argv[i]; const v = () => argv[++i];
+		if (a === "--expert") opt.expert = v(); else if (a === "--from") opt.from = v(); else if (a === "--cwd") opt.cwd = v(); else if (a === "--draft") opt.draft = v();
+		else if (a === "--timeout") opt.timeout = Number(v()); else if (a === "--max-own") opt.maxOwn = Number(v()); else if (a === "--thinking") opt.thinking = v();
+		else if (a === "--launcher") opt.launcherArg = v(); else if (a === "--json") opt.json = v(); else if (a === "--keep") opt.keep = true; else if (a === "--dry-run") opt.dry = true;
+		else if (a.startsWith("--")) { console.error(`route-check: unknown option ${a}`); return 2; } else opt._.push(a);
+	}
+	if (!opt._[0] || !opt.expert || !(opt.timeout > 0) || !(opt.maxOwn > 0)) { console.error("usage: route-check <prompts-file> [<scratch-agent-dir>] --expert <name> [--from A] [--draft D] [--cwd DIR] [--timeout S] [--max-own N] [--thinking L] [--launcher CMD] [--json FILE] [--keep] [--dry-run]"); return 2; }
+	if (opt.thinking === "xhigh" || opt.thinking === "high") { console.error("route-check: the routing decision needs no more than low thinking; xhigh/high would only load the GPU"); return 2; }
+	let prompts; try { prompts = parsePrompts(fs.readFileSync(opt._[0], "utf8")); } catch (e) { console.error(`route-check: ${e.message}`); return 2; }
+	if (!prompts.length) { console.error("route-check: no prompts"); return 2; }
+	const from = path.resolve(expand(opt.from || process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent")));
+	const temp = !opt._[1];
+	opt.scratch = path.resolve(expand(opt._[1] || path.join(from, "expert-builder", "work", `route.${process.pid}`)));
+	for (const real of [from, path.join(os.homedir(), ".pi", "agent")]) if (sameDir(opt.scratch, real)) { console.error(`route-check: ${opt.scratch} is a real agent dir; give a scratch dir`); return 2; }
+	const L = opt.launcherArg || process.env.LETS_CODE_LAUNCHER || "lets-code";
+	opt.launcher = L.includes("/") && fs.existsSync(L) && !(fs.statSync(L).mode & 0o111) ? ["bash", L] : [L];
+	if (opt.dry) { for (const p of prompts) console.log(`${opt.launcher.join(" ")} --thinking-level ${opt.thinking} --mode json --no-session -p ${JSON.stringify(p.prompt)}`); return 0; }
+	const empty = !fs.existsSync(opt.scratch) || !fs.readdirSync(opt.scratch).length;
+	if (empty) makeScratch(from, opt.scratch);
+	if (opt.draft) {
+		const D = path.resolve(expand(opt.draft));
+		fs.mkdirSync(path.join(opt.scratch, "agents"), { recursive: true });
+		fs.copyFileSync(path.join(D, "agents", `${opt.expert}.md`), path.join(opt.scratch, "agents", `${opt.expert}.md`));
+		if (fs.existsSync(path.join(D, opt.expert))) fs.cpSync(path.join(D, opt.expert), path.join(opt.scratch, opt.expert), { recursive: true });
+	}
+	if (!fs.existsSync(path.join(opt.scratch, "agents", `${opt.expert}.md`))) { console.error(`route-check: no agents/${opt.expert}.md in ${opt.scratch}`); if (temp && !opt.keep) fs.rmSync(opt.scratch, { recursive: true, force: true }); return 1; }
+	try { fs.rmSync(path.join(opt.scratch, "lets-code-state.json"), { force: true }); } catch { /* none */ }   // every expert dormant
+	opt.cwd = path.resolve(expand(opt.cwd || path.join(opt.scratch, "project"))); fs.mkdirSync(opt.cwd, { recursive: true });
+	console.log(`route-check: ${prompts.length} prompts for ${opt.expert}, one at a time (scratch ${opt.scratch}, folder ${opt.cwd})`);
+	const results = [];
+	try {
+		for (const p of prompts) {
+			const r = await runOne(p, opt); results.push(r);
+			const mark = verdictOk(r, opt.expert) ? "ok  " : "MISS";
+			const got = r.verdict === "expert" ? `expert:${r.routed}` : r.verdict === "subagent" ? r.routed : r.verdict === "own" ? `own (${r.why})` : `${r.verdict} (${r.why})`;
+			console.log(`${mark} ${r.kind === "other" ? `=${r.want}` : r.kind === "pos" ? "+" : "-"} ${got} | ${Math.round(r.seconds)} s, in ${r.input} out ${r.output} | ${r.prompt}`);
+			if (r.verdict === "error") { console.log("route-check: a session failed to start; stopping (check the launcher and the server)"); break; }
+		}
+	} finally {
+		if (temp && !opt.keep) fs.rmSync(opt.scratch, { recursive: true, force: true });
+	}
+	const s = score(results, opt.expert);
+	console.log(summaryLine(s));
+	if (opt.json) fs.writeFileSync(opt.json, JSON.stringify({ summary: s, results }, null, 2) + "\n");
+	return results.some((r) => r.verdict === "error") ? 1 : 0;
+}
+module.exports = { parsePrompts, step, fresh, finish, score, summaryLine, verdictOk, makeScratch, SCRUB };
+if (require.main === module) main(process.argv.slice(2)).then((c) => { process.exitCode = c; }, (e) => { console.error(`route-check: ${e.stack || e}`); process.exitCode = 1; });
+JS
+    chmod 755 "${d}/bin/expert-lint" "${d}/bin/expert-new" "${d}/bin/route-check"
+    # the paths: this agent dir's
+    for f in "${d}/prompt.md" "${d}"/ref/*.md; do
+        sed -e "s|@@EB@@|${d}|g" -e "s|@@AGENT@@|${PI_AGENT_DIR}|g" "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
+    done
+    chmod 644 "${d}/prompt.md" "${d}"/ref/*.md
+    # the expert; a user's own agent of that name is left alone (EB_AGENT stays empty)
+    if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    mkdir -p "${PI_AGENT_DIR}/agents"
+    tmp="$(mktemp "${af}.XXXXXX")" || return 0
+    cat > "${tmp}" <<'MD'
+---
+# Written by lets-code (expert-builder); regenerated on launch, edits are overwritten.
+# To keep your own version, delete this line: lets-code then leaves it alone.
+name: expert-builder
+description: Builds new experts for lets-code, and changes existing ones
+tools: bash, read, edit, write, grep, find, ls
+append_prompt: expert-builder/prompt.md
+timeout: 3600
+expert: true
+use_for: making or fixing an expert: from docs, a runbook or scripts; its knowledge, brief and routing
+keywords: new experts
+job: Builds an expert from a domain and its sources (docs, a repo, a method, scripts): designs its use_for, brief and tools, distills the knowledge, writes the files (your own in ~/.pi/agent, or a lets-code built-in on a git branch), lints them and measures its routing; up to an hour
+brief:
+  - domain (required): what the new expert is for, in the user's words
+  - sources: docs, repos, a methodology or existing scripts to distill (paths or URLs)
+  - scope: user (default: your own expert in ~/.pi/agent) or builtin (a lets-code contribution on a git branch)
+  - name: the name to give it, if the user chose one
+  - platform: where it must run (termux, linux, darwin), if not everywhere
+  - constraints: what it must never do, tools it may not use, limits; for builtin, the lets-code checkout and whether to push
+---
+MD
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+    EB_AGENT=1
+}  # end of pi_write_expert_builder
 
 # `lets-code mandate init [--global]`: a starter manifest to edit.
 mandate_init() {
@@ -10617,6 +11929,9 @@ case "$(lc "${EXPERTS}")" in
             pi_write_experts_extension
             export LETS_CODE_EXPERTS_ON=1
             on_termux && write_termux_agent
+            pi_write_expert_builder   # files only, every platform
+            # route-check (the builder's helper) starts sessions with this launcher
+            LETS_CODE_LAUNCHER="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"; export LETS_CODE_LAUNCHER
             if [ "$(lc_expert_remembered reverse-engineer)" = true ]; then
                 pi_write_rea on
                 [ -z "${REA_NOTE}" ] || log "note: rea: ${REA_NOTE}"

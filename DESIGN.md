@@ -334,6 +334,42 @@ existing `runs:` with the same brief repeated; a `judges: N` field that
 the runner expands and aggregates would be cleaner for the model but is
 left for later, since it changes the generic runner for one expert.
 
+**Expert builder.** Adding an expert had become a recipe followed by
+hand four times (termux-device, reverse-engineer, tester,
+acceptance-judge): frontmatter that lets-code's parser accepts, a few-word
+`use_for` that routes, instructions a 27B child follows, refs read on
+demand, a pinned setup with `--ignore-scripts`, a writer and its test, and
+a routing measurement in print mode. `expert-builder` ships that recipe as
+an expert, plus its tools as files the user can run alone. `expert-lint`
+re-implements the parser's rules (same regexes as `parseAgentFile`;
+`tests/expert-lint.test.mjs` checks the two agree on the same fixtures)
+because the subagents module cannot be imported outside pi (typebox comes
+from the host), and adds the checks for what fails silently: a setup with
+nothing gating it never runs, a `use_for` past 100 characters is cut, a ref
+the instructions never name is never read. CI lints every built-in with it
+(they passed with warnings only: no `job` on termux-device, no `tools` on
+reverse-engineer, a 401-character job on acceptance-judge); REA's setup was
+the one that ran npm without `--ignore-scripts`, and now does not (no
+package in its tree has install scripts). `route-check` is PR #38's and
+#41's method as a script: one print-mode session per prompt in a scratch
+copy of the agent dir (no state file, so every expert is dormant; no
+sessions or installs), lets-code's own session variables scrubbed so the
+nested session is a top-level one (`LETS_CODE_SUBAGENT_DEPTH` would
+otherwise hide the expert tool), stopped at the first `expert` run/enable,
+`subagent`, `write`/`edit` or 8 own tool calls, so no expert or task runs.
+lets-code exports `LETS_CODE_LAUNCHER` so the helper starts the same
+launcher. The builder's own `use_for` was measured the same way (13
+prompts, fixtures for the files the prompts name): recall 4/6 with either
+wording, no false trigger in 14 near-miss runs; the misses were "fix my
+expert's routing" and "a built-in on a branch", which the model began
+itself. Prompts that named missing files scored 2/6 before the fixtures
+existed, so the prompt now says to create them. Its entry costs 25 tokens
+in the line (97 to 122 on Linux, vLLM's tokenizer). A user-scope expert is
+written without the lets-code line so launches never overwrite it; a
+built-in is drafted in `expert-builder/work/draft` (a user's file of that
+name would block the built-in) and packed into a writer function by
+`expert-new pack`.
+
 **Claude Code adapter.** Automatic: the launcher switches it on only where
 the project's `.claude` (up to the git root) has hooks or workflow scripts,
 the parts that need the adapter to work at all; skills and commands alone

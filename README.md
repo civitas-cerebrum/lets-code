@@ -75,6 +75,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🔬 **REA** (expert) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: the `reverse-engineer` expert hands the question to a separate pi that has REA's 170 tools, so they never enter your session. REA is installed when you enable it. |
 | 🧪 **Tester** (expert) | Web-app QA the way [achilles](https://github.com/civitas-cerebrum/achilles) does it, on demand: the `tester` expert maps journeys, writes and runs e2e tests with the Steps API of [element-interactions](https://github.com/civitas-cerebrum/element-interactions) (Playwright), verifies a flow or change with evidence, hunts bugs and diagnoses failing e2e tests, in a separate pi; Android and iOS apps too where Appium is set up. Installed when you enable it; Linux and macOS only. |
 | ⚖️ **Acceptance judge** (expert) | "Is it done?" answered by trying to break it: the `acceptance-judge` expert takes the acceptance criteria and the work (a diff, branch, commit or PR), runs the checks itself with negative controls, and returns PASS / FAIL / UNVERIFIABLE per criterion with the evidence, then ACCEPT or REJECT. It never edits the work. The method is distilled from achilles' review roles; nothing to install, so it works everywhere, the phone included. |
+| 🏗️ **Expert builder** (expert) | Ask for a new expert ("make me an expert that converts and validates config files") and the `expert-builder` expert designs it, distills its sources (docs, a repo, a method, your scripts) into instructions and references, writes the files as your own, lints them and measures how well the model routes to it. It can also prepare a built-in for lets-code on a git branch. Files only, so it works everywhere. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -673,13 +674,14 @@ roles see every MCP call and can allow, ask or deny per server.
 
 An expert is a subagent with knowledge of its own: standing instructions
 (recipes, traps, a report format), a brief template that says what its
-caller must tell it, and, where it needs one, a setup. lets-code ships four,
-`acceptance-judge` and `reverse-engineer` (anywhere), `termux-device` (on
-Termux only) and `tester` (Linux and macOS), and you can add your own. They sit behind one tool, `expert`, whose line in the
+caller must tell it, and, where it needs one, a setup. lets-code ships five,
+`acceptance-judge`, `expert-builder` and `reverse-engineer` (anywhere),
+`termux-device` (on Termux only) and `tester` (Linux and macOS), and you can
+add your own (see [Build your own expert](#build-your-own-expert)). They sit behind one tool, `expert`, whose line in the
 context names each expert usable here with a few words on what it is for:
 
 ```text
-expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
+expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); expert-builder (making or fixing an expert: from docs, a runbook or scripts; its knowledge, brief and routing); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
 ```
 
 (On Linux and macOS `tester (anything on a web app that needs a browser:
@@ -699,6 +701,7 @@ The templates:
 | Expert | Brief (* required) |
 |---|---|
 | `acceptance-judge` | `criteria`*: the acceptance criteria verbatim (a list, or the ticket's text); `artifact`*: what to judge, the repo path plus a diff, commit, branch, PR or URL; `claim`: what the implementer says was done and how they checked it; `how_to_run`: test, build or start commands, a dev server URL; `constraints`: what must not be run or touched, time limits |
+| `expert-builder` | `domain`*: what the new expert is for, in your words; `sources`: docs, repos, a method or scripts to distill; `scope`: `user` (default, your own) or `builtin` (a lets-code contribution on a branch); `name`; `platform`; `constraints`: what it must never do, limits; for builtin, the checkout and whether to push |
 | `termux-device` | `goal`*: the user's goal, verbatim; `confirmed`: only after you approved the exact final step it reported (app, recipient, text) |
 | `reverse-engineer` | `target`*: absolute path or URL of the artifact; `question`*: what to find out; `purpose`: what the answer is for |
 | `tester` | `target`*: the web URL, the app's project path, or the mobile app id or .apk; `platform`: web (default), android or ios; `goal`*: the QA task in the user's words; `how_to_run`: commands that start the app and run the existing tests; `scope`: which pages, journeys or files, how deep; `constraints`: what not to touch, logins or test data, time limits |
@@ -779,7 +782,9 @@ Past about a dozen experts the line switches to a compact form, each
 **Your own.** Any agent file in `~/.pi/agent/agents` with `expert: true`
 is one (a project's agent files never are). On top of the usual agent fields
 (`description`, `tools`, `thinking`, `role`, `agent_dir`, `skills`,
-`append_prompt`, `timeout`, `requires`; see [Subagents](#subagents)):
+`append_prompt`, `timeout`, `requires`; see [Subagents](#subagents);
+`role: readonly`, or `role: reviewer` for one that runs checks but
+changes nothing):
 
 | Field | Meaning |
 |---|---|
@@ -807,7 +812,81 @@ brief:
 You know our database. Use psql read-only; ...
 ```
 
-lets-code writes and updates its own three (files with the
+<a id="build-your-own-expert"></a>
+**Build your own expert.** Two ways, with the same checks.
+
+*With the builder.* Enable it once (`/experts enable expert-builder`), then
+ask: "make me an expert that writes git commit messages from a diff, from
+the conventions in CONTRIBUTING.md". The model sends the builder a brief
+(`domain`, `sources`, `scope`, ...), and the builder, in its own pi:
+1. surveys the experts and agents you have, so the new one takes no one
+   else's tasks;
+2. designs it: name, `use_for` and `keywords` in your words, a brief of 2
+   to 5 fields, the least tools it needs, refs for knowledge only some steps
+   need, helpers in `bin/` for command sequences, a setup only if it
+   installs something, a platform only if it cannot work elsewhere, and
+   rules for anything irreversible or outward;
+3. distills the sources into instructions a 27B child follows (imperative,
+   pi's tools only) plus `ref/*.md` read on demand;
+4. scaffolds the files with `expert-new` and fills them in: your own file
+   in `~/.pi/agent/agents/<name>.md`, never with the `# Written by
+   lets-code` line, so lets-code never overwrites it;
+5. lints them with `expert-lint` (and the entry's token cost);
+6. measures routing with `route-check`: 6 prompts that should go to it, 6
+   near-misses, one for a neighbouring expert, each in its own print-mode
+   session with every expert dormant, stopped at the routing decision;
+   it tunes `use_for` once if recall is under 4/6 or a near-miss went to it;
+7. reports the files, the lint and routing numbers, and
+   `/experts enable <name>`.
+
+It never enables an expert, never runs a setup or installs anything for it,
+and writes only under `~/.pi/agent` (or, for `scope: builtin`, in a git
+worktree on a new branch; it commits, and pushes or opens a PR only if the
+brief says so). A new expert is in `/experts` and runnable at once, and in
+the always-on line from the next session.
+
+*By hand.* The same helpers are yours to run (written by lets-code to
+`~/.pi/agent/expert-builder/`):
+
+```text
+bin/expert-new init <name> --use-for "..." --brief "file (required): the path" [--ref x.md] [--bin tool] [--setup]
+bin/expert-lint --user [--tokens] ~/.pi/agent/agents/<name>.md      # --list: what is there already
+bin/route-check prompts.txt --expert <name> [--cwd <folder with the files the prompts name>]
+bin/expert-new pack <name>       # a built-in's writer function for lets-code; --test: its test
+```
+
+`expert-lint` checks what lets-code's parser would reject (a bad name or
+brief item, a duplicate field, a path outside `~/.pi/agent`, a bad
+`timeout`), what silently breaks (a missing `use_for`, `use_for` over 100
+or `keywords` over 40 characters, tools pi does not have, refs the
+instructions name but that do not exist, a setup that nothing gates so it
+never runs, a helper or setup that fails `bash -n`, npm without
+`--ignore-scripts`, `@latest`, `curl | sh`, sudo, scaffold TODOs left), and
+what makes it work less well (no `job`, no `keywords`, no tools listed,
+refs never named, harness tool names in the instructions, a prompt past
+1,500 words, overlap with another expert's `use_for`), and prints the
+entry's cost in the always-on line (`--tokens`: the server's tokenizer
+from `models.json`; else an estimate). `--user` refuses the lets-code line,
+`--builtin` requires it; `tests/run.sh` lints every built-in this way. The
+prompts file of `route-check` has one prompt a line: `+ ` should go to
+the expert, `- ` should not, `=<other> ` should go to that other expert; it
+prints each verdict and recall, false triggers and precision.
+
+The references in `~/.pi/agent/expert-builder/ref/` are the documentation
+for both ways: `format.md` (every field, its meaning and limits),
+`use-for.md` (routing, and writing the prompts file), `distill.md`
+(turning docs, a repo or a method into instructions), `setup.md` (setup,
+pinning, helpers, platforms), `safety.md` (irreversible and outward
+actions, consent) and `contribute.md` (the checklist for a built-in).
+
+On borealis the builder made `config-convert` ("make me an expert that
+converts and validates JSON/YAML/TOML config files") in 7.5 minutes: a
+`cfgconv` helper (convert, validate against a schema), a ref of the traps
+between the formats, lint clean, routing recall 6/6 and 5/6 with 1 and 2
+benign false triggers in 7 (drafting a YAML block, adding a key). Enabled,
+it converted a YAML file to TOML in 4 turns.
+
+lets-code writes and updates its own built-ins (files with the
 `# Written by lets-code` line). A file of yours by one of those names is
 left alone: it is an expert if it says `expert: true`, otherwise a plain
 agent of the `subagent` tool. With `EXPERTS=false` nothing is listed (the
@@ -1007,7 +1086,8 @@ behind each decision are in [DESIGN.md](DESIGN.md).
 for the probes, endpoint parsing, the chat-template effort probe and the
 OpenRouter config, the move into the one extension, node tests for that
 extension's index, the git guard, checkpoints, agent guard, mandate,
-subagents, experts, the Claude Code adapter and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
+subagents, experts (and a lint of every built-in expert with the expert
+builder's `expert-lint`), the Claude Code adapter and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
 the memory guard. Releases are published to npm from GitHub releases.
 
 ## License

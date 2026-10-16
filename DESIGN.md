@@ -168,6 +168,29 @@ json -p --no-session --provider lets-code --model <id> [--thinking]
 from `message_end` events; concurrency 2 by default (one GPU); depth 1 (a
 child registers no tool, so it pays nothing for it); 50 KB output cap.
 
+**Watching a subagent (`/subagents`).** The runner already reads the
+child's JSON stream, so it also keeps a transcript per run: the task, the
+assistant messages (thinking, text and tool-call blocks, rebuilt from
+`message_update` deltas, then replaced by `message_end`), tool runs from
+`tool_execution_*`, retries and compaction as notes, and status, tokens and
+the parent tool call. The registry lives on `globalThis`, so the copies of
+`subagents.ts` that the experts and Claude Code modules import share it,
+and `/reload` keeps it. It is saved under `lets-code-runs/<session>/` so
+finished runs reopen. We did not let the child write a real pi session
+instead (dropping `--no-session`). A session file gets whole messages only
+at `message_end`, so the view would not stream. It would also fill pi's
+session store, and full tool outputs would go uncapped. Faithfulness comes
+from rendering: the view feeds the recorded messages to pi's exported
+`UserMessageComponent`, `AssistantMessageComponent` and
+`ToolExecutionComponent` (with `create*ToolDefinition` for the built-in
+tools' renderers), which are the components the main view uses. A plain
+renderer takes over if they fail to load or throw. The UI is one
+`ctx.ui.custom` overlay (`width`/`maxHeight` 100%) plus `registerCommand`,
+`registerShortcut` and `setStatus`; no pi internals are touched. Zero
+context: no tool text, prompt section or message changes. The provider
+request was compared byte for byte with and without the feature. Steering
+a child would need `--mode rpc` instead of `-p`; that is left for later.
+
 **Sandbox.** The example extension's shape: `createBashTool(cwd,
 {operations})` with commands wrapped by `SandboxManager.wrapWithSandbox`,
 `user_bash` too. The module is a directory (`lets-code/sandbox/`) with its

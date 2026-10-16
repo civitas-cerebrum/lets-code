@@ -4084,11 +4084,18 @@ pi_write_subagent_extension() {
 // disallowedTools by tool name (Read -> read, Glob -> find, ...; tools pi
 // lacks are dropped), effort -> thinking, permissionMode plan -> the
 // readonly role; model, color and the rest are ignored (one model here).
+//
+// Watching a run: the runner keeps each child's transcript (see "run
+// transcripts" below), and /subagents (or LETS_CODE_SUBAGENT_KEY, default
+// alt+s; "none" turns the key off) opens a full-screen view of the runs,
+// live while they work (subagent-view.ts). While one runs, the footer says
+// so, with the key. UI only: no tool text, prompt or context changes.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Type } from "typebox";
 
 const ACTIVE = process.env.LETS_CODE_SUBAGENTS_ON === "1";
@@ -4227,10 +4234,248 @@ export function discoverAgents(cwd: string, trusted: boolean): AgentDef[] {
 	return [...out.values()];
 }
 
-interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number; timedOut?: number }
+interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number; timedOut?: number; stopped?: boolean }
+
+// ------------------------------------------------------------ run transcripts
+// Each child's JSON event stream is also kept as a transcript, for the
+// /subagents view (subagent-view.ts). UI only: none of it reaches the model.
+// Kept in memory for the session (on globalThis, so the copies of this module
+// the experts and Claude Code modules import share it, and a /reload keeps
+// it), and on disk as <agent dir>/lets-code-runs/<session id>/<run>.json
+// (0600, written at most every RUN_SAVE_MS while it runs and once at the
+// end), so a finished run reopens after a reload or a restart. Capped: a
+// tool's output keeps its head and tail (TOOL_OUT_CAP characters), a long
+// argument (ARG_CAP) or text block (TEXT_CAP) is cut, a run keeps its newest
+// MAX_EVENTS events, and the newest KEEP_RUNS runs of a session (and
+// RUNS_SESSIONS sessions) stay on disk. Nothing is stored that the child
+// did not print.
+export type RunStatus = "running" | "done" | "failed" | "aborted" | "timeout";
+export interface Block { type: "text" | "thinking" | "toolCall"; text: string; id?: string; name?: string; args?: unknown }
+export type RunEvent = { v: number; at: number } & (
+	| { t: "user"; text: string }
+	| { t: "assistant"; blocks: Block[]; done: boolean; stop?: string; error?: string }
+	| { t: "tool"; id: string; name: string; args: unknown; done: boolean; isError?: boolean; output: string; cut: number; details?: unknown }
+	| { t: "note"; text: string; error?: boolean });
+// the parent tool call a run belongs to
+export interface RunMeta { tool?: string; callId?: string; mode?: "single" | "parallel" | "chain"; index?: number; of?: number }
+export interface RunRecord {
+	v: 1; id: string; agent: string; kind: "subagent" | "expert"; task: string; cwd: string; session: string;
+	started: number; ended?: number; status: RunStatus; exitCode?: number; turns: number; input: number; output: number; live?: number;
+	parent?: RunMeta; events: RunEvent[]; dropped: number; final?: string; ver: number; seenTask?: boolean;
+}
+export const TOOL_OUT_CAP = 6000;
+export const TEXT_CAP = 32000;
+export const ARG_CAP = 2000;
+export const DETAILS_CAP = 8000;
+export const MAX_EVENTS = 800;
+export const KEEP_RUNS = Math.max(1, Number(process.env.LETS_CODE_SUBAGENT_KEEP_RUNS ?? "30") || 30);
+export const RUNS_SESSIONS = 20;
+export const RUN_SAVE_MS = 2000;
+export const runsRoot = () => join(AGENT_DIR, "lets-code-runs");
+
+export function clipText(s: string, cap = TEXT_CAP): string { return s.length <= cap ? s : `${s.slice(0, cap)}\n… [${s.length - cap} more characters not kept]`; }
+export function clipOutput(s: string, cap = TOOL_OUT_CAP): { text: string; cut: number } {
+	if (s.length <= cap) return { text: s, cut: 0 };
+	const head = Math.floor(cap * 0.7), tail = cap - head;
+	return { text: `${s.slice(0, head)}\n… [${s.length - cap} characters cut] …\n${s.slice(-tail)}`, cut: s.length - cap };
+}
+export function clipArgs(a: unknown, depth = 0): unknown {
+	if (typeof a === "string") return a.length > ARG_CAP ? `${a.slice(0, ARG_CAP)}… [${a.length - ARG_CAP} more characters]` : a;
+	if (a === null || typeof a !== "object") return a;
+	if (depth > 4) return "[…]";
+	if (Array.isArray(a)) return a.slice(0, 50).map((x) => clipArgs(x, depth + 1));
+	const o: Record<string, unknown> = {};
+	for (const [k, v] of Object.entries(a as Record<string, unknown>).slice(0, 50)) o[k] = clipArgs(v, depth + 1);
+	return o;
+}
+function resultText(r: any): string {
+	const c = r?.content;
+	if (typeof c === "string") return c;
+	if (!Array.isArray(c)) return typeof r === "string" ? r : "";
+	return c.map((x: any) => (x?.type === "text" ? String(x.text ?? "") : x?.type === "image" ? "[image]" : "")).filter(Boolean).join("\n");
+}
+function smallDetails(d: unknown): unknown {
+	if (d === undefined || d === null) return undefined;
+	try { const s = JSON.stringify(d); return s && s.length <= DETAILS_CAP ? JSON.parse(s) : undefined; } catch { return undefined; }
+}
+function blocksOf(content: unknown): Block[] {
+	if (typeof content === "string") return content ? [{ type: "text", text: clipText(content) }] : [];
+	if (!Array.isArray(content)) return [];
+	const out: Block[] = [];
+	for (const c of content as any[]) {
+		if (c?.type === "text") out.push({ type: "text", text: clipText(String(c.text ?? "")) });
+		else if (c?.type === "thinking") out.push({ type: "thinking", text: clipText(String(c.thinking ?? "")) });
+		else if (c?.type === "toolCall") out.push({ type: "toolCall", text: "", id: c.id, name: c.name, args: clipArgs(c.arguments) });
+	}
+	return out;
+}
+
+interface Registry { runs: RunRecord[]; listeners: Set<(r?: RunRecord) => void>; stops: Map<string, () => void>; session: string; seq: number; saved: Map<string, number> }
+const REG = Symbol.for("lets-code.subagent-runs");
+export function registry(): Registry {
+	const g = globalThis as any;
+	return (g[REG] ??= { runs: [], listeners: new Set(), stops: new Map(), session: "", seq: 0, saved: new Map() });
+}
+export function notifyRuns(r?: RunRecord): void { for (const l of [...registry().listeners]) { try { l(r); } catch { /* a view's problem, not the run's */ } } }
+
+export function newRun(agent: { name: string; expert?: unknown }, task: string, cwd: string, meta?: RunMeta, now = Date.now()): RunRecord {
+	const reg = registry();
+	const id = `${now.toString(36)}-${process.pid.toString(36)}-${(reg.seq++).toString(36)}`;
+	return { v: 1, id, agent: agent.name, kind: agent.expert ? "expert" : "subagent", task, cwd, session: reg.session, started: now, status: "running",
+		turns: 0, input: 0, output: 0, parent: meta, events: [{ t: "user", text: clipText(task), v: 0, at: now }], dropped: 0, ver: 0 };
+}
+// the run joins the session's list; finished ones beyond KEEP_RUNS leave memory
+export function addRun(rec: RunRecord): void {
+	const reg = registry();
+	reg.runs.push(rec);
+	const done = reg.runs.filter((r) => r.status !== "running").sort((a, b) => (b.ended ?? b.started) - (a.ended ?? a.started));
+	const drop = new Set(done.slice(KEEP_RUNS).map((r) => r.id));
+	if (drop.size) reg.runs = reg.runs.filter((r) => !drop.has(r.id));
+}
+const openAssistant = (rec: RunRecord) => { for (let i = rec.events.length - 1; i >= 0; i--) { const e = rec.events[i]; if (e.t === "assistant") return e.done ? undefined : e; } return undefined; };
+const toolEv = (rec: RunRecord, id: string | undefined, name?: string) => {
+	for (let i = rec.events.length - 1; i >= 0; i--) { const e = rec.events[i]; if (e.t === "tool" && !e.done && (id ? e.id === id : e.name === name)) return e; }
+	return undefined;
+};
+// one event of the child's JSON stream into the transcript; true when it changed
+export function recordEvent(rec: RunRecord, ev: any, now = Date.now()): boolean {
+	const push = (e: RunEvent) => {
+		rec.events.push(e);
+		if (rec.events.length > MAX_EVENTS) { const n = rec.events.length - MAX_EVENTS; rec.events.splice(1, n); rec.dropped += n; }   // the task stays first
+	};
+	let changed = true;
+	switch (ev?.type) {
+		case "message_start":
+			if (ev.message?.role === "assistant") push({ t: "assistant", blocks: [], done: false, v: 0, at: now }); else changed = false;
+			break;
+		case "message_update": {
+			const a = openAssistant(rec); const e = ev.assistantMessageEvent;
+			if (typeof ev.usage?.output === "number") rec.live = ev.usage.output;
+			if (!a || !e || typeof e.type !== "string") { changed = typeof ev.usage?.output === "number"; break; }
+			const kind = e.type.startsWith("text") ? "text" : e.type.startsWith("thinking") ? "thinking" : e.type.startsWith("toolcall") ? "toolCall" : "";
+			if (!kind) { changed = false; break; }
+			const i = Math.max(0, Math.min(Number(e.contentIndex ?? a.blocks.length) || 0, 200));
+			const b = (a.blocks[i] ??= { type: kind, text: "" });
+			if (e.type.endsWith("_start")) { if (kind === "toolCall") { b.id = e.id; b.name = e.toolName; } }
+			else if (e.type.endsWith("_delta")) { if (kind !== "toolCall" && b.text.length < TEXT_CAP) b.text += String(e.delta ?? ""); }
+			else if (e.type.endsWith("_end")) {
+				if (kind === "toolCall") { b.id = e.toolCall?.id ?? b.id; b.name = e.toolCall?.name ?? b.name; b.args = clipArgs(e.toolCall?.arguments); }
+				else b.text = clipText(String(e.content ?? b.text));
+			}
+			for (let j = 0; j < a.blocks.length; j++) a.blocks[j] ??= { type: "text", text: "" };
+			a.v++;
+			break;
+		}
+		case "message_end": {
+			const m = ev.message ?? {};
+			if (m.role === "assistant") {
+				let a = openAssistant(rec);
+				if (!a) { a = { t: "assistant", blocks: [], done: false, v: 0, at: now }; push(a); }
+				a.blocks = blocksOf(m.content); a.done = true; a.stop = m.stopReason;
+				if (m.errorMessage && (m.stopReason === "error" || m.stopReason === "aborted")) a.error = clipText(String(m.errorMessage), 2000);
+				a.v++;
+				rec.turns++; rec.live = 0;
+				const u = m.usage; if (u) { rec.input += u.input || 0; rec.output += u.output || 0; }
+			} else if (m.role === "user") {
+				// the first user message is the task (already the first event)
+				const text = blocksOf(m.content).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+				if (rec.seenTask && text.trim()) push({ t: "user", text: clipText(text), v: 0, at: now }); else changed = false;
+				rec.seenTask = true;
+			} else changed = false;   // tool results come from the tool events
+			break;
+		}
+		case "tool_execution_start":
+			push({ t: "tool", id: String(ev.toolCallId ?? ""), name: String(ev.toolName ?? "tool"), args: clipArgs(ev.args), done: false, output: "", cut: 0, v: 0, at: now });
+			break;
+		case "tool_execution_update":
+		case "tool_execution_end": {
+			let x = toolEv(rec, ev.toolCallId, ev.toolName);
+			if (!x) { x = { t: "tool", id: String(ev.toolCallId ?? ""), name: String(ev.toolName ?? "tool"), args: clipArgs(ev.args), done: false, output: "", cut: 0, v: 0, at: now }; push(x); }
+			const o = clipOutput(resultText(ev.type === "tool_execution_end" ? ev.result : ev.partialResult));
+			x.output = o.text; x.cut = o.cut;
+			if (ev.type === "tool_execution_end") { x.done = true; x.isError = !!ev.isError; x.details = smallDetails(ev.result?.details); }
+			x.v++;
+			break;
+		}
+		case "auto_retry_start":
+			push({ t: "note", text: `retrying (attempt ${ev.attempt ?? "?"}/${ev.maxAttempts ?? "?"}): ${clipText(String(ev.errorMessage ?? ""), 300)}`, error: true, v: 0, at: now });
+			break;
+		case "compaction_start":
+			push({ t: "note", text: `compacting the context (${ev.reason ?? "threshold"})`, v: 0, at: now });
+			break;
+		default:
+			changed = false;
+	}
+	if (changed) rec.ver++;
+	return changed;
+}
+// how the run ended; open blocks close, stderr of a failed run is kept as a note
+export function finishRun(rec: RunRecord, r: { exitCode: number; text: string; stderr: string; timedOut?: number }, stopped: boolean, now = Date.now()): void {
+	rec.ended = now; rec.exitCode = r.exitCode; rec.live = 0;
+	rec.status = stopped ? "aborted" : r.timedOut ? "timeout" : r.exitCode === 0 ? "done" : "failed";
+	for (const e of rec.events) if ((e.t === "assistant" || e.t === "tool") && !e.done) { e.done = true; e.v++; }
+	if (r.text.trim()) rec.final = clipText(r.text);
+	if (rec.status === "failed" && r.stderr.trim()) rec.events.push({ t: "note", text: `stderr: ${r.stderr.trim().slice(-800)}`, error: true, v: 0, at: now });
+	if (rec.status === "timeout") rec.events.push({ t: "note", text: `stopped after its timeout of ${r.timedOut}s`, error: true, v: 0, at: now });
+	rec.ver++;
+}
+// never throws; while running at most every RUN_SAVE_MS
+export function saveRun(rec: RunRecord, force = false, now = Date.now()): boolean {
+	const reg = registry();
+	if (!force && now - (reg.saved.get(rec.id) ?? 0) < RUN_SAVE_MS) return false;
+	reg.saved.set(rec.id, now);
+	try {
+		const dir = join(runsRoot(), rec.session || "no-session");
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const f = join(dir, `${rec.id}.json`), tmp = `${f}.${process.pid}.tmp`;
+		writeFileSync(tmp, JSON.stringify(rec), { mode: 0o600 });
+		renameSync(tmp, f);
+		if (rec.status !== "running") reg.saved.delete(rec.id);
+		return true;
+	} catch { return false; }
+}
+// the newest KEEP_RUNS runs of the session, and RUNS_SESSIONS sessions, stay
+export function pruneRuns(session: string): void {
+	const byTime = (dir: string, names: string[]) => names.map((n) => { try { return { n, t: statSync(join(dir, n)).mtimeMs }; } catch { return { n, t: 0 }; } }).sort((a, b) => b.t - a.t);
+	try {
+		const root = runsRoot(), dir = join(root, session || "no-session");
+		for (const { n } of byTime(dir, readdirSync(dir).filter((f) => f.endsWith(".json"))).slice(KEEP_RUNS)) rmSync(join(dir, n), { force: true });
+		for (const { n } of byTime(root, readdirSync(root)).slice(RUNS_SESSIONS)) rmSync(join(root, n), { recursive: true, force: true });
+	} catch { /* nothing to prune */ }
+}
+// a session's runs from disk; one saved while running whose process is gone
+// (pi quit or crashed) shows as stopped
+export function loadRuns(session: string): RunRecord[] {
+	const out: RunRecord[] = [];
+	try {
+		const dir = join(runsRoot(), session || "no-session");
+		for (const f of readdirSync(dir)) {
+			if (!f.endsWith(".json")) continue;
+			try {
+				const r = JSON.parse(readFileSync(join(dir, f), "utf8"));
+				if (r?.v !== 1 || typeof r.id !== "string" || !Array.isArray(r.events)) continue;
+				if (r.status === "running") { r.status = "aborted"; r.ended ??= r.events[r.events.length - 1]?.at ?? r.started; r.events.push({ t: "note", text: "interrupted: pi stopped while it ran", error: true, v: 0, at: r.ended }); }
+				out.push(r);
+			} catch { /* a broken file */ }
+		}
+	} catch { /* none yet */ }
+	return out.sort((a, b) => a.started - b.started).slice(-KEEP_RUNS);
+}
+// the session changed (start, /new, /resume, /reload): its saved runs, plus
+// whatever still runs in this process
+export function useSession(session: string): void {
+	const reg = registry();
+	reg.session = session;
+	const live = reg.runs.filter((r) => r.status === "running");
+	const mem = reg.runs.filter((r) => r.status !== "running" && r.session === session);
+	const ids = new Set([...live, ...mem].map((r) => r.id));
+	reg.runs = [...loadRuns(session).filter((r) => !ids.has(r.id)), ...mem, ...live];
+	notifyRuns();
+}
+
 
 // also the runner of the Claude Code adapter's workflow agents
-export function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSignal | undefined, onProgress?: (line: string) => void): Promise<RunResult> {
+export function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSignal | undefined, onProgress?: (line: string) => void, meta?: RunMeta): Promise<RunResult> {
 	const args = ["--mode", "json", "-p", "--no-session"];
 	if (MODEL) args.push("--provider", process.env.LETS_CODE_PROVIDER || "lets-code", "--model", MODEL);
 	// medium unless the agent file says otherwise: without --thinking a child takes the level
@@ -4253,6 +4498,8 @@ export function runAgent(agent: AgentDef, task: string, cwd: string, signal: Abo
 	if (!env.LETS_CODE_ROLE) delete (env as any).LETS_CODE_ROLE;
 	if (agent.agentDir) env.PI_CODING_AGENT_DIR = agent.agentDir;
 	const r: RunResult = { agent: agent.name, task, text: "", exitCode: 0, stderr: "", turns: 0, input: 0, output: 0 };
+	const rec = newRun(agent, task, cwd, meta); addRun(rec); saveRun(rec, true); notifyRuns(rec);
+	let stopped = false, finished = false;
 	return new Promise((resolve) => {
 		const child = spawn("pi", args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
 		const timer = agent.timeout ? setTimeout(() => {
@@ -4264,6 +4511,7 @@ export function runAgent(agent: AgentDef, task: string, cwd: string, signal: Abo
 		const handle = (line: string) => {
 			if (!line.trim()) return;
 			let ev: any; try { ev = JSON.parse(line); } catch { return; }
+			if (recordEvent(rec, ev)) { saveRun(rec); notifyRuns(rec); }
 			if (ev.type === "message_end" && ev.message?.role === "assistant") {
 				r.turns++; const u = ev.message.usage; if (u) { r.input += u.input || 0; r.output += u.output || 0; }
 				const c = ev.message.content; const text = typeof c === "string" ? c : Array.isArray(c) ? c.filter((x: any) => x?.type === "text").map((x: any) => x.text).join("\n") : "";
@@ -4275,14 +4523,23 @@ export function runAgent(agent: AgentDef, task: string, cwd: string, signal: Abo
 		child.stderr.on("data", (d) => { r.stderr += d.toString().slice(0, 4000); });
 		const onAbort = () => { try { child.kill("SIGTERM"); } catch { /* gone */ } };
 		signal?.addEventListener("abort", onAbort, { once: true });
+		// the view's stop (x): this child only; the others of the call go on
+		registry().stops.set(rec.id, () => { stopped = true; onAbort(); });
 		child.on("error", (e) => { r.exitCode = 1; r.stderr += `\n${e.message}`; finish(); });
 		child.on("close", (code) => { if (buf) handle(buf); r.exitCode = r.timedOut ? (code || 124) : code ?? 1; finish(); });
-		const finish = () => { if (timer) clearTimeout(timer); signal?.removeEventListener("abort", onAbort); try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ok */ } resolve(r); };
+		const finish = () => {
+			if (finished) return; finished = true;
+			if (timer) clearTimeout(timer); signal?.removeEventListener("abort", onAbort); try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ok */ }
+			registry().stops.delete(rec.id);
+			if (stopped && !signal?.aborted) r.stopped = true;
+			finishRun(rec, r, stopped || !!signal?.aborted); saveRun(rec, true); pruneRuns(rec.session); notifyRuns(rec);
+			resolve(r);
+		};
 	});
 }
 export function cap(s: string): string { if (Buffer.byteLength(s, "utf8") <= OUTPUT_CAP) return s; let t = s.slice(0, OUTPUT_CAP); while (Buffer.byteLength(t, "utf8") > OUTPUT_CAP) t = t.slice(0, -1); return `${t}\n\n[output truncated at 50 KB]`; }
 export function render(r: RunResult): string {
-	const status = r.timedOut ? `timed out after ${r.timedOut}s` : r.exitCode === 0 ? "done" : `exit ${r.exitCode}`;
+	const status = r.stopped ? "stopped by the user" : r.timedOut ? `timed out after ${r.timedOut}s` : r.exitCode === 0 ? "done" : `exit ${r.exitCode}`;
 	const head = `## ${r.agent}${r.step ? ` (step ${r.step})` : ""} — ${status}, ${r.turns} turn${r.turns === 1 ? "" : "s"}, ↑${r.input} ↓${r.output}`;
 	const body = r.text.trim() || (r.stderr.trim() ? `(no output; stderr: ${r.stderr.trim().slice(-800)})` : "(no output)");
 	return `${head}\n${cap(body)}`;
@@ -4337,6 +4594,78 @@ export function orchestration(agents: AgentDef[]): string {
 	].join("\n");
 }
 
+// ------------------------------------------------------------ the /subagents view
+// UI only: a command, a shortcut and a footer status; no tool, prompt or
+// context change. The view itself is subagent-view.ts, loaded on first use.
+export const VIEW_KEY = (process.env.LETS_CODE_SUBAGENT_KEY ?? "alt+s").trim().toLowerCase();
+const HERE = dirname(fileURLToPath(import.meta.url));
+// the footer line while something runs
+export function hintText(n: number, key = VIEW_KEY): string {
+	if (!n) return "";
+	return `${n} subagent${n === 1 ? "" : "s"} running · ${key && key !== "none" ? `${key} or ` : ""}/subagents to watch`;
+}
+// /subagents <arg>: a number (its row in the list) or an agent name
+export function pickRun(runs: RunRecord[], arg: string, ordered: (r: RunRecord[]) => RunRecord[]): RunRecord | undefined {
+	const rs = ordered(runs); const a = arg.trim();
+	if (!a) return undefined;
+	if (/^\d+$/.test(a)) return rs[Number(a) - 1];
+	return rs.find((r) => r.agent === a) ?? rs.find((r) => r.agent.startsWith(a));
+}
+function setupView(pi: ExtensionAPI) {
+	const api = pi as any;
+	const reg = registry() as Registry & { status?: (r?: RunRecord) => void };
+	let ui: any, shown = "", opened = false;
+	const status = () => {
+		const text = hintText(reg.runs.filter((r) => r.status === "running").length);
+		if (!ui || text === shown) return;
+		shown = text;
+		try { ui.setStatus("subagents", text ? (ui.theme?.fg ? ui.theme.fg("dim", text) : text) : undefined); } catch { /* no footer */ }
+	};
+	// one status listener per process: a /reload replaces the old module's
+	if (reg.status) reg.listeners.delete(reg.status);
+	reg.status = status; reg.listeners.add(status);
+	pi.on("session_start", (_e: any, ctx: any) => {
+		if (ctx?.hasUI) { ui = ctx.ui; shown = ""; }
+		useSession(String(ctx?.sessionManager?.getSessionId?.() ?? ""));
+		status();
+	});
+	const loadView = () => import(pathToFileURL(join(HERE, "subagent-view.ts")).href);
+	const open = async (ctx: any, start: { screen: "list" | "run"; id?: string }) => {
+		const view = await loadView();
+		if (!ctx?.hasUI || (ctx.mode && ctx.mode !== "tui")) {   // no screen to draw on: the list as text
+			const text = view.listLines(reg.runs, { width: 100, now: Date.now() }).join("\n");
+			if (ctx?.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+			return;
+		}
+		if (opened) return;
+		opened = true;
+		try {
+			const deps = await view.piDeps();
+			await ctx.ui.custom((tui: any, theme: any, _kb: any, done: (v: undefined) => void) => view.createView({
+				tui, theme, deps, registry: reg, start, key: VIEW_KEY !== "none" ? VIEW_KEY : undefined,
+				stop: (id: string) => reg.stops.get(id)?.(), done: () => done(undefined),
+			}), { overlay: true, overlayOptions: { anchor: "top-left", width: "100%", maxHeight: "100%" } });
+		} catch (e) {
+			ctx.ui.notify(`subagents view: ${e instanceof Error ? e.message : String(e)}`, "error");
+		} finally { opened = false; }
+	};
+	api.registerCommand?.("subagents", {
+		description: "Watch subagent and expert runs, live: /subagents [n | agent]",
+		handler: async (args: string, ctx: any) => {
+			const a = String(args ?? "").trim();
+			if (!a) return open(ctx, { screen: "list" });
+			const view = await loadView();
+			const r = pickRun(reg.runs, a, view.order);
+			if (!r) { const m = `No run "${a}". /subagents lists them.`; if (ctx?.hasUI) ctx.ui.notify(m, "warning"); else console.log(m); return; }
+			return open(ctx, { screen: "run", id: r.id });
+		},
+	});
+	if (VIEW_KEY && VIEW_KEY !== "none") api.registerShortcut?.(VIEW_KEY, {
+		description: "Watch the subagents (inside the view: the next run)",
+		handler: async (ctx: any) => open(ctx, { screen: reg.runs.length ? "run" : "list" }),
+	});
+}
+
 export default function (pi: ExtensionAPI) {
 	if (!ACTIVE || DEPTH >= MAX_DEPTH) return;   // a child at the depth limit gets no tool at all (and pays no tokens for it)
 	const Item = Type.Object({ agent: Type.String({ description: "agent name" }), task: Type.String({ description: "task; in a chain, {previous} is the prior step's output" }) });
@@ -4374,14 +4703,14 @@ export default function (pi: ExtensionAPI) {
 			if (params.tasks?.length) {
 				if (params.tasks.length > MAX_PARALLEL) return { content: [{ type: "text" as const, text: `Too many parallel tasks (${params.tasks.length}); max ${MAX_PARALLEL}.` }], isError: true };
 				for (const t of params.tasks) if (!find(t.agent)) return missing(t.agent);
-				const results = await mapLimit(params.tasks, CONCURRENCY, (t: any) => runAgent(find(t.agent)!, t.task, ctx.cwd, signal, progress));
+				const results = await mapLimit(params.tasks, CONCURRENCY, (t: any, i: number) => runAgent(find(t.agent)!, t.task, ctx.cwd, signal, progress, { tool: "subagent", callId: _id, mode: "parallel", index: i, of: params.tasks.length }));
 				return { content: [{ type: "text" as const, text: results.map(render).join("\n\n") }], isError: results.every((r) => r.exitCode !== 0) };
 			}
 			if (params.chain?.length) {
 				for (const t of params.chain) if (!find(t.agent)) return missing(t.agent);
 				const results: RunResult[] = []; let previous = "";
 				for (const [i, t] of (params.chain as any[]).entries()) {
-					const r = await runAgent(find(t.agent)!, t.task.replace(/\{previous\}/g, previous), ctx.cwd, signal, progress);
+					const r = await runAgent(find(t.agent)!, t.task.replace(/\{previous\}/g, previous), ctx.cwd, signal, progress, { tool: "subagent", callId: _id, mode: "chain", index: i, of: params.chain.length });
 					r.step = i + 1; results.push(r); previous = r.text;
 					if (r.exitCode !== 0 || signal?.aborted) break;
 				}
@@ -4389,10 +4718,11 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!params.agent || !params.task) return { content: [{ type: "text" as const, text: `Give {agent, task}, {tasks:[...]} or {chain:[...]}. Agents:\n${list}` }], isError: !agents.length };
 			const a = find(params.agent); if (!a) return missing(params.agent);
-			const r = await runAgent(a, params.task, ctx.cwd, signal, progress);
+			const r = await runAgent(a, params.task, ctx.cwd, signal, progress, { tool: "subagent", callId: _id, mode: "single" });
 			return { content: [{ type: "text" as const, text: render(r) }], isError: r.exitCode !== 0 };
 		},
 	});
+	if (DEPTH === 0) setupView(pi);
 	// once on, it stays on for the session (see above); subagents never get it
 	pi.on("before_agent_start", async (event: any, ctx: any) => {
 		const sections = event?.systemPromptOptions?.sections;
@@ -4411,6 +4741,439 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	});
 }
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+    pi_write_subagent_view_extension "${dir}"
+}
+
+# The /subagents view (a full-screen overlay of the subagent and expert
+# runs, live), next to subagents.ts, which loads it on first use; the index
+# never loads it on its own.
+pi_write_subagent_view_extension() {  # pi_write_subagent_view_extension <dir>
+    local dir="$1" f tmp
+    f="${dir}/subagent-view.ts"
+    tmp="$(mktemp "${dir}/.subagent-view.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (subagents: the run view); regenerated on launch, edits are overwritten.
+// The /subagents view, loaded by subagents.ts the first time it opens (the
+// index never loads it on its own). One full-screen overlay
+// (ctx.ui.custom with overlay: true) with two screens: the list of this
+// session's subagent and expert runs (running first), and one run's
+// transcript, drawn with pi's own message and tool components
+// (UserMessageComponent, AssistantMessageComponent, ToolExecutionComponent
+// with the built-in tools' renderers) when they load, else with the plain
+// renderer below (same content, simpler look). It streams while the child
+// runs: the runner notifies the view on every event it records. Read-only;
+// nothing here reaches the model. No runtime imports: pi's parts come in
+// through piDeps(), so the module also loads where pi is not installed (tests).
+
+type Run = any;
+type Ev = any;
+export interface Theme { fg(color: string, text: string): string; bold?(text: string): string; italic?(text: string): string }
+export interface PiParts { UserMessageComponent: any; AssistantMessageComponent: any; ToolExecutionComponent: any; getMarkdownTheme?(): any; tools: Record<string, ((cwd: string) => any) | undefined> }
+export interface Deps {
+	matchesKey(data: string, key: string): boolean;
+	visibleWidth(s: string): number;
+	truncateToWidth(s: string, w: number): string;
+	wrap(s: string, w: number): string[];
+	pi?: PiParts;
+}
+export interface Registry { runs: Run[]; listeners: Set<(r?: Run) => void> }
+export interface ViewOptions {
+	tui: { requestRender(): void; terminal?: { rows?: number } };
+	theme: Theme; deps: Deps; registry: Registry;
+	start?: { screen?: "list" | "run"; id?: string };
+	key?: string;                 // the shortcut that opened it: inside the view it moves to the next run
+	stop?(id: string): void;      // stops one running child (the runner's own kill)
+	done(): void;
+}
+
+// ------------------------------------------------------------------ plain helpers (no pi)
+const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[PX^_][^\x1b]*\x1b\\/g;
+export function plainWidth(s: string): number { return [...s.replace(ANSI, "")].length; }
+export function plainTruncate(s: string, w: number): string {
+	if (plainWidth(s) <= w) return s;
+	let out = "", seen = 0, i = 0;
+	const limit = Math.max(0, w - 1);
+	while (i < s.length) {
+		ANSI.lastIndex = i;
+		const m = ANSI.exec(s);
+		if (m && m.index === i) { out += m[0]; i += m[0].length; continue; }
+		const ch = String.fromCodePoint(s.codePointAt(i)!);
+		if (seen >= limit) break;
+		out += ch; seen++; i += ch.length;
+	}
+	return `${out}${w > 0 ? "…" : ""}\x1b[0m`;
+}
+// plain text (no ANSI) onto lines of at most w columns, words kept whole when they fit
+export function plainWrap(s: string, w: number): string[] {
+	const out: string[] = [];
+	const width = Math.max(1, w);
+	for (const raw of String(s).replace(/\t/g, "    ").split("\n")) {
+		if (!raw.trim()) { out.push(""); continue; }
+		let line = "";
+		for (const word of raw.split(/(\s+)/)) {
+			if (!word) continue;
+			if ([...line].length + [...word].length <= width) { line += word; continue; }
+			if (line.trim()) out.push(line.replace(/\s+$/, ""));
+			line = /^\s+$/.test(word) ? "" : word;
+			while ([...line].length > width) { const cs = [...line]; out.push(cs.slice(0, width).join("")); line = cs.slice(width).join(""); }
+		}
+		if (line.trim()) out.push(line.replace(/\s+$/, ""));
+	}
+	return out;
+}
+const SEQ: Record<string, string[]> = {
+	escape: ["\x1b"], enter: ["\r", "\n"], tab: ["\t"], "shift+tab": ["\x1b[Z"], space: [" "],
+	up: ["\x1b[A", "\x1bOA"], down: ["\x1b[B", "\x1bOB"], right: ["\x1b[C", "\x1bOC"], left: ["\x1b[D", "\x1bOD"],
+	backspace: ["\x7f", "\b"], pageUp: ["\x1b[5~"], pageDown: ["\x1b[6~"], home: ["\x1b[H", "\x1b[1~", "\x1bOH"], end: ["\x1b[F", "\x1b[4~", "\x1bOF"],
+};
+// the raw sequences of the keys this view uses (pi's matchesKey replaces it inside pi)
+export function plainMatchesKey(data: string, key: string): boolean {
+	if (SEQ[key]) return SEQ[key].includes(data);
+	const alt = /^alt\+(.)$/.exec(key); if (alt) return data === `\x1b${alt[1]}`;
+	const ctrl = /^ctrl\+([a-z])$/.exec(key); if (ctrl) return data === String.fromCharCode(ctrl[1].charCodeAt(0) - 96);
+	return key.length === 1 && data === key;
+}
+export function plainDeps(): Deps { return { matchesKey: plainMatchesKey, visibleWidth: plainWidth, truncateToWidth: plainTruncate, wrap: plainWrap }; }
+// pi's key parser (Kitty protocol included), width helpers and components, each
+// piece falling back on its own when it does not load
+export async function piDeps(): Promise<Deps> {
+	const d = plainDeps();
+	try {
+		const t: any = await import("@earendil-works/pi-tui");
+		if (typeof t.matchesKey === "function") d.matchesKey = (data, key) => t.matchesKey(data, key);
+		if (typeof t.visibleWidth === "function") d.visibleWidth = (s) => t.visibleWidth(s);
+		if (typeof t.truncateToWidth === "function") d.truncateToWidth = (s, w) => t.truncateToWidth(s, w);
+		if (typeof t.wrapTextWithAnsi === "function") d.wrap = (s, w) => t.wrapTextWithAnsi(s, w);
+	} catch { /* plain helpers */ }
+	try {
+		const p: any = await import("@earendil-works/pi-coding-agent");
+		if (p.UserMessageComponent && p.AssistantMessageComponent && p.ToolExecutionComponent)
+			d.pi = { UserMessageComponent: p.UserMessageComponent, AssistantMessageComponent: p.AssistantMessageComponent, ToolExecutionComponent: p.ToolExecutionComponent, getMarkdownTheme: p.getMarkdownTheme,
+				tools: { read: p.createReadToolDefinition, bash: p.createBashToolDefinition, edit: p.createEditToolDefinition, write: p.createWriteToolDefinition, grep: p.createGrepToolDefinition, find: p.createFindToolDefinition, ls: p.createLsToolDefinition } };
+	} catch { /* plain renderer */ }
+	return d;
+}
+
+// ------------------------------------------------------------------ formatting
+export function compact(n: number): string {
+	if (n < 1000) return String(n);
+	if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;
+	if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+	return `${(n / 1_000_000).toFixed(1)}M`;
+}
+export function elapsed(ms: number): string {
+	const t = Math.max(0, Math.floor(ms / 1000));
+	if (t < 60) return `${t}s`;
+	if (t < 3600) return `${Math.floor(t / 60)}m ${String(t % 60).padStart(2, "0")}s`;
+	return `${Math.floor(t / 3600)}h ${String(Math.floor((t % 3600) / 60)).padStart(2, "0")}m`;
+}
+export const runMs = (r: Run, now: number) => (r.ended ?? (r.status === "running" ? now : r.started)) - r.started;
+export const MARK: Record<string, string> = { running: "●", done: "✓", failed: "✗", aborted: "■", timeout: "✗" };
+export const COLOR: Record<string, string> = { running: "accent", done: "success", failed: "error", aborted: "warning", timeout: "error" };
+export function statusLabel(r: Run): string {
+	if (r.status === "failed") return r.exitCode ? `failed (exit ${r.exitCode})` : "failed";
+	return ({ running: "running", done: "done", aborted: "stopped", timeout: "timed out" } as Record<string, string>)[r.status] ?? String(r.status);
+}
+export const tokens = (r: Run) => (r.input || 0) + (r.output || 0) + (r.live || 0);
+// running first (in the order they started), then the finished ones, newest first
+export function order(runs: Run[]): Run[] {
+	const live = runs.filter((r) => r.status === "running").sort((a, b) => a.started - b.started);
+	const rest = runs.filter((r) => r.status !== "running").sort((a, b) => (b.ended ?? b.started) - (a.ended ?? a.started));
+	return [...live, ...rest];
+}
+// one line of the task: an expert's brief loses its preamble and headings
+export function summary(task: string): string {
+	return String(task ?? "").replace(/^Brief for the [\w.-]+ expert\.\s*/, "").replace(/^#+\s*[^\n]*\n/gm, "").replace(/\s+/g, " ").trim();
+}
+const ident: Theme = { fg: (_c, s) => s };
+const pad = (s: string, w: number, deps: Deps) => s + " ".repeat(Math.max(0, w - deps.visibleWidth(s)));
+const cutTo = (s: string, w: number, deps: Deps) => (w <= 0 ? "" : deps.visibleWidth(s) <= w ? s : deps.truncateToWidth(s, w));
+
+// The list screen: a title, one row per run (two below 56 columns), the keys.
+export function listLines(runs: Run[], o: { width: number; now: number; selected?: string; theme?: Theme; deps?: Deps; keyHint?: string }): string[] {
+	const th = o.theme ?? ident, deps = o.deps ?? plainDeps(), W = Math.max(20, o.width);
+	const rs = order(runs);
+	const live = rs.filter((r) => r.status === "running").length;
+	const bold = (s: string) => (th.bold ? th.bold(s) : s);
+	const out = [cutTo(`${bold("Subagents")}${th.fg("dim", `  ${live} running · ${rs.length - live} finished`)}`, W, deps), ""];
+	if (!rs.length) out.push(th.fg("dim", "  No subagent or expert runs in this session yet."));
+	const nw = Math.min(14, Math.max(4, ...rs.map((r) => r.agent.length)));
+	const timeW = 7, tokW = 5;
+	const fixed = 2 + 2 + nw + 2 + 2 + timeW + 2 + tokW;
+	const wide = W - fixed >= 12;
+	for (const r of rs) {
+		const sel = r.id === o.selected;
+		const cursor = sel ? th.fg("accent", "❯") : " ";
+		const mark = th.fg(COLOR[r.status] ?? "dim", MARK[r.status] ?? "?");
+		const name = cutTo(r.agent, nw, deps);
+		const time = elapsed(runMs(r, o.now)), tok = tokens(r) ? compact(tokens(r)) : "–";
+		const task = summary(r.task) || "(no task)";
+		const nameS = sel ? bold(name) : name;
+		if (wide) {
+			const tw = W - fixed;
+			out.push(`${cursor} ${mark} ${pad(nameS, nw, deps)}  ${pad(th.fg(sel ? "text" : "muted", cutTo(task, tw, deps)), tw, deps)}  ${th.fg("dim", time.padStart(timeW))}  ${th.fg("dim", tok.padStart(tokW))}`);
+		} else {
+			out.push(cutTo(`${cursor} ${mark} ${nameS}  ${th.fg("dim", `${time} · ${tok}`)}`, W, deps));
+			out.push(`    ${th.fg(sel ? "text" : "muted", cutTo(task, W - 4, deps))}`);
+		}
+	}
+	out.push("");
+	const keys = W >= 64 ? `↑↓ pick · enter open · ${o.keyHint ? `${o.keyHint}/` : ""}tab next · esc close` : "↑↓ pick · enter open · esc close";
+	out.push(th.fg("dim", cutTo(keys, W, deps)));
+	return out.map((l) => cutTo(l, W, deps));
+}
+
+// The run screen's header: status line (right: position among the runs) and
+// where it comes from (the parent tool call).
+export function headerLines(r: Run, o: { width: number; now: number; index: number; count: number; theme?: Theme; deps?: Deps }): string[] {
+	const th = o.theme ?? ident, deps = o.deps ?? plainDeps(), W = Math.max(20, o.width);
+	const bold = (s: string) => (th.bold ? th.bold(s) : s);
+	const tok = `↑${compact(r.input || 0)} ↓${compact((r.output || 0) + (r.live || 0))}`;
+	const left = `${th.fg(COLOR[r.status] ?? "dim", MARK[r.status] ?? "?")} ${bold(r.agent)}${r.kind === "expert" ? th.fg("dim", " expert") : ""}  ${th.fg(COLOR[r.status] ?? "dim", statusLabel(r))}  ${th.fg("dim", `${elapsed(runMs(r, o.now))} · ${tok}`)}`;
+	const right = th.fg("dim", `${o.index + 1}/${o.count}`);
+	const lw = deps.visibleWidth(left), rw = deps.visibleWidth(right);
+	const top = lw + 2 + rw <= W ? left + " ".repeat(W - lw - rw) + right : cutTo(left, W, deps);
+	const p = r.parent ?? {};
+	const call = p.callId ? `${p.tool ?? "subagent"} call …${String(p.callId).slice(-8)}` : `${p.tool ?? (r.kind === "expert" ? "expert" : "subagent")} call`;
+	const where = p.mode && p.mode !== "single" ? ` · ${p.mode === "chain" ? "step" : "task"} ${(p.index ?? 0) + 1}/${p.of ?? 1}` : "";
+	const turns = ` · ${r.turns || 0} turn${r.turns === 1 ? "" : "s"}`;
+	return [top, cutTo(th.fg("dim", `${call}${where}${turns}`), W, deps)];
+}
+
+// ------------------------------------------------------------------ transcript
+export interface Flags { expanded: boolean; thinking: boolean }
+function argSummary(name: string, a: any): string {
+	if (!a || typeof a !== "object") return "";
+	const s = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim();
+	if (name === "bash") return s(a.command);
+	if (name === "grep" || name === "find") return [s(a.pattern), s(a.path)].filter(Boolean).join(" in ");
+	if (a.path !== undefined) return s(a.path) + (name === "read" && (a.offset || a.limit) ? `:${a.offset ?? 1}${a.limit ? `+${a.limit}` : ""}` : "");
+	try { return s(JSON.stringify(a)); } catch { return ""; }
+}
+export const TOOL_PREVIEW = 6;
+// one event as plain lines (no pi components): the fallback, and the tests' view
+export function plainEvent(ev: Ev, width: number, flags: Flags, th: Theme = ident, deps: Deps = plainDeps()): string[] {
+	const W = Math.max(10, width), out: string[] = [];
+	const it = (s: string) => (th.italic ? th.italic(s) : s);
+	const bold = (s: string) => (th.bold ? th.bold(s) : s);
+	if (ev.t === "user") {
+		plainWrap(ev.text, W - 2).forEach((l, i) => out.push(`${th.fg("accent", i ? " " : "›")} ${l}`));
+	} else if (ev.t === "assistant") {
+		for (const b of ev.blocks ?? []) {
+			if (b.type === "thinking" && b.text?.trim()) {
+				if (flags.thinking) plainWrap(b.text.trim(), W - 2).forEach((l) => out.push(`  ${th.fg("dim", it(l))}`));
+				else out.push(`  ${th.fg("dim", it("Thinking… (t shows it)"))}`);
+			} else if (b.type === "text" && b.text?.trim()) {
+				for (const l of plainWrap(b.text.trim(), W - 2)) out.push(`  ${l}`);
+			}
+		}
+		if (ev.error) for (const l of plainWrap(`Error: ${ev.error}`, W - 2)) out.push(`  ${th.fg("error", l)}`);
+		if (!ev.done && !out.length) out.push(`  ${th.fg("dim", "…")}`);
+	} else if (ev.t === "tool") {
+		const color = !ev.done ? "accent" : ev.isError ? "error" : "success";
+		out.push(cutTo(`${th.fg(color, "●")} ${bold(ev.name)} ${th.fg("muted", argSummary(ev.name, ev.args))}`, W, deps));
+		const lines = String(ev.output ?? "").replace(/\s+$/, "").split("\n").filter((l, i, a) => a.length > 1 || l);
+		if (!lines.length || (lines.length === 1 && !lines[0])) { if (!ev.done) out.push(`  ${th.fg("dim", "running…")}`); }
+		else {
+			const shown = flags.expanded || lines.length <= TOOL_PREVIEW ? lines : ev.name === "bash" ? lines.slice(-TOOL_PREVIEW) : lines.slice(0, TOOL_PREVIEW);
+			const more = lines.length - shown.length;
+			if (more && ev.name === "bash") out.push(`  ${th.fg("dim", `… ${more} earlier line${more === 1 ? "" : "s"} (o expands)`)}`);
+			for (const l of shown) out.push(cutTo(`  ${th.fg(ev.isError ? "error" : "dim", l.replace(/\t/g, "    "))}`, W, deps));
+			if (more && ev.name !== "bash") out.push(`  ${th.fg("dim", `… ${more} more line${more === 1 ? "" : "s"} (o expands)`)}`);
+		}
+	} else if (ev.t === "note") {
+		for (const l of plainWrap(ev.text, W - 2)) out.push(`  ${th.fg(ev.error ? "error" : "dim", l)}`);
+	}
+	return out;
+}
+// how the run ended, under its transcript
+export function endLines(r: Run, width: number, now: number, th: Theme = ident, deps: Deps = plainDeps()): string[] {
+	if (r.status === "running") return [];
+	const text = `${statusLabel(r)} after ${elapsed(runMs(r, now))} · ${r.turns || 0} turn${r.turns === 1 ? "" : "s"} · ↑${compact(r.input || 0)} ↓${compact(r.output || 0)}`;
+	const w = deps.visibleWidth(text) + 4;
+	const rule = w < width ? "─".repeat(Math.floor((width - w) / 2)) : "";
+	return [cutTo(th.fg(COLOR[r.status] ?? "dim", `${rule}  ${text}  ${rule}`), width, deps)];
+}
+
+// Each event drawn once per (version, width, flags): with pi's components when
+// they are there (as the main view draws the same messages), else plainEvent.
+export class Transcript {
+	deps: Deps; theme: Theme; tui: any;
+	cache = new Map<object, { key: string; lines: string[] }>();
+	piFailed = false;
+	constructor(deps: Deps, theme: Theme, tui: any) { this.deps = deps; this.theme = theme; this.tui = tui; }
+	clear() { this.cache.clear(); }
+	lines(r: Run, width: number, flags: Flags, now: number): string[] {
+		const out: string[] = [];
+		const pi = this.deps.pi && !this.piFailed;
+		(r.events ?? []).forEach((ev: Ev, i: number) => {
+			if (i === 1 && r.dropped) out.push("", this.theme.fg("dim", `  … ${r.dropped} earlier event${r.dropped === 1 ? "" : "s"} not kept`));
+			const ls = this.event(ev, r, width, flags);
+			if (!ls.length) return;
+			if (!pi && out.length) out.push("");
+			out.push(...ls);
+		});
+		const end = endLines(r, width, now, this.theme, this.deps);
+		if (end.length) out.push("", ...end);
+		return out;
+	}
+	event(ev: Ev, r: Run, width: number, flags: Flags): string[] {
+		const key = `${ev.v ?? 0}|${width}|${flags.expanded ? 1 : 0}|${flags.thinking ? 1 : 0}|${this.piFailed ? 0 : 1}`;
+		const hit = this.cache.get(ev);
+		if (hit && hit.key === key) return hit.lines;
+		let lines: string[] | undefined;
+		if (this.deps.pi && !this.piFailed) {
+			try { lines = this.piEvent(ev, r, width, flags); } catch { this.piFailed = true; this.cache.clear(); }
+		}
+		lines ??= plainEvent(ev, width, flags, this.theme, this.deps);
+		this.cache.set(ev, { key, lines });
+		return lines;
+	}
+	piEvent(ev: Ev, r: Run, width: number, flags: Flags): string[] {
+		const p = this.deps.pi!;
+		const md = p.getMarkdownTheme?.();
+		if (ev.t === "user") return new p.UserMessageComponent(ev.text, md).render(width);
+		if (ev.t === "assistant") {
+			const content = (ev.blocks ?? []).map((b: any) => b.type === "thinking" ? { type: "thinking", thinking: b.text ?? "" }
+				: b.type === "toolCall" ? { type: "toolCall", id: b.id ?? "", name: b.name ?? "", arguments: b.args ?? {} } : { type: "text", text: b.text ?? "" });
+			const msg = { role: "assistant", content, stopReason: ev.stop ?? (ev.done ? "stop" : undefined), errorMessage: ev.error, timestamp: ev.at };
+			const c = new p.AssistantMessageComponent(undefined, !flags.thinking, md);
+			c.updateContent(msg, !ev.done);
+			return c.render(width);
+		}
+		if (ev.t === "tool") {
+			const def = p.tools[ev.name]?.(r.cwd || process.cwd());
+			const c = new p.ToolExecutionComponent(ev.name, ev.id || `call-${ev.at}`, ev.args ?? {}, { showImages: false }, def, this.tui, r.cwd || process.cwd());
+			c.markExecutionStarted?.(); c.setArgsComplete?.();
+			if (ev.done || ev.output) c.updateResult({ content: [{ type: "text", text: ev.output ?? "" }], details: ev.details, isError: !!ev.isError }, !ev.done);
+			c.setExpanded?.(flags.expanded);
+			return c.render(width);   // it brings its own spacer, as in the main view
+		}
+		return ["", ...plainEvent(ev, width, flags, this.theme, this.deps)];
+	}
+}
+
+// ------------------------------------------------------------------ the view
+export const KEYS_WIDE = "esc back · ←/→ tab runs · ↑↓ pgup/pgdn scroll · t thinking · o tools · l list · x stop";
+export const KEYS_NARROW = "esc back · ←→ runs · ↑↓ scroll · t think · o tools · l list · x stop";
+export class RunsView {
+	o: ViewOptions;
+	screen: "list" | "run";
+	id?: string;
+	top = 0; follow = true; flags: Flags = { expanded: false, thinking: true };
+	confirm = false; closed = false;
+	lastMax = 0; lastBody = 10;
+	transcript: Transcript;
+	listener: (r?: Run) => void;
+	timer?: ReturnType<typeof setInterval>;
+	constructor(o: ViewOptions) {
+		this.o = o;
+		this.transcript = new Transcript(o.deps, o.theme, o.tui);
+		const rs = this.runs();
+		const first = o.start?.id ? rs.find((r) => r.id === o.start!.id) : rs[0];
+		this.id = first?.id;
+		this.screen = o.start?.screen === "run" && first ? "run" : "list";
+		this.listener = () => { if (!this.closed) this.o.tui.requestRender(); };
+		o.registry.listeners.add(this.listener);
+		// the clocks of running runs move once a second
+		this.timer = setInterval(() => { if (this.runs().some((r) => r.status === "running")) this.o.tui.requestRender(); }, 1000);
+		(this.timer as any).unref?.();
+	}
+	runs(): Run[] { return order(this.o.registry.runs); }
+	current(): Run | undefined { const rs = this.runs(); return rs.find((r) => r.id === this.id) ?? rs[0]; }
+	rows(): number { return Math.max(8, this.o.tui.terminal?.rows || process.stdout.rows || 24); }
+	keyHint(): string { return this.o.key ? this.o.key : ""; }
+	render(width: number): string[] {
+		const W = Math.max(20, width), H = this.rows(), deps = this.o.deps, now = Date.now();
+		let lines: string[];
+		if (this.screen === "list") {
+			lines = listLines(this.o.registry.runs, { width: W, now, selected: this.current()?.id, theme: this.o.theme, deps, keyHint: this.keyHint() });
+			if (lines.length > H) {   // keep the selected row in sight
+				const idx = Math.max(0, this.runs().findIndex((r) => r.id === this.current()?.id));
+				const per = W - (2 + 2 + Math.min(14, Math.max(4, ...this.runs().map((r) => r.agent.length))) + 2 + 2 + 7 + 2 + 5) >= 12 ? 1 : 2;
+				const body = lines.slice(2, lines.length - 2), room = H - 4;
+				const start = Math.max(0, Math.min(idx * per - Math.floor(room / 2), body.length - room));
+				lines = [...lines.slice(0, 2), ...body.slice(start, start + room), ...lines.slice(-2)];
+			}
+		} else {
+			const r = this.current();
+			if (!r) { this.screen = "list"; return this.render(width); }
+			const rs = this.runs();
+			const head = headerLines(r, { width: W, now, index: Math.max(0, rs.findIndex((x) => x.id === r.id)), count: rs.length, theme: this.o.theme, deps });
+			const rule = this.o.theme.fg("dim", "─".repeat(W));
+			const body = this.transcript.lines(r, W, this.flags, now);
+			const bodyH = Math.max(1, H - head.length - 2);
+			const max = Math.max(0, body.length - bodyH);
+			if (this.follow) this.top = max;
+			this.top = Math.max(0, Math.min(this.top, max));
+			if (this.top >= max) this.follow = true;
+			this.lastMax = max; this.lastBody = bodyH;
+			const view = body.slice(this.top, this.top + bodyH);
+			while (view.length < bodyH) view.push("");
+			const below = body.length - (this.top + bodyH);
+			let foot: string;
+			if (this.confirm) foot = this.o.theme.fg("warning", `Stop ${r.agent}? y stops it, any other key keeps it running`);
+			else {
+				const keys = W >= 92 ? KEYS_WIDE : KEYS_NARROW;
+				const k = r.status === "running" ? keys : keys.replace(/ · x stop$/, "");
+				foot = this.o.theme.fg("dim", below > 0 && !this.follow ? `↓ ${below} more · end follows · ${k}` : k);
+			}
+			lines = [...head, rule, ...view, foot];
+		}
+		while (lines.length < H) lines.push("");
+		return lines.slice(0, H).map((l) => cutTo(l, W, deps));
+	}
+	move(step: number) {
+		const rs = this.runs(); if (!rs.length) return;
+		const i = Math.max(0, rs.findIndex((r) => r.id === this.current()?.id));
+		this.id = rs[(i + step + rs.length) % rs.length].id;
+	}
+	open(step = 0) { if (step) this.move(step); this.screen = "run"; this.top = 0; this.follow = true; this.confirm = false; }
+	close() { if (this.closed) return; this.closed = true; this.dispose(); this.o.done(); }
+	handleInput(data: string): void {
+		const k = (key: string) => this.o.deps.matchesKey(data, key);
+		const shortcut = !!this.o.key && k(this.o.key);
+		if (this.screen === "run" && this.confirm) {
+			this.confirm = false;
+			const r = this.current();
+			if ((data === "y" || data === "Y") && r?.status === "running") this.o.stop?.(r.id);
+		} else if (k("escape") || k("q") || k("ctrl+c")) {
+			this.close(); return;
+		} else if (this.screen === "list") {
+			if (k("up") || k("k")) this.move(-1);
+			else if (k("down") || k("j")) this.move(1);
+			else if (k("enter") || k("right") || k("space")) { if (this.current()) this.open(); }
+			else if (shortcut || k("tab")) { if (this.current()) this.open(); }
+			else return;
+		} else {
+			const page = Math.max(1, this.lastBody - 1);
+			const scroll = (d: number) => { this.top = Math.max(0, Math.min(this.lastMax, this.top + d)); this.follow = this.top >= this.lastMax; };
+			if (shortcut || k("tab") || k("right")) this.open(1);
+			else if (k("shift+tab") || k("left")) this.open(-1);
+			else if (k("up") || k("k")) scroll(-1);
+			else if (k("down") || k("j")) scroll(1);
+			else if (k("pageUp")) scroll(-page);
+			else if (k("pageDown") || k("space")) scroll(page);
+			else if (k("home") || data === "g") { this.top = 0; this.follow = this.lastMax === 0; }
+			else if (k("end") || data === "G") this.follow = true;
+			else if (k("t")) this.flags = { ...this.flags, thinking: !this.flags.thinking };
+			else if (k("o") || k("ctrl+o")) this.flags = { ...this.flags, expanded: !this.flags.expanded };
+			else if (k("l") || k("backspace")) this.screen = "list";
+			else if (k("x")) { if (this.current()?.status === "running" && this.o.stop) this.confirm = true; }
+			else return;
+		}
+		this.o.tui.requestRender();
+	}
+	invalidate(): void { this.transcript.clear(); }
+	dispose(): void {
+		this.o.registry.listeners.delete(this.listener);
+		if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
+	}
+}
+export function createView(o: ViewOptions): RunsView { return new RunsView(o); }
 TS
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
@@ -4695,7 +5458,7 @@ export default async function (pi: ExtensionAPI) {
 				const why = await ensure(n, ctx, progress, false, signal);
 				if (why) return text(runs.length > 1 ? `${why} Nothing ran.` : why, true);
 			}
-			const results = await sub.mapLimit(runs, sub.CONCURRENCY, (r: any) => sub.runAgent(find(r.name)!, renderBrief(find(r.name)!, asBrief(r.brief)!), ctx.cwd, signal, progress));
+			const results = await sub.mapLimit(runs, sub.CONCURRENCY, (r: any, i: number) => sub.runAgent(find(r.name)!, renderBrief(find(r.name)!, asBrief(r.brief)!), ctx.cwd, signal, progress, { tool: "expert", callId: _id, mode: runs.length > 1 ? "parallel" : "single", index: i, of: runs.length }));
 			return text(results.map(sub.render).join("\n\n"), results.every((r: any) => r.exitCode !== 0));
 		},
 	});

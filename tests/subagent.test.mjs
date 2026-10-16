@@ -29,6 +29,43 @@ const running = path.join(dir, "running-" + id); fs.writeFileSync(running, "");
 const n = fs.readdirSync(dir).filter((f) => f.startsWith("running-")).length;
 fs.appendFileSync(path.join(dir, "concurrency"), n + "\\n");
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+process.on("SIGTERM", () => { try { fs.unlinkSync(running); } catch {} process.exit(143); });
+if (/stream/.test(task)) {   // a recorded-shape event stream: thinking, a tool call with a big output, the answer
+  const big = "HEAD" + "z".repeat(20000) + "TAIL"; const cmd = { command: "cat big.txt" };
+  const evs = [
+    { type: "session", version: 3, id: "child", timestamp: "2026-01-01T00:00:00.000Z", cwd: process.cwd() }, { type: "agent_start" }, { type: "turn_start" },
+    { type: "message_start", message: { role: "user", content: task } }, { type: "message_end", message: { role: "user", content: task } },
+    { type: "message_start", message: { role: "assistant", content: [], stopReason: "pending" } },
+    { type: "message_update", usage: { output: 1 }, assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+    { type: "message_update", usage: { output: 3 }, assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Look at " } },
+    { type: "message_update", usage: { output: 5 }, assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "the files." } },
+    { type: "message_update", usage: { output: 5 }, assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "Look at the files." } },
+    { type: "message_update", usage: { output: 6 }, assistantMessageEvent: { type: "toolcall_start", contentIndex: 1, id: "call_1", toolName: "bash" } },
+    { type: "message_update", usage: { output: 9 }, assistantMessageEvent: { type: "toolcall_delta", contentIndex: 1, delta: "{\\"command\\":" } },
+    { type: "message_update", usage: { output: 12 }, assistantMessageEvent: { type: "toolcall_end", contentIndex: 1, toolCall: { type: "toolCall", id: "call_1", name: "bash", arguments: cmd } } },
+    { type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: "Look at the files." }, { type: "toolCall", id: "call_1", name: "bash", arguments: cmd }], usage: { input: 100, output: 20 }, stopReason: "toolUse" } },
+    { type: "tool_execution_start", toolCallId: "call_1", toolName: "bash", args: cmd },
+    { type: "tool_execution_update", toolCallId: "call_1", toolName: "bash", args: cmd, partialResult: { content: [{ type: "text", text: "HEAD" }], details: {} } },
+    { type: "tool_execution_end", toolCallId: "call_1", toolName: "bash", result: { content: [{ type: "text", text: big }], details: {} }, isError: false },
+    { type: "message_start", message: { role: "toolResult", toolCallId: "call_1", content: [{ type: "text", text: big }] } },
+    { type: "message_end", message: { role: "toolResult", toolCallId: "call_1", content: [{ type: "text", text: big }] } },
+    { type: "turn_end" }, { type: "turn_start" },
+    { type: "message_start", message: { role: "assistant", content: [], stopReason: "pending" } },
+    { type: "message_update", usage: { output: 1 }, assistantMessageEvent: { type: "text_start", contentIndex: 0 } },
+    { type: "message_update", usage: { output: 4 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Found it: " } },
+    { type: "message_update", usage: { output: 8 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "line 3." } },
+    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Found it: line 3." }], usage: { input: 150, output: 10 }, stopReason: "stop" } },
+    { type: "turn_end" }, { type: "agent_end", messages: [] }, { type: "agent_settled" },
+  ];
+  let i = 0; const tick = () => { if (i < evs.length) { out(evs[i++]); setTimeout(tick, 15); } else { fs.unlinkSync(running); process.exit(0); } }; tick();
+  return;
+}
+if (/hang/.test(task)) {   // works until stopped
+  out({ type: "message_start", message: { role: "assistant", content: [] } });
+  out({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "working" } });
+  setInterval(() => {}, 1000);
+  return;
+}
 out({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } });
 setTimeout(() => {
   if (/slow/.test(task)) return;   // never answers; only a timeout ends it
@@ -70,9 +107,10 @@ async function load(env = {}) {
 	Object.assign(process.env, env);
 	const f = join(agentDir, "extensions", `subagent-${loads++}.ts`); writeFileSync(f, src);
 	const mod = await import(pathToFileURL(f).href);
-	let tool = null; const handlers = {};
-	mod.default({ registerTool: (d) => { tool = d; }, on(ev, h) { handlers[ev] = h; return () => {}; } });
-	return { mod, tool, handlers, run: (params, cwd = work, trusted = true) => tool.execute("id", params, undefined, undefined, { cwd, isProjectTrusted: trusted }) };
+	let tool = null; const handlers = {}, tools = [], commands = {}, shortcuts = {};
+	mod.default({ registerTool: (d) => { tool = d; tools.push(d); }, on(ev, h) { handlers[ev] = h; return () => {}; },
+		registerCommand: (name, d) => { commands[name] = d; }, registerShortcut: (key, d) => { shortcuts[key] = d; } });
+	return { mod, tool, tools, commands, shortcuts, handlers, run: (params, cwd = work, trusted = true) => tool.execute("id", params, undefined, undefined, { cwd, isProjectTrusted: trusted }) };
 }
 
 // --- what the model is told: agents and call shapes in the tool; the method once asked for
@@ -265,6 +303,123 @@ async function load(env = {}) {
 		rmSync(join(rea, "runtime"), { recursive: true });
 		t("reverse-engineer: hidden once the runtime is gone", mod.parseAgentFile(file, "reverse-engineer.md", "user"), null);
 	}
+}
+
+// --- run transcripts (the /subagents view's data) and the view's hooks: UI only
+{
+	const reg = () => globalThis[Symbol.for("lets-code.subagent-runs")];
+	const { copyFileSync, statSync } = await import("node:fs");
+	const { dirname } = await import("node:path");
+	const view = join(dirname(extPath), "subagent-view.ts");
+	if (existsSync(view)) copyFileSync(view, join(agentDir, "extensions", "subagent-view.ts"));
+	const h = await load({});
+	const { mod } = h;
+	t("view: a /subagents command and the alt+s shortcut", [typeof h.commands.subagents?.handler, typeof h.shortcuts["alt+s"]?.handler], ["function", "function"]);
+	t("view: no new tool and no prompt hook (zero context)", [h.tools.map((x) => x.name), Object.keys(h.handlers).sort()], [["subagent"], ["before_agent_start", "session_start"]]);
+	t("view: nothing about it in the tool's text", /subagents to watch|\/subagents|alt\+s/.test(JSON.stringify([h.tool.description, h.tool.promptSnippet, h.tool.promptGuidelines, h.tool.parameters])), false);
+	const sections = {};
+	await h.handlers.before_agent_start({ prompt: "fix the typo", systemPromptOptions: { sections } }, { getContextUsage: () => ({ percent: 1 }) });
+	t("view: the prompt sections are unchanged", Object.keys(sections), []);
+	t("hint text", [mod.hintText(1), mod.hintText(2, "none"), mod.hintText(0)], ["1 subagent running · alt+s or /subagents to watch", "2 subagents running · /subagents to watch", ""]);
+
+	// the session's id names the runs' directory; the footer shows the hint while one runs
+	const statuses = [];
+	const ui = { setStatus: (k, v) => statuses.push([k, v]), notify() {}, theme: { fg: (_c, s) => s } };
+	h.handlers.session_start({ reason: "startup" }, { hasUI: true, ui, sessionManager: { getSessionId: () => "sess-1" } });
+	const seen = [];
+	const spy = (r) => { const last = r?.events?.at(-1); if (last?.t === "assistant" && !last.done) seen.push(last.blocks.map((b) => b.text).join("|")); };
+	reg().listeners.add(spy);
+	const single = await h.run({ agent: "worker", task: "stream it" });
+	reg().listeners.delete(spy);
+	const rec = reg().runs.find((r) => r.task === "stream it");
+	t("stream: the tool result is the same as before", /Found it: line 3\./.test(single.content[0].text) && !single.isError, true);
+	t("stream: one run recorded, done, in the session, with its tool call", rec && [rec.status, rec.session, rec.agent, rec.kind, rec.parent], ["done", "sess-1", "worker", "subagent", { tool: "subagent", callId: "id", mode: "single" }]);
+	t("stream: events in order (the child's own copy of the task is not repeated)", rec.events.map((e) => e.t), ["user", "assistant", "tool", "assistant"]);
+	t("stream: thinking and the tool call kept", rec.events[1].blocks.map((b) => [b.type, b.text, b.name ?? null]), [["thinking", "Look at the files.", null], ["toolCall", "", "bash"]]);
+	t("stream: tool args kept", [rec.events[2].name, rec.events[2].args, rec.events[2].done, rec.events[2].isError], ["bash", { command: "cat big.txt" }, true, false]);
+	const out = rec.events[2].output;
+	t("stream: a huge tool output keeps its head and tail", [out.startsWith("HEAD"), out.endsWith("TAIL"), /characters cut/.test(out), rec.events[2].cut, out.length < mod.TOOL_OUT_CAP + 100], [true, true, true, 20008 - mod.TOOL_OUT_CAP, true]);
+	t("stream: the final answer", rec.events[3].blocks, [{ type: "text", text: "Found it: line 3." }]);
+	t("stream: tokens and turns", [rec.input, rec.output, rec.turns, rec.live], [250, 30, 2, 0]);
+	t("stream: seen while streaming (partial text, then the rest)", seen.includes("Found it: ") && seen.includes("Found it: line 3."), true);
+	const file = join(agentDir, "lets-code-runs", "sess-1", `${rec.id}.json`);
+	t("disk: saved under the session, 0600", [existsSync(file), (statSync(file).mode & 0o777).toString(8)], [true, "600"]);
+	t("disk: the finished run", JSON.parse(readFileSync(file, "utf8")).status, "done");
+	t("hint: shown while it ran, cleared after", [statuses.some(([k, v]) => k === "subagents" && v === "1 subagent running · alt+s or /subagents to watch"), statuses.at(-1)], [true, ["subagents", undefined]]);
+
+	// parallel: two runs at once, each with its place in the call
+	statuses.length = 0;
+	const par = await h.run({ tasks: [{ agent: "scout", task: "stream a" }, { agent: "worker", task: "stream b" }] });
+	const a = reg().runs.find((r) => r.task === "stream a"), b = reg().runs.find((r) => r.task === "stream b");
+	t("parallel: both recorded, apart", [a.status, b.status, a.id !== b.id, a.events.length, b.events.length], ["done", "done", true, 4, 4]);
+	t("parallel: their place in the call", [a.parent, b.parent], [{ tool: "subagent", callId: "id", mode: "parallel", index: 0, of: 2 }, { tool: "subagent", callId: "id", mode: "parallel", index: 1, of: 2 }]);
+	t("parallel: the hint counted both", statuses.some(([, v]) => v === "2 subagents running · alt+s or /subagents to watch"), true);
+	t("parallel: tool result unchanged in shape", (par.content[0].text.match(/^## (scout|worker)/gm) ?? []).length, 2);
+
+	// the view's stop (x): that child only, the other one finishes
+	const pending = h.run({ tasks: [{ agent: "worker", task: "hang here" }, { agent: "scout", task: "stream c" }] });
+	let hang; for (let i = 0; i < 100 && !(hang = reg().runs.find((r) => r.task === "hang here" && r.status === "running" && r.events.length > 1)); i++) await new Promise((r) => setTimeout(r, 30));
+	t("stop: the hanging run streams its partial text", hang?.events.at(-1)?.blocks?.[0]?.text, "working");
+	reg().stops.get(hang.id)();
+	const res = await pending;
+	t("stop: that run is stopped, the other done", [hang.status, reg().runs.find((r) => r.task === "stream c").status], ["aborted", "done"]);
+	t("stop: the model is told the user stopped it", /## worker — stopped by the user/.test(res.content[0].text), true);
+	t("stop: open blocks closed", hang.events.every((e) => e.t !== "assistant" || e.done), true);
+	t("stop: its stop is gone", reg().stops.has(hang.id), false);
+
+	// the tool call's abort (Esc in pi): recorded as stopped too
+	const ac = new AbortController();
+	const p2 = h.tool.execute("id2", { agent: "worker", task: "hang there" }, ac.signal, undefined, { cwd: work, isProjectTrusted: true });
+	let h2; for (let i = 0; i < 100 && !(h2 = reg().runs.find((r) => r.task === "hang there" && r.events.length > 1)); i++) await new Promise((r) => setTimeout(r, 30));
+	ac.abort(); const r2 = await p2;
+	t("abort: recorded as stopped, the result as before", [h2.status, /stopped by the user/.test(r2.content[0].text), r2.isError], ["aborted", false, true]);
+
+	// a failing child keeps its stderr as a note
+	await h.run({ agent: "worker", task: "please fail again" });
+	const f = reg().runs.find((r) => r.task === "please fail again");
+	t("failed: status, exit code, stderr note", [f.status, f.exitCode, f.events.at(-1).t, /boom/.test(f.events.at(-1).text)], ["failed", 3, "note", true]);
+
+	// the recorder on its own
+	const r = mod.newRun({ name: "scout" }, "t", work, undefined, 1000);
+	for (let i = 0; i < mod.MAX_EVENTS + 100; i++) mod.recordEvent(r, { type: "tool_execution_start", toolCallId: `c${i}`, toolName: "read", args: { path: `f${i}` } });
+	t("cap: newest MAX_EVENTS events, the task first, the rest counted", [r.events.length, r.events[0].t, r.dropped, r.events.at(-1).args.path], [mod.MAX_EVENTS, "user", 101, `f${mod.MAX_EVENTS + 99}`]);
+	t("cap: long arguments cut", mod.clipArgs({ content: "x".repeat(5000), n: 1 }).content.length < 2100, true);
+	t("cap: nested arguments bounded", JSON.stringify(mod.clipArgs({ a: { b: { c: { d: { e: { f: 1 } } } } } })), '{"a":{"b":{"c":{"d":{"e":"[…]"}}}}}');
+	t("unknown events are ignored", [mod.recordEvent(r, { type: "queue_update" }), mod.recordEvent(r, null), mod.recordEvent(r, { type: "message_update" })], [false, false, false]);
+	const e = mod.newRun({ name: "x", expert: { job: "j" } }, "brief", work);
+	t("an expert's run is marked", e.kind, "expert");
+	mod.recordEvent(e, { type: "message_end", message: { role: "assistant", content: "plain", stopReason: "error", errorMessage: "500 upstream" } });
+	t("an assistant message without a start, and its error", [e.events[1].blocks, e.events[1].error], [[{ type: "text", text: "plain" }], "500 upstream"]);
+	mod.recordEvent(e, { type: "auto_retry_start", attempt: 1, maxAttempts: 3, errorMessage: "529 overloaded" });
+	t("retries are noted", e.events.at(-1).text, "retrying (attempt 1/3): 529 overloaded");
+
+	// reopened after a restart: from disk; one saved while running shows as interrupted
+	const live = mod.newRun({ name: "scout" }, "left running", work, undefined, 1000); live.session = "sess-2"; mod.saveRun(live, true);
+	const done = mod.newRun({ name: "worker" }, "finished", work, undefined, 2000); done.session = "sess-2"; mod.finishRun(done, { exitCode: 0, text: "ok", stderr: "" }, false); mod.saveRun(done, true);
+	const loaded = mod.loadRuns("sess-2");
+	t("load: the session's runs", loaded.map((x) => [x.task, x.status]), [["left running", "aborted"], ["finished", "done"]]);
+	t("load: an interrupted run says so", loaded[0].events.at(-1).text, "interrupted: pi stopped while it ran");
+	reg().runs = reg().runs.filter((x) => x.id !== live.id && x.id !== done.id);
+	h.handlers.session_start({ reason: "resume" }, { hasUI: true, ui, sessionManager: { getSessionId: () => "sess-2" } });
+	t("session switch: that session's runs", reg().runs.filter((x) => x.status !== "running").map((x) => x.task), ["left running", "finished"]);
+	h.handlers.session_start({ reason: "resume" }, { hasUI: true, ui, sessionManager: { getSessionId: () => "sess-1" } });
+	t("and back: the first session's runs from disk", reg().runs.some((x) => x.task === "stream it"), true);
+	for (let i = 0; i < mod.KEEP_RUNS + 5; i++) { const x = mod.newRun({ name: "w" }, `p${i}`, work); x.session = "sess-p"; mod.finishRun(x, { exitCode: 0, text: "", stderr: "" }, false); mod.saveRun(x, true); }
+	mod.pruneRuns("sess-p");
+	t("prune: the newest KEEP_RUNS runs stay on disk", readdirSync(join(agentDir, "lets-code-runs", "sess-p")).length, mod.KEEP_RUNS);
+	t("pickRun: by row and by name", [mod.pickRun(loaded, "2", (x) => x)?.task, mod.pickRun(loaded, "sco", (x) => x)?.task, mod.pickRun(loaded, "9", (x) => x)], ["finished", "left running", undefined]);
+
+	// the command without a terminal: the list as text
+	if (existsSync(view)) {
+		const logged = []; const log = console.log; console.log = (m) => logged.push(String(m));
+		try { await h.commands.subagents.handler("", { hasUI: false }); } finally { console.log = log; }
+		t("no UI: /subagents prints the list", /^Subagents {2}\d+ running · \d+ finished/.test(logged[0] ?? ""), true);
+	}
+	const ks = await load({ LETS_CODE_SUBAGENT_KEY: "none" });
+	t("LETS_CODE_SUBAGENT_KEY=none: no shortcut, the command stays", [Object.keys(ks.shortcuts), typeof ks.commands.subagents?.handler], [[], "function"]);
+	const ck = await load({ LETS_CODE_SUBAGENT_KEY: "ctrl+alt+w" });
+	t("LETS_CODE_SUBAGENT_KEY picks the key", Object.keys(ck.shortcuts), ["ctrl+alt+w"]);
+	delete process.env.LETS_CODE_SUBAGENT_KEY;
 }
 
 rmSync(work, { recursive: true, force: true });

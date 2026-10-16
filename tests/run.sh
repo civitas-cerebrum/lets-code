@@ -37,7 +37,7 @@ s = open(sys.argv[1]).read()
 i = s.find("\n# ------------------------------------------------------------ extension dirs\n")
 if i >= 0:
     sys.stdout.write(s[i:s.find("\n# ------------------------------------------------------------------ themes\n", i)])
-for name in ("pi_write_gitguard_extension", "pi_write_memguard_extension", "pi_write_agentguard_extension", "pi_write_mandate_extension", "pi_write_subagent_extension", "pi_write_experts_extension", "pi_write_sandbox_extension", "pi_write_sessiontag_extension", "pi_write_metrics_extension", "pi_write_grounding_extension", "pi_write_backend_extension", "pi_write_claudecode_extension", "pi_write_thinking_extension"):
+for name in ("pi_write_gitguard_extension", "pi_write_memguard_extension", "pi_write_agentguard_extension", "pi_write_mandate_extension", "pi_write_subagent_extension", "pi_write_subagent_view_extension", "pi_write_experts_extension", "pi_write_sandbox_extension", "pi_write_sessiontag_extension", "pi_write_metrics_extension", "pi_write_grounding_extension", "pi_write_backend_extension", "pi_write_claudecode_extension", "pi_write_thinking_extension"):
     i = s.find("\n%s() {" % name)
     if i < 0:
         continue

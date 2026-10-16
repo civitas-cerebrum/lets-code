@@ -4080,7 +4080,7 @@ pi_write_subagent_extension() {
 // A missing agent_dir, skill or append_prompt hides the agent too.
 //
 // A file in ~/.pi/agent/agents that says `expert: true` is an expert
-// (its own fields: job, use_for, keywords, platform, setup, setup_note, brief; see the
+// (its own fields: job, use_for, keywords, dispatch_rule, platform, setup, setup_note, brief; see the
 // experts module). It is never listed here (its name stays taken); with
 // experts on (LETS_CODE_EXPERTS_ON=1) a call to it is pointed at the expert
 // tool, with them off it is simply unknown.
@@ -4140,7 +4140,7 @@ export interface AgentDef {
 // given: one required field, task). ready: everything the file names exists
 // (agent_dir, skills, append_prompt, requires), i.e. its setup has run.
 export interface BriefField { name: string; required: boolean; hint: string }
-export interface ExpertMeta { job: string; useFor?: string; keywords?: string; brief: BriefField[]; platform?: string; setup?: string; setupNote?: string; ready: boolean }
+export interface ExpertMeta { job: string; useFor?: string; keywords?: string; dispatchRule?: string; brief: BriefField[]; platform?: string; setup?: string; setupNote?: string; ready: boolean }
 export const MAX_TIMEOUT = 24 * 3600;
 
 // A path named in an agent file, resolved and checked lexically: relative to
@@ -4199,7 +4199,7 @@ export function parseAgentFile(text: string, file: string, source: "user" | "pro
 				brief.push({ name: b[1], required: !!b[2], hint: b[3].trim() });
 			}
 			if (!brief.length) brief.push({ name: "task", required: true, hint: "the whole task, standing alone" });
-			a.expert = { job: (fm.job || a.description).replace(/\s+/g, " ").trim(), useFor: fm.use_for?.replace(/\s+/g, " ").trim().slice(0, 100) || undefined, keywords: fm.keywords?.replace(/\s+/g, " ").trim().slice(0, 40) || undefined, brief, platform: fm.platform || undefined, setup: fm.setup ? path("setup") : undefined, setupNote: fm.setup_note || undefined, ready };
+			a.expert = { job: (fm.job || a.description).replace(/\s+/g, " ").trim(), useFor: fm.use_for?.replace(/\s+/g, " ").trim().slice(0, 100) || undefined, keywords: fm.keywords?.replace(/\s+/g, " ").trim().slice(0, 40) || undefined, dispatchRule: fm.dispatch_rule?.replace(/\s+/g, " ").trim().slice(0, 300) || undefined, brief, platform: fm.platform || undefined, setup: fm.setup ? path("setup") : undefined, setupNote: fm.setup_note || undefined, ready };
 		}
 	} catch { return null; }   // a path outside the allowed roots
 	return a;
@@ -5206,6 +5206,9 @@ pi_write_experts_extension() {
 //   use_for     a few words on the tasks it takes, in the always-on line
 //   keywords    two or three words that stand in for use_for once there are
 //               many experts (default: its first words)
+//   dispatch_rule  one imperative line in the system prompt while it is usable
+//               here, for tasks the model keeps doing by hand next to the line
+//               (termux-device's: phone actions); costs tokens in every request
 //   platform    where it can run: termux, or Node platform names; else hidden
 //   setup       a script (path under ~/.pi/agent) run once it is enabled,
 //               when what the file names (agent_dir, requires, ...) is missing
@@ -5240,7 +5243,7 @@ const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "age
 const SETUP_TIMEOUT = 15 * 60 * 1000;
 
 interface Field { name: string; required: boolean; hint: string }
-interface Spec { name: string; description: string; file: string; expert: { job: string; useFor?: string; keywords?: string; brief: Field[]; setup?: string; setupNote?: string; ready: boolean } }
+interface Spec { name: string; description: string; file: string; expert: { job: string; useFor?: string; keywords?: string; dispatchRule?: string; brief: Field[]; setup?: string; setupNote?: string; ready: boolean } }
 
 // ------------------------------------------------------------------ state
 export const statePath = () => join(AGENT_DIR, "lets-code-state.json");
@@ -5323,12 +5326,26 @@ export function snippet(specs: Spec[]): string {
 	return full.length <= LINE_BUDGET ? full : line(true);
 }
 
+// The experts' dispatch rules, one line each, as a system-prompt section
+// (none: no section). The expert line alone did not stop a phone session
+// from launching an app by hand; a rule in the prompt names the trigger.
+export function rulesSection(specs: Spec[]): string {
+	const rules = specs.map((s) => s.expert.dispatchRule).filter((r): r is string => !!r);
+	return rules.length ? ["Experts (lets-code):", ...rules.map((r) => `- ${r}`)].join("\n") : "";
+}
+
 export default async function (pi: ExtensionAPI) {
 	if (!ACTIVE || DEPTH >= MAX_DEPTH) return;   // a child gets no tool (it cannot start children)
 	const sub = await import(pathToFileURL(join(HERE, "subagents.ts")).href);
 	const discover = (): Spec[] => sub.discoverExperts();
 	const known = discover();
 	if (!known.length) return;   // none usable here: no tool, no tokens
+	const RULES = rulesSection(known);
+	if (RULES) pi.on("before_agent_start", async (event: any) => {
+		const sections = event?.systemPromptOptions?.sections;
+		if (sections && typeof sections === "object") sections.lets_code_experts = RULES;
+		return undefined;
+	});
 	const session = new Map<string, boolean>();   // decided in this session (dialog, /experts)
 	const declined = new Set<string>();            // said no in this session: not asked again
 	const enabled = (n: string) => session.has(n) ? session.get(n)! : remembered()[n] === true;
@@ -5601,6 +5618,7 @@ expert: true
 use_for: phone tasks: apps, files, intents, messages; screen/taps once set up
 job: Does a phone task end to end (launch an app, open a file, fire an intent, prepare a message; screen and taps where set up) and reports each command with its evidence; a few minutes
 keywords: phone, apps, messages
+dispatch_rule: Acting on this phone or reading its state (launch or open an app, a message, notification, intent or tap; what is installed or signed in) goes to expert termux-device with the whole goal; don't run am, pm, cmd or termux-* first. Your own commands only check its result or do Termux file work.
 platform: termux
 brief:
   - goal (required): the user's goal, verbatim
@@ -9492,6 +9510,7 @@ outside it rejects the file. For an expert, a missing `agent_dir`,
 | `expert` | `true` makes it an expert (not a plain subagent) | `true`, `yes` or `on` |
 | `use_for` | the few words in the always-on line: `name (use_for)` | cut at 100 characters; aim for 6 to 14 words. The routing signal: see use-for.md |
 | `keywords` | replace use_for once the line passes 900 characters (about a dozen experts) | cut at 40 characters; 2 or 3 words. None: the first 4 words of use_for |
+| `dispatch_rule` | one imperative line in the main session's system prompt while the expert is usable: when it must get the task | cut at 300 characters. Costs tokens in every request: only when route-check shows the model doing its tasks by hand despite use_for |
 | `job` | one line in `list` and in the enable dialog | default: description. Say what it does and how long it may take |
 | `brief` | the template its caller fills in | block list of `- name (required): hint` or `- name: hint`; a bad item or a duplicate name rejects the file. None: one required `task` |
 | `platform` | where it is listed | `termux`, or Node platform names (`linux`, `darwin`, ...), comma separated; none: everywhere. On Termux Node says `android`, so `linux` does not include the phone |
@@ -9573,6 +9592,10 @@ and how long it may take ("up to 30 minutes").
   usually the cheaper answer, so do not fight it.
 - The model looks at the project first (ls, read) before it delegates; a
   route-check counts up to 8 of its own tool calls before calling it "own".
+- A phone session still launched an app by hand next to the line (the
+  user's earlier turns had it working in the shell). termux-device's
+  `dispatch_rule` (format.md) names the trigger in the system prompt; add
+  one only when route-check shows such misses, since it costs every request.
 - Precision has been 100% for every built-in: near-misses do not route.
   Recall of 60 to 100% is normal; under 4/6 means use_for does not say the
   user's words.
@@ -9866,8 +9889,8 @@ const PI_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const PLATFORMS = ["termux", "linux", "darwin", "win32", "freebsd", "openbsd", "android", "aix", "sunos"];
 const KNOWN = ["name", "description", "tools", "thinking", "role", "model", "agent_dir", "skills", "append_prompt", "timeout", "requires", "requires_env",
-	"expert", "job", "use_for", "keywords", "platform", "setup", "setup_note", "brief"];
-const USE_FOR_MAX = 100, KEYWORDS_MAX = 40, USE_FOR_WORDS = 16, BODY_WORDS = 1500, ENTRY_TOKENS = 40, MAX_TIMEOUT = 24 * 3600;
+	"expert", "job", "use_for", "keywords", "dispatch_rule", "platform", "setup", "setup_note", "brief"];
+const USE_FOR_MAX = 100, KEYWORDS_MAX = 40, RULE_MAX = 300, USE_FOR_WORDS = 16, BODY_WORDS = 1500, ENTRY_TOKENS = 40, MAX_TIMEOUT = 24 * 3600;
 const MARKER = /^# Written by lets-code/m;
 const TODO = "TODO" + "(expert-new)";   // split, so this file does not carry the marker itself
 const STOP = new Set("a an and the or of to in on for with by from at as is are be it its this that what which your you my me i".split(" "));
@@ -10001,6 +10024,11 @@ function lintFile(file, opt) {
 	const kw = squash(fm.keywords);
 	if (!kw) warn("keywords", "missing: past about a dozen experts the line shows the first 4 words of use_for instead");
 	else { if (kw.length > KEYWORDS_MAX) err("keywords", `${kw.length} characters: lets-code cuts it at ${KEYWORDS_MAX}`); if (list(kw).length > 4) warn("keywords", "more than 4: two or three words"); }
+	const rule = squash(fm.dispatch_rule);
+	if (rule) {
+		if (rule.length > RULE_MAX) err("dispatch_rule", `${rule.length} characters: lets-code cuts it at ${RULE_MAX}`);
+		R.rule = rule.slice(0, RULE_MAX);
+	}
 
 	// brief
 	if (p.inline.brief) err("brief", "brief takes a block list (\"  - name (required): hint\" lines), not an inline value");
@@ -10154,8 +10182,9 @@ async function main(argv) {
 			const others = survey(R.agentDir).filter((o) => o.expert && platformOk(o.platform) && path.resolve(o.file) !== path.resolve(f) && o.name !== R.name);
 			const all = [...others.map((o) => ({ n: o.name, e: entry(o.name, o.useFor) })), { n: R.name, e: R.entry }].sort((a, b) => a.n.localeCompare(b.n));
 			const withIt = LINE(all.map((x) => x.e)); const without = others.length ? LINE(others.map((o) => entry(o.name, o.useFor))) : "";
-			const t = await countTokens([`; ${R.entry}`, withIt, ...(without ? [without] : [])], opt.tokens ? server(R.agentDir) : null);
+			const t = await countTokens([`; ${R.entry}`, withIt, ...(without ? [without] : []), ...(R.rule ? [`\n- ${R.rule}`] : [])], opt.tokens ? server(R.agentDir) : null);
 			R.tokens = { entry: t.counts[0], line: t.counts[1], lineWithout: without ? t.counts[2] : 0, how: t.how };
+			if (R.rule) { R.tokens.rule = t.counts[t.counts.length - 1]; R.notes.push(`dispatch_rule: ${R.tokens.rule} tokens in the system prompt of every session where it is usable; keep it for tasks route-check shows the model doing by hand`); }
 			R.notes.push(`cost: its entry "${R.entry}" is ${t.counts[0]} tokens; the expert line ${R.tokens.lineWithout ? `${R.tokens.lineWithout} -> ` : ""}${R.tokens.line} tokens (${t.how === "server" ? "the server's tokenizer" : "estimated, 3.6 chars a token"})`);
 			if (t.counts[0] > ENTRY_TOKENS) R.warnings.push(`cost: the entry is ${t.counts[0]} tokens, always in context: under ${ENTRY_TOKENS}`);
 		}

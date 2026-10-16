@@ -791,6 +791,7 @@ changes nothing):
 | `expert` | `true` |
 | `use_for` | A few words on the tasks it takes, shown in the always-on line; write what a user would ask for, not what the expert is |
 | `keywords` | Two or three words that replace `use_for` in the compact line |
+| `dispatch_rule` | One imperative line added to the system prompt while the expert is usable (up to 300 characters, paid on every request): only for tasks the model keeps doing by hand. termux-device has one for phone actions |
 | `job` | One line for `list` (default: `description`) |
 | `brief` | The template, one `- name (required): hint` or `- name: hint` item per field (none: one required `task`) |
 | `platform` | `termux`, or Node platform names (`linux`, `darwin`); elsewhere it is not listed |

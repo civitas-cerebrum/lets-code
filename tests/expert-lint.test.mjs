@@ -71,6 +71,8 @@ const cases = {
 	"a bad requires_env": file({ ...base, requires_env: "A-B" }),
 	"use_for over 100": file({ ...base, use_for: "x".repeat(120) }),
 	"keywords over 40": file({ ...base, keywords: "k".repeat(50) }),
+	"a dispatch rule": file({ ...base, dispatch_rule: "Config conversions go to expert conf." }),
+	"dispatch_rule over 300": file({ ...base, dispatch_rule: "r".repeat(320) }),
 	"not an expert": file({ ...base, expert: "false" }),
 };
 // lint's rejecting rules: the ones that make parseAgentFile drop the file
@@ -86,10 +88,20 @@ for (const [label, text] of Object.entries(cases)) {
 	t(`${label}: same brief`, b.fields.length ? b.fields : [{ name: "task", required: true, hint: "the whole task, standing alone" }], a.expert.brief);
 	t(`${label}: same use_for`, (p.fm.use_for || "").replace(/\s+/g, " ").trim().slice(0, 100), a.expert.useFor ?? "");
 	t(`${label}: same keywords`, (p.fm.keywords || "").replace(/\s+/g, " ").trim().slice(0, 40), a.expert.keywords ?? "");
+	t(`${label}: same dispatch_rule`, (p.fm.dispatch_rule || "").replace(/\s+/g, " ").trim().slice(0, 300), a.expert.dispatchRule ?? "");
 	t(`${label}: same job`, (p.fm.job || p.fm.description).replace(/\s+/g, " ").trim(), a.expert.job);
 	t(`${label}: same tools`, (p.fm.tools ? p.fm.tools.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim()).filter(Boolean) : undefined), a.tools);
 }
 t("lint: over 100 is an error", lint.lintFile((writeFileSync(join(agentDir, "agents", "conf.md"), cases["use_for over 100"]), join(agentDir, "agents", "conf.md")), { agentDir }).errors.some((e) => e.startsWith("use_for: 120 characters")), true);
+{
+	const f = join(agentDir, "agents", "conf.md");
+	writeFileSync(f, cases["dispatch_rule over 300"]);
+	t("lint: dispatch_rule over 300 is an error", lint.lintFile(f, { agentDir }).errors.some((e) => e.startsWith("dispatch_rule: 320 characters")), true);
+	writeFileSync(f, cases["a dispatch rule"]);
+	const R = lint.lintFile(f, { agentDir });
+	t("lint: dispatch_rule is a known field", R.warnings.some((w) => w.includes("unknown field dispatch_rule")), false);
+	t("lint: dispatch_rule kept for its cost", R.rule, "Config conversions go to expert conf.");
+}
 t("lint: pi's tools are the runner's", lint.PI_TOOLS.slice().sort(), ["bash", "edit", "find", "grep", "ls", "read", "write"]);
 rmSync(join(agentDir, "agents", "conf.md"));
 

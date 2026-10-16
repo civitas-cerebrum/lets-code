@@ -40,7 +40,7 @@ const clearCalls = () => readdirSync(fake).forEach((f) => rmSync(join(fake, f)))
 // the agents: two experts usable anywhere, one only on Termux, one that needs its setup, a plain agent
 const A = (f, s) => writeFileSync(join(agentDir, "agents", f), s);
 A("helper.md", "---\nname: helper\ndescription: Answers questions about artifacts\ntools: read, bash\nexpert: true\nuse_for: questions about artifacts\njob: Looks into a built artifact and answers one question\nbrief:\n  - target (required): absolute path or URL of the artifact\n  - question (required): what to find out\n  - purpose: what the answer is for\n---\nYou help.\n");
-A("phone.md", "---\nname: phone\ndescription: Phone tasks\nexpert: true\nplatform: termux\nbrief:\n  - goal (required): the user's goal, verbatim\n---\nYou use the phone.\n");
+A("phone.md", "---\nname: phone\ndescription: Phone tasks\nexpert: true\nplatform: termux\ndispatch_rule: Phone actions go to expert phone.\nbrief:\n  - goal (required): the user's goal, verbatim\n---\nYou use the phone.\n");
 A("tool.md", "---\nname: tool\ndescription: Needs a runtime\nexpert: true\nrequires: rt/ready\nsetup: rt/setup.sh\nsetup_note: installs the runtime\n---\nYou use the runtime.\n");
 A("scout.md", "---\nname: scout\ndescription: finds things\n---\nYou look around.\n");
 mkdirSync(join(agentDir, "rt"));
@@ -72,10 +72,10 @@ async function load(env = {}) {
 	for (const [k, v] of Object.entries(env)) { saved[k] = process.env[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; }
 	const f = join(ext, `experts-${loads++}.ts`); writeFileSync(f, src);
 	const mod = await import(pathToFileURL(f).href);
-	let tool = null; const commands = {};
-	await mod.default({ registerTool: (d) => { tool = d; }, registerCommand: (name, d) => { commands[name] = d; }, on() { return () => {}; } });
+	let tool = null; const commands = {}; const handlers = {};
+	await mod.default({ registerTool: (d) => { tool = d; }, registerCommand: (name, d) => { commands[name] = d; }, on(ev, h) { handlers[ev] = h; return () => {}; } });
 	for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-	return { mod, tool, commands };
+	return { mod, tool, commands, handlers };
 }
 // a context: answers = what the confirm dialog says each time (none = no UI)
 function ctx(answers) {
@@ -96,8 +96,15 @@ const onTermux = /\/com\.termux\//.test(process.env.PREFIX ?? "") || existsSync(
 
 // --- what is always in context
 writeFileSync(join(agentDir, "lets-code-state.json"), JSON.stringify({ thinkingLevels: { "p/m": "low" }, metrics: true }));
-const { tool, commands, mod } = await load();
+const { tool, commands, mod, handlers } = await load();
 {
+	// dispatch rules: a section only for usable experts that have one (phone: Termux only)
+	const ev = { systemPromptOptions: { sections: { tools: "x" } } };
+	await handlers.before_agent_start?.(ev);
+	t("dispatch rule: a section only where its expert is usable", ev.systemPromptOptions.sections.lets_code_experts, onTermux ? "Experts (lets-code):\n- Phone actions go to expert phone." : undefined);
+	t("dispatch rule: other sections kept", ev.systemPromptOptions.sections.tools, "x");
+	t("rulesSection: none -> empty", mod.rulesSection([{ name: "a", expert: {} }]), "");
+	t("rulesSection: one line each", mod.rulesSection([{ name: "a", expert: { dispatchRule: "R1" } }, { name: "b", expert: {} }, { name: "c", expert: { dispatchRule: "R2" } }]), "Experts (lets-code):\n- R1\n- R2");
 	const names = onTermux ? "helper (questions about artifacts); phone; tool" : "helper (questions about artifacts); tool";
 	t("snippet: names usable here, their tasks, the actions", tool.promptSnippet, `expert: these tasks go to the expert named, not done by hand, even quick ones: ${names}. Actions: list | enable | run`);
 	t("snippet under 40 words", tool.promptSnippet.split(/\s+/).length <= 40, true);

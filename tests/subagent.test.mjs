@@ -257,16 +257,13 @@ async function load(env = {}) {
 		const file = i < 0 ? "" : s.slice(s.indexOf("\n", i) + 1, s.indexOf("\nMD\n", i) + 1);
 		mkdirSync(join(rea, "runtime", "node_modules", "rea-agents", "skills", "reverse-engineer-anything"), { recursive: true });
 		writeFileSync(join(rea, "runtime", "node_modules", "rea-agents", "package.json"), "{}");
-		process.env.LETS_CODE_REA_AGENT = "1";
 		const ra = mod.parseAgentFile(file, "reverse-engineer.md", "user");
 		t("reverse-engineer: parses with its environment", ra && [ra.name, ra.agentDir, ra.skills, ra.appendPrompt, ra.timeout],
 			["reverse-engineer", join(rea, "agent"), [join(rea, "runtime", "node_modules", "rea-agents", "skills", "reverse-engineer-anything")], join(rea, "prompt.md"), 3600]);
 		t("reverse-engineer: description fits the jobs line", ra && ra.description.length <= 60, true);
-		delete process.env.LETS_CODE_REA_AGENT;
-		t("reverse-engineer: hidden without LETS_CODE_REA_AGENT", mod.parseAgentFile(file, "reverse-engineer.md", "user"), null);
-		process.env.LETS_CODE_REA_AGENT = "1"; rmSync(join(rea, "runtime"), { recursive: true });
+		t("reverse-engineer: an expert", !!ra?.expert, true);
+		rmSync(join(rea, "runtime"), { recursive: true });
 		t("reverse-engineer: hidden once the runtime is gone", mod.parseAgentFile(file, "reverse-engineer.md", "user"), null);
-		delete process.env.LETS_CODE_REA_AGENT;
 	}
 }
 

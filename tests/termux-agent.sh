@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Unit test for write_termux_agent: the termux-device agent file lets-code
-# writes (and keeps current), listed only with LETS_CODE_TERMUX_AGENT, and
-# a user's own file of that name left alone.
+# Unit test for write_termux_agent: the termux-device file lets-code writes
+# (and keeps current): an expert (only on Termux, one required brief
+# field), and a user's own file of that name left alone.
 set -eu
 eval "$(sed -n '/^write_termux_agent() {/,/^}$/p; /^on_termux() {/p' "$(dirname "$0")/../lets-code")"
 fail=0
@@ -11,10 +11,13 @@ af="${PI_AGENT_DIR}/agents/termux-device.md"
 write_termux_agent
 t "agent file written"          "$(grep -c '^# Written by lets-code' "${af}")" 1
 t "name"                        "$(sed -n 's/^name: //p' "${af}")" termux-device
-t "listed only when switched on" "$(sed -n 's/^requires_env: //p' "${af}")" LETS_CODE_TERMUX_AGENT
+t "no launch gate"              "$(grep -c '^requires_env:' "${af}" || true)" 0
 t "tools"                       "$(sed -n 's/^tools: //p' "${af}")" "bash, read"
 t "no device-specific uid"      "$(grep -c '10372' "${af}" || true)" 0
 t "frontmatter closed"          "$(grep -c '^---$' "${af}")" 2
+t "an expert"                "$(sed -n 's/^expert: //p' "${af}")" true
+t "only on Termux"              "$(sed -n 's/^platform: //p' "${af}")" termux
+t "brief: the goal, required"   "$(sed -n 's/^  - //p' "${af}")" "goal (required): the user's goal, verbatim"
 before="$(cat "${af}")"; write_termux_agent
 t "rewrite is stable"           "$(cat "${af}")" "${before}"
 printf -- '---\nname: termux-device\ndescription: mine\n---\nmine\n' > "${af}"

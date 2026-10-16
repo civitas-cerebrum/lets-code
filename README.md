@@ -39,7 +39,7 @@ lets-code                               # go
 ```
 
 `setup` keeps to the essentials. `setup full` also turns on the optional
-features below (modes, sandbox, MCP import, REA); `setup granular`
+features below (modes, sandbox, MCP import); `setup granular`
 asks about each one.
 
 Setup installs the `lets-code` command itself. No npm? Grab the script:
@@ -70,8 +70,9 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
-| 📱 **Termux device** (optional) | On a phone running lets-code in Termux, a `termux-device` subagent does phone tasks end to end: launch or bring an app to the front, open a file in an app, fire an intent, with recipes and traps verified on Termux and a check that the launch really reached the system. `--termux` / `TERMUX=true`; nothing in context when off. |
-| 🔬 **REA** (optional) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: a `reverse-engineer` subagent (or a one-line skill with subagents off) hands the question to a separate pi that has REA's 170 tools, so they never enter your session. Zero tokens in `manual` mode. |
+| 🧑‍🔬 **Experts** (on by default) | Subagents with their own knowledge behind one `expert` tool that costs one line of context: the model sees each expert's name and what it is for, asks for a job and a brief template when it needs one, and runs it with a filled-in brief. Every expert is dormant until you say yes (a dialog the first time, remembered); one that needs an install gets it then. |
+| 📱 **Termux device** (expert) | On a phone running lets-code in Termux, the `termux-device` expert does phone tasks end to end: launch or bring an app to the front, open a file in an app, fire an intent, with recipes and traps verified on Termux and a check that the launch really reached the system. |
+| 🔬 **REA** (expert) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: the `reverse-engineer` expert hands the question to a separate pi that has REA's 170 tools, so they never enter your session. REA is installed when you enable it. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -110,6 +111,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--metrics-log <file>` | Append the footer's numbers to `<file>` as JSON lines, also without a UI (see [Metrics log](#metrics-log)) |
 | `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `yolo` or a role of yours |
 | `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
+| `--experts` / `--no-experts` | The `expert` tool (on by default, needs subagents; see [Experts](#experts)) |
 | `--claude-code` / `--no-claude-code` | The Claude Code adapter with your `~/.claude` too (`CLAUDE_CODE=all`) / off; by default it switches on by itself where needed (see [Claude Code projects](#claude-code-projects)) |
 | `--sandbox` / `--no-sandbox` | The OS sandbox for bash |
 | `--verbose` | Show each probe and the full launch detail (API, output cap, guards, session tag) |
@@ -178,8 +180,8 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `TEMPLATE_EFFORT` | `off` skips the chat-template effort probe, `neutral` maps every level to the least-instruction value (see server setup). |
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS` | On by default; `false` turns the `subagent` tool off. |
+| `EXPERTS` | On by default (with subagents); `false` turns the `expert` tool off and lists no expert. Each expert is enabled in a session, not here (see [Experts](#experts)); `TERMUX=true` / `REA=true` from earlier versions are migrated once and then ignored. |
 | `SANDBOX` | `true` turns the feature on. |
-| `REA` | `true` adds the `reverse-engineer` agent (the reverse-engineering skill with subagents off), `manual` makes it `/skill:reverse-engineering` only. |
 | `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with the latest request's cache hit rate, cost, and the latest response's time to first token and output tokens (two lines that keep their height: `↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012` and `⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out`; on a narrow terminal the cache shortens to its hit rate, then cost, cache, output and TTFT drop; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi, and the size picked there is remembered (`~/.pi/agent/lets-code-state.json`): later sessions start in it, ahead of `METRICS`; `--metrics` / `--no-metrics` / `LETS_CODE_METRICS` decide for one launch without changing it. tok/s counts from each response's first streamed token, so prompt processing is not in it. |
 
 Listing several endpoints lets one config follow you around:
@@ -488,7 +490,9 @@ Paths are relative to `~/.pi/agent`, or absolute under it (or under the
 project, for a trusted project's agent); a file that points anywhere else,
 or has a bad `timeout`, is ignored. A missing `agent_dir`, skill or
 `append_prompt` hides the agent like `requires` does. The
-`reverse-engineer` agent lets-code writes is the example:
+`reverse-engineer` agent lets-code writes is the example (its file also
+carries the fields that make it an expert, see
+[Experts](#experts)):
 
 ```markdown
 ---
@@ -499,7 +503,6 @@ skills: rea/runtime/node_modules/rea-agents/skills/reverse-engineer-anything
 append_prompt: rea/prompt.md
 timeout: 3600
 requires: rea/runtime/node_modules/rea-agents/package.json
-requires_env: LETS_CODE_REA_AGENT
 ---
 ```
 
@@ -617,31 +620,132 @@ roles see every MCP call and can allow, ask or deny per server.
 </details>
 
 <details>
-<summary><b>Termux device agent</b></summary>
+<summary><b>Experts</b></summary>
+
+An expert is a subagent with knowledge of its own: standing instructions
+(recipes, traps, a report format), a brief template that says what its
+caller must tell it, and, where it needs one, a setup. lets-code ships two,
+`termux-device` (on Termux only) and `reverse-engineer` (anywhere), and you
+can add your own. They sit behind one tool, `expert`, whose line in the
+context names each expert usable here with a few words on what it is for:
+
+```text
+expert: these tasks go to the expert named, not done by hand, even quick ones: reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); termux-device (phone tasks: open or bring up apps, open files in apps, intents). Actions: list | enable | run
+```
+
+The rest comes on demand, from the tool itself:
+
+| Call | What it does |
+|---|---|
+| `{action: "list"}` | Each expert with its job, its state and its brief template (`name: "<one>"` for one, with a sample call) |
+| `{action: "enable", name}` | Asks you, in a yes/no dialog, and runs the setup on yes. The model never enables one by itself; without a UI (`-p`) the call is refused with a note on how you enable it |
+| `{action: "run", name, brief}` | Runs it with the brief: `brief` is an object of the template's fields. A missing required field returns the template and nothing runs. Dormant: the enable dialog first. `runs: [{name, brief}, ...]` runs several in parallel |
+
+The templates:
+
+| Expert | Brief (* required) |
+|---|---|
+| `termux-device` | `goal`*: the user's goal, verbatim |
+| `reverse-engineer` | `target`*: absolute path or URL of the artifact; `question`*: what to find out; `purpose`: what the answer is for |
+
+A run is a subagent run (same runner, progress, abort, timeout, depth limit
+and `LETS_CODE_SUBAGENT_CONCURRENCY`): the child gets the expert's
+instructions as its system prompt and the brief as its task, one heading per
+field, and its report comes back. Experts are never listed in the
+`subagent` tool; calling one there points at `expert`.
+
+**Dormant until you say yes.** Every expert starts dormant: listed, nothing
+installed, nothing else in the context. It is enabled only by you: the
+yes/no dialog when the model first runs it (or proposes `enable`), or
+`/expert enable <name>`. The yes is remembered in
+`~/.pi/agent/lets-code-state.json` under `experts`, and that is when its
+setup runs (REA's install). A no is not asked again in that session and is
+not remembered. There is one switch for the whole feature, `EXPERTS`
+(`--experts` / `--no-experts`, `LETS_CODE_EXPERTS`), and no switch per
+expert: with tens of experts a flag each would not scale.
+
+```text
+/expert                     list them with their state
+/expert enable <name>       enable (and set up) without a dialog; remembered
+/expert disable <name>      dormant again; remembered
+```
+
+**Many experts.** Each entry in the line is the name and its `use_for`.
+Past about a dozen experts the line switches to a compact form, each
+`use_for` replaced by the expert's `keywords` (or its first words), and
+`list` gives the rest. Measured with the model's tokenizer, the whole
+`expert` tool (line, description and parameters) is about 200 tokens with
+2 experts, 260 with 6 and 385 with 20.
+
+**Your own.** Any agent file in `~/.pi/agent/agents` with `expert: true`
+is one (a project's agent files never are). On top of the usual agent fields
+(`description`, `tools`, `thinking`, `role`, `agent_dir`, `skills`,
+`append_prompt`, `timeout`, `requires`; see [Subagents](#subagents)):
+
+| Field | Meaning |
+|---|---|
+| `expert` | `true` |
+| `use_for` | A few words on the tasks it takes, shown in the always-on line; write what a user would ask for, not what the expert is |
+| `keywords` | Two or three words that replace `use_for` in the compact line |
+| `job` | One line for `list` (default: `description`) |
+| `brief` | The template, one `- name (required): hint` or `- name: hint` item per field (none: one required `task`) |
+| `platform` | `termux`, or Node platform names (`linux`, `darwin`); elsewhere it is not listed |
+| `setup` | A script under `~/.pi/agent`, run with bash once the expert is enabled and what `agent_dir`, `skills`, `append_prompt` or `requires` names is missing. Progress on stderr, the reason on its last stdout line when it fails |
+| `setup_note` | What the setup does, shown in the dialog |
+
+```markdown
+---
+name: db-expert
+description: Answers questions about our Postgres schema and query plans
+tools: read, bash
+expert: true
+use_for: questions about our Postgres schema, queries and plans
+keywords: Postgres, SQL
+brief:
+  - question (required): what to find out
+  - query: the SQL in question, verbatim
+---
+You know our database. Use psql read-only; ...
+```
+
+lets-code writes and updates its own two (files with the
+`# Written by lets-code` line). A file of yours by one of those names is
+left alone: it is an expert if it says `expert: true`, otherwise a plain
+agent of the `subagent` tool. With `EXPERTS=false` nothing is listed (the
+expert files stay out of the `subagent` tool too); with subagents off there
+are no experts and the launch says so.
+
+**From earlier versions.** `TERMUX=true` / `REA=true` in the config (or a
+preset) are no longer switches: the first launch remembers the expert as
+enabled, says so in one line, and ignores the key from then on (remove
+it). `false`, empty, the `LETS_CODE_TERMUX` / `LETS_CODE_REA` variables and
+the `--termux` / `--rea` flags are gone. So is `REA=manual` and the
+`/skill:reverse-engineering` skill: a dormant expert already costs only
+its entry in the line.
+
+</details>
+
+<details>
+<summary><b>Termux device expert</b></summary>
 
 On Android, lets-code runs in Termux, and the model can reach the phone
 itself through Android's `am`. Doing that reliably takes device knowledge a
 model guesses wrong (which `am` works without root, `--user 0`, why
 `termux-open` fails on files in `~`, how to tell a real launch from a
-silent failure), so it is an agent type of its own:
+silent failure), so it is the expert `termux-device` (see
+[Experts](#experts)): "open this PDF", "bring Spotify to the front" go to
+`expert({action: "run", name: "termux-device", brief: {goal}})` with the
+user's goal verbatim, and the agent reports each command with its exit
+code and how far the result is verified. The first run asks you to enable
+it (remembered), or `/expert enable termux-device`.
 
-```bash
-lets-code --termux         # or TERMUX=true in the config
-```
-
-With subagents on, your session gets the agent `termux-device`: "open this
-PDF", "bring Spotify to the front" go to
-`subagent({agent: "termux-device", task})` with the whole goal, and the
-agent reports each command with its exit code and how far the result is
-verified. It may launch apps, open files (copied to `/sdcard/Download`,
-since other apps cannot read Termux's home) and run read-only checks; it
-never installs, changes settings, force-stops, deletes or reboots, and
-recommends the command instead. lets-code writes
-`~/.pi/agent/agents/termux-device.md` and keeps it current; it is listed
-only in sessions launched with `TERMUX=true`, so off costs nothing. A file
-of yours by that name (without the `# Written by lets-code` line) is left
-alone. Outside Termux, or with subagents off, the launch says so and the
-agent stays off.
+It may launch apps, open files (copied to `/sdcard/Download`, since other
+apps cannot read Termux's home) and run read-only checks; it never
+installs, changes settings, force-stops, deletes or reboots, and recommends
+the command instead. lets-code writes `~/.pi/agent/agents/termux-device.md`
+on every launch on Termux and keeps it current; elsewhere it is not listed.
+A file of yours by that name (without the `# Written by lets-code` line) is
+left alone.
 
 </details>
 
@@ -653,43 +757,33 @@ binaries (with Ghidra, IDA or Hopper), Electron and JavaScript apps, .NET,
 APKs, firmware and websites. It is one MCP server with about 170 tools,
 roughly 65k tokens of schemas even in its compact profile, too much to keep
 next to a local model's context. So lets-code never registers it in your
-session:
+session: it is the expert `reverse-engineer` (see [Experts](#experts)),
+whose entry in the `expert` line is all that sits in the context.
+`expert({action: "run", name: "reverse-engineer", brief: {target, question,
+purpose}})` (or several in `runs: [...]`) runs it with progress and in
+parallel, stopped after an hour. The first run asks you to enable it and
+then installs REA, with progress, in the running session; the answer is
+remembered, and later launches keep the install current.
 
-```bash
-lets-code --rea            # or REA=true in the config, or setup full
-lets-code --rea manual     # only when you type /skill:reverse-engineering
-```
+lets-code writes `~/.pi/agent/agents/reverse-engineer.md` and keeps it
+current. A file of yours by that name (without the `# Written by lets-code`
+line) is left alone.
 
-With subagents on (the default), your session gets the agent
-`reverse-engineer`: its name in the `subagent` tool is all that sits in the
-context, and `subagent({agent: "reverse-engineer", task})` (or several in
-`tasks: [...]`) runs it with progress, in parallel and inside an
-orchestration like any other agent, stopped after an hour. lets-code
-writes `~/.pi/agent/agents/reverse-engineer.md` and keeps it current; it is
-listed only in sessions launched with REA on, and a file of yours by that
-name (without the `# Written by lets-code` line) is left alone, in which
-case the skill below is used instead.
-
-With subagents off, or a file of your own by that name, your session gets
-one skill, `reverse-engineering`: its name and a one-sentence description
-(nothing with `manual`, which always uses the skill). When a question
-depends on a built artifact, pi loads the skill and runs
-`~/.pi/agent/rea/run "<task>"`.
-
-Either way the child is a fresh pi with its own agent dir,
-`~/.pi/agent/rea/agent`. That dir links your models, auth, settings and
-extensions, so the child uses the same server and guards, but its `mcp.json`
-holds only REA, and REA's own skill loads there. The child works through
-REA's tools in codemode and returns a short Answer / Evidence / Unknowns
-report; nothing else reaches your session.
+The child is a fresh pi with its own agent dir, `~/.pi/agent/rea/agent`.
+That dir links your models, auth, settings and extensions, so the child
+uses the same server and guards, but its `mcp.json` holds only REA, and
+REA's own skill loads there. The child works through REA's tools in
+codemode and returns a short Answer / Evidence / Unknowns report; nothing
+else reaches your session.
 
 REA is pinned (`REA_VERSION` in the script) and installed with npm into
-`~/.pi/agent/rea/runtime` on first use, about 160 MB. Native analysis needs
-an engine: add `GHIDRA_INSTALL_DIR` (or REA's IDA/Hopper variables) to the
-`env` of the `rea` entry in `~/.pi/agent/rea/agent/mcp.json`; lets-code
-keeps that env when it rewrites the file. The REA server runs outside the
-bash sandbox with your user's rights, and mandate modes that deny MCP
-(`plan`, `readonly`) deny it in the child too.
+`~/.pi/agent/rea/runtime` by `~/.pi/agent/rea/setup` when you enable it,
+about 160 MB. Native analysis needs an engine: add `GHIDRA_INSTALL_DIR` (or
+REA's IDA/Hopper variables) to the `env` of the `rea` entry in
+`~/.pi/agent/rea/agent/mcp.json`; lets-code keeps that env when it rewrites
+the file. The REA server runs outside the bash sandbox with your user's
+rights, and mandate modes that deny MCP (`plan`, `readonly`) deny it in the
+child too.
 
 </details>
 
@@ -721,7 +815,7 @@ Everything lets-code adds to pi is one extension,
 startup `[Extensions]`: an `index.ts` that loads one module per feature
 (`footer.ts`, `agent-guard.ts`, `git-guard.ts`, `memory-guard.ts`,
 `grounding.ts`, `backend.ts`, `session-tag.ts`, `mandate.ts`,
-`subagents.ts`, `claude-code.ts`, and `sandbox/` with its npm runtime). A module is written
+`subagents.ts`, `experts.ts`, `claude-code.ts`, and `sandbox/` with its npm runtime). A module is written
 when its feature is on and stays inert while it is off; one that fails to
 load is reported by name and the others still run. The per-feature
 directories (`footer/`, `agent-guard/`, ...) and `lets-code-*.ts` files
@@ -737,7 +831,7 @@ behind each decision are in [DESIGN.md](DESIGN.md).
 for the probes, endpoint parsing, the chat-template effort probe and the
 OpenRouter config, the move into the one extension, node tests for that
 extension's index, the git guard, checkpoints, agent guard, mandate,
-subagents, the Claude Code adapter and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
+subagents, experts, the Claude Code adapter and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
 the memory guard. Releases are published to npm from GitHub releases.
 
 ## License

@@ -36,6 +36,9 @@ t "brief: goal, required"       "$(sed -n 's/^  - goal (required): //p' "${af}")
 t "brief: confirmed, optional"  "$(grep -c '^  - confirmed: ' "${af}")" 1
 t "brief: two fields"           "$(grep -c '^  - ' "${af}")" 2
 u="$(sed -n 's/^use_for: //p' "${af}")"
+r="$(sed -n 's/^dispatch_rule: //p' "${af}")"
+t "dispatch_rule under 300"     "$([ -n "${r}" ] && [ ${#r} -le 300 ] && echo yes || echo "${#r} chars")" yes
+t "dispatch_rule names it"      "$(echo "${r}" | grep -c 'goes to expert termux-device with the whole goal')" 1
 t "use_for stays short"         "$([ ${#u} -le 70 ] && echo yes || echo "${#u} chars")" yes
 t "body names the probe"        "$(grep -c "${T}/bin/probe" "${af}")" 1
 t "no placeholder left"         "$(grep -rl '@@T@@' "${PI_AGENT_DIR}" | wc -l | tr -d ' ')" 0

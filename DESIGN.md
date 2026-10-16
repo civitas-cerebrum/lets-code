@@ -247,6 +247,22 @@ reverse-engineer took the questions that need it and left one-command ones
 Saying "even quick ones" in the line raised it from 1 to 2-3 of 6 with
 no new false triggers.
 
+*A dispatch rule where the line is not enough:* a phone session still did
+phone work by hand. Asked "launch email app" after an earlier turn in the
+shell, it grepped package names, missed Gmail (`com.google.android.gm`) and
+said no mail app was installed. An expert may carry a `dispatch_rule`, one
+imperative line (up to 300 characters) that goes into the system prompt
+while the expert is usable. termux-device's names the trigger: acting on
+the phone or reading its state goes to it with the whole goal, and the
+model's own commands only check the result. That costs 77 tokens per
+request on Termux and nothing elsewhere. route-check with Termux
+simulated (16 prompts: 7 phone tasks including the incident's wording, 6
+near-misses such as "find my email in my dotfiles", 3 for the other
+experts) went from recall 5/7 to 6/7, with no false trigger before or
+after and the other experts' 3 of 3 kept. Adding "account or email
+address" to the rule got 7/7, but pulled the dotfiles near-miss to the
+expert and lost a neighbour, so that wording was not kept.
+
 *Dormant until the user says yes:* an expert can install things (REA: npm,
 160 MB) and run commands on a device, so only the user enables it, through
 `ctx.ui.confirm` the first time a run needs it (or the model proposes

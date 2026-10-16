@@ -187,8 +187,9 @@ selector or a dialog keeps its keys. The arrow sequences are pi-tui's key
 matching, so both `ESC [ B` and the application-cursor `ESC O B` that
 Termux sends count (tested with the bytes on the phone). Focused, the
 selected row is drawn as pi's `SelectList` (the /model list) draws its
-own: `→` and the whole line in the theme's `accent`, no background, so it
-follows every theme; the keys line is in the accent too; unfocused, the names are dim and nothing is marked selectable. The list has the same height with and without the
+own: the whole line in the theme's `accent`, no background and no marker
+of its own (the row keeps `◂`, `▸` and its status mark), so it follows
+every theme; the keys line is in the accent too; unfocused, the names are dim and nothing is marked selectable. The list has the same height with and without the
 keys (its last line is the keys line either way). The hook has no
 `switchSession`, so a switch sends the command (`/subagents back`,
 `/subagents id:<run>`) with `pi.sendUserMessage(..., {

@@ -4922,6 +4922,7 @@ termux_write_knowledge() {
 #   tier 2 shell         Shizuku's rish or adb to the phone itself: screen, taps, typing
 # One "key: value" line each, then tiers: (those present) and, without tier 2, next:.
 set -u
+to() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }   # no timeout on macOS
 here="$(cd "$(dirname "$0")" && pwd)"
 syscmd="${TERMUX_PROBE_SYSCMD:-/system/bin/cmd}"
 ref="$(cd "${here}/.." && pwd)/ref/tiers.md"
@@ -4930,7 +4931,7 @@ ver="$(getprop ro.build.version.release 2>/dev/null)"; sdk="$(getprop ro.build.v
 uid="$(id -u)"
 echo "android: ${ver:-?} (sdk ${sdk:-?}); uid ${uid}$([ "${uid}" = 0 ] && echo ', root' || echo ', not rooted'); termux from ${TERMUX_APK_RELEASE:-unknown source}"
 
-pk="$(timeout 15 "${syscmd}" package list packages 2>/dev/null | tr -d '\r' | sed -n 's/^package://p')"
+pk="$(to 15 "${syscmd}" package list packages 2>/dev/null | tr -d '\r' | sed -n 's/^package://p')"
 has() { printf '%s\n' "${pk}" | grep -qx "$1"; }
 if [ -z "${pk}" ]; then
     echo "apps: unreadable (cmd package list packages gave nothing)"
@@ -4943,7 +4944,7 @@ else
 fi
 
 # tier 0: the control check (a component that does not exist must be refused)
-o="$(timeout 20 am start --user 0 -n com.termux/.LetsCodeProbeNoSuchActivity 2>&1)"
+o="$(to 20 am start --user 0 -n com.termux/.LetsCodeProbeNoSuchActivity 2>&1)"
 case "${o}" in
     *"Error type 3"*|*"does not exist"*) t0=1; echo "tier 0 intents: yes (am reaches the system)" ;;
     *) t0=0; echo "tier 0 intents: no (am did not answer the control check: $(printf '%s' "${o}" | tail -n 1))" ;;
@@ -5001,6 +5002,7 @@ SH
 #   ui sh '<command>'          any command as the shell user
 #   ui xml <file> [dump args]  parse a dump already on disk
 set -u
+to() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }   # no timeout on macOS
 here="$(cd "$(dirname "$0")" && pwd)"
 dumpf="${TMPDIR:-/tmp}/lets-code-ui.xml"
 final_re='(^|[^a-z])(send|gönder|call|voice call|video call|pay|post|publish|tweet|reply all|place order|buy|order now|checkout|confirm payment|transfer|delete|submit)([^a-z]|$)'
@@ -5016,17 +5018,17 @@ channel() {   # prints the channel, or "none" (exit 3) with the reasons on stder
     if [ -n "${TERMUX_UI_CHANNEL:-}" ]; then echo "${TERMUX_UI_CHANNEL}"; return 0; fi
     local r o why="" s devs bad
     if r="$(find_rish)"; then
-        o="$(timeout 10 sh "${r}" -c 'id -u' </dev/null 2>&1 | tr -d '\r' | tail -n 1)"
+        o="$(to 10 sh "${r}" -c 'id -u' </dev/null 2>&1 | tr -d '\r' | tail -n 1)"
         case "${o}" in 2000|0) echo "rish ${r}"; return 0 ;; esac
         why="rish (${r}) did not answer as shell: ${o:-no output} (is Shizuku started, and Termux allowed in it?)"
     else
         why="rish: not found"
     fi
     if command -v adb >/dev/null 2>&1; then
-        devs="$(timeout 10 adb devices 2>/dev/null | tr -d '\r' | awk 'NR > 1 && $2 == "device" { print $1 }')"
-        bad="$(timeout 10 adb devices 2>/dev/null | tr -d '\r' | awk 'NR > 1 && ($2 == "unauthorized" || $2 == "offline") { print $1 "=" $2 }' | tr '\n' ' ')"
+        devs="$(to 10 adb devices 2>/dev/null | tr -d '\r' | awk 'NR > 1 && $2 == "device" { print $1 }')"
+        bad="$(to 10 adb devices 2>/dev/null | tr -d '\r' | awk 'NR > 1 && ($2 == "unauthorized" || $2 == "offline") { print $1 "=" $2 }' | tr '\n' ' ')"
         for s in $(printf '%s\n' ${devs} | grep -E '^(localhost|127\.0\.0\.1)' ; printf '%s\n' ${devs} | grep -vE '^(localhost|127\.0\.0\.1)'); do
-            o="$(timeout 10 adb -s "${s}" shell 'id -u' </dev/null 2>/dev/null | tr -d '\r')"
+            o="$(to 10 adb -s "${s}" shell 'id -u' </dev/null 2>/dev/null | tr -d '\r')"
             [ "${o}" = 2000 ] && { echo "adb ${s}"; return 0; }
         done
         why="${why}; adb: no connected device${bad:+ (${bad% })} (Wireless debugging on, then adb connect localhost:<port>)"
@@ -5047,8 +5049,8 @@ need() {
 run() {   # run '<command>' as the shell user
     need
     case "${CH}" in
-        rish\ *) timeout "${UI_TIMEOUT:-30}" sh "${CH#rish }" -c "$1" </dev/null ;;
-        adb\ *)  timeout "${UI_TIMEOUT:-30}" adb -s "${CH#adb }" shell "$1" </dev/null ;;
+        rish\ *) to "${UI_TIMEOUT:-30}" sh "${CH#rish }" -c "$1" </dev/null ;;
+        adb\ *)  to "${UI_TIMEOUT:-30}" adb -s "${CH#adb }" shell "$1" </dev/null ;;
         *) echo "unknown channel: ${CH}" >&2; return 3 ;;
     esac
 }
@@ -5142,7 +5144,7 @@ case "${cmd}" in
         [ $# -ge 1 ] || { echo "usage: ui shot <file.png>" >&2; exit 2; }
         need
         case "${CH}" in
-            adb\ *) timeout 30 adb -s "${CH#adb }" exec-out screencap -p > "$1" ;;
+            adb\ *) to 30 adb -s "${CH#adb }" exec-out screencap -p > "$1" ;;
             *) run 'screencap -p' > "$1" ;;
         esac
         [ -s "$1" ] && echo "screenshot: $1 ($(wc -c < "$1") bytes)" || { echo "screencap failed" >&2; exit 4; } ;;

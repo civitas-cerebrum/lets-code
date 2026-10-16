@@ -94,7 +94,7 @@ t "password masked"             "$(ut dump "${work}/pw.xml" | grep -c hunter22 |
 
 # ------------------------------------------- an isolated PATH for the fakes
 iso="${work}/iso"; mkdir -p "${iso}"
-for c in bash sh sed grep awk tr tail head cat mktemp rm timeout python3 dirname sleep wc printf env; do
+for c in bash sh sed grep awk tr tail head cat mktemp rm python3 dirname sleep wc printf env; do   # no timeout, as on macOS
     p="$(command -v "${c}" 2>/dev/null)" || continue
     case "${p}" in /*) ln -sf "${p}" "${iso}/${c}" ;; esac
 done

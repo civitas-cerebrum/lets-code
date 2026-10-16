@@ -5708,7 +5708,6 @@ const cutTo = (s: string, w: number, deps: Deps) => (w <= 0 ? "" : deps.visibleW
 // line has the keys. At most FOOTER_ROWS rows; with more, a window around
 // the selection (or the first rows), and the last line says how many more.
 export const FOOTER_ROWS = 6;
-const REVERSE = "\x1b[7m", REVERSE_OFF = "\x1b[27m";
 export const TASK_MIN_WIDTH = 100;
 export const NARROW_WIDTH = 72;
 export interface NavRow { kind: "main" | "run"; id?: string }
@@ -5726,26 +5725,26 @@ export function footerLines(runs: Run[], o: { width: number; now: number; curren
 	for (let i = start; i < end; i++) {
 		const r = i === 0 ? undefined : rs[i - 1];
 		const here = r ? r.id === cur : cur === "main";
-		const lead = i === sel ? th.fg("accent", "❯") : here ? th.fg("accent", "▸") : " ";
-		const mark = r ? th.fg(COLOR[r.status] ?? "dim", MARK[r.status] ?? "?") : th.fg("muted", "◂");
+		// the selected row as pi's own lists draw theirs (SelectList: an arrow and the
+		// whole line in the theme's accent, no background); the others keep their colours
+		const selRow = i === sel, t = selRow ? ident : th;
+		const lead = selRow ? "→" : here ? th.fg("accent", "▸") : " ";
+		const mark = r ? t.fg(COLOR[r.status] ?? "dim", MARK[r.status] ?? "?") : t.fg("muted", "◂");
 		const nameS = pad(cutTo(r ? r.agent : "main", nw, deps), nw, deps);
-		// not focused: names dim, nothing looks selectable; focused: names plain, the selected row in reverse video
-		const name = !nav ? th.fg("muted", nameS) : i === sel && th.bold ? th.bold(nameS) : nameS;
-		const push = (row: string) => {
-			const line = cutTo(row, W, deps);
-			lines.push(i === sel ? `${REVERSE}${pad(line, W, deps)}${REVERSE_OFF}` : line);
-		};
+		// not focused: names dim, nothing looks selectable
+		const name = !nav ? th.fg("muted", nameS) : nameS;
+		const push = (row: string) => { const line = cutTo(row, W, deps); lines.push(selRow ? th.fg("accent", line) : line); };
 		if (!r) {
-			const what = W < TASK_MIN_WIDTH ? "" : `  ${th.fg("muted", "the main session")}`;
+			const what = W < TASK_MIN_WIDTH ? "" : `  ${t.fg("muted", "the main session")}`;
 			push(`${lead}${mark} ${name}${what}`);
 			continue;
 		}
 		const time = elapsed(runMs(r, o.now));
-		if (W < NARROW_WIDTH) { push(`${lead}${mark} ${name} ${th.fg("dim", `${time} · ${compact(tokens(r))}`)}`); continue; }
-		const tail = `${th.fg("dim", time.padStart(7))}  ${th.fg("dim", io(r).padStart(13))}`;
+		if (W < NARROW_WIDTH) { push(`${lead}${mark} ${name} ${t.fg("dim", `${time} · ${compact(tokens(r))}`)}`); continue; }
+		const tail = `${t.fg("dim", time.padStart(7))}  ${t.fg("dim", io(r).padStart(13))}`;
 		if (W < TASK_MIN_WIDTH) { push(`${lead}${mark} ${name}  ${tail}`); continue; }
 		const tw = W - (2 + 1 + nw + 2 + 2 + 7 + 2 + 13);
-		push(`${lead}${mark} ${name}  ${th.fg("muted", pad(cutTo(summary(r.task) || "(no task)", tw, deps), tw, deps))}  ${tail}`);
+		push(`${lead}${mark} ${name}  ${t.fg("muted", pad(cutTo(summary(r.task) || "(no task)", tw, deps), tw, deps))}  ${tail}`);
 	}
 	const above = start, below = total - end;
 	const more = above || below ? `${above ? `↑${above} ` : ""}${below ? `↓${below} ` : ""}more · ` : "";

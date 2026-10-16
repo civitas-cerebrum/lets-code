@@ -532,7 +532,8 @@ task (wide terminals), the elapsed time and the tokens, and `▸` marks the
 session that is open. As in Claude Code, <kbd>↓</kbd> on the input's last
 line (or in an empty input) moves into the list; <kbd>Alt</kbd>+<kbd>S</kbd>
 or `/subagents` does too. While the list has the keys its selected row is
-in reverse video and its last line shows the keys: <kbd>↑</kbd>/<kbd>↓</kbd>
+drawn as pi's own lists draw theirs (an arrow, the line in the theme's
+accent colour) and its last line shows the keys: <kbd>↑</kbd>/<kbd>↓</kbd>
 select, <kbd>Enter</kbd> switches to the selected session the way `/resume`
 does (so pi draws it like any session), <kbd>x</kbd> twice stops a running
 child (the others in the call go on), <kbd>↑</kbd> above the first row,

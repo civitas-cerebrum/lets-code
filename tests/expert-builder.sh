@@ -208,7 +208,7 @@ cat > "${F}/launcher" <<'SH'
 #!/usr/bin/env bash
 # a fake lets-code: records its env, then plays the events the prompt names
 for a; do p="$a"; done
-echo "depth=${LETS_CODE_SUBAGENT_DEPTH:-}|experts=${LETS_CODE_EXPERTS_ON:-}|endpoints=${LETS_CODE_ENDPOINTS:-}|dir=${PI_CODING_AGENT_DIR}|cwd=$(pwd)|args=$*" >> "${FAKE_LOG}"
+echo "depth=${LETS_CODE_SUBAGENT_DEPTH:-}|experts=${LETS_CODE_EXPERTS_ON:-}|endpoints=${LETS_CODE_ENDPOINTS:-}|dir=${PI_CODING_AGENT_DIR}|cwd=$(pwd -P)|args=$*" >> "${FAKE_LOG}"
 ev() { printf '%s\n' "$1"; }
 use() { ev '{"type":"message_end","message":{"role":"assistant","content":[],"usage":{"input":100,"output":10}}}'; }
 call() { ev "{\"type\":\"tool_execution_start\",\"toolName\":\"$1\",\"args\":$2}"; }
@@ -254,7 +254,7 @@ t "route: the JSON summary"        "$(python3 -c 'import json,sys; s=json.load(o
 t "route: one session a prompt"    "$(wc -l < "${FAKE_LOG}" | tr -d ' ')" 8
 t "route: depth scrubbed"          "$(grep -c '^depth=|experts=|' "${FAKE_LOG}")" 8
 t "route: user's config env kept"  "$(grep -c 'endpoints=http://x' "${FAKE_LOG}")" 8
-t "route: the scratch agent dir"   "$(grep -c "dir=${work}/scratch|cwd=${work}/scratch/project|" "${FAKE_LOG}")" 8
+t "route: the scratch agent dir"   "$(grep -c "dir=${work}/scratch|cwd=$(cd "${work}" && pwd -P)/scratch/project|" "${FAKE_LOG}")" 8
 has "route: print mode, low"       "$(head -n 1 "${FAKE_LOG}")" "args=--thinking-level low --mode json --no-session -p convert a.yaml to TOML"
 t "route: scratch, all dormant"    "$([ -e "${work}/scratch/lets-code-state.json" ] && echo state || echo none)" none
 t "route: no sessions, no installs" "$([ -e "${work}/scratch/sessions" ] || [ -e "${work}/scratch/conf/runtime" ] && echo copied || echo left-out)" left-out

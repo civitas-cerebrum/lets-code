@@ -3725,6 +3725,13 @@ const BUILTIN: Manifest = {
 			label: "reviewer", tools: ["read", "grep", "find", "ls", "bash", "tool_search"], write: [tmpdir()], external: "deny", mcp: "deny", dispatch: [], network: "on",
 			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
 		},
+		// the developer expert's: edits and runs inside its workspace (the
+		// working folder) and the temp dir only; no git writes (the caller
+		// reviews and commits), installs, recursive deletes, sudo or remote shells
+		developer: {
+			label: "developer", tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "tool_search"], write: [".", tmpdir()], external: "deny", mcp: "deny", dispatch: [], network: "on",
+			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
+		},
 		yolo: { label: "yolo", bypass: true, network: "on", dispatch: ["*"], mcp: "allow" },
 	},
 };
@@ -4155,7 +4162,7 @@ export interface AgentDef {
 // given: one required field, task). ready: everything the file names exists
 // (agent_dir, skills, append_prompt, requires), i.e. its setup has run.
 export interface BriefField { name: string; required: boolean; hint: string }
-export interface ExpertMeta { job: string; useFor?: string; keywords?: string; dispatchRule?: string; brief: BriefField[]; platform?: string; setup?: string; setupNote?: string; ready: boolean }
+export interface ExpertMeta { job: string; useFor?: string; keywords?: string; dispatchRule?: string; brief: BriefField[]; platform?: string; setup?: string; setupNote?: string; ready: boolean; routed: boolean }
 export const MAX_TIMEOUT = 24 * 3600;
 
 // A path named in an agent file, resolved and checked lexically: relative to
@@ -4214,7 +4221,7 @@ export function parseAgentFile(text: string, file: string, source: "user" | "pro
 				brief.push({ name: b[1], required: !!b[2], hint: b[3].trim() });
 			}
 			if (!brief.length) brief.push({ name: "task", required: true, hint: "the whole task, standing alone" });
-			a.expert = { job: (fm.job || a.description).replace(/\s+/g, " ").trim(), useFor: fm.use_for?.replace(/\s+/g, " ").trim().slice(0, 100) || undefined, keywords: fm.keywords?.replace(/\s+/g, " ").trim().slice(0, 40) || undefined, dispatchRule: fm.dispatch_rule?.replace(/\s+/g, " ").trim().slice(0, 300) || undefined, brief, platform: fm.platform || undefined, setup: fm.setup ? path("setup") : undefined, setupNote: fm.setup_note || undefined, ready };
+			a.expert = { job: (fm.job || a.description).replace(/\s+/g, " ").trim(), useFor: fm.use_for?.replace(/\s+/g, " ").trim().slice(0, 100) || undefined, keywords: fm.keywords?.replace(/\s+/g, " ").trim().slice(0, 40) || undefined, dispatchRule: fm.dispatch_rule?.replace(/\s+/g, " ").trim().slice(0, 300) || undefined, brief, platform: fm.platform || undefined, setup: fm.setup ? path("setup") : undefined, setupNote: fm.setup_note || undefined, ready, routed: !/^(false|no|off)$/i.test(fm.route ?? "") };
 		}
 	} catch { return null; }   // a path outside the allowed roots
 	return a;
@@ -5946,6 +5953,9 @@ pi_write_experts_extension() {
 //               here, for tasks the model keeps doing by hand next to the line
 //               (termux-device's: phone actions); costs tokens in every request
 //   platform    where it can run: termux, or Node platform names; else hidden
+//   route       false: left out of the always-on line, so the model does not
+//               route tasks to it; it is run by name (a pipeline stage) and
+//               shown by list
 //   setup       a script (path under ~/.pi/agent) run once it is enabled,
 //               when what the file names (agent_dir, requires, ...) is missing
 //   setup_note  what that setup does, shown in the enable dialog
@@ -5979,7 +5989,7 @@ const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "age
 const SETUP_TIMEOUT = 15 * 60 * 1000;
 
 interface Field { name: string; required: boolean; hint: string }
-interface Spec { name: string; description: string; file: string; expert: { job: string; useFor?: string; keywords?: string; dispatchRule?: string; brief: Field[]; setup?: string; setupNote?: string; ready: boolean } }
+interface Spec { name: string; description: string; file: string; expert: { job: string; useFor?: string; keywords?: string; dispatchRule?: string; brief: Field[]; setup?: string; setupNote?: string; ready: boolean; routed?: boolean } }
 
 // ------------------------------------------------------------------ state
 export const statePath = () => join(AGENT_DIR, "lets-code-state.json");
@@ -6049,7 +6059,9 @@ export function runSetup(script: string, onLine: (l: string) => void, signal?: A
 // schema; list has the rest.
 export const LINE_BUDGET = 900;
 export const USE_FOR_SHORT = 4;
-export function snippet(specs: Spec[]): string {
+export function snippet(all: Spec[]): string {
+	const specs = all.filter((s) => s.expert.routed !== false);
+	if (!specs.length) return "expert: experts run by name; list shows them. Actions: list | enable | run";
 	const line = (short: boolean) => {
 		const who = specs.map((s) => {
 			let u = s.expert.useFor ?? "";
@@ -6067,7 +6079,7 @@ export function snippet(specs: Spec[]): string {
 // (none: no section). The expert line alone did not stop a phone session
 // from launching an app by hand; a rule in the prompt names the trigger.
 export function rulesSection(specs: Spec[]): string {
-	const rules = specs.map((s) => s.expert.dispatchRule).filter((r): r is string => !!r);
+	const rules = specs.filter((s) => s.expert.routed !== false).map((s) => s.expert.dispatchRule).filter((r): r is string => !!r);
 	return rules.length ? ["Experts (lets-code):", ...rules.map((r) => `- ${r}`)].join("\n") : "";
 }
 
@@ -10587,7 +10599,7 @@ entirely (it is not listed anywhere), so lint before you rely on it.
 | `description` | one line; the child's prompt starts `You are the "<name>" agent. <description>` | required in practice |
 | `tools` | the child's tools, comma list or block list | pi's: `read, bash, edit, write, grep, find, ls`; MCP tools as `mcp__<server>_<tool>`. None given: all tools. Give the least it needs |
 | `thinking` | the child's thinking level | `off minimal low medium high xhigh`; default medium. Avoid xhigh on a local GPU |
-| `role` | the mandate role the child runs under | built-ins: `readonly` (reads and read-only commands only), `reviewer` (runs tests and commands, writes only under the temp dir, no git writes or installs: reviewers and judges), `plan`, `auto`, `ask`, `yolo`; or a role from your `mandate.json`. Default: the session's mode |
+| `role` | the mandate role the child runs under | built-ins: `readonly` (reads and read-only commands only), `reviewer` (runs tests and commands, writes only under the temp dir, no git writes or installs: reviewers and judges), `developer` (edits and runs in its working folder and the temp dir only, no git writes or installs: an expert that changes code), `plan`, `auto`, `ask`, `yolo`; or a role from your `mandate.json`. Default: the session's mode |
 | `agent_dir` | the child's own `PI_CODING_AGENT_DIR` (own mcp.json, settings) | a directory under the agent dir |
 | `skills` | paths passed as `--skill` | under the agent dir |
 | `append_prompt` | a file appended to the system prompt | under the agent dir. With an empty body, only this file is the prompt |
@@ -10612,6 +10624,7 @@ outside it rejects the file. For an expert, a missing `agent_dir`,
 | `platform` | where it is listed | `termux`, or Node platform names (`linux`, `darwin`, ...), comma separated; none: everywhere. On Termux Node says `android`, so `linux` does not include the phone |
 | `setup` | a script run with bash when the user enables it and a gated path (`requires`, ...) is missing | under the agent dir; see setup.md |
 | `setup_note` | what the setup does, in the enable dialog | say what it installs, where, how big |
+| `route` | `false` leaves it out of the always-on line: the model does not route tasks to it, it is run by name (a pipeline stage such as the factory's `developer`) and shown by `list` | `true` (default) or `false`; use_for is still checked, for `list` and a later switch |
 
 ## What the caller sees
 - Always, in the `expert` tool's line: `<name> (<use_for>)` for each expert
@@ -10636,7 +10649,7 @@ A file with the line `# Written by lets-code` (inside the frontmatter) is
 lets-code's: it is rewritten on every launch. A user's own expert must
 not carry it. Deleting the line from a built-in keeps your edited copy.
 Names already taken: the built-ins (`termux-device`, `reverse-engineer`,
-`tester`, `expert-builder`, ...) and the starter agents (`scout`,
+`tester`, `expert-builder`, `developer`, ...) and the starter agents (`scout`,
 `worker`, `general`, `reviewer`).
 
 ## State
@@ -10860,7 +10873,9 @@ the only brake.
   readonly` in the frontmatter makes it read-only whatever the session;
   `role: reviewer` lets it run tests and commands but write only under the
   temp dir, with no git writes, installs or destructive commands (for an
-  expert that checks work rather than changes it).
+  expert that checks work rather than changes it); `role: developer` lets
+  it edit and run inside its working folder and the temp dir only, with no
+  git writes or installs (for an expert that changes code the caller commits).
 - `tools` limits what it can call: an expert that only reads and reports
   needs `read, grep, find, ls`, plus `bash` if it runs commands.
 
@@ -10988,7 +11003,7 @@ const PI_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const PLATFORMS = ["termux", "linux", "darwin", "win32", "freebsd", "openbsd", "android", "aix", "sunos"];
 const KNOWN = ["name", "description", "tools", "thinking", "role", "model", "agent_dir", "skills", "append_prompt", "timeout", "requires", "requires_env",
-	"expert", "job", "use_for", "keywords", "dispatch_rule", "platform", "setup", "setup_note", "brief"];
+	"expert", "job", "use_for", "keywords", "dispatch_rule", "platform", "setup", "setup_note", "brief", "route"];
 const USE_FOR_MAX = 100, KEYWORDS_MAX = 40, RULE_MAX = 300, USE_FOR_WORDS = 16, BODY_WORDS = 1500, ENTRY_TOKENS = 40, MAX_TIMEOUT = 24 * 3600;
 const MARKER = /^# Written by lets-code/m;
 const TODO = "TODO" + "(expert-new)";   // split, so this file does not carry the marker itself
@@ -11051,7 +11066,7 @@ function survey(A) {
 		let text = ""; try { text = fs.readFileSync(path.join(dir, f), "utf8"); } catch { continue; }
 		const p = parseFrontmatter(text);
 		out.push({ name: (p.fm.name || f.replace(/\.md$/, "")).trim(), file: path.join(dir, f), expert: /^(true|yes|on)$/i.test(p.fm.expert || ""),
-			useFor: squash(p.fm.use_for).slice(0, USE_FOR_MAX), keywords: squash(p.fm.keywords), description: squash(p.fm.description), platform: p.fm.platform || "", ours: MARKER.test(text) });
+			useFor: squash(p.fm.use_for).slice(0, USE_FOR_MAX), keywords: squash(p.fm.keywords), description: squash(p.fm.description), platform: p.fm.platform || "", routed: !/^(false|no|off)$/i.test(p.fm.route || ""), ours: MARKER.test(text) });
 	}
 	return out;
 }
@@ -11119,7 +11134,11 @@ function lintFile(file, opt) {
 		if (n > USE_FOR_WORDS) warn("use_for", `${n} words: keep it to the tasks, about 8 to ${USE_FOR_WORDS} words`);
 		if (/^(an? )?(expert|agent|subagent)\b/i.test(useFor)) warn("use_for", "starts with what it is: write the tasks a user asks for (\"converting config files: ...\")");
 	}
+	if (fm.route && !/^(true|yes|on|false|no|off)$/i.test(fm.route)) err("route", `${fm.route}: true or false`);
+	R.routed = !/^(false|no|off)$/i.test(fm.route || "");
 	R.entry = entry(name, useFor.slice(0, USE_FOR_MAX));
+	if (!R.routed) note("route", "false: not in the always-on line (no context cost); the model runs it only by name or after list");
+	if (!R.routed && fm.dispatch_rule) warn("route", "route false with a dispatch_rule: the rule is left out of the prompt too; drop one of them");
 	const kw = squash(fm.keywords);
 	if (!kw) warn("keywords", "missing: past about a dozen experts the line shows the first 4 words of use_for instead");
 	else { if (kw.length > KEYWORDS_MAX) err("keywords", `${kw.length} characters: lets-code cuts it at ${KEYWORDS_MAX}`); if (list(kw).length > 4) warn("keywords", "more than 4: two or three words"); }
@@ -11276,9 +11295,9 @@ async function main(argv) {
 	let errors = 0;
 	for (const f of files) {
 		const R = lintFile(f, opt);
-		if (R.entry && R.agentDir) {
+		if (R.entry && R.agentDir && R.routed) {
 			// the line's cost: with every usable expert in the dir, and without this one
-			const others = survey(R.agentDir).filter((o) => o.expert && platformOk(o.platform) && path.resolve(o.file) !== path.resolve(f) && o.name !== R.name);
+			const others = survey(R.agentDir).filter((o) => o.expert && o.routed && platformOk(o.platform) && path.resolve(o.file) !== path.resolve(f) && o.name !== R.name);
 			const all = [...others.map((o) => ({ n: o.name, e: entry(o.name, o.useFor) })), { n: R.name, e: R.entry }].sort((a, b) => a.n.localeCompare(b.n));
 			const withIt = LINE(all.map((x) => x.e)); const without = others.length ? LINE(others.map((o) => entry(o.name, o.useFor))) : "";
 			const t = await countTokens([`; ${R.entry}`, withIt, ...(without ? [without] : []), ...(R.rule ? [`\n- ${R.rule}`] : [])], opt.tokens ? server(R.agentDir) : null);
@@ -11764,6 +11783,458 @@ MD
     if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
     EB_AGENT=1
 }  # end of pi_write_expert_builder
+
+# The software factory's own experts (its phase 1): a developer and two
+# reviewers, each a fresh-context stage with a built brief. The factory
+# reads their final messages, so each ends in a fixed, parseable format:
+# the developer's `STATUS: PLAN|DONE|BLOCKED` line and headings, the
+# reviewers' `VERDICT: APPROVE|REVISE` line and one `R<n>|D<n> | severity |
+# file:line | ...` line per finding, ids kept across fix rounds. Their jobs
+# do not overlap: expert-reviewer hunts bugs and edge cases against the
+# criteria, design-reviewer judges structure against the codebase's own
+# conventions and passes bugs on in a note, acceptance-judge gives the
+# per-criterion verdict and tester the browser work. Written with the
+# expert-builder's method (expert-new init in a draft dir, expert-lint,
+# route-check, expert-new pack). Tools are the least each needs: the
+# reviewers read and run under the `reviewer` role; the developer has pi's
+# file tools under the `developer` role (writes only in its working folder
+# and the temp dir, no git writes or installs: the caller commits). No setup
+# and no platform: files only, so they work everywhere.
+# developer expert: Implements a ticket in the current folder from its acceptance criteria, an approved plan and constraints: writes the code and its tests, runs them, returns a change summary with test evidence (in plan mode only a plan); never commits; up to an hour
+# Written on every launch with experts on; dormant until the user enables it.
+pi_write_developer() {
+    local d="${PI_AGENT_DIR}/developer" af="${PI_AGENT_DIR}/agents/developer.md" tmp f
+    mkdir -p "${d}" "${PI_AGENT_DIR}/agents"
+    # the expert; a user's own agent of that name is left alone
+    if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    tmp="$(mktemp "${af}.XXXXXX")" || return 0
+    cat > "${tmp}" <<'LC_EOF'
+---
+# Written by lets-code (developer); regenerated on launch, edits are overwritten.
+# To keep your own version, delete this line: lets-code then leaves it alone.
+name: developer
+description: Implements a ticket from its acceptance criteria and an approved plan, with its tests, inside its workspace
+tools: read, bash, edit, write, grep, find, ls
+role: developer
+timeout: 3600
+expert: true
+route: false
+use_for: implementing a ticket or approved plan: code and its tests
+keywords: ticket, implement
+job: Implements a ticket in the current folder from its acceptance criteria, an approved plan and constraints: writes the code and its tests, runs them, returns a change summary with test evidence (in plan mode only a plan); never commits; up to an hour
+brief:
+  - task (required): the ticket or goal, verbatim
+  - criteria: the acceptance criteria, numbered C1, C2, ...
+  - mode: plan (return a plan, change nothing) or build (the default)
+  - plan: the approved plan to follow (build mode)
+  - findings: review or test findings to fix, with their ids (a fix round)
+  - how_to_run: the test and build commands
+  - constraints: files or areas not to touch, style rules, limits
+---
+You are the developer of a lets-code session: you implement one ticket in
+the current folder, your workspace. Another agent gave you one brief and
+sees only your final message; a program may parse it, so keep its format.
+
+## Workspace
+- Write only inside the current folder and the temp dir. Your role refuses
+  writes elsewhere, git writes (add, commit, stash, checkout), installs and
+  destructive commands; do not work around it.
+- Leave the change uncommitted: the caller reviews and commits it.
+- Stop with `STATUS: BLOCKED` when the brief names another repo than the
+  current folder, or the work needs a package installed; say what is needed.
+
+## Order of work
+1. Read the brief. Number the criteria C1, C2, ... if they are not.
+2. Explore: `git status`, the files the task touches, the existing tests
+   and how they run (how_to_run, package.json, Makefile, pyproject.toml).
+   Run the test suite once and note what already fails.
+3. Mode plan: write the plan (format below) and stop. Change no file.
+4. Mode build: follow the plan when one is given; deviate only where it is
+   wrong, and say so under Notes. Without a plan, choose the smallest
+   design that meets the criteria and fits the code around it.
+5. Per criterion, a test that fails without the change, in the project's
+   framework, layout and style. It asserts the criterion's observable
+   result, not just that nothing threw. Then write the code.
+6. Run the new tests and then the whole suite; fix until green. Leave a
+   failure that existed before as it was and report it.
+7. Fix round (findings given): address each finding by its id, change only
+   what it needs, and run the tests again.
+8. Read your own `git diff`: no debug output, no commented-out code, no
+   unrelated edits, no weakened, skipped or deleted tests.
+
+## Rules
+- Stay in scope: the criteria, the plan and the findings. No drive-by
+  refactors, renames or formatting of untouched code.
+- Never change a test to make it pass unless the test is wrong; then say
+  why under Notes.
+- No secrets in code, logs or the report.
+- Keep each command under 10 minutes. Stop servers and background
+  processes you started.
+
+## Final message
+The first line is `STATUS: PLAN`, `STATUS: DONE` or `STATUS: BLOCKED`.
+
+For PLAN:
+## Plan
+Numbered steps, each naming its files and the criteria it serves.
+## Tests
+Per criterion: the test file, the test name, what it asserts.
+## Risks
+Open questions and assumptions, or "none".
+
+For DONE and BLOCKED:
+## Changes
+`path`: what changed, one line each.
+## Tests
+Each command run, its exit code and its summary line; the new tests by
+file and name.
+## Criteria
+`C<n>: covered by <test>` or `C<n>: not covered: <why>`, one per line.
+## Findings
+`<id>: fixed: <how>` or `<id>: not fixed: <why>`, one per line (fix rounds).
+## Notes
+Deviations from the plan, failures that existed before, what blocked you;
+or "none".
+LC_EOF
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+}  # end of pi_write_developer
+
+# expert-reviewer expert: Reviews a diff, PR or branch for correctness against its acceptance criteria: logic errors, edge cases, error paths, concurrency, security, data loss; reproduces what it can and returns findings with severity, then APPROVE or REVISE; never edits; up to 30 minutes
+# Written on every launch with experts on; dormant until the user enables it.
+pi_write_expert_reviewer() {
+    local d="${PI_AGENT_DIR}/expert-reviewer" af="${PI_AGENT_DIR}/agents/expert-reviewer.md" tmp f
+    mkdir -p "${d}" "${d}/ref" "${PI_AGENT_DIR}/agents"
+    cat > "${d}/ref/checklist.md" <<'LC_EOF'
+# Where bugs hide
+
+Go through the groups that match the code the diff touches. For each
+suspicion, find the input or state that breaks it, then try it.
+
+## Inputs and boundaries
+- Empty: empty string, list, file, map; zero items; missing optional field.
+- null / undefined / None / NaN where a value is expected.
+- Zero, negative, one, the maximum, off by one at both ends of a range
+  (`<` vs `<=`, `length - 1`, inclusive vs exclusive slices).
+- Very large input: quadratic loops, whole files read into memory.
+- Text: unicode, emoji, combining marks, case folding, leading or trailing
+  spaces, newlines (CRLF), quotes and shell metacharacters in names.
+- Numbers: integer overflow, float comparison, rounding, parsing "1e3",
+  "0x10", "  7 ", locale decimal commas.
+- Time: time zones, DST, leap days, month ends, timestamps in ms vs s.
+- Paths: relative vs absolute, `..`, symlinks, spaces, a trailing slash.
+
+## Control flow and state
+- A branch the change adds or alters: is every case of the condition
+  handled? A switch or match without its default.
+- Early returns that skip cleanup, a status update or a callback.
+- State mutated through a shared reference; a default argument shared
+  between calls; a cache not invalidated when its source changes.
+- Order dependence: initialisation, the first call vs later calls, retries.
+- Idempotence: running it twice (a migration, a retry, a double click).
+
+## Errors and resources
+- An exception or error code swallowed, logged and ignored, or turned into
+  a success value.
+- A failed call leaves partial state: half-written files, open
+  transactions, a lock held.
+- Files, sockets, processes, timers and listeners closed on every path.
+- Timeouts on network and subprocess calls.
+
+## Concurrency and async
+- A missing `await`; a promise neither awaited nor caught.
+- Check-then-act races (exists then create, read then write).
+- Shared mutable state across requests, threads or workers.
+- Ordering of events assumed but not guaranteed.
+
+## Security and data
+- Input into a shell, SQL, HTML, a regex or a path without escaping.
+- Authorisation checked on one path but not another.
+- Secrets in logs, errors or responses.
+- Data loss: overwrite without backup, delete without confirmation, a
+  migration that drops a column still read elsewhere.
+
+## Contracts
+- A changed signature, return type, default, error type, file format, CLI
+  flag or HTTP response that existing callers rely on: grep the callers.
+- Behaviour documented in README or docstrings that the change breaks.
+
+## The tests in the diff
+- Each criterion has a test that would fail without the change.
+- Assertions check the result, not only "no exception" or "mock called".
+- Expected values not computed with the same code under test.
+- A test weakened, skipped or deleted in the same change.
+- The runner actually collects the new tests (file name, folder, config).
+
+## Reproducing
+Write the repro under `${TMPDIR:-/tmp}/review/`, never in the repo:
+```bash
+mkdir -p "${TMPDIR:-/tmp}/review"
+cat > "${TMPDIR:-/tmp}/review/repro.py" <<'PY'
+import sys; sys.path.insert(0, "/path/to/repo/src")
+from module import f
+print(repr(f("")))          # the input you suspect
+PY
+python3 "${TMPDIR:-/tmp}/review/repro.py"; echo "rc=$?"
+```
+For JavaScript, `node -e` with an absolute `require`/`import` of the repo
+file; for a CLI, run it with the suspect arguments. Quote the command, the
+exit code and the deciding output lines in the finding.
+LC_EOF
+    chmod 644 "${d}/ref/checklist.md"
+    # the expert; a user's own agent of that name is left alone
+    if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    tmp="$(mktemp "${af}.XXXXXX")" || return 0
+    cat > "${tmp}" <<'LC_EOF'
+---
+# Written by lets-code (expert-reviewer); regenerated on launch, edits are overwritten.
+# To keep your own version, delete this line: lets-code then leaves it alone.
+name: expert-reviewer
+description: Reviews a diff against its acceptance criteria for bugs, edge cases and failure modes; findings with severity and a verdict
+tools: read, bash, grep, find, ls
+role: reviewer
+timeout: 1800
+expert: true
+use_for: bug review of a diff or PR: what breaks, edge cases, severity
+keywords: bug review
+job: Reviews a diff, PR or branch for correctness against its acceptance criteria: logic errors, edge cases, error paths, concurrency, security, data loss; reproduces what it can and returns findings with severity, then APPROVE or REVISE; never edits; up to 30 minutes
+brief:
+  - diff (required): the repo path and what to review: base..head, a commit, a branch or a PR
+  - criteria: the acceptance criteria the change must meet
+  - context: the ticket or plan; what the change is meant to do
+  - previous_findings: an earlier round's findings to re-check, with their ids
+  - how_to_run: the test and build commands
+  - constraints: what must not be run, time limits
+---
+You are the expert reviewer of a lets-code session: you review one change
+for correctness. Another agent gave you one brief and sees only your final
+message; a program parses it, so keep its format exactly.
+
+Your question: does this code do what the criteria and context say, for
+every input and state, without breaking what worked? Not yours: naming,
+structure, patterns, duplication and style (the design reviewer's), and the
+formal per-criterion acceptance verdict (the acceptance judge's).
+
+## Tools here
+- `@@D@@/ref/checklist.md`: where bugs hide, per kind of code.
+  Read it before step 3.
+
+## Order of work
+1. Locate the change: `git diff --stat <base>...<head>`, then the full
+   diff (or `git show`, `git diff` for uncommitted work). Keep `git status
+   --porcelain`: the tree must look the same when you finish.
+2. Read the criteria and context, then the code around each hunk: its
+   callers, callees, types and the tests that cover it.
+3. Hunt, hunk by hunk, with the checklist: wrong logic, missed edge
+   cases, unhandled errors, leaks, races, injection, data loss, a broken
+   contract for existing callers, tests that do not assert the criterion.
+4. Reproduce each suspected bug: a short script or test under
+   `${TMPDIR:-/tmp}/review/` that runs the repo's code with the failing
+   input. It fails as predicted: `confirmed`. Not runnable: `suspected`,
+   with the reasoning and file:line.
+5. Run the existing tests once (how_to_run). A failure the change causes
+   is a finding; one that fails the same way without it is not.
+6. With previous_findings: re-check each one, FIXED or OPEN.
+7. Clean up: stop what you started, remove `${TMPDIR:-/tmp}/review/`.
+
+## Severity
+- blocker: wrong result on a main path, a crash, data loss, a security
+  hole, a criterion not met.
+- major: wrong on an edge case the criteria or the input domain imply, an
+  unhandled error path, a test that does not test what it claims.
+- minor: an unlikely edge case, a misleading error, a missing test.
+- nit: harmless; at most three.
+
+## Rules
+- Never edit, commit, stash, check out or install in the work's tree.
+- Every finding names file:line, the input or state that breaks, and the
+  smallest fix. No finding without a concrete failure: taste is not a bug.
+- Keep ids stable: a previous finding still open keeps its id; new
+  findings continue after the highest previous id.
+- Verdict REVISE when any blocker or major is open, else APPROVE.
+
+## Final message
+The first line is `VERDICT: APPROVE` or `VERDICT: REVISE`.
+## Summary
+One or two sentences.
+## Findings
+One line per finding, then indented details; "none" when there are none:
+`R<n> | <blocker|major|minor|nit> | <file>:<line> | <confirmed|suspected> | <title>`
+  why: what goes wrong, for which input or state
+  evidence: the command, exit code and output lines, or the reasoning
+  fix: the smallest change that fixes it
+## Previous
+`R<n>: FIXED` or `R<n>: OPEN`, one per line (only with previous_findings).
+## Checked
+What you read and ran, so the caller knows what was covered.
+LC_EOF
+    sed "s|@@D@@|${d}|g" "${tmp}" > "${tmp}.s" && mv "${tmp}.s" "${tmp}"
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+}  # end of pi_write_expert_reviewer
+
+# design-reviewer expert: Reviews the design of a diff, PR or branch against the codebase's own conventions: patterns, structure, naming, duplication, coupling, complexity, testability; returns findings with severity, then APPROVE or REVISE; never edits and does not hunt bugs; up to 30 minutes
+# Written on every launch with experts on; dormant until the user enables it.
+pi_write_design_reviewer() {
+    local d="${PI_AGENT_DIR}/design-reviewer" af="${PI_AGENT_DIR}/agents/design-reviewer.md" tmp f
+    mkdir -p "${d}" "${d}/ref" "${PI_AGENT_DIR}/agents"
+    cat > "${d}/ref/design.md" <<'LC_EOF'
+# Design checklist
+
+Look at each changed unit (function, class, module, file) and ask the
+questions of the groups that apply. A finding needs a cost or a broken
+convention you can name; "I would have written it differently" is not one.
+
+## Fit with the codebase
+- Does a helper, util, type or component for this already exist? grep for
+  similar names and the same library calls. Reimplementing one is major.
+- Does it follow the pattern of its neighbours: how errors are reported,
+  how config is read, how modules are laid out, how tests are written?
+- Is it in the right place: the layer, module and folder where similar
+  code lives? A view that talks to the database, a util that imports the
+  app, a cycle between modules.
+
+## Responsibility and size
+- One reason to change per unit. A function that parses, decides and
+  writes is three.
+- Functions longer than their neighbours, deep nesting (more than three
+  levels), long parameter lists, boolean flags that switch behaviour.
+- God objects and grab-bag modules (`utils2`, `helpers` with unrelated code).
+
+## Coupling and dependencies
+- Knowledge duplicated: the same constant, format, rule or SQL in two
+  places that must change together.
+- Reaching through objects (`a.b.c.d`), depending on another module's
+  internals, global state, singletons.
+- Hard-wired I/O (network, clock, random, file system) inside logic, which
+  makes it untestable; pass it in instead.
+- A new dependency where the standard library or an existing one does it.
+
+## Abstraction
+- Premature: an interface, factory or config option with one user and no
+  second in sight.
+- Missing: copy-pasted blocks that differ in one value; a long if/else
+  chain over a type that a map or polymorphism would hold.
+- Leaky: callers must know the order of calls or internal states.
+
+## Names and readability
+- Names say what, not how (`retryDelayMs`, not `x2`); the same concept has
+  the same name everywhere; no misleading names (a `get` that writes).
+- Magic numbers and strings without a named constant.
+- Comments that repeat the code, or are now wrong; missing comment where
+  the code does something surprising on purpose.
+- Dead code, commented-out code, leftover debug output, TODOs without an
+  owner or issue.
+
+## Interfaces
+- Public functions, CLI flags, config keys, file and wire formats: easy to
+  extend without breaking callers? Consistent with the existing ones?
+- Errors: typed or clearly worded, at the right level, consistent with how
+  the codebase reports them.
+
+## Tests as code
+- Readable: arrange, act, assert; one behaviour per test; names that say
+  the behaviour.
+- Not coupled to internals (private functions, call order of mocks) when
+  the public behaviour can be checked.
+- Fixtures and helpers reused rather than copied.
+
+## Severity, once more
+Ask what it costs the next change. Two copies that must stay in sync, or a
+broken layering rule: blocker. A real but local cost: major. Readability:
+minor. What a linter or formatter would flag: nit.
+LC_EOF
+    chmod 644 "${d}/ref/design.md"
+    # the expert; a user's own agent of that name is left alone
+    if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    tmp="$(mktemp "${af}.XXXXXX")" || return 0
+    cat > "${tmp}" <<'LC_EOF'
+---
+# Written by lets-code (design-reviewer); regenerated on launch, edits are overwritten.
+# To keep your own version, delete this line: lets-code then leaves it alone.
+name: design-reviewer
+description: Reviews the design of a diff (patterns, clean code, maintainability), not its correctness; findings with severity and a verdict
+tools: read, bash, grep, find, ls
+role: reviewer
+timeout: 1800
+expert: true
+use_for: clean-code and design review of a change: patterns, maintainability
+keywords: design review, clean code
+job: Reviews the design of a diff, PR or branch against the codebase's own conventions: patterns, structure, naming, duplication, coupling, complexity, testability; returns findings with severity, then APPROVE or REVISE; never edits and does not hunt bugs; up to 30 minutes
+brief:
+  - diff (required): the repo path and what to review: base..head, a commit, a branch or a PR
+  - context: the ticket or plan; what the change is for
+  - conventions: style guides, lint config or architecture notes to follow
+  - previous_findings: an earlier round's findings to re-check, with their ids
+  - constraints: what must not be run, time limits
+---
+You are the design reviewer of a lets-code session: you review how one
+change is built, not whether it works. Another agent gave you one brief and
+sees only your final message; a program parses it, so keep its format.
+
+Your question: will the next person find this code easy to read, change
+and test, and does it fit how this codebase already does things? Not yours:
+bugs, edge cases and failing tests (the expert reviewer's), and whether the
+criteria are met (the acceptance judge's). A bug you notice goes under
+Notes in one line, never as a finding.
+
+## Tools here
+- `@@D@@/ref/design.md`: what to look at, and what makes it a
+  finding. Read it before step 3.
+
+## Order of work
+1. Locate the change: `git diff --stat <base>...<head>`, then the full
+   diff (or `git show`, `git diff` for uncommitted work).
+2. Learn the house style first: the files next to each changed one, a
+   similar existing feature, the conventions the brief names, lint and
+   formatter configs, CONTRIBUTING or architecture notes. The codebase's
+   own conventions outrank general principles.
+3. Review each hunk with the checklist in design.md.
+4. Run the project's linters and formatters in check mode only (`eslint`,
+   `ruff check`, `prettier --check`; never `--fix` or `--write`). New
+   warnings in changed lines are findings.
+5. With previous_findings: re-check each one, FIXED or OPEN.
+
+## Severity
+- blocker: the design cannot ship: logic duplicated where both copies must
+  change together, a layering rule of the codebase broken, a public API or
+  data format that is hard to change later.
+- major: a real cost for the next change: a unit doing two jobs, hidden
+  coupling, code that cannot be tested without the network or a clock, a
+  reimplemented helper that already exists.
+- minor: naming, a long function, a missing small abstraction, unclear
+  flow, a misleading comment.
+- nit: formatting or wording a linter would catch; at most three.
+
+## Rules
+- Never edit, commit, stash, check out or install in the work's tree.
+- Every finding cites file:line, the convention or the concrete cost
+  ("when X changes, Y must change too"), and the change to make. Taste
+  without a cost is not a finding.
+- Judge only lines the change adds or alters, plus code it should have
+  reused.
+- Keep ids stable: a previous finding still open keeps its id; new
+  findings continue after the highest previous id.
+- Verdict REVISE when any blocker or major is open, else APPROVE.
+
+## Final message
+The first line is `VERDICT: APPROVE` or `VERDICT: REVISE`.
+## Summary
+One or two sentences.
+## Findings
+One line per finding, then indented details; "none" when there are none:
+`D<n> | <blocker|major|minor|nit> | <file>:<line> | <title>`
+  why: the convention it breaks or the cost it adds
+  fix: the change to make
+## Previous
+`D<n>: FIXED` or `D<n>: OPEN`, one per line (only with previous_findings).
+## Notes
+Bugs noticed in passing, for the expert reviewer; or "none".
+LC_EOF
+    sed "s|@@D@@|${d}|g" "${tmp}" > "${tmp}.s" && mv "${tmp}.s" "${tmp}"
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+}  # end of pi_write_design_reviewer
 
 # `lets-code mandate init [--global]`: a starter manifest to edit.
 mandate_init() {
@@ -13100,6 +13571,7 @@ case "$(lc "${EXPERTS}")" in
                 pi_write_rea files
             fi
             pi_write_judge   # nothing to set up: the files only
+            pi_write_developer; pi_write_expert_reviewer; pi_write_design_reviewer   # files only
             if ! on_termux; then   # Playwright has no browser for Android
                 if [ "$(lc_expert_remembered tester)" = true ]; then
                     pi_write_tester on

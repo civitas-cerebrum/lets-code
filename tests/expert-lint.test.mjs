@@ -74,6 +74,9 @@ const cases = {
 	"a dispatch rule": file({ ...base, dispatch_rule: "Config conversions go to expert conf." }),
 	"dispatch_rule over 300": file({ ...base, dispatch_rule: "r".repeat(320) }),
 	"not an expert": file({ ...base, expert: "false" }),
+	"route false": file({ ...base, route: "false" }),
+	"route no": file({ ...base, route: "no" }),
+	"route true": file({ ...base, route: "true" }),
 };
 // lint's rejecting rules: the ones that make parseAgentFile drop the file
 const REJECT = /^(name: "|brief: "|brief: field|append_prompt: .* outside|timeout:|requires_env:|expert:)/;
@@ -91,6 +94,7 @@ for (const [label, text] of Object.entries(cases)) {
 	t(`${label}: same dispatch_rule`, (p.fm.dispatch_rule || "").replace(/\s+/g, " ").trim().slice(0, 300), a.expert.dispatchRule ?? "");
 	t(`${label}: same job`, (p.fm.job || p.fm.description).replace(/\s+/g, " ").trim(), a.expert.job);
 	t(`${label}: same tools`, (p.fm.tools ? p.fm.tools.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim()).filter(Boolean) : undefined), a.tools);
+	t(`${label}: same route`, !!R.routed, a.expert.routed);
 }
 t("lint: over 100 is an error", lint.lintFile((writeFileSync(join(agentDir, "agents", "conf.md"), cases["use_for over 100"]), join(agentDir, "agents", "conf.md")), { agentDir }).errors.some((e) => e.startsWith("use_for: 120 characters")), true);
 {
@@ -101,6 +105,10 @@ t("lint: over 100 is an error", lint.lintFile((writeFileSync(join(agentDir, "age
 	const R = lint.lintFile(f, { agentDir });
 	t("lint: dispatch_rule is a known field", R.warnings.some((w) => w.includes("unknown field dispatch_rule")), false);
 	t("lint: dispatch_rule kept for its cost", R.rule, "Config conversions go to expert conf.");
+	writeFileSync(f, cases["route false"]); const RR = lint.lintFile(f, { agentDir });
+	t("lint: route false is noted, no warning", [RR.notes.some((x) => x.startsWith("route: false")), RR.warnings.filter((w) => w.startsWith("route")).length, RR.errors.length], [true, 0, 0]);
+	writeFileSync(f, file({ ...base, route: "maybe" }));
+	t("lint: a bad route value is an error", lint.lintFile(f, { agentDir }).errors.some((e) => e.startsWith("route: maybe")), true);
 }
 t("lint: pi's tools are the runner's", lint.PI_TOOLS.slice().sort(), ["bash", "edit", "find", "grep", "ls", "read", "write"]);
 rmSync(join(agentDir, "agents", "conf.md"));

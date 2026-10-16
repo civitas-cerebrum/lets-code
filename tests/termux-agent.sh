@@ -51,6 +51,10 @@ t "app identity: by role, mailto"      "$(grep -c 'action.SENDTO -d mailto:`' "$
 t "app identity: launcher list"        "$(grep -c 'query-activities --brief --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER | grep /' "${af}")" 1
 t "app identity: Gmail example"        "$(grep -c 'Gmail is `com.google.android.gm`' "${af}")" 1
 t "failed launch: re-derive first"     "$(grep -c 'When a launch' "${af}")" 1
+t "accounts: device state, not dotfiles" "$(grep -c '^## Accounts: ' "${af}")" 1
+t "accounts: dumpsys at tier 2"        "$(grep -c "bin/ui sh 'dumpsys account'" "${af}")" 1
+t "accounts: settings at tier 0"       "$(grep -c 'android.settings.SYNC_SETTINGS' "${af}")" 1
+t "accounts: names its source"         "$(grep -c '^Report only the account the goal asks about, and always its source' "${af}")" 1
 t "consent: final step needs confirmed" "$(grep -c "brief's \`confirmed\` field" "${af}")" 1
 t "safety: no wireless debugging"       "$(grep -c 'enable developer options or wireless debugging' "${af}")" 1
 before="$(cd "${PI_AGENT_DIR}" && find . -type f -exec cat {} +)"; write_termux_agent
@@ -161,6 +165,7 @@ case "\$2" in
     *"uiautomator dump"*) cat "\${UI_FIXTURE}" ;;
     "wm size") echo "Physical size: 1080x2400" ;;
     "id -u") echo 2000 ;;
+    "dumpsys account") printf 'Accounts: 1\n    Account {name=someone@example.com, type=com.google}\n' ;;
 esac
 SH
 chmod +x "${work}/fakerish"
@@ -192,6 +197,7 @@ c="$(grep '^input text ' "${log}" | tail -n 1)"; eval "set -- ${c#input text }"
 t "ui type: one quoted arg, spaces as %s" "$1" "hi%sthere,%sit's%s5%%sdone"
 rc=0; ui type "görüşürüz" 2>/dev/null || rc=$?
 t "ui type non-ASCII refused"   "${rc}" 4
+t "accounts recipe: ui sh dumpsys account" "$(ui sh 'dumpsys account' | grep -E 'Account \{')" "    Account {name=someone@example.com, type=com.google}"
 ui key enter >/dev/null; ui key 279 >/dev/null
 t "ui key"                      "$(grep '^input keyevent' "${log}" | tr '\n' '|')" "input keyevent 66|input keyevent 279|"
 rc=0; ui key 'x; reboot' 2>/dev/null || rc=$?

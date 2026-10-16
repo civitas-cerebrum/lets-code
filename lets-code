@@ -5667,6 +5667,20 @@ which app it is, or that none is installed, from a grep on package names.
 fails, redo 1 and 3 before concluding anything: the component may be
 wrong, not the app missing.
 
+## Accounts: "my email", "my username"
+Which account is signed in is device state, not a file. Dotfiles, git
+config and SSH key comments say what Termux tools use, not the phone.
+1. Tier 2: `@@T@@/bin/ui sh 'dumpsys account' | grep -E 'Account \{'`
+   (`name=` is the account, `type=com.google` a Google one); or open the
+   app (Gmail: its launcher activity) and read the account off the screen.
+2. Tier 0 and 1 cannot read accounts. Open the list for the user:
+   `am start --user 0 -a android.settings.SYNC_SETTINGS`, and say they
+   can read it there; do not guess.
+3. Files (`git config user.email`, `~/.ssh/*.pub`) only when the goal is
+   about Termux itself or the user asks; call it that source.
+Report only the account the goal asks about, and always its source:
+`Source: account manager`, `screen`, `user (settings opened)` or `file <path>`.
+
 ## Traps (do not retry)
 - Without tier 2, `screencap`, `uiautomator`, `input`, `content` and
   `dumpsys` fail (no rights, or `app_process` not found). Do not try them;

@@ -5728,7 +5728,8 @@ export function footerLines(runs: Run[], o: { width: number; now: number; curren
 		// the selected row as pi's own lists draw theirs (SelectList: an arrow and the
 		// whole line in the theme's accent, no background); the others keep their colours
 		const selRow = i === sel, t = selRow ? ident : th;
-		const lead = selRow ? "→" : here ? th.fg("accent", "▸") : " ";
+		// two columns of their own, so neither hides the other: the selection, then the open session
+		const lead = `${selRow ? "→" : " "}${here ? t.fg("accent", "▸") : " "} `;
 		const mark = r ? t.fg(COLOR[r.status] ?? "dim", MARK[r.status] ?? "?") : t.fg("muted", "◂");
 		const nameS = pad(cutTo(r ? r.agent : "main", nw, deps), nw, deps);
 		// not focused: names dim, nothing looks selectable
@@ -5743,7 +5744,7 @@ export function footerLines(runs: Run[], o: { width: number; now: number; curren
 		if (W < NARROW_WIDTH) { push(`${lead}${mark} ${name} ${t.fg("dim", `${time} · ${compact(tokens(r))}`)}`); continue; }
 		const tail = `${t.fg("dim", time.padStart(7))}  ${t.fg("dim", io(r).padStart(13))}`;
 		if (W < TASK_MIN_WIDTH) { push(`${lead}${mark} ${name}  ${tail}`); continue; }
-		const tw = W - (2 + 1 + nw + 2 + 2 + 7 + 2 + 13);
+		const tw = W - (4 + 1 + nw + 2 + 2 + 7 + 2 + 13);
 		push(`${lead}${mark} ${name}  ${t.fg("muted", pad(cutTo(summary(r.task) || "(no task)", tw, deps), tw, deps))}  ${tail}`);
 	}
 	const above = start, below = total - end;

@@ -127,6 +127,29 @@ const blocked = (r) => r?.block === true;
 	t("readonly: cannot dispatch", blocked(await h.call(d, "subagent", { agent: "worker", task: "x" })), true);
 }
 
+// --- verify: a judge's role: runs tests, writes only under the temp dir,
+// leaves the work's git state and dependencies alone
+{
+	// the role's temp dir is outside the project here (these projects sit in the real one)
+	const tmpWas = process.env.TMPDIR; const scratch = join(work, "judge-tmp"); mkdirSync(scratch); process.env.TMPDIR = scratch;
+	const h = await load({ LETS_CODE_ROLE: "verify", LETS_CODE_SUBAGENT_DEPTH: "1" }); const d = repo(); await h.start(d);
+	t("verify: edit tool not available", blocked(await h.call(d, "edit", { path: join(d, "src", "a.txt") })), true);
+	t("verify: test runner passes", await h.call(d, "bash", { command: "npm test 2>&1 | tail -n 20" }), undefined);
+	t("verify: pytest passes", await h.call(d, "bash", { command: "python3 -m pytest -q tests" }), undefined);
+	t("verify: output to the temp dir passes", await h.call(d, "bash", { command: `node app.js > ${join(scratch, "out.txt")}` }), undefined);
+	t("verify: output into the work blocked", blocked(await h.call(d, "bash", { command: "node app.js > out.txt" })), true);
+	t("verify: sed -i in the work blocked", blocked(await h.call(d, "bash", { command: "sed -i 's/a/b/' src/a.txt" })), true);
+	t("verify: sed -i in a temp copy passes", await h.call(d, "bash", { command: `sed -i 's/a/b/' ${join(scratch, "copy", "a.txt")}` }), undefined);
+	t("verify: git checkout blocked", blocked(await h.call(d, "bash", { command: "git checkout main" })), true);
+	t("verify: git stash blocked", blocked(await h.call(d, "bash", { command: "git stash" })), true);
+	t("verify: git diff passes", await h.call(d, "bash", { command: "git diff HEAD~1 -- src" }), undefined);
+	t("verify: npm install blocked", blocked(await h.call(d, "bash", { command: "npm install left-pad" })), true);
+	t("verify: rm -rf blocked", blocked(await h.call(d, "bash", { command: "rm -rf src" })), true);
+	t("verify: cannot dispatch", blocked(await h.call(d, "subagent", { agent: "worker", task: "x" })), true);
+	t("verify: no prompt section", (() => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), []);
+	if (tmpWas === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = tmpWas;
+}
+
 // --- yolo bypasses everything
 {
 	const h = await load({ LETS_CODE_MODE: "yolo" }); const d = repo(); await h.start(d);

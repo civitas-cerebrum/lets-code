@@ -278,5 +278,27 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	t("tester: pi's tools", a?.tools, ["bash", "read", "edit", "write", "grep", "find", "ls"]);
 }
 
+// the acceptance judge as lets-code writes it (judge_write_agent): ready with
+// no setup, on every platform, read-and-run tools only, under the verify role
+{
+	const sub = await import(pathToFileURL(join(ext, "subagents.ts")).href);
+	const lc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lets-code"), "utf8");
+	const from = lc.indexOf("\njudge_write_agent() {");
+	const body = lc.slice(lc.indexOf("<<'MD'\n", from) + 7, lc.indexOf("\nMD\n", from) + 1);
+	const a = sub.parseAgentFile(body, join(agentDir, "agents", "acceptance-judge.md"), "user", undefined, false, true);
+	t("judge: an expert", [a?.name, !!a?.expert], ["acceptance-judge", true]);
+	t("judge: brief", a?.expert?.brief.map((f) => `${f.name}${f.required ? "*" : ""}`), ["criteria*", "artifact*", "claim", "how_to_run", "constraints"]);
+	t("judge: its prompt, no agent dir", [a?.agentDir, a?.appendPrompt, a?.timeout], [undefined, join(agentDir, "acceptance-judge", "prompt.md"), 1800]);
+	t("judge: not ready while its prompt is missing", a?.expert?.ready, existsSync(join(agentDir, "acceptance-judge", "prompt.md")));
+	mkdirSync(join(agentDir, "acceptance-judge"), { recursive: true }); writeFileSync(join(agentDir, "acceptance-judge", "prompt.md"), "x");
+	const b = sub.parseAgentFile(body, join(agentDir, "agents", "acceptance-judge.md"), "user", undefined, false, true);
+	t("judge: ready with its files alone, no setup", [b?.expert?.setup, b?.expert?.ready], [undefined, true]);
+	rmSync(join(agentDir, "acceptance-judge"), { recursive: true, force: true });
+	t("judge: every platform", [a?.expert?.platform, sub.platformOk(a?.expert?.platform)], [undefined, true]);
+	t("judge: read and run, no edit or write", a?.tools, ["read", "bash", "grep", "find", "ls"]);
+	t("judge: the verify role", a?.role, "verify");
+	t("judge: use_for whole in the line", a?.expert?.useFor, body.match(/^use_for: (.*)$/m)[1]);
+}
+
 console.log(`\n${n} checks, ${fail ? "FAILURES" : "all passed"}`);
 process.exit(fail);

@@ -277,6 +277,36 @@ an Appium stack. No agent dir: the child needs only its prompt and pi's
 tools. `platform: linux, darwin` keeps it off Termux (Node says `android`
 there), where Playwright has no browser.
 
+**Acceptance judge (achilles' review roles, not achilles).** achilles
+reviews work with gate roles inside its pipeline: a `workflow-reviewer`
+(no shell) that turns a phase's exit criteria into a yes/no checklist with
+evidence and a surgical fix per miss, a `task-reviewer` and an independent
+`verifier` in the role kernel's change loop (only the verifier, which
+neither wrote nor reviewed the change, may mark it complete), Stage B
+reviewers that are fresh subagents with no stake in the work, the evidence
+floor of failure diagnosis, and the negative control of ticket-driven
+testing (the merge-base is the control; a test that also passes there
+tests something already true). What carries over to a 27B child is the
+criteria, not the gates: assume the claim is wrong, re-derive from the
+artifact, per criterion a check that was executed and a control that must
+fail, PASS / FAIL / UNVERIFIABLE with quoted evidence, no PASS from reading
+alone, ACCEPT only when all pass, and never edit the work (separation of
+duties). It ships as a 700-word prompt and two references read per step
+(criteria into checks and the evidence ladder with test traps; negative
+controls per kind of check), from achilles main @ 6384b5f and the review
+roles of `release/0.2.0` @ d85fb1f and `contrib/achilles-lessons` @ 90e62c4.
+Achilles' verifier may run only the test runner, which is too narrow for
+an arbitrary project, and lets-code's `readonly` role denies test runners,
+so the judge gets a role of its own, `verify`: any command, writes only
+under the temp dir, no git writes, installs, recursive deletes or remote
+shells. The mandate is off by default, so the instructions and
+`scratch-copy` (a copy of the work or of a revision as its own git repo,
+dependencies linked, never touching the original) carry it there. No
+setup and no platform limit: it needs only pi's tools. A panel is the
+existing `runs:` with the same brief repeated; a `judges: N` field that
+the runner expands and aggregates would be cleaner for the model but is
+left for later, since it changes the generic runner for one expert.
+
 **Claude Code adapter.** Automatic: the launcher switches it on only where
 the project's `.claude` (up to the git root) has hooks or workflow scripts,
 the parts that need the adapter to work at all; skills and commands alone

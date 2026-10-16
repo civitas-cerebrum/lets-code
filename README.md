@@ -74,6 +74,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 📱 **Termux device** (expert) | On a phone running lets-code in Termux, the `termux-device` expert does phone tasks end to end: launch or bring an app to the front, open a file in an app, fire an intent, prepare a message (WhatsApp, SMS, mail) for you to send, and, once you set up Shizuku or adb, read the screen, tap and type. It checks first what the phone allows and tells you the one setup step that unlocks more. |
 | 🔬 **REA** (expert) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: the `reverse-engineer` expert hands the question to a separate pi that has REA's 170 tools, so they never enter your session. REA is installed when you enable it. |
 | 🧪 **Tester** (expert) | Web-app QA the way [achilles](https://github.com/civitas-cerebrum/achilles) does it, on demand: the `tester` expert maps journeys, writes and runs e2e tests with the Steps API of [element-interactions](https://github.com/civitas-cerebrum/element-interactions) (Playwright), verifies a flow or change with evidence, hunts bugs and diagnoses failing e2e tests, in a separate pi; Android and iOS apps too where Appium is set up. Installed when you enable it; Linux and macOS only. |
+| ⚖️ **Acceptance judge** (expert) | "Is it done?" answered by trying to break it: the `acceptance-judge` expert takes the acceptance criteria and the work (a diff, branch, commit or PR), runs the checks itself with negative controls, and returns PASS / FAIL / UNVERIFIABLE per criterion with the evidence, then ACCEPT or REJECT. It never edits the work. The method is distilled from achilles' review roles; nothing to install, so it works everywhere, the phone included. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -417,7 +418,8 @@ the harness live outside this repo.
 
 With `MANDATE=true` every session runs under a **role**: a scope that says
 which tools, paths, kinds of bash command, MCP servers and agents are
-allowed, asked about or denied. The four built-in roles are the modes:
+allowed, asked about or denied. The four built-in roles are the modes (two
+more, `readonly` and `verify`, are for subagents):
 
 | Mode | What changes |
 |---|---|
@@ -442,6 +444,11 @@ command group (`readonly`, `git-write`, `build`, `package-install`,
 section, and extra `protected` paths. `.git`, `.env`, keys and certificates
 are protected in every mode but `yolo`.
 
+`verify`, the acceptance judge's role, runs tests and commands but writes
+only under the temp dir (no edit or write tool, redirects and `sed -i`
+elsewhere refused), and refuses git writes (`checkout`, `stash`, `commit`,
+...), package installs, recursive deletes, `sudo` and remote shells.
+
 </details>
 
 <details>
@@ -464,7 +471,8 @@ Investigate quickly and report ...
 ```
 
 `tools` limits the child's tools, `thinking` sets its level, `role` picks its
-mandate role (`readonly` is a built-in without the planning prompt). Project
+mandate role (`readonly` is a built-in without the planning prompt; `verify`
+also runs tests, for judges). Project
 agents in `.pi/agents/` or `.agents/agents/` are used once the project is
 trusted. Calls: `{agent, task}`, `{tasks: [...]}` for parallel work (at most
 2 at a time by default, since one GPU serves every agent;
@@ -625,13 +633,13 @@ roles see every MCP call and can allow, ask or deny per server.
 
 An expert is a subagent with knowledge of its own: standing instructions
 (recipes, traps, a report format), a brief template that says what its
-caller must tell it, and, where it needs one, a setup. lets-code ships three,
-`termux-device` (on Termux only), `reverse-engineer` (anywhere) and `tester`
-(Linux and macOS), and you can add your own. They sit behind one tool, `expert`, whose line in the
+caller must tell it, and, where it needs one, a setup. lets-code ships four,
+`acceptance-judge` and `reverse-engineer` (anywhere), `termux-device` (on
+Termux only) and `tester` (Linux and macOS), and you can add your own. They sit behind one tool, `expert`, whose line in the
 context names each expert usable here with a few words on what it is for:
 
 ```text
-expert: these tasks go to the expert named, not done by hand, even quick ones: reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
+expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
 ```
 
 (On Linux and macOS `tester (anything on a web app that needs a browser:
@@ -650,6 +658,7 @@ The templates:
 
 | Expert | Brief (* required) |
 |---|---|
+| `acceptance-judge` | `criteria`*: the acceptance criteria verbatim (a list, or the ticket's text); `artifact`*: what to judge, the repo path plus a diff, commit, branch, PR or URL; `claim`: what the implementer says was done and how they checked it; `how_to_run`: test, build or start commands, a dev server URL; `constraints`: what must not be run or touched, time limits |
 | `termux-device` | `goal`*: the user's goal, verbatim; `confirmed`: only after you approved the exact final step it reported (app, recipient, text) |
 | `reverse-engineer` | `target`*: absolute path or URL of the artifact; `question`*: what to find out; `purpose`: what the answer is for |
 | `tester` | `target`*: the web URL, the app's project path, or the mobile app id or .apk; `platform`: web (default), android or ios; `goal`*: the QA task in the user's words; `how_to_run`: commands that start the app and run the existing tests; `scope`: which pages, journeys or files, how deep; `constraints`: what not to touch, logins or test data, time limits |
@@ -682,6 +691,27 @@ that runs them, pass/fail counts and the findings with their evidence. It
 is not offered on Termux: Playwright has no browser for Android, and
 Appium needs a host with the Android SDK. For a unit test, a failing
 assertion or `npm test`, the model works as usual.
+
+**Acceptance judge.** `acceptance-judge` answers "is it done?" the way
+achilles' review roles do (its verifier and reviewers), without achilles:
+an independent judge that assumes the claim is wrong until the artifact
+shows otherwise. It numbers the criteria, restates each as checkable
+conditions, runs the evidence itself (tests whose assertions it has read,
+the command with the criterion's input, the URL), and runs a negative
+control where it can: the same check against the merge-base, the change
+reverted, or the line broken in a scratch copy must fail ("would it pass
+if the change did nothing?"). Verdicts are PASS, FAIL or UNVERIFIABLE per
+criterion (AMBIGUOUS when a criterion has two readings; the stricter one is
+judged), each with the command, exit code, key output lines and file:line;
+no PASS without executed evidence. ACCEPT only when every criterion
+passes, else REJECT with the smallest list of what is missing, plus what
+the claim relies on outside the criteria. It has `read, bash, grep, find,
+ls` and no edit or write; `acceptance-judge/bin/scratch-copy` makes the
+throwaway copies under the temp dir, and with `MANDATE=true` the `verify`
+role enforces that. Nothing is installed. For a panel, the model can run
+the same brief two or three times with `runs:` (two at a time) and accept
+only if every judge does. A plain code review stays with `reviewer`, and
+running the tests with the model.
 
 **Dormant until you say yes.** Every expert starts dormant: listed, nothing
 installed, nothing else in the context. It is enabled only by you: the

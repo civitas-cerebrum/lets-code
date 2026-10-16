@@ -3629,10 +3629,11 @@ pi_write_mandate_extension() {
 //
 // Manifest: ~/.pi/agent/mandate.json (global, full authority) and
 // .pi/mandate.json (project, may only tighten; read when the project is
-// trusted). Built-in roles: plan, auto, ask, yolo.
+// trusted). Built-in roles: plan, auto, ask, yolo, and readonly and verify
+// for subagents.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 type Decision = "allow" | "ask" | "deny";
@@ -3697,6 +3698,12 @@ const BUILTIN: Manifest = {
 		},
 		// read-only without the planning instructions: for scouts and reviewers
 		readonly: { label: "readonly", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "list_mcp_resources", "read_mcp_resource"], write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: [], network: "off" },
+		// a judge's: runs tests and commands, writes only under the temp dir,
+		// never changes the work's git state, installs nothing (acceptance-judge)
+		verify: {
+			label: "verify", tools: ["read", "grep", "find", "ls", "bash", "tool_search"], write: [tmpdir()], external: "deny", mcp: "deny", dispatch: [], network: "on",
+			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
+		},
 		yolo: { label: "yolo", bypass: true, network: "on", dispatch: ["*"], mcp: "allow" },
 	},
 };
@@ -8219,6 +8226,297 @@ MD
     TESTER_AGENT=1
 }
 
+# Acceptance judge expert: an adversarial check of a piece of work against
+# its acceptance criteria, in a child pi that reads and runs but never edits.
+# The method is achilles' review roles distilled (civitas-cerebrum/achilles:
+# the reviewer contract and evidence floor of main @ 6384b5f; the verifier,
+# task-reviewer and workflow-reviewer roles, the negative control and the
+# separation of duties of release/0.2.0 @ d85fb1f and
+# contrib/achilles-lessons @ 90e62c4); nothing of achilles is installed.
+# Nothing to set up either, so it is usable everywhere, Termux included.
+JUDGE_DIR="${PI_AGENT_DIR}/acceptance-judge"
+# pi_write_judge: the child's instructions, references and scratch-copy
+# helper, and the agent file. Sets JUDGE_AGENT (1 = the agent file is ours).
+pi_write_judge() {
+    local j="${JUDGE_DIR}" f
+    JUDGE_AGENT=""
+    mkdir -p "${j}/ref" "${j}/bin"
+    cat > "${j}/prompt.md" <<'MD'
+You are the acceptance judge of a lets-code session. Another agent gives you
+acceptance criteria and a piece of work said to meet them, and will see only
+your final message. Find out whether the work meets each criterion by trying
+to break it. You never fix anything. You have read, bash, grep, find and ls.
+
+## Stance
+- The claim is wrong until the artifact shows otherwise. The claim, commit
+  messages, comments, a PR text and test names are leads to check, never
+  evidence.
+- Re-derive everything from the artifact: read the code and run the checks
+  yourself. A test run counts only when you ran it and read its output.
+- You did not write this work and you do not repair it. Never edit, commit,
+  stash, check out, reset, install or delete anything in the work's tree,
+  and run nothing that rewrites it (formatters with --write, migrations,
+  codegen). Every experiment happens in a scratch copy (see Tools).
+- Judge the criteria given, nothing else: no style review, no suggestions.
+
+## Tools here
+- `@@J@@/bin/scratch-copy <dir> [<rev>]`: a throwaway copy of the work
+  (or of commit `<rev>`, such as the merge-base) under the temp dir, as
+  its own git repo; prints the path. Dependency dirs (node_modules, .venv)
+  are linked, not copied. `scratch-copy --clean` removes all copies.
+- `@@J@@/ref/criteria.md`: criteria into checks, what counts as evidence,
+  ambiguous criteria, test traps. Read it before step 2.
+- `@@J@@/ref/controls.md`: negative controls for tests, commands, output,
+  web pages and code. Read it before step 4.
+
+## Order of work
+1. Locate the artifact: the repo, branch or commit, the diff (`git diff
+   <base>...<head>`, `git show`, `gh pr diff`) and `git status --porcelain`
+   (keep that output: the tree must look the same when you finish). If the
+   artifact cannot be found, every criterion is UNVERIFIABLE: stop there.
+2. Number the criteria C1, C2, ... in the brief's order, verbatim. Restate
+   each as one to three checkable conditions: an input or action, and the
+   observable result that must follow.
+3. Per criterion, get evidence by executing something: the tests that cover
+   it (a test counts once you have read its assertions), the program or
+   command with the criterion's input, the URL. Try the edge too (empty,
+   zero, the error path) when the criterion says all, any, never or always.
+4. Negative control per criterion, wherever one is possible: show that your
+   check FAILS when the criterion is not met (the base commit, the change
+   reverted or broken in a scratch copy, an empty or invalid input). Ask:
+   would this check pass if the change did nothing? Then it is not evidence.
+5. Verdict per criterion:
+   - PASS: an executed check shows every condition holds, and its negative
+     control failed (or you say why no control was possible).
+   - FAIL: a check shows a condition does not hold, or the work lacks it.
+   - UNVERIFIABLE: no check could be run, or only reading was possible.
+   Mark AMBIGUOUS (with PASS/FAIL/UNVERIFIABLE) when the criterion has two
+   readings: name both and judge the stricter one.
+6. Overall: ACCEPT only when every criterion is PASS. Otherwise REJECT.
+
+## Rules
+- No PASS without executed evidence. Reading code can show FAIL (the
+  feature is missing) but never PASS.
+- Quote evidence exactly: the command, its exit code, the deciding output
+  lines, file:line for code.
+- A failure stays a FAIL unless you show it fails the same way on the base.
+- Keep runs short (the brief's limits; 10 minutes per suite at most). Stop
+  every server and process you started, run `scratch-copy --clean`, and
+  check `git status --porcelain` again.
+
+## Final message, for an agent that has not seen any of it
+## Verdict
+ACCEPT or REJECT, and one sentence why.
+## Criteria
+Per criterion: `C<n>: PASS | FAIL | UNVERIFIABLE` (plus AMBIGUOUS), the
+criterion verbatim, the conditions, the evidence (command, rc, key output
+lines, file:line) and the negative control with its result.
+## Missing
+For REJECT: the smallest list of what must change or be shown, per criterion.
+## Relied on
+What the claim depends on outside the criteria (an untested path, an
+environment, a manual step, a service), if anything.
+MD
+    cat > "${j}/ref/criteria.md" <<'MD'
+# Criteria into checks, and what counts as evidence
+
+## Restating a criterion
+Write each criterion as conditions someone else could check without you:
+given (state, input), when (action), then (observable result).
+- "Users can reset their password" -> C1a: POST /reset with a known email
+  returns 200 and sends one mail; C1b: the link sets the new password;
+  C1c: an unknown email gets the same response (if the criterion or the
+  ticket says so; otherwise do not invent it).
+- Split "and": "validates the email and shows an error" is two conditions;
+  both must pass.
+- Words that quantify (all, every, any, never, only, at most) need the
+  edge: the empty case, the boundary, the error path, a second instance.
+- Keep the criterion's own words. Do not narrow it to what the work does,
+  and do not widen it with requirements it does not state.
+
+## Ambiguous and uncheckable criteria
+- Two reasonable readings: name both, judge the stricter, mark AMBIGUOUS.
+  The caller decides which reading the author meant.
+- Not observable ("the code is clean", "fast enough" with no number):
+  UNVERIFIABLE, and say under Missing what would make it checkable (a
+  threshold, a command, an example).
+- A criterion that names something absent from the work (a flag, an
+  endpoint, a file) is FAIL, not ambiguous.
+
+## Evidence, strongest first
+1. A check you executed on the artifact, whose output you read, with a
+   negative control that failed.
+2. A check you executed without a possible control (say why none).
+3. An existing test you ran, after reading its assertions and mapping each
+   to a condition. A test's name is not what it checks.
+Reading code supports FAIL (missing, wrong branch, unreachable code, cite
+file:line) but never PASS. When reading is all you can do, the verdict is
+UNVERIFIABLE with the reading cited.
+
+Not evidence: the claim, commit messages, the PR description, comments,
+test names, a CI badge or log you did not inspect, "tests pass" without the
+output, a test that also passes on the base commit (for a new behaviour).
+
+## Test traps (look for these in the diff)
+- A test edited in the same change: compare it with the base. A weakened
+  or deleted assertion, a widened tolerance, a new skip/only/xfail, an
+  updated snapshot: the test was moved to the code, not the code to the test.
+- A test that asserts nothing that the criterion names: only that no
+  exception was thrown, that a mock was called, that output is non-empty.
+- Expected values copied from the implementation (the same formula on both
+  sides) prove nothing.
+- A test the runner never collects (wrong file name or folder, not in the
+  config): run the runner and find the test's name in its output.
+- Mocked away the very thing the criterion is about.
+
+## Rationalizations to refuse
+- "It obviously works" / "it is a one-line change": run it.
+- "The claim says the tests were green": run them.
+- "Running it is slow": run the narrowest test or command that covers it.
+- "It probably meant the lenient reading": AMBIGUOUS, judge the stricter.
+- "That failure is flaky / unrelated": re-run once; still failing is FAIL
+  unless it fails the same way on the base commit.
+- "PASS with a note": there is no such verdict. Either it passes or the
+  note names what is missing.
+MD
+    cat > "${j}/ref/controls.md" <<'MD'
+# Negative controls: proving a check can fail
+
+A check is evidence only when it can fail. Before you trust a green check,
+make it go red where the criterion is not met; if it stays green, it does
+not test the criterion. Never do this in the work's tree: use
+`@@J@@/bin/scratch-copy` (copies live under the temp dir; edit them with
+sed, patch or cp, which is allowed there). Read results per test.
+
+## 1. The base commit (best for a change on a branch)
+```bash
+base=$(git -C <repo> merge-base HEAD origin/main)   # or the brief's base
+nofix=$(bash @@J@@/bin/scratch-copy <repo> "$base")
+cp <repo>/tests/new_test.py "$nofix/tests/"          # the NEW tests on the OLD code
+(cd "$nofix" && python3 -m pytest -q tests/new_test.py); echo "rc=$?"
+```
+| Without the change | Meaning |
+|---|---|
+| fails | the test discriminates the criterion: good |
+| passes | it checks something already true; worthless for a new behaviour (fine only for "must not change" criteria) |
+| skipped, or not collected | it told you nothing: fix the invocation |
+
+## 2. The change reverted in a copy (uncommitted work, no base)
+```bash
+c=$(bash @@J@@/bin/scratch-copy <repo>)
+git -C <repo> diff <base> -- src/feature.js | (cd "$c" && patch -R -p1)
+```
+Then run the same check in `$c`: it must fail.
+
+## 3. Break the one line (mutation)
+In a copy, change the line that implements the criterion (`sed -i` on the
+copy: flip a comparison, return early, drop the call) and re-run the check:
+it must fail with the expected message, not for another reason (a syntax
+error is not a control). Run the check once in an untouched copy first: it
+must pass there, which shows the copy itself works.
+
+## 4. Commands and CLIs
+Run the command with input that must NOT give the result: an empty file, a
+missing argument, an invalid value, the case the criterion excludes. If the
+criterion is "prints X for Y", show it does not print X for not-Y. Exit
+codes count: quote `echo "rc=$?"`.
+
+## 5. Output, files, generated artifacts
+Produce the same output from the base copy and diff the two; the difference
+must be what the criterion describes, and nothing it forbids.
+
+## 6. Web pages and APIs
+`curl -sS -o "${TMPDIR:-/tmp}/body" -w '%{http_code}\n' <url>`; then grep the body for
+the criterion's text or field. Control: a request that must not show it
+(another path, a missing parameter, a logged-out request), or the base
+build when it can be started. Start servers in the background, log to a
+file under the temp dir, and kill them when done.
+
+## 7. When no control is possible
+Code-only claims, external services, a criterion about something that does
+not run here: say "no negative control: <why>". A PASS without a control is
+weaker; say so in its evidence.
+
+Finish with `bash @@J@@/bin/scratch-copy --clean`.
+MD
+    cat > "${j}/bin/scratch-copy" <<'SH'
+#!/usr/bin/env bash
+# Written by lets-code (acceptance-judge); regenerated on launch, edits are overwritten.
+# scratch-copy <dir> [<rev>]: a throwaway copy of <dir> for negative controls,
+# under ${TMPDIR:-/tmp}/lets-code-judge; prints its path (the same subdir of
+# the copy when <dir> is inside a git repo). In a git repo: the working tree
+# (tracked and untracked files, not ignored ones), or commit <rev>; the copy
+# is a git repo of its own with that content as one commit, and dependency
+# dirs (node_modules, .venv, venv, vendor, target) link to the original's.
+# Outside git: a plain copy. Never writes to <dir>.
+# scratch-copy --clean: removes every copy.
+set -eu
+root="${TMPDIR:-/tmp}"; root="${root%/}/lets-code-judge"
+if [ "${1:-}" = --clean ]; then rm -rf "${root}"; echo "removed ${root}"; exit 0; fi
+[ $# -ge 1 ] && [ -d "$1" ] || { echo "usage: scratch-copy <dir> [<rev>] | --clean" >&2; exit 2; }
+src="$(cd "$1" && pwd)"; rev="${2:-}"
+mkdir -p "${root}"; dst="$(mktemp -d "${root}/copy.XXXXXX")"
+if top="$(git -C "${src}" rev-parse --show-toplevel 2>/dev/null)"; then
+    rel="${src#"${top}"}"
+    if [ -n "${rev}" ]; then
+        git -C "${top}" archive "${rev}" | tar -x -C "${dst}"
+    else
+        (cd "${top}" && git ls-files -z -c -o --exclude-standard | while IFS= read -r -d '' f; do
+            if [ -e "${f}" ] || [ -L "${f}" ]; then printf '%s\0' "${f}"; fi
+        done | tar --null -T - -cf -) | tar -x -C "${dst}"
+    fi
+    (cd "${dst}" && git init -q && git add -A && git -c user.name=judge -c user.email=judge@localhost commit -qm "scratch copy" --no-verify) >/dev/null 2>&1 || true
+    for d in node_modules .venv venv vendor target; do
+        if [ -e "${top}/${d}" ] && [ ! -e "${dst}/${d}" ]; then
+            ln -s "${top}/${d}" "${dst}/${d}"; echo "${d}" >> "${dst}/.git/info/exclude" 2>/dev/null || true
+        fi
+    done
+    echo "${dst}${rel}"
+else
+    [ -z "${rev}" ] || { echo "scratch-copy: ${src} is not in a git repo, so it has no revision ${rev}" >&2; exit 2; }
+    cp -a "${src}/." "${dst}/"
+    echo "${dst}"
+fi
+SH
+    chmod 755 "${j}/bin/scratch-copy"
+    for f in "${j}/prompt.md" "${j}"/ref/*.md; do
+        sed "s|@@J@@|${j}|g" "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
+    done
+    chmod 644 "${j}/prompt.md" "${j}"/ref/*.md
+    judge_write_agent
+}
+judge_write_agent() {
+    local af="${PI_AGENT_DIR}/agents/acceptance-judge.md" tmp
+    if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    mkdir -p "${PI_AGENT_DIR}/agents"
+    tmp="$(mktemp "${af}.XXXXXX")" || return 0
+    cat > "${tmp}" <<'MD'
+---
+# Written by lets-code (acceptance-judge); regenerated on launch, edits are overwritten.
+# To keep your own version, delete this line: lets-code then leaves it alone.
+name: acceptance-judge
+description: Adversarial check of a piece of work against its acceptance criteria; a verdict per criterion with evidence
+tools: read, bash, grep, find, ls
+role: verify
+append_prompt: acceptance-judge/prompt.md
+timeout: 1800
+expert: true
+use_for: is it done? a change, PR or branch checked against its ticket's acceptance criteria
+keywords: acceptance criteria
+job: Judges whether a change, PR, branch or build meets its acceptance criteria (a ticket, issue or requirements): tries to break each one, runs the checks with negative controls, and returns PASS / FAIL / UNVERIFIABLE per criterion with the evidence, then ACCEPT or REJECT; never edits the work. For a panel, run the same brief 2-3 times with runs: and accept only if every judge accepts; up to 30 minutes
+brief:
+  - criteria (required): the acceptance criteria verbatim (a list, or the ticket's text)
+  - artifact (required): what to judge: the repo path plus a diff, commit, branch, PR or URL
+  - claim: what the implementer says was done and how they checked it
+  - how_to_run: test, build or start commands, a dev server URL
+  - constraints: what must not be run or touched, time limits
+---
+MD
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+    JUDGE_AGENT=1
+}
+
 # `lets-code mandate init [--global]`: a starter manifest to edit.
 mandate_init() {
     local target
@@ -9550,6 +9848,7 @@ case "$(lc "${EXPERTS}")" in
             else
                 pi_write_rea files
             fi
+            pi_write_judge   # nothing to set up: the files only
             if ! on_termux; then   # Playwright has no browser for Android
                 if [ "$(lc_expert_remembered tester)" = true ]; then
                     pi_write_tester on

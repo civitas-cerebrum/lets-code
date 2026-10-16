@@ -219,7 +219,12 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	const notes = []; const cc = { hasUI: true, ui: { notify: (m) => notes.push(m), setStatus: () => {}, confirm: async () => { throw new Error("no dialog for a command"); } } };
 	await s6.commands.expert.handler("disable helper", cc);
 	t("/expert disable: remembered false", [state().experts.helper, notes[notes.length - 1]], [false, "The helper expert is dormant again (remembered)."]);
-	has("/expert list: disabled", (await s6.commands.expert.handler("list", cc), notes[notes.length - 1]), "- helper: Looks into a built artifact and answers one question [dormant: the user declined it in this session");
+	has("/expert list: one line per expert, dormant mark", (await s6.commands.expert.handler("list", cc), notes[notes.length - 1]), "○ helper  Looks into a built artifact and answers one question");
+	has("/expert list: declined shown plainly", notes[notes.length - 1], "dormant, declined in this session");
+	t("/expert list: no tool wording", /just run it|action: "run"/.test(notes[notes.length - 1]), false);
+	await s6.commands.expert.handler("helper", cc);
+	has("/expert <name>: details with the brief", notes[notes.length - 1], "  Brief");
+	has("/expert <name>: how to enable", notes[notes.length - 1], "/expert enable helper");
 	await s6.commands.expert.handler("enable helper", cc);
 	t("/expert enable: no dialog, remembered", [notes[notes.length - 1], state().experts.helper], ["The helper expert is enabled (remembered).", true]);
 	await s6.commands.expert.handler("enable nope", cc);

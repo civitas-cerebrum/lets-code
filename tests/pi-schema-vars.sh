@@ -15,14 +15,14 @@ d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
 # vLLM chat-template mode with the server template exposing effort control
 # (non-empty effort map): the reasoning_effort kwarg carries pi's name for
 # the current thinking level, not lets-code's own wording.
-PI_AGENT_DIR="$d/vllm" pi_write_configs http://192.168.0.114/vllm/v1 openai-completions qwen 196608 32768 false true medium '{"low": "low"}'
+PI_AGENT_DIR="$d/vllm" pi_write_configs http://10.0.0.5/vllm/v1 openai-completions qwen 196608 32768 false true medium '{"low": "low"}'
 m="$d/vllm/models.json"
 check "effort \$var is pi's thinking.effort" "$(python3 -c "import json;print(json.load(open('$m'))['providers']['lets-code']['compat']['chatTemplateKwargs']['reasoning_effort']['\$var'])")" "thinking.effort"
 check "effort kwarg omitted when thinking off" "$(python3 -c "import json;print(json.load(open('$m'))['providers']['lets-code']['compat']['chatTemplateKwargs']['reasoning_effort'].get('omitWhenOff'))")" "True"
 check "level map kept with the kwarg" "$(python3 -c "import json;print(json.load(open('$m'))['providers']['lets-code']['models'][0].get('thinkingLevelMap'))")" "{'low': 'low'}"
 
 # the same call without an effort map: the kwarg is absent, not a stub
-PI_AGENT_DIR="$d/nomap" pi_write_configs http://192.168.0.114/vllm/v1 openai-completions qwen 196608 32768 false true medium ''
+PI_AGENT_DIR="$d/nomap" pi_write_configs http://10.0.0.5/vllm/v1 openai-completions qwen 196608 32768 false true medium ''
 check "no effort kwarg without effort map" "$(python3 -c "import json;print('reasoning_effort' in json.load(open('$d/nomap/models.json'))['providers']['lets-code']['compat']['chatTemplateKwargs'])")" "False"
 
 # the whole class: every \$var the writer may emit (chatTemplateKwargs or

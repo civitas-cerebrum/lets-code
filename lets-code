@@ -6493,7 +6493,9 @@ First line: `tiers: <the probe's tiers line>`. Then for each action:
   state), `system-accepted` (rc=0, no error, and the control check behaved
   differently), `foreground-confirmed` (the "brought to the front" warning,
   or a fresh start with rc=0 plus a sane control), `api-read` (a termux-api
-  command's JSON: quote the fields used), `awaiting-confirmation`
+  read's JSON: quote the fields used; a termux-api action such as a toast
+  is `system-accepted` only when `termux-battery-status` prints JSON as
+  its control, never a bad flag), `awaiting-confirmation`
   (prepared; the final step is the user's), or `on-screen-unverifiable`
 End with what the user must do next, if anything (tap Send, confirm, a
 setup step). Quote errors; don't paraphrase them.
@@ -6613,7 +6615,7 @@ if ! cli; then
     if DEBIAN_FRONTEND=noninteractive to 600 pkg install -y termux-api </dev/null >"${log}" 2>&1 && cli; then
         c=installed
     else
-        c="failed ($(grep -v '^\s*$' "${log}" | tail -n 1 | cut -c1-160))"
+        c="failed ($(grep -v '^[[:space:]]*$' "${log}" | tail -n 1 | cut -c1-160))"
     fi
     rm -f "${log}"
 fi
@@ -7329,11 +7331,13 @@ The commands talk to the Termux:API app; without it they hang, even when
 | wifi network | `termux-wifi-connectioninfo` | `dumpsys wifi` |
 | open a URL | `termux-open-url` (core, no app) | — |
 | speak text | `termux-tts-speak` | — |
-Evidence: a read's JSON is the evidence (`api-read`). A toast or
-notification can't be seen from here: check a notification with
-`termux-notification-list` (needs Notification access), else report the
-rc. Control check for the channel itself: `timeout 20 termux-battery-status`
-must print JSON.
+Evidence: a read's JSON is the evidence (`api-read`). An action (toast,
+notification, vibrate, torch) prints nothing: its rc 0 is
+`system-accepted` only when the channel's control,
+`timeout 20 termux-battery-status`, prints JSON. A bad flag is no control
+(the script rejects it before the app is reached). You cannot see a toast:
+say it was sent, not seen. A notification you can check with
+`termux-notification-list` (needs Notification access).
 
 ## Device state and sensors
 - `termux-battery-status`: JSON percentage, status, plugged, health,

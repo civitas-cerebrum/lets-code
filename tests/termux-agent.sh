@@ -56,6 +56,8 @@ t "api ref: one line in the body" "$(grep -c 'Every command: `ref/api.md`' "${af
 t "api ref: prefer it over am/dumpsys" "$(grep -c 'goes through it at tier 1, not hand-rolled `am`, `dumpsys` or `settings`' "${af}")" 1
 t "api ref: never without tier 1" "$(grep -c 'call none of them; with it, wrap each in `timeout 20`' "${af}")" 1
 t "api ref: verification api-read" "$(grep -c '`api-read`' "${af}")" 1
+t "api ref: an action's control is a read" "$(grep -c 'is `system-accepted` only when `termux-battery-status` prints JSON' "${af}")" 1
+t "api ref: a bad flag is no control" "$(grep -c 'A bad flag is no control' "${T}/ref/api.md")" 1
 t "api ref: not in the frontmatter" "$(sed -n '2,/^---$/p' "${af}" | grep -c 'api.md' || true)" 0
 t "tiers.md points to api.md"     "$(grep -c 'ref/api.md' "${T}/ref/tiers.md")" 2
 # every command of the termux-api package (0.60.0), in its reference

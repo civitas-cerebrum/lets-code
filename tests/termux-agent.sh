@@ -54,6 +54,7 @@ t "failed launch: re-derive first"     "$(grep -c 'When a launch' "${af}")" 1
 t "accounts: device state, not dotfiles" "$(grep -c '^## Accounts: ' "${af}")" 1
 t "accounts: dumpsys at tier 2"        "$(grep -c "bin/ui sh 'dumpsys account'" "${af}")" 1
 t "accounts: settings at tier 0"       "$(grep -c 'android.settings.SYNC_SETTINGS' "${af}")" 1
+t "accounts: no file search at tier 0" "$(grep -c 'Do not search files instead' "${af}")" 1
 t "accounts: names its source"         "$(grep -c '^Report only the account the goal asks about, and always its source' "${af}")" 1
 t "consent: final step needs confirmed" "$(grep -c "brief's \`confirmed\` field" "${af}")" 1
 t "safety: no wireless debugging"       "$(grep -c 'enable developer options or wireless debugging' "${af}")" 1

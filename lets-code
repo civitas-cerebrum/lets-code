@@ -808,7 +808,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // pi's load order when they were separate extensions (alphabetical)
-export const FEATURES = ["agent-guard", "backend", "claude-code", "footer", "git-guard", "grounding", "mandate", "memory-guard", "sandbox", "session-tag", "experts", "subagents", "thinking"];
+export const FEATURES = ["agent-guard", "backend", "claude-code", "footer", "git-guard", "grounding", "mandate", "memory-guard", "sandbox", "session-tag", "experts", "factory", "subagents", "thinking"];
 
 export function moduleFile(dir: string, name: string): string | undefined {
 	return [join(dir, `${name}.ts`), join(dir, name, "index.ts")].find((f) => existsSync(f));
@@ -6058,6 +6058,482 @@ TS
 # reverse-engineer, your own), behind one small tool, `expert`. Each is
 # an agent file with `expert: true`; the user enables one (a dialog, or
 # /experts enable), its setup runs then, and the choice is remembered.
+# The software factory's engine (phase 2): a module next to the experts,
+# with no tool and nothing in the system prompt; its entry point is internal
+# (/factory with LETS_CODE_FACTORY_DEV=1) until the software-factory expert
+# wraps it. Its stages are expert runs through the subagents module.
+pi_write_factory_extension() {
+    local dir f tmp
+    lc_ext_module factory; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
+    tmp="$(mktemp "${dir}/.factory.XXXXXX")"
+    cat > "${tmp}" <<'TS'
+// Written by lets-code (factory); regenerated on launch, edits are overwritten.
+// The software factory's engine: takes one ticket through a pipeline of
+// expert stages, each a fresh child with a brief built from the run's
+// artifacts (the ticket, the confirmed criteria, the approved plan, the
+// diff, earlier findings), never from a conversation:
+//   intake (criteria from the ticket, the suite's baseline)
+//   -> developer, plan        -> checkpoint: the user approves the plan
+//   -> developer, build -> expert-reviewer -> design-reviewer -> tester
+//   -> acceptance-judge -> regression (the suite, run by the engine)
+//   -> checkpoint: the user approves the result before anything is committed.
+// The criteria are confirmed (or edited) at a checkpoint before planning.
+// A REVISE / REJECT / failing suite sends its findings back to the developer
+// (at most MAX_FIX_ROUNDS rounds); a finding id the developer was already
+// sent stops the loop and asks the user. Without a UI every checkpoint
+// pauses the run: its ledger is saved and resumeRun() goes on from there.
+// Each run has its own git worktree and branch (pi/factory-<id>) of the
+// target repo, under ~/.pi/agent/lets-code-factory/<id>/, next to its
+// ledger and artifacts; the user's checkout is never touched. Stages run
+// through the subagents module's runner, so they show in /subagents. The
+// caller sees stage summaries only. Nothing is added to the model's context:
+// no tool, no prompt section; the /factory command is an internal entry
+// point (LETS_CODE_FACTORY_DEV=1) until the software-factory expert wraps it.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ACTIVE = process.env.LETS_CODE_EXPERTS_ON === "1" && process.env.LETS_CODE_SUBAGENTS_ON === "1";
+const DEPTH = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
+export const factoryRoot = () => join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "lets-code-factory");
+export const MAX_FIX_ROUNDS = 5;
+export const SUITE_TIMEOUT_MS = 10 * 60 * 1000;
+
+export type Stage = "intake" | "plan" | "build" | "expert-review" | "design-review" | "test" | "judge" | "regression" | "done";
+export const PIPELINE: Stage[] = ["intake", "plan", "build", "expert-review", "design-review", "test", "judge", "regression", "done"];
+export const EXPERT: Partial<Record<Stage, string>> = { plan: "developer", build: "developer", "expert-review": "expert-reviewer", "design-review": "design-reviewer", test: "tester", judge: "acceptance-judge" };
+const PREFIX: Partial<Record<Stage, string>> = { "expert-review": "R", "design-review": "D", test: "T", judge: "C", regression: "REG" };
+export type Waiting = "criteria" | "plan" | "result" | "stuck" | "blocked";
+
+export interface Finding { id: string; severity: string; where: string; title: string; detail: string }
+export interface Entry {
+	stage: Stage; round: number; expert?: string; brief?: string; output?: string;
+	verdict: string; summary: string; findings?: string[];
+	input: number; output_tokens: number; seconds: number; started: number; ended: number;
+}
+export interface Ledger {
+	v: 1; id: string; created: number; updated: number;
+	repo: string; base: string; branch: string; work: string; dir: string;
+	ticket: string; howToRun: string; constraints: string; conventions: string; tester: "auto" | "on" | "off";
+	status: "running" | "waiting" | "done" | "stopped";
+	waiting: Waiting | null; note: string;
+	stage: Stage; rounds: number;
+	criteria: string[]; plan: string; claim: string;
+	findings: Partial<Record<Stage, Finding[]>>;   // each review stage's open findings, from its last verdict
+	sent: Record<string, string[]>;                // finding ids already sent to the developer, per stage
+	fixing: { stage: Stage; findings: Finding[] } | null;   // what the next build fixes, and where to go on
+	pending: { stage: Stage; findings: Finding[] } | null;  // a fix round waiting for the user (stuck)
+	baseline: { code: number; tail: string } | null;
+	commit: string;
+	entries: Entry[];
+}
+export interface Dispatched { text: string; exitCode: number; input: number; output: number; seconds: number }
+export interface Decision { action: "approve" | "edit" | "stop" | "more" | "final" | "retry" | "commit" | "keep"; text?: string }
+export interface Deps {
+	dispatch(expert: string, brief: Record<string, string>, cwd: string, meta: { stage: Stage; round: number; runId: string }): Promise<Dispatched>;
+	exec(cmd: string, cwd: string, timeoutMs?: number): Promise<{ code: number; out: string }>;
+	checkpoint(kind: Waiting, L: Ledger): Promise<Decision | null>;   // null: no one to ask, pause
+	available?(expert: string): boolean;   // the tester stage runs only where tester is usable and set up
+	progress?(line: string): void;
+	now?(): number;
+}
+
+// ------------------------------------------------------------------ parsing
+const clean = (l: string) => l.replace(/`/g, "").replace(/\*\*/g, "").replace(/^\s*(?:[>#]+\s*|[-*]\s+)?/, "").trim();
+// the first STATUS: / VERDICT: line anywhere in the message, backticks and bold stripped
+export function lineValue(text: string, key: string): string | null {
+	const re = new RegExp(`^${key}:\\s*([A-Za-z_]+)`, "i");
+	for (const raw of (text || "").split(/\r?\n/)) { const m = re.exec(clean(raw)); if (m) return m[1].toUpperCase(); }
+	return null;
+}
+// finding lines `R1 | major | src/a.js:4 | confirmed | title` and the indented lines under them
+export function parseFindings(text: string, prefix: string): Finding[] {
+	const out: Finding[] = []; let cur: Finding | null = null;
+	const head = new RegExp(`^(${prefix}\\d+)\\s*\\|\\s*(blocker|major|minor|nit)\\s*\\|\\s*([^|]*?)\\s*\\|\\s*(.*)$`, "i");
+	for (const raw of (text || "").split(/\r?\n/)) {
+		const l = clean(raw); const m = head.exec(l);
+		if (m) {
+			const rest = m[4].split("|").map((s) => s.trim()); const title = rest.length > 1 && /^(confirmed|suspected)$/i.test(rest[0]) ? rest.slice(1).join(" | ") : rest.join(" | ");
+			cur = { id: m[1].toUpperCase(), severity: m[2].toLowerCase(), where: m[3], title, detail: "" }; out.push(cur); continue;
+		}
+		if (/^#{1,6}\s/.test(raw.trim()) || (!raw.trim() && cur?.detail)) { cur = null; continue; }
+		if (cur && raw.trim()) cur.detail = cur.detail ? `${cur.detail}\n${raw.trim()}` : raw.trim();
+	}
+	return out;
+}
+// the acceptance judge: ACCEPT / REJECT, and every criterion that is not PASS as a finding C<n>
+export function parseJudge(text: string): { verdict: string | null; failing: Finding[] } {
+	const lines = (text || "").split(/\r?\n/); let verdict: string | null = null; const failing: Finding[] = []; let cur: Finding | null = null;
+	for (let i = 0; i < lines.length; i++) {
+		const l = clean(lines[i]);
+		if (!verdict) { const v = /^(ACCEPT|REJECT)\b/i.exec(l) || /^verdict:\s*(ACCEPT|REJECT)\b/i.exec(l); if (v) { verdict = v[1].toUpperCase(); continue; } }
+		const c = /^(C\d+):\s*(PASS|FAIL|UNVERIFIABLE)\b(.*)$/i.exec(l);
+		if (c) { cur = null; if (c[2].toUpperCase() !== "PASS") { cur = { id: c[1].toUpperCase(), severity: "blocker", where: "criterion", title: `${c[2].toUpperCase()}${c[3].replace(/^[\s:|-]+/, " ").trimEnd()}`, detail: "" }; failing.push(cur); } continue; }
+		if (/^#{1,6}\s/.test(lines[i].trim())) { cur = null; continue; }
+		if (cur && lines[i].trim()) cur.detail = cur.detail ? `${cur.detail}\n${lines[i].trim()}` : lines[i].trim();
+	}
+	return { verdict, failing };
+}
+// the acceptance criteria of a ticket: the list under a heading or line that says so
+export function parseCriteria(ticket: string): string[] {
+	const lines = (ticket || "").split(/\r?\n/); const out: string[] = []; let on = false;
+	for (const raw of lines) {
+		const l = raw.trim();
+		if (/^(#+\s*)?(acceptance criteria|criteria|definition of done)\b.*:?$/i.test(l.replace(/\*\*/g, ""))) { on = true; continue; }
+		if (!on) continue;
+		if (/^#+\s/.test(l)) { if (out.length) break; continue; }
+		const item = /^(?:\d+[.)]|[-*+]|C\d+[:.)]|\[[ x]\])\s+(.*)$/i.exec(l);
+		if (item) out.push(item[1].replace(/^\[[ x]\]\s*/i, "").trim());
+		else if (l && out.length) out[out.length - 1] += ` ${l}`;
+	}
+	return out;
+}
+// criteria the user typed or edited: one per line, numbering optional
+export function criteriaFromText(text: string): string[] {
+	return (text || "").split(/\r?\n/).map((l) => l.trim().replace(/^(?:C?\d+[.):]|[-*+])\s*/i, "").trim()).filter(Boolean);
+}
+const numbered = (c: string[]) => c.map((x, i) => `C${i + 1}. ${x}`).join("\n");
+// the message without its STATUS line (first or last), and from its first
+// heading on when it has one: what the developer planned or reported, not
+// its remarks around it
+export function bodyOf(text: string, key: string): string {
+	const re = new RegExp(`^${key}:`, "i");
+	const lines = (text || "").split(/\r?\n/).filter((l) => !re.test(clean(l)));
+	const h = lines.findIndex((l) => /^#{1,6}\s/.test(l.trim()));
+	return (h >= 0 ? lines.slice(h) : lines).join("\n").trim();
+}
+const formatFindings = (fs: Finding[]) => fs.map((f) => `${f.id} | ${f.severity} | ${f.where} | ${f.title}${f.detail ? `\n${f.detail.split("\n").map((d) => `  ${d}`).join("\n")}` : ""}`).join("\n");
+const short = (s: string, n = 140) => { const t = (s || "").replace(/\s+/g, " ").trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
+
+// ------------------------------------------------------------------ ledger
+export function newId(now = Date.now()): string {
+	const d = new Date(now); const p = (n: number) => String(n).padStart(2, "0");
+	return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${Math.random().toString(16).slice(2, 6)}`;
+}
+export function saveLedger(L: Ledger, now = Date.now()): void {
+	L.updated = now; mkdirSync(L.dir, { recursive: true });
+	const f = join(L.dir, "ledger.json"); const tmp = `${f}.${process.pid}.tmp`;
+	writeFileSync(tmp, JSON.stringify(L, null, 2) + "\n", { mode: 0o600 }); renameSync(tmp, f);
+}
+export function loadLedger(id: string, root = factoryRoot()): Ledger | null {
+	try { const L = JSON.parse(readFileSync(join(root, id, "ledger.json"), "utf8")); return L && L.v === 1 ? L : null; } catch { return null; }
+}
+export function listRuns(root = factoryRoot()): Ledger[] {
+	let ids: string[] = []; try { ids = readdirSync(root); } catch { return []; }
+	return ids.map((id) => loadLedger(id, root)).filter((L): L is Ledger => !!L).sort((a, b) => b.created - a.created);
+}
+function artifact(L: Ledger, name: string, text: string): string {
+	const d = join(L.dir, "artifacts"); mkdirSync(d, { recursive: true }); writeFileSync(join(d, name), text, { mode: 0o600 });
+	return join("artifacts", name);
+}
+
+// ------------------------------------------------------------------ briefs
+// Every brief is built from the ledger alone: the ticket, the confirmed
+// criteria, the approved plan, the developer's last report, the diff on disk
+// and the findings with their ids. No conversation reaches a stage.
+export function diffPath(L: Ledger): string { return join(L.dir, "artifacts", "change.patch"); }
+export function briefFor(stage: Stage, L: Ledger): Record<string, string> {
+	const criteria = numbered(L.criteria);
+	const where = `${L.work} (its own git worktree on ${L.branch}). The change is the work tree against commit ${L.base}: \`git -C ${L.work} diff ${L.base}\` (new files are staged, so they show), also saved as ${diffPath(L)}.`;
+	const prev = (s: Stage) => (L.findings[s]?.length ? formatFindings(L.findings[s]!) : "");
+	const context = `Ticket:\n${L.ticket}${L.plan ? `\n\nApproved plan:\n${L.plan}` : ""}`;
+	const keep = [L.constraints, "Do not commit, push or open anything: the user approves the result first."].filter(Boolean).join("\n");
+	const b: Record<string, string> = {};
+	if (stage === "plan" || stage === "build") {
+		Object.assign(b, { task: L.ticket, criteria, mode: stage === "plan" ? "plan" : "build", how_to_run: L.howToRun, constraints: keep });
+		if (stage === "build") { b.plan = L.plan; if (L.fixing) b.findings = `Fix these findings of the ${L.fixing.stage} stage, by id:\n${formatFindings(L.fixing.findings)}`; }
+	} else if (stage === "expert-review") {
+		Object.assign(b, { diff: where, criteria, context, previous_findings: prev(stage), how_to_run: L.howToRun, constraints: L.constraints });
+	} else if (stage === "design-review") {
+		Object.assign(b, { diff: where, context, conventions: L.conventions, previous_findings: prev(stage), constraints: L.constraints });
+	} else if (stage === "test") {
+		Object.assign(b, { target: L.work, goal: `Verify the change for this ticket end to end, and find what it breaks. The change: ${where}\n\nCriteria:\n${criteria}`, how_to_run: L.howToRun, constraints: keep,
+			report: `Start your final message with the line VERDICT: APPROVE (nothing the change causes fails) or VERDICT: REVISE, then your usual headings; in Findings, one line per failure: T<n> | blocker|major|minor|nit | where | title.${prev(stage) ? `\nRe-check these earlier failures, keeping their ids:\n${prev(stage)}` : ""}` });
+	} else if (stage === "judge") {
+		Object.assign(b, { criteria, artifact: where, claim: L.claim, how_to_run: L.howToRun, constraints: L.constraints });
+	}
+	for (const k of Object.keys(b)) if (!b[k]) delete b[k];
+	return b;
+}
+
+// ------------------------------------------------------------------ the engine
+const next = (s: Stage): Stage => PIPELINE[Math.min(PIPELINE.indexOf(s) + 1, PIPELINE.length - 1)];
+export function summary(L: Ledger): string {
+	const lines = L.entries.map((e) => `- ${e.stage}${e.round ? ` (fix round ${e.round})` : ""}: ${e.verdict}${e.summary ? `, ${e.summary}` : ""}${e.seconds ? ` [${Math.round(e.seconds)} s${e.input ? `, ↑${e.input} ↓${e.output_tokens}` : ""}]` : ""}`);
+	const state = L.status === "waiting" || (L.waiting && L.status === "running") ? `waiting for the user: ${L.waiting}${L.note ? ` (${L.note})` : ""}` : L.status === "done" ? `done${L.commit ? `, committed ${L.commit.slice(0, 10)} on ${L.branch}` : `, left uncommitted on ${L.branch}`}` : L.status === "stopped" ? `stopped${L.note ? `: ${L.note}` : ""}` : `running: ${L.stage}`;
+	return [`factory run ${L.id}: ${state}`, `work tree: ${L.work}`, ...lines].join("\n");
+}
+
+async function stageRun(L: Ledger, deps: Deps, stage: Stage): Promise<{ text: string; ok: boolean; entry: Entry }> {
+	const now = deps.now ?? Date.now; const expert = EXPERT[stage]!; const brief = briefFor(stage, L);
+	const n = L.entries.length + 1; const started = now();
+	deps.progress?.(`factory ${L.id}: ${stage}${L.rounds && stage !== "plan" ? ` (round ${L.rounds})` : ""} -> ${expert}`);
+	const briefFile = artifact(L, `${String(n).padStart(2, "0")}-${stage}.brief.json`, JSON.stringify(brief, null, 2) + "\n");
+	let r: Dispatched;
+	try { r = await deps.dispatch(expert, brief, L.work, { stage, round: L.rounds, runId: L.id }); }
+	catch (e) { r = { text: `dispatch failed: ${e instanceof Error ? e.message : String(e)}`, exitCode: 1, input: 0, output: 0, seconds: 0 }; }
+	const out = artifact(L, `${String(n).padStart(2, "0")}-${stage}.out.md`, r.text);
+	const entry: Entry = { stage, round: L.rounds, expert, brief: briefFile, output: out, verdict: "", summary: "", input: r.input, output_tokens: r.output, seconds: r.seconds, started, ended: now() };
+	return { text: r.text, ok: r.exitCode === 0, entry };
+}
+async function snapshot(L: Ledger, deps: Deps): Promise<string> {
+	// new files staged so `git diff <base>` shows them; the worktree is the engine's own
+	await deps.exec(`git add -A`, L.work);
+	const d = await deps.exec(`git diff ${L.base}`, L.work);
+	mkdirSync(join(L.dir, "artifacts"), { recursive: true }); writeFileSync(diffPath(L), d.out, { mode: 0o600 });
+	const stat = await deps.exec(`git diff --shortstat ${L.base}`, L.work);
+	return stat.out.trim();
+}
+// a failed stage's findings go back to the developer, unless one of them was sent before
+function fixRound(L: Ledger, stage: Stage, toFix: Finding[], force = false): void {
+	const sent = L.sent[stage] ?? [];
+	const repeated = toFix.filter((f) => sent.includes(f.id)).map((f) => f.id);
+	if (!force && (repeated.length || L.rounds >= MAX_FIX_ROUNDS)) {
+		L.pending = { stage, findings: toFix }; L.waiting = "stuck";
+		L.note = repeated.length ? `${stage}: ${repeated.join(", ")} came back after a fix` : `${MAX_FIX_ROUNDS} fix rounds used; ${stage} still fails`;
+		return;
+	}
+	L.rounds++; L.sent[stage] = [...new Set([...sent, ...toFix.map((f) => f.id)])];
+	L.fixing = { stage, findings: toFix }; L.pending = null; L.stage = "build";
+}
+function blocked(L: Ledger, why: string): void { L.waiting = "blocked"; L.note = why; }
+
+// one step of the pipeline; false when the run stops or waits
+async function step(L: Ledger, deps: Deps): Promise<boolean> {
+	const stage = L.stage;
+	if (stage === "done") { L.waiting = "result"; return true; }
+	if (stage === "intake") {
+		if (!L.criteria.length) L.criteria = parseCriteria(L.ticket);
+		if (L.howToRun && !L.baseline) { const r = await deps.exec(L.howToRun, L.work, SUITE_TIMEOUT_MS); L.baseline = { code: r.code, tail: r.out.slice(-1500) }; }
+		const t = (deps.now ?? Date.now)();
+		L.entries.push({ stage, round: 0, verdict: L.criteria.length ? `${L.criteria.length} criteria` : "no criteria found", summary: L.baseline ? `suite before the change: exit ${L.baseline.code}` : "no how_to_run: no baseline", input: 0, output_tokens: 0, seconds: 0, started: t, ended: t });
+		L.stage = "plan"; L.waiting = "criteria"; return true;
+	}
+	if (stage === "regression") {
+		const t0 = (deps.now ?? Date.now)();
+		if (!L.howToRun) { L.entries.push({ stage, round: L.rounds, verdict: "SKIPPED", summary: "no how_to_run", input: 0, output_tokens: 0, seconds: 0, started: t0, ended: t0 }); L.stage = "done"; return true; }
+		await snapshot(L, deps);
+		const r = await deps.exec(L.howToRun, L.work, SUITE_TIMEOUT_MS); const t1 = (deps.now ?? Date.now)();
+		const out = artifact(L, `${String(L.entries.length + 1).padStart(2, "0")}-regression.out.md`, `$ ${L.howToRun}\nexit ${r.code}\n\n${r.out.slice(-20000)}`);
+		const before = L.baseline?.code;
+		const pass = r.code === 0; const failedBefore = before !== undefined && before !== 0;
+		const verdict = pass ? "PASS" : failedBefore ? "FAIL (as before the change)" : "FAIL";
+		L.entries.push({ stage, round: L.rounds, output: out, verdict, summary: `\`${short(L.howToRun, 60)}\` exit ${r.code}${failedBefore ? `, exit ${before} before the change` : ""}`, input: 0, output_tokens: 0, seconds: (t1 - t0) / 1000, started: t0, ended: t1 });
+		if (pass || failedBefore) { L.stage = "done"; if (failedBefore && !pass) L.note = "the suite failed before the change too"; return true; }
+		fixRound(L, stage, [{ id: "REG1", severity: "blocker", where: L.howToRun, title: "the test suite fails after the change", detail: r.out.slice(-3000) }]);
+		return true;
+	}
+	if (stage === "test" && (L.tester === "off" || (L.tester === "auto" && !(deps.available?.("tester") ?? false)))) {
+		const t = (deps.now ?? Date.now)();
+		L.entries.push({ stage, round: L.rounds, verdict: "SKIPPED", summary: L.tester === "off" ? "tester off for this run" : "the tester expert is not usable or not set up here", input: 0, output_tokens: 0, seconds: 0, started: t, ended: t });
+		L.stage = next(stage); return true;
+	}
+	const { text, ok, entry } = await stageRun(L, deps, stage);
+	L.entries.push(entry);
+	if (stage === "plan" || stage === "build") {
+		// no STATUS line: a plan with its "## Plan" heading is a plan, a report with "## Changes" a build
+		const said = lineValue(text, "STATUS");
+		const st = said ?? (ok && stage === "plan" && /^#{1,3}\s*Plan\b/im.test(text) ? "PLAN" : ok && stage === "build" && /^#{1,3}\s*Changes\b/im.test(text) ? "DONE" : null);
+		entry.verdict = st ? (said ? st : `${st} (no STATUS line)`) : ok ? "NO STATUS" : "FAILED";
+		if (stage === "plan" && st === "PLAN") { L.plan = bodyOf(text, "STATUS"); entry.summary = short(L.plan.split("\n").find((l) => /^\s*1[.)]/.test(l)) ?? L.plan); L.stage = "build"; L.waiting = "plan"; return true; }
+		if (stage === "build" && st === "DONE") {
+			L.claim = bodyOf(text, "STATUS"); const stat = await snapshot(L, deps); entry.summary = stat || "no change in the work tree";
+			if (!stat) { blocked(L, "the developer reported DONE but the work tree has no change"); return true; }
+			if (L.fixing) { L.stage = L.fixing.stage; L.fixing = null; } else L.stage = next(stage);
+			return true;
+		}
+		entry.summary = short(bodyOf(text, "STATUS") || text);
+		blocked(L, `${stage}: ${st === "BLOCKED" ? "the developer is blocked" : ok ? "no STATUS line in the developer's reply" : "the developer's run failed"}: ${short(bodyOf(text, "STATUS") || text, 200)}`);
+		return true;
+	}
+	let verdict: string | null; let found: Finding[];
+	if (stage === "judge") { const j = parseJudge(text); verdict = j.verdict === "ACCEPT" ? "APPROVE" : j.verdict === "REJECT" ? "REVISE" : null; found = j.failing; entry.verdict = j.verdict ?? (ok ? "NO VERDICT" : "FAILED"); }
+	else { verdict = lineValue(text, "VERDICT"); found = parseFindings(text, PREFIX[stage]!); entry.verdict = verdict ?? (ok ? "NO VERDICT" : "FAILED"); }
+	const open = found.filter((f) => stage === "judge" || f.severity === "blocker" || f.severity === "major");
+	entry.findings = found.map((f) => `${f.id}:${f.severity}`);
+	entry.summary = found.length ? `${found.length} finding${found.length === 1 ? "" : "s"} (${open.length} to fix)` : "no findings";
+	if (verdict === "APPROVE") { L.findings[stage] = found; L.stage = next(stage); return true; }
+	if (verdict === "REVISE") {
+		L.findings[stage] = found;
+		if (!open.length) { L.stage = next(stage); entry.summary += "; REVISE without a blocker or major: going on"; return true; }
+		fixRound(L, stage, open); return true;
+	}
+	blocked(L, `${stage}: ${ok ? `no verdict line in ${EXPERT[stage]}'s reply` : `${EXPERT[stage]}'s run failed: ${short(text, 200)}`}`);
+	return true;
+}
+
+async function applyDecision(L: Ledger, d: Decision, deps: Deps): Promise<void> {
+	const kind = L.waiting!; L.waiting = null; L.note = "";
+	if (d.action === "stop") { L.status = "stopped"; L.note = `the user stopped it at the ${kind} checkpoint`; return; }
+	if (kind === "criteria") { if (d.text !== undefined) L.criteria = criteriaFromText(d.text); if (!L.criteria.length) { L.waiting = "criteria"; L.note = "no criteria: write at least one"; } return; }
+	if (kind === "plan") { if (d.text !== undefined && d.text.trim()) L.plan = d.text.trim(); return; }
+	if (kind === "blocked") return;   // retry: the stage runs again
+	if (kind === "stuck") {
+		const p = L.pending; L.pending = null;
+		if (d.action === "final") { L.stage = "done"; return; }
+		if (p && L.rounds < MAX_FIX_ROUNDS) fixRound(L, p.stage, p.findings, true); else { L.status = "stopped"; L.note = `${MAX_FIX_ROUNDS} fix rounds used`; }
+		return;
+	}
+	if (kind === "result") {
+		if (d.action === "commit") {
+			await deps.exec(`git add -A`, L.work);
+			const msg = `${(L.ticket.split("\n").find((l) => l.trim()) ?? "factory run").replace(/^#+\s*/, "").slice(0, 72)}\n\nsoftware factory run ${L.id}`;
+			artifact(L, "commit-message.txt", msg);
+			// one commit on the run's branch from the base, whatever the children's checkpoints did to HEAD
+			const tree = (await deps.exec(`git write-tree`, L.work)).out.trim();
+			const c = await deps.exec(`git commit-tree ${tree} -p ${L.base} -F ${join(L.dir, "artifacts", "commit-message.txt")}`, L.work);
+			const sha = c.out.trim();
+			if (c.code === 0 && /^[0-9a-f]{40}$/.test(sha)) { await deps.exec(`git update-ref refs/heads/${L.branch} ${sha}`, L.work); await deps.exec(`git symbolic-ref HEAD refs/heads/${L.branch}`, L.work); L.commit = sha; }
+			else { L.waiting = "result"; L.note = `commit failed: ${short(c.out, 200)}`; return; }
+		}
+		L.status = "done";
+	}
+}
+
+// Runs the pipeline from where the ledger stands until it is done, stopped
+// or waiting for a user who cannot be asked. Saves the ledger after each step.
+export async function advance(L: Ledger, deps: Deps): Promise<Ledger> {
+	L.status = L.status === "waiting" ? "running" : L.status;
+	for (let guard = 0; guard < 200 && L.status === "running"; guard++) {
+		if (L.waiting) {
+			const d = await deps.checkpoint(L.waiting, L);
+			if (!d) { L.status = "waiting"; saveLedger(L, (deps.now ?? Date.now)()); return L; }
+			await applyDecision(L, d, deps); saveLedger(L, (deps.now ?? Date.now)()); continue;
+		}
+		await step(L, deps); saveLedger(L, (deps.now ?? Date.now)());
+		deps.progress?.(summary(L).split("\n").pop() ?? "");
+	}
+	return L;
+}
+
+export interface StartOpts { ticket: string; repo: string; howToRun?: string; constraints?: string; conventions?: string; tester?: "auto" | "on" | "off"; criteria?: string[]; root?: string; id?: string }
+// a new run: its dir, its worktree and branch from the repo's HEAD, its ledger
+export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
+	const now = (deps.now ?? Date.now)(); const id = o.id ?? newId(now); const dir = join(o.root ?? factoryRoot(), id);
+	const top = await deps.exec(`git rev-parse --show-toplevel`, resolve(o.repo));
+	if (top.code !== 0) throw new Error(`${o.repo} is not a git repository`);
+	const repo = top.out.trim(); const base = (await deps.exec(`git rev-parse HEAD`, repo)).out.trim();
+	const branch = `pi/factory-${id}`; const work = join(dir, "work");
+	mkdirSync(dir, { recursive: true });
+	const add = await deps.exec(`git worktree add -q -b ${branch} ${JSON.stringify(work)} ${base}`, repo);
+	if (add.code !== 0) throw new Error(`git worktree add failed: ${short(add.out, 300)}`);
+	const L: Ledger = { v: 1, id, created: now, updated: now, repo, base, branch, work, dir, ticket: o.ticket.trim(), howToRun: o.howToRun ?? "", constraints: o.constraints ?? "", conventions: o.conventions ?? "",
+		tester: o.tester ?? "auto", status: "running", waiting: null, note: "", stage: "intake", rounds: 0, criteria: o.criteria ?? [], plan: "", claim: "", findings: {}, sent: {}, fixing: null, pending: null, baseline: null, commit: "", entries: [] };
+	writeFileSync(join(dir, "ticket.md"), L.ticket + "\n", { mode: 0o600 });
+	saveLedger(L, now);
+	return advance(L, deps);
+}
+export async function resumeRun(id: string, deps: Deps, root = factoryRoot()): Promise<Ledger> {
+	const L = loadLedger(id, root); if (!L) throw new Error(`no factory run ${id}`);
+	if (L.status === "done" || L.status === "stopped") return L;
+	if (L.status !== "waiting") L.status = "running";   // interrupted mid-stage: that stage runs again
+	return advance(L, deps);
+}
+
+// ------------------------------------------------------------------ in a session
+export function shellExec(cmd: string, cwd: string, timeoutMs = 120000): Promise<{ code: number; out: string }> {
+	return new Promise((res) => {
+		let out = ""; const child = spawn("bash", ["-c", cmd], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true });
+		const timer = setTimeout(() => { try { process.kill(-child.pid!, "SIGKILL"); } catch { /* gone */ } }, timeoutMs); timer.unref?.();
+		const add = (d: Buffer) => { out += d.toString(); if (out.length > 200000) out = out.slice(-100000); };
+		child.stdout.on("data", add); child.stderr.on("data", add);
+		child.on("error", (e) => { clearTimeout(timer); res({ code: 127, out: e.message }); });
+		child.on("close", (code) => { clearTimeout(timer); res({ code: code ?? 1, out }); });
+	});
+}
+// the checkpoints as dialogs; no UI: null (the run pauses)
+export function dialogs(ui: any | undefined): Deps["checkpoint"] {
+	return async (kind, L) => {
+		if (!ui) return null;
+		if (kind === "criteria") {
+			for (;;) {
+				const c = await ui.select(`Factory ${L.id}: acceptance criteria\n\n${L.criteria.length ? numbered(L.criteria) : "(none found in the ticket)"}`, ["Confirm", "Edit", "Stop"]);
+				if (c === "Confirm" && L.criteria.length) return { action: "approve" };
+				if (c === "Edit" || (c === "Confirm" && !L.criteria.length)) { const t = await ui.editor("Acceptance criteria, one per line", L.criteria.join("\n")); if (t === undefined) continue; return { action: "edit", text: t }; }
+				return { action: "stop" };
+			}
+		}
+		if (kind === "plan") {
+			const c = await ui.select(`Factory ${L.id}: the developer's plan\n\n${L.plan}`, ["Approve", "Edit", "Stop"]);
+			if (c === "Approve") return { action: "approve" };
+			if (c === "Edit") { const t = await ui.editor("The plan to follow", L.plan); return t === undefined ? { action: "approve" } : { action: "edit", text: t }; }
+			return { action: "stop" };
+		}
+		if (kind === "result") {
+			const c = await ui.select(`Factory ${L.id}: the result\n\n${summary(L)}\n\nDiff: ${diffPath(L)}`, ["Commit on the run branch", "Keep uncommitted", "Stop"]);
+			return { action: c === "Commit on the run branch" ? "commit" : c === "Keep uncommitted" ? "keep" : "stop" };
+		}
+		if (kind === "stuck") {
+			const opts = [...(L.rounds < MAX_FIX_ROUNDS ? ["One more fix round"] : []), "Go to the final approval as it is", "Stop"];
+			const c = await ui.select(`Factory ${L.id}: ${L.note}\n\n${formatFindings(L.pending?.findings ?? [])}`, opts);
+			return { action: c === "One more fix round" ? "more" : c === "Go to the final approval as it is" ? "final" : "stop" };
+		}
+		const c = await ui.select(`Factory ${L.id}: ${L.note}`, ["Retry the stage", "Stop"]);
+		return { action: c === "Retry the stage" ? "retry" : "stop" };
+	};
+}
+// the real stages: the experts module's brief rendering, the subagents runner
+export async function sessionDeps(ctx: any, signal?: AbortSignal, progress?: (l: string) => void): Promise<Deps> {
+	const sub = await import(pathToFileURL(join(HERE, "subagents.ts")).href);
+	const exp = await import(pathToFileURL(join(HERE, "experts.ts")).href);
+	const find = (n: string) => sub.discoverExperts().find((s: any) => s.name === n);
+	return {
+		available: (n) => { const s = find(n); return !!s && s.expert.ready && exp.remembered()[n] === true; },
+		async dispatch(expert, brief, cwd, meta) {
+			const s = find(expert); if (!s) return { text: `The ${expert} expert is not usable here.`, exitCode: 127, input: 0, output: 0, seconds: 0 };
+			const t0 = Date.now(); const i = PIPELINE.indexOf(meta.stage);
+			const r = await sub.runAgent(s, exp.renderBrief(s, brief), cwd, signal, progress, { tool: "factory", callId: meta.runId, mode: "chain", index: i, of: PIPELINE.length });
+			return { text: r.text ?? "", exitCode: r.exitCode ?? 1, input: r.input ?? 0, output: r.output ?? 0, seconds: (Date.now() - t0) / 1000 };
+		},
+		exec: shellExec,
+		checkpoint: dialogs(ctx?.hasUI ? ctx.ui : undefined),
+		progress,
+	};
+}
+// the stage experts must be enabled: the user's yes (one dialog for all) is remembered
+export async function ensureExperts(ctx: any, names = ["developer", "expert-reviewer", "design-reviewer", "acceptance-judge"]): Promise<string | null> {
+	const exp = await import(pathToFileURL(join(HERE, "experts.ts")).href);
+	const off = names.filter((n) => exp.remembered()[n] !== true);
+	if (!off.length) return null;
+	if (!ctx?.hasUI) return `The factory needs these experts enabled: ${off.join(", ")} (/experts enable <name>).`;
+	if (!(await ctx.ui.confirm("Enable the factory's experts?", `${off.join(", ")}\nlets-code remembers the answer yes.`))) return "The user did not enable the factory's experts.";
+	for (const n of off) exp.remember(n, true);
+	return null;
+}
+
+export default function (pi: ExtensionAPI) {
+	if (!ACTIVE || DEPTH > 0 || process.env.LETS_CODE_FACTORY_DEV !== "1") return;   // nothing in the model's context
+	pi.registerCommand("factory", {
+		description: "Software factory (internal): /factory run <ticket.md> [how-to-run...] | resume <id> | list",
+		handler: async (args: string, ctx: any) => {
+			const say = (m: string) => (ctx.hasUI ? ctx.ui.notify(m, "info") : console.log(m));
+			const [verb = "list", arg = "", ...rest] = (args ?? "").trim().split(/\s+/).filter(Boolean);
+			const progress = (l: string) => { if (ctx.hasUI) ctx.ui.setStatus("factory", short(l, 80)); };
+			try {
+				if (verb === "list") return say(listRuns().map((L) => summary(L).split("\n")[0]).join("\n") || "No factory runs.");
+				const why = await ensureExperts(ctx); if (why) return say(why);
+				const deps = await sessionDeps(ctx, ctx.signal, progress);
+				let L: Ledger;
+				if (verb === "resume") L = await resumeRun(arg, deps);
+				else if (verb === "run") {
+					const file = resolve(ctx.cwd, arg); if (!arg || !existsSync(file)) return say(`No ticket file ${arg}.`);
+					L = await startRun({ ticket: readFileSync(file, "utf8"), repo: ctx.cwd, howToRun: rest.join(" ") }, deps);
+				} else return say("Usage: /factory run <ticket.md> [how-to-run] | resume <id> | list");
+				if (ctx.hasUI) ctx.ui.setStatus("factory", undefined);
+				say(summary(L));
+			} catch (e) { say(`factory: ${e instanceof Error ? e.message : String(e)}`); }
+		},
+	});
+}
+TS
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+}
+
 pi_write_experts_extension() {
     local dir f tmp
     lc_ext_module experts; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
@@ -13686,6 +14162,7 @@ case "$(lc "${EXPERTS}")" in
             log "note: experts need subagents (SUBAGENTS=true); none are available in this session."
         else
             pi_write_experts_extension
+            pi_write_factory_extension   # the factory's engine: no tool, nothing in context
             export LETS_CODE_EXPERTS_ON=1
             on_termux && write_termux_agent
             pi_write_expert_builder   # files only, every platform

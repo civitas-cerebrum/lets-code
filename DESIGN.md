@@ -636,6 +636,34 @@ registered only where scripts exist, and its section joins the prompt only
 when a prompt matches a script (strict: 0 of 124 real prompts matched five
 sample workflows).
 
+### Researcher
+
+The researcher expert answers open questions from the web, so it needs
+what pi does not have: a search and a fetch. Its `bin/web` is one Python
+file on the standard library (urllib, html.parser, threads), so it needs
+no setup and runs on Termux as on Linux; search parses a public HTML
+search page (the lite page as a fallback), and the endpoint is an
+environment variable so the unit test serves a fake one on 127.0.0.1.
+The method is the information-gathering loop of a staged pipeline,
+generalised: plan sub-questions, fan out (all queries in one call, fetches
+four at a time), dedupe (a ledger keyed by canonical URL; syndicated
+copies count as one source), score sources with a fixed rubric, verify
+each claim against two independent sources or one primary source about
+itself, tag every claim with source ids, keep vetoes and unknowns honest,
+and cache the state (plan, claims, ledger, page text, searches) in a
+folder a later run resumes from. Fetched content is the trust boundary:
+the helper fences it as untrusted, drops hidden elements and comments,
+counts what it dropped and flags instruction-like lines, and the
+instructions forbid acting on page text or following its links off the
+organisation's own site. robots.txt is read strictly (longest match, a
+tie goes to Disallow, `*` and our token both apply, an unreadable policy
+allows one plain fetch but no browser-header retry). The role is
+`reviewer`: network on, writes only under the temp dir, which is where
+the state folder lives. Context: its entry adds 23 (160 -> 183 on Linux, by the server's tokenizer) tokens to the
+always-on expert line; the child's prompt section is 1043 tokens; the
+three refs (939, 737 and 883 tokens) are read on demand. Routing (route-check,
+thinking low): recall 11/12 over two runs of 6 positives, and none of 24 near-misses (local-code questions for the model, general or scout, a licence explained from knowledge, a one-line edit, a phone task, unrelated prompts) went to it, precision 100%. The neighbours' prompts it never took; their misses went to the model itself, as on main (a 6-prompt regression file run three times each: tester 6/9 with it, 7/9 without; acceptance-judge 7/9 both).
+
 ## Script layout
 
 The script is one file, built in order: header and logging; probing

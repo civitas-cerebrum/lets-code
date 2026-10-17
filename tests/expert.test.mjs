@@ -56,7 +56,7 @@ A("phone.md", "---\nname: phone\ndescription: Phone tasks\nexpert: true\nplatfor
 A("tool.md", "---\nname: tool\ndescription: Needs a runtime\nexpert: true\nrequires: rt/ready\nsetup: rt/setup.sh\nsetup_note: installs the runtime\n---\nYou use the runtime.\n");
 A("scout.md", "---\nname: scout\ndescription: finds things\n---\nYou look around.\n");
 mkdirSync(join(agentDir, "rt"));
-writeFileSync(join(agentDir, "rt", "setup.sh"), "echo 'installing the runtime ...' >&2\ntouch \"$(dirname \"$0\")/ready\"\n");
+writeFileSync(join(agentDir, "rt", "setup.sh"), "echo 'installing the runtime ...' >&2\ntouch \"$(dirname \"$0\")/ready\"\necho 'tool: install the companion app yourself.'\n");
 
 // typebox comes from the pi host; point the temp copies at pi's own, or a stub (CI)
 {
@@ -218,6 +218,10 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	has("setup: the dialog names it", c.asked[0], "Setup: installs the runtime.");
 	t("setup: ran, then the child ran", [r.isError, existsSync(join(agentDir, "rt", "ready"))], [false, true]);
 	t("setup: remembered after success", state().experts.tool, true);
+	// its last stdout line on success: shown to the user and leading the result of the call that ran it
+	t("setup note: in the notification", c.notes.some((n) => n === "The tool expert is set up. tool: install the companion app yourself."), true);
+	t("setup note: leads the run's result", out(r).split("\n")[0], "Setup: tool: install the companion app yourself.");
+	t("setup note: once only", out(await run(s3.tool, { action: "run", name: "tool", brief: { task: "again" } }, ctx([]))).includes("Setup:"), false);
 	has("setup: list says enabled", out(await run(s3.tool, { action: "list" }, ctx([]))), "- tool: Needs a runtime [enabled]");
 	// a setup that fails: a note, not remembered
 	rmSync(join(agentDir, "rt", "ready")); writeFileSync(join(agentDir, "rt", "setup.sh"), "echo 'npm not found; run: npm install'; exit 2\n");

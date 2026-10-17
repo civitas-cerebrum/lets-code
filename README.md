@@ -993,20 +993,25 @@ tells you the setup step below.
 | Tier | Needs | Gives |
 |---|---|---|
 | 0 intents | nothing | launch apps, open files, deep links; pre-filled messages: WhatsApp's "Send to..." picker with your text (no number needed), a chat with the text (with a number), SMS, mail compose, the share sheet. You tap Send |
-| 1 Termux:API | the Termux:API app + `pkg install termux-api` | contacts (name to number), clipboard, dialogs on the phone, notification list, SMS. No screen |
+| 1 Termux:API | the Termux:API app + `pkg install termux-api` | battery, clipboard, toasts, notifications, dialogs, location, contacts, SMS, volume, wifi, sensors, camera, TTS (every command in `termux/ref/api.md`, read on demand). No screen |
 | 2 shell | Shizuku + `rish`, or adb to the phone itself | the screen as text, taps, typing, keys, swipes |
 
 Setup, done by you (the expert never installs, changes settings or enables
-debugging; it gives you these steps):
+debugging; it gives you these steps; only tier 1's commands are installed
+for you, by the setup you agree to when enabling it):
 
-- **Tier 1, Termux:API.** Install the app from the *same source as Termux*
-  (`echo $TERMUX_APK_RELEASE`: GITHUB means
+- **Tier 1, Termux:API.** The commands come with the expert: when you
+  enable it, its setup runs `pkg install termux-api` if they are missing
+  (nothing when they are there). The app it cannot install: get it from
+  the *same source as Termux* (`echo $TERMUX_APK_RELEASE`: GITHUB means
   [its GitHub releases](https://github.com/termux/termux-api/releases),
-  F_DROID F-Droid, GOOGLE_PLAY_STORE Play; mixed signing keys do not
-  work), then `pkg install termux-api`. Each permission (Contacts, SMS) is
+  F_DROID [F-Droid](https://f-droid.org/packages/com.termux.api/),
+  GOOGLE_PLAY_STORE Play; mixed signing keys do not work); the setup's
+  note names the right one. Each permission (Contacts, SMS, Location) is
   asked on first use. Trade-off: everything that runs in Termux can use
-  what you grant. Note: with the commands installed but the app missing,
-  `termux-*` calls hang; the probe says so.
+  what you grant. With the commands installed but the app missing,
+  `termux-*` calls hang, so neither the setup nor the expert calls one
+  then; the probe says so.
 - **Tier 2, Shizuku + rish (recommended).** Install
   [Shizuku](https://github.com/RikkaApps/Shizuku/releases) (or from Play).
   Enable Developer options (tap Build number 7 times) and Wireless

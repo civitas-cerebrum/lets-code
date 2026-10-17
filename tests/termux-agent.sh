@@ -42,12 +42,31 @@ t "dispatch_rule names it"      "$(echo "${r}" | grep -c 'goes to expert termux-
 t "use_for stays short"         "$([ ${#u} -le 70 ] && echo yes || echo "${#u} chars")" yes
 t "body names the probe"        "$(grep -c "${T}/bin/probe" "${af}")" 1
 t "no placeholder left"         "$(grep -rl '@@T@@' "${PI_AGENT_DIR}" | wc -l | tr -d ' ')" 0
-for f in bin/probe bin/ui; do t "${f} executable" "$([ -x "${T}/${f}" ] && echo yes)" yes; done
-for f in bin/uitext.py ref/tiers.md ref/screen.md ref/messaging.md; do t "${f} written" "$([ -s "${T}/${f}" ] && echo yes)" yes; done
-t "helpers parse"               "$(bash -n "${T}/bin/probe" && bash -n "${T}/bin/ui" && python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "${T}/bin/uitext.py" && echo yes)" yes
-for r in tiers screen messaging; do
+for f in bin/probe bin/ui bin/setup; do t "${f} executable" "$([ -x "${T}/${f}" ] && echo yes)" yes; done
+for f in bin/uitext.py ref/tiers.md ref/screen.md ref/messaging.md ref/api.md; do t "${f} written" "$([ -s "${T}/${f}" ] && echo yes)" yes; done
+t "helpers parse"               "$(bash -n "${T}/bin/probe" && bash -n "${T}/bin/ui" && bash -n "${T}/bin/setup" && python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "${T}/bin/uitext.py" && echo yes)" yes
+for r in tiers screen messaging api; do
     t "ref ${r} named in the body or a ref" "$(cat "${af}" "${T}"/ref/*.md | grep -c "ref/${r}.md" | awk '{print ($1 > 0) ? "yes" : "no"}')" yes
 done
+t "setup: the script"            "$(sed -n 's/^setup: //p' "${af}")" termux/bin/setup
+t "setup: gated by its marker"   "$(sed -n 's/^requires: //p' "${af}")" termux/runtime/.installed
+t "setup: the note says what"    "$(sed -n 's/^setup_note: //p' "${af}" | grep -c 'pkg if they are missing; the Termux:API app you install yourself')" 1
+t "no marker without the commands" "$([ -e "${T}/runtime/.installed" ] && echo marked || echo none)" none
+t "api ref: one line in the body" "$(grep -c 'Every command: `ref/api.md`' "${af}")" 1
+t "api ref: prefer it over am/dumpsys" "$(grep -c 'goes through it at tier 1, not hand-rolled `am`, `dumpsys` or `settings`' "${af}")" 1
+t "api ref: never without tier 1" "$(grep -c 'call none of them; with it, wrap each in `timeout 20`' "${af}")" 1
+t "api ref: verification api-read" "$(grep -c '`api-read`' "${af}")" 1
+t "api ref: an action's control is a read" "$(grep -c 'is `system-accepted` only when `termux-battery-status` prints JSON' "${af}")" 1
+t "api ref: a bad flag is no control" "$(grep -c 'A bad flag is no control' "${T}/ref/api.md")" 1
+t "api ref: not in the frontmatter" "$(sed -n '2,/^---$/p' "${af}" | grep -c 'api.md' || true)" 0
+t "tiers.md points to api.md"     "$(grep -c 'ref/api.md' "${T}/ref/tiers.md")" 2
+# every command of the termux-api package (0.60.0), in its reference
+for c in api-start api-stop audio-info battery-status brightness call-log camera-info camera-photo clipboard-get clipboard-set contact-list dialog download fingerprint infrared-frequencies infrared-transmit job-scheduler keystore location media-player media-scan microphone-record nfc notification notification-channel notification-list notification-remove saf-create saf-dirs saf-ls saf-managedir saf-mkdir saf-read saf-rm saf-stat saf-write sensor share sms-inbox sms-list sms-send speech-to-text storage-get telephony-call telephony-cellinfo telephony-deviceinfo toast torch tts-engines tts-speak usb vibrate volume wallpaper wifi-connectioninfo wifi-enable wifi-scaninfo; do
+    grep -qE "termux-${c}([^a-z-]|\$)" "${T}/ref/api.md" || { echo "FAIL  api.md lacks termux-${c}"; fail=1; }
+done
+t "api ref: the categories"      "$(grep '^## ' "${T}/ref/api.md" | tr '\n' '|')" "## Rules for every call|## Prefer it over hand-rolled commands|## Device state and sensors|## Communication|## UI and notifications|## Clipboard|## Storage and media|## System and background|"
+t "api ref: sending is a final step" "$(grep -A1 'termux-sms-send -n' "${T}/ref/api.md" | grep -c 'Final step')" 1
+t "api ref: calling is a final step" "$(grep -A1 'termux-telephony-call <number>' "${T}/ref/api.md" | grep -c 'Final step')" 1
 t "job set (expert-lint)"        "$(grep -c '^job: ' "${af}")" 1
 t "app identity: no package-name grep" "$(grep -c 'list packages | grep' "${af}" || true)" 0
 t "app identity: by role, mailto"      "$(grep -c 'action.SENDTO -d mailto:`' "${af}")" 1
@@ -108,7 +127,7 @@ t "password masked"             "$(ut dump "${work}/pw.xml" | grep -c hunter22 |
 
 # ------------------------------------------- an isolated PATH for the fakes
 iso="${work}/iso"; mkdir -p "${iso}"
-for c in bash sh sed grep awk tr tail head cat mktemp rm python3 dirname sleep wc printf env; do   # no timeout, as on macOS
+for c in bash sh sed grep awk tr tail head cat mktemp rm python3 dirname sleep wc printf env cut mkdir chmod; do   # no timeout, as on macOS
     p="$(command -v "${c}" 2>/dev/null)" || continue
     case "${p}" in /*) ln -sf "${p}" "${iso}/${c}" ;; esac
 done
@@ -159,6 +178,72 @@ out="$(probe)"
 t "probe: am not reaching the system" "$(echo "${out}" | grep -c '^tier 0 intents: no')" 1
 t "probe: no packages"          "$(echo "${out}" | sed -n 's/^apps: //p')" "unreadable (cmd package list packages gave nothing)"
 t "probe: tiers none"           "$(echo "${out}" | sed -n 's/^tiers: //p')" none
+
+# ------------------------------------- setup: tier 1, in each state of the phone
+calls="${work}/api-calls"
+apicmd() { fake "$1" "echo \"\$0 \$*\" >> ${calls}; exit 0"; }   # logs any call: setup must make none
+pkglog="${work}/pkg.log"
+setup() { env -i PATH="${iso}" HOME="${work}/home" PREFIX="${work}/prefix" TMPDIR="${work}" TERMUX_APK_RELEASE="${REL-GITHUB}" TERMUX_PROBE_SYSCMD="${syscmd}" bash "${T}/bin/setup" "$@" 2>"${work}/setup.err"; }
+mk="${T}/runtime/.installed"
+: > "${calls}"; : > "${pkglog}"
+# 1. installed: the commands and the app; quiet, no install, marked
+pkgs com.termux com.termux.api; apicmd termux-toast; apicmd termux-battery-status
+fake pkg "echo \"\$*\" >> ${pkglog}; exit 0"
+rm -rf "${T}/runtime"; rc=0; out="$(setup)" || rc=$?
+t "setup installed: exit 0"      "${rc}" 0
+t "setup installed: quiet"       "$(wc -c < "${work}/setup.err" | tr -d ' ')" 0
+t "setup installed: no pkg"      "$(wc -l < "${pkglog}" | tr -d ' ')" 0
+t "setup installed: the note"    "${out}" "termux-api: the termux-* commands are there; the Termux:API app is installed; Android asks for each permission on first use."
+t "setup installed: marked"      "$(cat "${mk}")" "commands: yes; app: yes"
+out2="$(setup)"
+t "setup again: same, still no pkg" "${out2}|$(wc -l < "${pkglog}" | tr -d ' ')" "${out}|0"
+rm -rf "${T}/runtime"; setup --if-ready >/dev/null
+t "setup --if-ready, all there: marked" "$(cat "${mk}")" "commands: yes; app: yes (found at launch)"
+# 2. the commands missing (app there): pkg install termux-api, then they are
+rm -f "${iso}/termux-toast" "${iso}/termux-battery-status"; rm -rf "${T}/runtime"
+setup --if-ready >/dev/null
+t "setup --if-ready, no commands: no install, not marked" "$(wc -l < "${pkglog}" | tr -d ' '):$([ -e "${mk}" ] && echo marked || echo none)" "0:none"
+fake pkg "echo \"\$*\" >> ${pkglog}; for c in termux-toast termux-battery-status; do printf '#!/bin/sh\necho \"\$0 \$*\" >> ${calls}\n' > ${iso}/\$c; chmod +x ${iso}/\$c; done; echo 'Setting up termux-api (0.60.0) ...'"
+out="$(setup)"
+t "setup missing commands: pkg install" "$(cat "${pkglog}")" "install -y termux-api"
+t "setup missing commands: says so"     "$(cat "${work}/setup.err")" "installing the termux-api package (pkg install termux-api) ..."
+t "setup missing commands: the note"    "${out}" "termux-api: the termux-* commands are installed; the Termux:API app is installed; Android asks for each permission on first use."
+t "setup missing commands: marked"      "$(cat "${mk}")" "commands: installed; app: yes"
+: > "${pkglog}"; setup >/dev/null
+t "setup after install: no second pkg"  "$(wc -l < "${pkglog}" | tr -d ' ')" 0
+# 3. the app missing: no termux-* call, where to get it for this Termux
+pkgs com.termux; rm -rf "${T}/runtime"
+setup --if-ready >/dev/null
+t "setup --if-ready, no app: not marked" "$([ -e "${mk}" ] && echo marked || echo none)" none
+out="$(setup)"
+t "setup no app: GitHub release named"  "$(echo "${out}" | grep -c 'the Termux:API app is missing (the commands hang without it, so the expert will not call them): install it from GitHub, https://github.com/termux/termux-api/releases (your Termux is the GitHub build), open it once, then allow each permission when Android asks. Until then the expert works through intents (tier 0).')" 1
+t "setup no app: on stderr too"         "$(grep -c '^Termux:API app: not installed; get it from GitHub' "${work}/setup.err")" 1
+t "setup no app: marked, so it can run" "$(cat "${mk}")" "commands: yes; app: no"
+out="$(REL=F_DROID setup)"
+t "setup no app: F-Droid for F-Droid"  "$(echo "${out}" | grep -c 'install it from F-Droid, https://f-droid.org/packages/com.termux.api/ (your Termux is the F-Droid build)')" 1
+out="$(REL=GOOGLE_PLAY_STORE setup)"
+t "setup no app: Play for Play"        "$(echo "${out}" | grep -c 'install it from Google Play')" 1
+out="$(REL= setup)"
+t "setup no app: source unknown, both" "$(echo "${out}" | grep -c 'F-Droid https://f-droid.org/packages/com.termux.api/ or GitHub')" 1
+pkgs; out="$(setup)"
+t "setup app unknown: says so"         "$(echo "${out}" | grep -c 'could not be checked')" 1
+t "setup: never calls a termux-* command" "$(wc -l < "${calls}" | tr -d ' ')" 0
+# 4. pkg fails (offline): the expert still runs at tier 0
+rm -f "${iso}/termux-toast" "${iso}/termux-battery-status"; pkgs com.termux com.termux.api
+fake pkg 'echo "E: Unable to locate package termux-api"; exit 100'
+rc=0; out="$(setup)" || rc=$?
+t "setup pkg fails: exit 0"            "${rc}" 0
+t "setup pkg fails: the note"          "${out}" "termux-api: pkg install termux-api failed (E: Unable to locate package termux-api): run it yourself in Termux; the Termux:API app is installed; Android asks for each permission on first use. Until then the expert works through intents (tier 0)."
+t "setup pkg fails: marked"            "$(cat "${mk}")" "commands: failed (E: Unable to locate package termux-api); app: yes"
+# 5. at launch: marked when tier 1 is complete, else left for the setup
+rm -rf "${T}/runtime"; apicmd termux-toast; apicmd termux-battery-status
+( PATH="${iso}:${PATH}"; TERMUX_PROBE_SYSCMD="${syscmd}"; export TERMUX_PROBE_SYSCMD; write_termux_agent )
+t "launch, tier 1 complete: marked"    "$(cat "${mk}")" "commands: yes; app: yes (found at launch)"
+rm -rf "${T}/runtime"; pkgs com.termux
+( PATH="${iso}:${PATH}"; TERMUX_PROBE_SYSCMD="${syscmd}"; export TERMUX_PROBE_SYSCMD; write_termux_agent )
+t "launch, no app: left to the setup"  "$([ -e "${mk}" ] && echo marked || echo none)" none
+t "launch: no termux-* call"           "$(wc -l < "${calls}" | tr -d ' ')" 0
+rm -f "${iso}/termux-toast" "${iso}/termux-battery-status" "${iso}/pkg"
 
 # ------------------------------------------------- ui through a fake rish
 log="${work}/rish.log"; : > "${log}"

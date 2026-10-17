@@ -277,9 +277,11 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	// fake subagents and experts modules next to a copy of factory.ts
 	writeFileSync(join(ext, "subagents.ts"), `
 export const runs = [];
+const reg = { view: {} }; export function registry() { return reg; } export function viewState(r) { return r.view; }
+export const busySeen = [];
 export function discoverExperts() { return ["developer", "expert-reviewer", "design-reviewer", "acceptance-judge"].map((name) => ({ name, expert: { ready: true, brief: [] } })); }
 export async function runAgent(agent, task, cwd, signal, onProgress, meta) {
-	runs.push({ agent: agent.name, task, cwd, meta });
+	runs.push({ agent: agent.name, task, cwd, meta }); busySeen.push(!!reg.view.mainBusy);
 	const fs = await import("node:fs"); const path = await import("node:path");
 	const stage = meta && meta.index;
 	let text = "VERDICT: APPROVE";
@@ -297,31 +299,70 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 	writeFileSync(join(ext, "factory.ts"), src);
 	const fm = await import(pathToFileURL(join(ext, "factory.ts")).href);
 	const cmds = {}; const pi = { registerCommand: (n, o) => { cmds[n] = o; }, on: () => {}, registerTool: () => { throw new Error("no tool"); } };
-	delete process.env.LETS_CODE_FACTORY_DEV; fm.default(pi);
-	t("session: no command, no tool unless asked for (nothing in context)", Object.keys(cmds), []);
-	process.env.LETS_CODE_FACTORY_DEV = "1"; fm.default(pi);
-	t("session: the internal /factory command", typeof cmds.factory?.handler, "function");
+	const hooks = []; pi.on = (e) => hooks.push(e);
+	delete process.env.LETS_CODE_EXPERTS_ON; fm.default(pi);
+	t("session: experts off, no command", Object.keys(cmds), []);
+	process.env.LETS_CODE_EXPERTS_ON = "1"; process.env.LETS_CODE_SUBAGENT_DEPTH = "1"; fm.default(pi);
+	t("session: none in a child", Object.keys(cmds), []);
+	delete process.env.LETS_CODE_SUBAGENT_DEPTH; fm.default(pi);
+	t("session: the /factory command, no tool, no hook (nothing in context)", [typeof cmds.factory?.handler, hooks], ["function", []]);
+	t("session: completions", [cmds.factory.getArgumentCompletions("st").map((c) => c.value), cmds.factory.getArgumentCompletions("start x")], [["start", "status"], null]);
 	const notes = []; const selects = [];
 	const ui = { notify: (m) => notes.push(m), setStatus: () => {}, confirm: async () => true, editor: async (_t, p) => p,
 		select: async (title, options) => { selects.push(title.split("\n")[0]); return options[0]; } };
 	writeFileSync(join(repo, "notes.md"), SECRET);
 	const ctx = { cwd: repo, hasUI: true, ui, sessionManager: { getEntries: () => [{ type: "message", message: { role: "user", content: SECRET } }], getBranch: () => [] }, signal: undefined };
-	await cmds.factory.handler("run TICKET.md grep -q ok src/a.txt", ctx);
+	await cmds.factory.handler("start TICKET.md grep -q ok src/a.txt", ctx);
 	const sub = await import(pathToFileURL(join(ext, "subagents.ts")).href);
 	t("session: stages through the subagents runner", sub.runs.map((r) => r.agent), ["developer", "developer", "expert-reviewer", "design-reviewer", "acceptance-judge"]);
 	t("session: runs tagged for /subagents", [...new Set(sub.runs.map((r) => r.meta.tool))], ["factory"]);
+	t("session: the session counts as working during the run (switching shows a stage in place), not after", [[...new Set(sub.busySeen)], !!sub.viewState(sub.registry()).mainBusy], [[true], false]);
 	t("session: the conversation reaches no stage", sub.runs.some((r) => r.task.includes(SECRET)), false);
 	t("session: the experts' yes asked once, remembered", (await import(pathToFileURL(join(ext, "experts.ts")).href)).remembered()["developer"], true);
 	t("session: the checkpoints as dialogs", selects.map((s) => s.replace(/^Factory \S+: /, "")), ["acceptance criteria", "the developer's plan", "the result"]);
 	t("session: the user sees the stage summary", [notes.length, notes.at(-1).startsWith("factory run "), notes.at(-1).includes("committed")], [1, true, true]);
-	const listed = []; await cmds.factory.handler("list", { ...ctx, ui: { ...ui, notify: (m) => listed.push(m) } });
-	t("session: /factory list", listed[0].split("\n").length >= 1 && listed[0].includes("done"), true);
+	const said = async (args, c = ctx) => { const got = []; await cmds.factory.handler(args, { ...c, ui: { ...ui, notify: (m) => got.push(m) } }); return got.join("\n"); };
+	const lastId = F.listRuns().length ? (await said("list")).split("\n")[0].split(/\s+/)[0] : "";
+	t("session: /factory list, newest first", [/^\d{8}-\d{6}-[0-9a-f]{4}  done, committed/.test(await said("list"))], [true]);
+	t("session: /factory status (newest)", (await said("status")).includes("The change is committed on pi/factory-"), true);
+	t("session: /factory status <id>", (await said(`status ${lastId}`)).startsWith(`factory run ${lastId}: done`), true);
+	t("session: /factory status of an unknown run", await said("status nope"), "No factory run nope.");
+	t("session: /factory with a bad verb: usage", (await said("frobnicate")).startsWith("Usage: /factory start"), true);
+	t("session: /factory start without a file", await said("start missing.md"), "No ticket file missing.md.");
+	t("session: resume completions offer waiting runs", Array.isArray(cmds.factory.getArgumentCompletions("resume ")), true);
 	// without a UI: the run waits at the criteria and says how to go on
 	const out = []; const log = console.log; console.log = (m) => out.push(m);
 	const ctx2 = { cwd: repo, hasUI: false, sessionManager: ctx.sessionManager };
 	await cmds.factory.handler("run TICKET.md", ctx2);
 	console.log = log;
-	t("session, no UI: waits at the criteria", /waiting for the user: criteria/.test(out.join("\n")), true);
+	t("session, no UI: waits at the criteria and says how to go on", [/waiting for the user: criteria/.test(out.join("\n")), /\/factory resume \S+ asks it/.test(out.join("\n"))], [true, true]);
+	// the expert's entry: runExpert, as the experts module calls it for runner: factory
+	sub.runs.length = 0; selects.length = 0;
+	const r1 = await fm.runExpert({ ticket: "TICKET.md", how_to_run: "grep -q ok src/a.txt", start: "python3 -m http.server 8123", constraints: "leave README.md alone" }, ctx, undefined, () => {}, "call-77");
+	t("expert: a ticket given as a path is read", [r1.isError, /done, committed/.test(r1.text), sub.runs[0].task.includes("isFreeShipping") || sub.runs[0].task.includes("feature.txt exists")], [false, true, true]);
+	t("expert: its stage runs carry the tool call's id (for /subagents and detaching)", [...new Set(sub.runs.map((r) => r.meta.callId))], ["call-77"]);
+	t("expert: constraints reach the stages", sub.runs.every((r) => r.task.includes("leave README.md alone")), true);
+	t("expert: the result is stage summaries, not stage output", [r1.text.includes("## Changes"), r1.text.split("\n").filter((l) => l.startsWith("- ")).length >= 7], [false, true]);
+	sub.runs.length = 0;
+	const r2 = await fm.runExpert({ ticket: "# T-9: a thing\n## Acceptance criteria\n1. feature.txt exists" }, ctx, undefined, () => {}, "call-78");
+	t("expert: a ticket given as text", [r2.isError, sub.runs[0].task.includes("T-9: a thing")], [false, true]);
+	const r3 = await fm.runExpert({ ticket: "  " }, ctx);
+	t("expert: no ticket, nothing runs", [r3.isError, r3.text.startsWith("Nothing ran")], [true, true]);
+	const r4 = await fm.runExpert({ ticket: "TICKET.md" }, { cwd: repo, hasUI: false });
+	t("expert, no UI: it waits and says how to go on", [r4.isError, /waiting for the user: criteria/.test(r4.text), /\/factory resume/.test(r4.text)], [false, true, true]);
+	const r5 = await fm.runExpert({ ticket: "TICKET.md", repo: join(work, "not-a-repo") }, ctx);
+	t("expert: a repo that is not one", [r5.isError, /could not run: .*not a git repository/.test(r5.text)], [true, true]);
+	const stopUi = { ...ui, select: async (title, options) => (title.includes("plan") ? "Stop" : options[0]) };
+	const r6 = await fm.runExpert({ ticket: "TICKET.md" }, { ...ctx, ui: stopUi });
+	t("expert: stopped by the user is reported as such", [r6.isError, /stopped: the user stopped it at the plan checkpoint/.test(r6.text), /\/factory resume/.test(r6.text)], [true, true, true]);
+}
+
+// ------------------------------------------------------------------ the tester gets how to start the app
+{
+	const repo = makeRepo("start");
+	const fd = fakeDeps({ ...OK, build: [build()], test: ["VERDICT: APPROVE"] }, { available: (n) => n === "tester" });
+	await F.startRun(opts(repo, { start: "python3 -m http.server 8123" }), fd);
+	t("tester: tests and the app's start command", fd.calls.find((c) => c.expert === "tester").brief.how_to_run, "Tests: grep -q ok src/a.txt\nStart the app: python3 -m http.server 8123");
 }
 
 console.log(`\n${n} checks, ${fail ? "FAILURES" : "all passed"}`);

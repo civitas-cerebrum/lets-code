@@ -77,9 +77,11 @@ const cases = {
 	"route false": file({ ...base, route: "false" }),
 	"route no": file({ ...base, route: "no" }),
 	"route true": file({ ...base, route: "true" }),
+	"runner factory": file({ ...base, runner: "factory" }),
+	"an unknown runner": file({ ...base, runner: "rocket" }),
 };
 // lint's rejecting rules: the ones that make parseAgentFile drop the file
-const REJECT = /^(name: "|brief: "|brief: field|append_prompt: .* outside|timeout:|requires_env:|expert:)/;
+const REJECT = /^(name: "|brief: "|brief: field|append_prompt: .* outside|timeout:|requires_env:|expert:|runner:)/;
 for (const [label, text] of Object.entries(cases)) {
 	const f = join(agentDir, "agents", "conf.md"); writeFileSync(f, text);
 	const a = sub.parseAgentFile(text, f, "user", undefined, false, true);
@@ -95,6 +97,7 @@ for (const [label, text] of Object.entries(cases)) {
 	t(`${label}: same job`, (p.fm.job || p.fm.description).replace(/\s+/g, " ").trim(), a.expert.job);
 	t(`${label}: same tools`, (p.fm.tools ? p.fm.tools.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim()).filter(Boolean) : undefined), a.tools);
 	t(`${label}: same route`, !!R.routed, a.expert.routed);
+	t(`${label}: same runner`, p.fm.runner || undefined, a.expert.runner);
 }
 t("lint: over 100 is an error", lint.lintFile((writeFileSync(join(agentDir, "agents", "conf.md"), cases["use_for over 100"]), join(agentDir, "agents", "conf.md")), { agentDir }).errors.some((e) => e.startsWith("use_for: 120 characters")), true);
 {

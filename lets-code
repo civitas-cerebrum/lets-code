@@ -4162,7 +4162,7 @@ export interface AgentDef {
 // given: one required field, task). ready: everything the file names exists
 // (agent_dir, skills, append_prompt, requires), i.e. its setup has run.
 export interface BriefField { name: string; required: boolean; hint: string }
-export interface ExpertMeta { job: string; useFor?: string; keywords?: string; dispatchRule?: string; brief: BriefField[]; platform?: string; setup?: string; setupNote?: string; ready: boolean; routed: boolean }
+export interface ExpertMeta { job: string; useFor?: string; keywords?: string; dispatchRule?: string; brief: BriefField[]; platform?: string; setup?: string; setupNote?: string; ready: boolean; routed: boolean; runner?: string }
 export const MAX_TIMEOUT = 24 * 3600;
 
 // A path named in an agent file, resolved and checked lexically: relative to
@@ -4221,7 +4221,8 @@ export function parseAgentFile(text: string, file: string, source: "user" | "pro
 				brief.push({ name: b[1], required: !!b[2], hint: b[3].trim() });
 			}
 			if (!brief.length) brief.push({ name: "task", required: true, hint: "the whole task, standing alone" });
-			a.expert = { job: (fm.job || a.description).replace(/\s+/g, " ").trim(), useFor: fm.use_for?.replace(/\s+/g, " ").trim().slice(0, 100) || undefined, keywords: fm.keywords?.replace(/\s+/g, " ").trim().slice(0, 40) || undefined, dispatchRule: fm.dispatch_rule?.replace(/\s+/g, " ").trim().slice(0, 300) || undefined, brief, platform: fm.platform || undefined, setup: fm.setup ? path("setup") : undefined, setupNote: fm.setup_note || undefined, ready, routed: !/^(false|no|off)$/i.test(fm.route ?? "") };
+			a.expert = { job: (fm.job || a.description).replace(/\s+/g, " ").trim(), useFor: fm.use_for?.replace(/\s+/g, " ").trim().slice(0, 100) || undefined, keywords: fm.keywords?.replace(/\s+/g, " ").trim().slice(0, 40) || undefined, dispatchRule: fm.dispatch_rule?.replace(/\s+/g, " ").trim().slice(0, 300) || undefined, brief, platform: fm.platform || undefined, setup: fm.setup ? path("setup") : undefined, setupNote: fm.setup_note || undefined, ready, routed: !/^(false|no|off)$/i.test(fm.route ?? ""), runner: fm.runner || undefined };
+			if (fm.runner && fm.runner !== "factory") return null;   // a runner lets-code does not have
 		}
 	} catch { return null; }   // a path outside the allowed roots
 	return a;
@@ -6086,19 +6087,20 @@ pi_write_factory_extension() {
 // target repo, under ~/.pi/agent/lets-code-factory/<id>/, next to its
 // ledger and artifacts; the user's checkout is never touched. Stages run
 // through the subagents module's runner, so they show in /subagents. The
-// caller sees stage summaries only. Nothing is added to the model's context:
-// no tool, no prompt section; the /factory command is an internal entry
-// point (LETS_CODE_FACTORY_DEV=1) until the software-factory expert wraps it.
+// caller sees stage summaries only. The module adds nothing to the model's
+// context: it is reached through the software-factory expert (runner:
+// factory; the experts module calls runExpert in the main session, since a
+// child cannot start children) and the user's /factory command
+// (start, resume, list, status).
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const ACTIVE = process.env.LETS_CODE_EXPERTS_ON === "1" && process.env.LETS_CODE_SUBAGENTS_ON === "1";
-const DEPTH = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
+const active = () => process.env.LETS_CODE_EXPERTS_ON === "1" && process.env.LETS_CODE_SUBAGENTS_ON === "1" && !(Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") > 0);
 export const factoryRoot = () => join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "lets-code-factory");
 export const MAX_FIX_ROUNDS = 5;
 export const SUITE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -6118,7 +6120,7 @@ export interface Entry {
 export interface Ledger {
 	v: 1; id: string; created: number; updated: number;
 	repo: string; base: string; branch: string; work: string; dir: string;
-	ticket: string; howToRun: string; constraints: string; conventions: string; tester: "auto" | "on" | "off";
+	ticket: string; howToRun: string; start?: string; constraints: string; conventions: string; tester: "auto" | "on" | "off";
 	status: "running" | "waiting" | "done" | "stopped";
 	waiting: Waiting | null; note: string;
 	stage: Stage; rounds: number;
@@ -6251,7 +6253,7 @@ export function briefFor(stage: Stage, L: Ledger): Record<string, string> {
 	} else if (stage === "design-review") {
 		Object.assign(b, { diff: where, context, conventions: L.conventions, previous_findings: prev(stage), constraints: L.constraints });
 	} else if (stage === "test") {
-		Object.assign(b, { target: L.work, goal: `Verify the change for this ticket end to end, and find what it breaks. The change: ${where}\n\nCriteria:\n${criteria}`, how_to_run: L.howToRun, constraints: keep,
+		Object.assign(b, { target: L.work, goal: `Verify the change for this ticket end to end, and find what it breaks. The change: ${where}\n\nCriteria:\n${criteria}`, how_to_run: [L.howToRun && `Tests: ${L.howToRun}`, L.start && `Start the app: ${L.start}`].filter(Boolean).join("\n"), constraints: keep,
 			report: `Start your final message with the line VERDICT: APPROVE (nothing the change causes fails) or VERDICT: REVISE, then your usual headings; in Findings, one line per failure: T<n> | blocker|major|minor|nit | where | title.${prev(stage) ? `\nRe-check these earlier failures, keeping their ids:\n${prev(stage)}` : ""}` });
 	} else if (stage === "judge") {
 		Object.assign(b, { criteria, artifact: where, claim: L.claim, how_to_run: L.howToRun, constraints: L.constraints });
@@ -6410,7 +6412,7 @@ export async function advance(L: Ledger, deps: Deps): Promise<Ledger> {
 	return L;
 }
 
-export interface StartOpts { ticket: string; repo: string; howToRun?: string; constraints?: string; conventions?: string; tester?: "auto" | "on" | "off"; criteria?: string[]; root?: string; id?: string }
+export interface StartOpts { ticket: string; repo: string; howToRun?: string; start?: string; constraints?: string; conventions?: string; tester?: "auto" | "on" | "off"; criteria?: string[]; root?: string; id?: string }
 // a new run: its dir, its worktree and branch from the repo's HEAD, its ledger
 export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 	const now = (deps.now ?? Date.now)(); const id = o.id ?? newId(now); const dir = join(o.root ?? factoryRoot(), id);
@@ -6421,7 +6423,7 @@ export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 	mkdirSync(dir, { recursive: true });
 	const add = await deps.exec(`git worktree add -q -b ${branch} ${JSON.stringify(work)} ${base}`, repo);
 	if (add.code !== 0) throw new Error(`git worktree add failed: ${short(add.out, 300)}`);
-	const L: Ledger = { v: 1, id, created: now, updated: now, repo, base, branch, work, dir, ticket: o.ticket.trim(), howToRun: o.howToRun ?? "", constraints: o.constraints ?? "", conventions: o.conventions ?? "",
+	const L: Ledger = { v: 1, id, created: now, updated: now, repo, base, branch, work, dir, ticket: o.ticket.trim(), howToRun: o.howToRun ?? "", start: o.start ?? "", constraints: o.constraints ?? "", conventions: o.conventions ?? "",
 		tester: o.tester ?? "auto", status: "running", waiting: null, note: "", stage: "intake", rounds: 0, criteria: o.criteria ?? [], plan: "", claim: "", findings: {}, sent: {}, fixing: null, pending: null, baseline: null, commit: "", entries: [] };
 	writeFileSync(join(dir, "ticket.md"), L.ticket + "\n", { mode: 0o600 });
 	saveLedger(L, now);
@@ -6477,7 +6479,7 @@ export function dialogs(ui: any | undefined): Deps["checkpoint"] {
 	};
 }
 // the real stages: the experts module's brief rendering, the subagents runner
-export async function sessionDeps(ctx: any, signal?: AbortSignal, progress?: (l: string) => void): Promise<Deps> {
+export async function sessionDeps(ctx: any, signal?: AbortSignal, progress?: (l: string) => void, callId?: string): Promise<Deps> {
 	const sub = await import(pathToFileURL(join(HERE, "subagents.ts")).href);
 	const exp = await import(pathToFileURL(join(HERE, "experts.ts")).href);
 	const find = (n: string) => sub.discoverExperts().find((s: any) => s.name === n);
@@ -6486,7 +6488,7 @@ export async function sessionDeps(ctx: any, signal?: AbortSignal, progress?: (l:
 		async dispatch(expert, brief, cwd, meta) {
 			const s = find(expert); if (!s) return { text: `The ${expert} expert is not usable here.`, exitCode: 127, input: 0, output: 0, seconds: 0 };
 			const t0 = Date.now(); const i = PIPELINE.indexOf(meta.stage);
-			const r = await sub.runAgent(s, exp.renderBrief(s, brief), cwd, signal, progress, { tool: "factory", callId: meta.runId, mode: "chain", index: i, of: PIPELINE.length });
+			const r = await sub.runAgent(s, exp.renderBrief(s, brief), cwd, signal, progress, { tool: "factory", callId: callId ?? meta.runId, mode: "chain", index: i, of: PIPELINE.length });
 			return { text: r.text ?? "", exitCode: r.exitCode ?? 1, input: r.input ?? 0, output: r.output ?? 0, seconds: (Date.now() - t0) / 1000 };
 		},
 		exec: shellExec,
@@ -6505,27 +6507,73 @@ export async function ensureExperts(ctx: any, names = ["developer", "expert-revi
 	return null;
 }
 
+// what the caller is told: the stage lines and what happens next
+export function report(L: Ledger): string {
+	const next = L.status === "waiting" ? `The run waits for the user (${L.waiting}): /factory resume ${L.id} asks it.`
+		: L.status === "done" ? (L.commit ? `The change is committed on ${L.branch} (worktree ${L.work}); pushing or a PR is up to the user.` : `The change is left uncommitted in ${L.work} on ${L.branch}.`)
+		: L.status === "stopped" ? `Stopped. /factory resume ${L.id} goes on from the ledger; the worktree stays.` : "";
+	return [summary(L), next].filter(Boolean).join("\n");
+}
+// the software-factory expert's run, in the main session: the brief's ticket
+// (its text, or a file holding it), repo, how_to_run, start, constraints
+export async function runExpert(brief: Record<string, unknown>, ctx: any, signal?: AbortSignal, progress?: (l: string) => void, callId?: string): Promise<{ text: string; isError: boolean }> {
+	const v = (k: string) => { const x = brief?.[k]; return (typeof x === "string" ? x : x === undefined || x === null ? "" : JSON.stringify(x)).trim(); };
+	const cwd = ctx?.cwd || process.cwd();
+	let ticket = v("ticket");
+	if (ticket && !ticket.includes("\n") && ticket.length < 500) { const f = resolve(cwd, ticket); try { if (statSync(f).isFile()) ticket = readFileSync(f, "utf8"); } catch { /* the text itself */ } }
+	if (!ticket.trim()) return { text: "Nothing ran: the brief needs the ticket (its text, or the path of a file holding it).", isError: true };
+	const why = await ensureExperts(ctx); if (why) return { text: why, isError: true };
+	try {
+		const deps = await sessionDeps(ctx, signal, progress, callId);
+		const L = await startRun({ ticket, repo: resolve(cwd, v("repo") || "."), howToRun: v("how_to_run"), start: v("start"), constraints: v("constraints") }, deps);
+		return { text: report(L), isError: L.status === "stopped" };
+	} catch (e) { return { text: `The software factory could not run: ${e instanceof Error ? e.message : String(e)}`, isError: true }; }
+}
+// the subagents view's state (the switching view of #56), if that module is here
+async function busyView(): Promise<any> {
+	try { const sub = await import(pathToFileURL(join(HERE, "subagents.ts")).href); return typeof sub.viewState === "function" ? sub.viewState(sub.registry()) : undefined; } catch { return undefined; }
+}
+const USAGE = "Usage: /factory start <ticket.md> [how-to-run] | resume <id> | list | status [id]";
 export default function (pi: ExtensionAPI) {
-	if (!ACTIVE || DEPTH > 0 || process.env.LETS_CODE_FACTORY_DEV !== "1") return;   // nothing in the model's context
+	if (!active()) return;   // a command only: nothing in the model's context
 	pi.registerCommand("factory", {
-		description: "Software factory (internal): /factory run <ticket.md> [how-to-run...] | resume <id> | list",
+		description: "Software factory: /factory start <ticket.md> [how-to-run] | resume <id> | list | status [id]",
+		getArgumentCompletions: (prefix: string) => {
+			const w = prefix.split(/\s+/);
+			if (w.length <= 1) return ["start", "resume", "list", "status"].filter((x) => x.startsWith(w[0] ?? "") && x !== w[0]).map((x) => ({ value: x, label: x }));
+			if (w[0] === "resume" || w[0] === "status") return listRuns().filter((L) => w[0] === "status" || L.status === "waiting" || L.status === "running" || L.status === "stopped").map((L) => L.id).filter((id) => id.startsWith(w[1] ?? "") && id !== w[1]).slice(0, 20).map((id) => ({ value: `${w[0]} ${id}`, label: id }));
+			return null;
+		},
 		handler: async (args: string, ctx: any) => {
-			const say = (m: string) => (ctx.hasUI ? ctx.ui.notify(m, "info") : console.log(m));
+			const say = (m: string, type = "info") => (ctx.hasUI ? ctx.ui.notify(m, type) : console.log(m));
 			const [verb = "list", arg = "", ...rest] = (args ?? "").trim().split(/\s+/).filter(Boolean);
 			const progress = (l: string) => { if (ctx.hasUI) ctx.ui.setStatus("factory", short(l, 80)); };
 			try {
-				if (verb === "list") return say(listRuns().map((L) => summary(L).split("\n")[0]).join("\n") || "No factory runs.");
-				const why = await ensureExperts(ctx); if (why) return say(why);
+				if (verb === "list") {
+					const runs = listRuns();
+					return say(runs.length ? runs.slice(0, 20).map((L) => `${L.id}  ${summary(L).split("\n")[0].replace(/^factory run \S+: /, "")}`).join("\n") : "No factory runs. /factory start <ticket.md> [how-to-run] starts one.");
+				}
+				if (verb === "status") {
+					const L = arg ? loadLedger(arg) : listRuns()[0];
+					return say(L ? report(L) : arg ? `No factory run ${arg}.` : "No factory runs.", L ? "info" : "warning");
+				}
+				if (verb !== "start" && verb !== "run" && verb !== "resume") return say(USAGE, "warning");
+				if (!arg) return say(USAGE, "warning");
+				const file = resolve(ctx.cwd, arg);
+				if (verb !== "resume" && !existsSync(file)) return say(`No ticket file ${arg}.`, "warning");
+				const why = await ensureExperts(ctx); if (why) return say(why, "warning");
 				const deps = await sessionDeps(ctx, ctx.signal, progress);
+				// the session counts as working while the run goes on, so switching
+				// into a stage shows it in place instead of tearing this session down
+				const vs = await busyView(); const was = vs?.mainBusy;
+				if (vs) vs.mainBusy = true;
 				let L: Ledger;
-				if (verb === "resume") L = await resumeRun(arg, deps);
-				else if (verb === "run") {
-					const file = resolve(ctx.cwd, arg); if (!arg || !existsSync(file)) return say(`No ticket file ${arg}.`);
-					L = await startRun({ ticket: readFileSync(file, "utf8"), repo: ctx.cwd, howToRun: rest.join(" ") }, deps);
-				} else return say("Usage: /factory run <ticket.md> [how-to-run] | resume <id> | list");
+				try {
+					L = verb === "resume" ? await resumeRun(arg, deps) : await startRun({ ticket: readFileSync(file, "utf8"), repo: ctx.cwd, howToRun: rest.join(" ") }, deps);
+				} finally { if (vs && !was) vs.mainBusy = false; }
 				if (ctx.hasUI) ctx.ui.setStatus("factory", undefined);
-				say(summary(L));
-			} catch (e) { say(`factory: ${e instanceof Error ? e.message : String(e)}`); }
+				say(report(L));
+			} catch (e) { if (ctx.hasUI) ctx.ui.setStatus("factory", undefined); say(`factory: ${e instanceof Error ? e.message : String(e)}`, "error"); }
 		},
 	});
 }
@@ -6555,6 +6603,8 @@ pi_write_experts_extension() {
 //   route       false: left out of the always-on line, so the model does not
 //               route tasks to it; it is run by name (a pipeline stage) and
 //               shown by list
+//   runner      factory: run in this session by the factory module
+//               (runExpert), not as a child: it starts children of its own
 //   setup       a script (path under ~/.pi/agent) run once it is enabled,
 //               when what the file names (agent_dir, requires, ...) is missing
 //   setup_note  what that setup does, shown in the enable dialog
@@ -6588,7 +6638,7 @@ const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "age
 const SETUP_TIMEOUT = 15 * 60 * 1000;
 
 interface Field { name: string; required: boolean; hint: string }
-interface Spec { name: string; description: string; file: string; expert: { job: string; useFor?: string; keywords?: string; dispatchRule?: string; brief: Field[]; setup?: string; setupNote?: string; ready: boolean; routed?: boolean } }
+interface Spec { name: string; description: string; file: string; expert: { job: string; useFor?: string; keywords?: string; dispatchRule?: string; brief: Field[]; setup?: string; setupNote?: string; ready: boolean; routed?: boolean; runner?: string } }
 
 // ------------------------------------------------------------------ state
 export const statePath = () => join(AGENT_DIR, "lets-code-state.json");
@@ -6831,9 +6881,17 @@ export default async function (pi: ExtensionAPI) {
 				const b = asBrief(r.brief); const miss = missingFields(s.expert.brief, b);
 				if (!b || miss.length) return text(`Nothing ran: the brief for ${s.name} ${b ? `lacks ${miss.join(", ")}` : "must be an object of the template's fields"}. Template:\n${template(s, true)}`, true);
 			}
+			// an expert with a runner (software-factory) runs in this session, alone
+			const engine = runs.map((r) => find(r.name)!).find((s) => s.expert.runner);
+			if (engine && runs.length > 1) return text(`${engine.name} runs alone, not in runs:[..]. Nothing ran.`, true);
 			for (const n of [...new Set(runs.map((r) => r.name))]) {   // one dialog at a time
 				const why = await ensure(n, ctx, progress, false, signal);
 				if (why) return text(runs.length > 1 ? `${why} Nothing ran.` : why, true);
+			}
+			if (engine) {
+				const mod = await import(pathToFileURL(join(HERE, `${engine.expert.runner}.ts`)).href);
+				const out = await sub.detachable(signal, _id, (sig: AbortSignal, j: { detached: boolean }) => mod.runExpert(asBrief(runs[0].brief)!, ctx, sig, (l: string) => { if (!j.detached) progress(l); }, _id));
+				return text(out.text, out.isError);
 			}
 			// the call goes on when the user switches sessions mid-call (the subagents module's detachable)
 			let job = { detached: false };
@@ -11602,7 +11660,7 @@ const PI_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const PLATFORMS = ["termux", "linux", "darwin", "win32", "freebsd", "openbsd", "android", "aix", "sunos"];
 const KNOWN = ["name", "description", "tools", "thinking", "role", "model", "agent_dir", "skills", "append_prompt", "timeout", "requires", "requires_env",
-	"expert", "job", "use_for", "keywords", "dispatch_rule", "platform", "setup", "setup_note", "brief", "route"];
+	"expert", "job", "use_for", "keywords", "dispatch_rule", "platform", "setup", "setup_note", "brief", "route", "runner"];
 const USE_FOR_MAX = 100, KEYWORDS_MAX = 40, RULE_MAX = 300, USE_FOR_WORDS = 16, BODY_WORDS = 1500, ENTRY_TOKENS = 40, MAX_TIMEOUT = 24 * 3600;
 const MARKER = /^# Written by lets-code/m;
 const TODO = "TODO" + "(expert-new)";   // split, so this file does not carry the marker itself
@@ -11760,7 +11818,9 @@ function lintFile(file, opt) {
 
 	// agent fields
 	const tools = list(fm.tools);
-	if (!fm.tools) warn("tools", `none: the child gets every tool; name the least it needs (pi's: ${PI_TOOLS.join(", ")})`);
+	if (fm.runner && fm.runner !== "factory") err("runner", `${fm.runner}: the only runner is factory (lets-code ignores the file)`);
+	if (fm.runner) note("runner", `${fm.runner}: it runs in the main session through lets-code's ${fm.runner} module, not as a child; tools, role and thinking do not apply`);
+	else if (!fm.tools) warn("tools", `none: the child gets every tool; name the least it needs (pi's: ${PI_TOOLS.join(", ")})`);
 	for (const t of tools) if (!PI_TOOLS.includes(t) && !/^mcp__\w+$/.test(t)) err("tools", `${t} is not a pi tool (${PI_TOOLS.join(", ")}, or mcp__<server>_<tool>)`);
 	if (/^(readonly|plan|reviewer)$/.test(fm.role || "") && tools.some((t) => t === "write" || t === "edit")) warn("tools", `role ${fm.role} with write/edit: the role refuses them${fm.role === "reviewer" ? " outside the temp dir" : ""}`);
 	if (fm.thinking && !THINKING.includes(fm.thinking)) err("thinking", `${fm.thinking}: one of ${THINKING.join(", ")}`);
@@ -12838,6 +12898,60 @@ LC_EOF
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
 }  # end of pi_write_design_reviewer
+
+# The software factory expert (phase 3): an expert the experts module runs in
+# the main session through the factory module (runner: factory), since its
+# stages are expert runs of their own and a child cannot start children. The
+# agent file is the routing entry, the job and the brief; its body documents
+# the pipeline and is never a child's prompt. Written with the
+# expert-builder's method (draft, expert-lint, route-check, expert-new pack).
+# software-factory expert: Runs a ticket through the software factory in its own worktree: developer (plan, then build), expert and design review, tester, acceptance judge, the full suite, up to 5 fix rounds; the user approves the criteria, plan and result; stage summaries back; minutes to hours
+# Written on every launch with experts on; dormant until the user enables it.
+pi_write_software_factory() {
+    local d="${PI_AGENT_DIR}/software-factory" af="${PI_AGENT_DIR}/agents/software-factory.md" tmp f
+    mkdir -p "${d}" "${PI_AGENT_DIR}/agents"
+    # the expert; a user's own agent of that name is left alone
+    if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    tmp="$(mktemp "${af}.XXXXXX")" || return 0
+    cat > "${tmp}" <<'LC_EOF'
+---
+# Written by lets-code (software-factory); regenerated on launch, edits are overwritten.
+# To keep your own version, delete this line: lets-code then leaves it alone.
+name: software-factory
+description: Takes one ticket through the software factory's pipeline of experts, with the user's approvals
+runner: factory
+expert: true
+use_for: the software factory: a ticket taken end to end through its pipeline of experts
+keywords: software factory
+job: Runs a ticket through the software factory in its own worktree: developer (plan, then build), expert and design review, tester, acceptance judge, the full suite, up to 5 fix rounds; the user approves the criteria, plan and result; stage summaries back; minutes to hours
+brief:
+  - ticket (required): the ticket verbatim, or the path of a file holding it, with its acceptance criteria
+  - repo: the git repo to work on (default: the current folder); the user's checkout is never touched
+  - how_to_run: the command that runs the test suite
+  - start: how to start the app, for the tester's browser checks
+  - constraints: what must not be touched, style rules, limits
+---
+The software factory is not a child agent: lets-code's factory module runs
+it in the main session (runner: factory), because each of its stages is an
+expert run of its own, in a fresh context with a brief built from the run's
+artifacts (the ticket, the confirmed criteria, the approved plan, the diff,
+earlier findings), never the conversation.
+
+Pipeline: intake (criteria from the ticket, the suite's baseline), the
+user confirms the criteria; developer (plan), the user approves the plan;
+developer (build), expert-reviewer, design-reviewer, tester, acceptance-judge,
+the full suite; the user approves the result, and only then is it
+committed, as one commit on the run's branch. Nothing is pushed.
+
+A run lives in lets-code-factory/<id>/ in the agent dir: its ledger (each
+stage's brief, verdict, findings, tokens and time), its artifacts and its
+worktree. Stages show in /subagents. A run waiting for the user, or one
+that was interrupted, goes on with /factory resume <id>; /factory list and
+/factory status show where each one stands.
+LC_EOF
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+}  # end of pi_write_software_factory
 
 # `lets-code mandate init [--global]`: a starter manifest to edit.
 mandate_init() {
@@ -14176,6 +14290,7 @@ case "$(lc "${EXPERTS}")" in
             fi
             pi_write_judge   # nothing to set up: the files only
             pi_write_developer; pi_write_expert_reviewer; pi_write_design_reviewer   # files only
+            pi_write_software_factory   # the factory's entry: runs in this session (runner: factory)
             if ! on_termux; then   # Playwright has no browser for Android
                 if [ "$(lc_expert_remembered tester)" = true ]; then
                     pi_write_tester on

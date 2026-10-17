@@ -76,6 +76,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🧪 **Tester** (expert) | Web-app QA the way [achilles](https://github.com/civitas-cerebrum/achilles) does it, on demand: the `tester` expert maps journeys, writes and runs e2e tests with the Steps API of [element-interactions](https://github.com/civitas-cerebrum/element-interactions) (Playwright), verifies a flow or change with evidence, hunts bugs and diagnoses failing e2e tests, in a separate pi; Android and iOS apps too where Appium is set up. Installed when you enable it; Linux and macOS only. |
 | ⚖️ **Acceptance judge** (expert) | "Is it done?" answered by trying to break it: the `acceptance-judge` expert takes the acceptance criteria and the work (a diff, branch, commit or PR), runs the checks itself with negative controls, and returns PASS / FAIL / UNVERIFIABLE per criterion with the evidence, then ACCEPT or REJECT. It never edits the work. The method is distilled from achilles' review roles; nothing to install, so it works everywhere, the phone included. |
 | 🏗️ **Expert builder** (expert) | Ask for a new expert ("make me an expert that converts and validates config files") and the `expert-builder` expert designs it, distills its sources (docs, a repo, a method, your scripts) into instructions and references, writes the files as your own, lints them and measures how well the model routes to it. It can also prepare a built-in for lets-code on a git branch. Files only, so it works everywhere. |
+| 🏭 **Developer and reviewers** (experts) | The software factory's stages, usable on their own: `developer` implements a ticket from its acceptance criteria and an approved plan, with its tests, confined to its working folder and never committing (or returns only a plan); `expert-reviewer` hunts bugs and edge cases in a diff against its criteria; `design-reviewer` judges its design against the codebase's own conventions. Each answers in a fixed format a program can parse (`STATUS:` / `VERDICT:` lines, one line per finding with its severity). Files only, so they work everywhere. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -419,8 +420,8 @@ the harness live outside this repo.
 
 With `MANDATE=true` every session runs under a **role**: a scope that says
 which tools, paths, kinds of bash command, MCP servers and agents are
-allowed, asked about or denied. The four built-in roles are the modes (two
-more, `readonly` and `reviewer`, are for subagents):
+allowed, asked about or denied. The four built-in roles are the modes (three
+more, `readonly`, `reviewer` and `developer`, are for subagents):
 
 | Mode | What changes |
 |---|---|
@@ -454,6 +455,12 @@ deletes, `sudo` and remote shells. A role of the same name in your
 you set win, the others stay as built in (to change it completely, set
 each field, or give your role another name). A project's `.pi/mandate.json`
 may only tighten it.
+
+`developer`, the role of the `developer` expert, has the file tools but
+writes only inside its working folder and the temp dir (no prompt: a path
+outside is refused), runs tests and builds, and refuses git writes (the
+caller commits), package installs, recursive deletes, `sudo` and remote
+shells.
 
 </details>
 
@@ -752,14 +759,15 @@ roles see every MCP call and can allow, ask or deny per server.
 
 An expert is a subagent with knowledge of its own: standing instructions
 (recipes, traps, a report format), a brief template that says what its
-caller must tell it, and, where it needs one, a setup. lets-code ships five,
-`acceptance-judge`, `expert-builder` and `reverse-engineer` (anywhere),
-`termux-device` (on Termux only) and `tester` (Linux and macOS), and you can
+caller must tell it, and, where it needs one, a setup. lets-code ships eight,
+`acceptance-judge`, `design-reviewer`, `developer`, `expert-builder`,
+`expert-reviewer` and `reverse-engineer` (anywhere), `termux-device` (on
+Termux only) and `tester` (Linux and macOS), and you can
 add your own (see [Build your own expert](#build-your-own-expert)). They sit behind one tool, `expert`, whose line in the
 context names each expert usable here with a few words on what it is for:
 
 ```text
-expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); expert-builder (making or fixing an expert: from docs, a runbook or scripts; its knowledge, brief and routing); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
+expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); design-reviewer (clean-code and design review of a change: patterns, maintainability); expert-builder (making or fixing an expert: from docs, a runbook or scripts; its knowledge, brief and routing); expert-reviewer (bug review of a diff or PR: what breaks, edge cases, severity); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
 ```
 
 (On Linux and macOS `tester (anything on a web app that needs a browser:
@@ -779,6 +787,9 @@ The templates:
 | Expert | Brief (* required) |
 |---|---|
 | `acceptance-judge` | `criteria`*: the acceptance criteria verbatim (a list, or the ticket's text); `artifact`*: what to judge, the repo path plus a diff, commit, branch, PR or URL; `claim`: what the implementer says was done and how they checked it; `how_to_run`: test, build or start commands, a dev server URL; `constraints`: what must not be run or touched, time limits |
+| `developer` | `task`*: the ticket or goal, verbatim; `criteria`: the acceptance criteria, numbered; `mode`: `plan` (a plan, no change) or `build` (default); `plan`: the approved plan; `findings`: review or test findings to fix, with their ids; `how_to_run`: test and build commands; `constraints`: what not to touch, style, limits |
+| `expert-reviewer` | `diff`*: the repo path and base..head, a commit, a branch or a PR; `criteria`: the acceptance criteria; `context`: the ticket or plan; `previous_findings`: an earlier round's findings to re-check; `how_to_run`: test and build commands; `constraints`: what must not be run, limits |
+| `design-reviewer` | `diff`*: the repo path and base..head, a commit, a branch or a PR; `context`: the ticket or plan; `conventions`: style guides, lint config, architecture notes; `previous_findings`: an earlier round's findings to re-check; `constraints`: what must not be run, limits |
 | `expert-builder` | `domain`*: what the new expert is for, in your words; `sources`: docs, repos, a method or scripts to distill; `scope`: `user` (default, your own) or `builtin` (a lets-code contribution on a branch); `name`; `platform`; `constraints`: what it must never do, limits; for builtin, the checkout and whether to push |
 | `termux-device` | `goal`*: the user's goal, verbatim; `confirmed`: only after you approved the exact final step it reported (app, recipient, text) |
 | `reverse-engineer` | `target`*: absolute path or URL of the artifact; `question`*: what to find out; `purpose`: what the answer is for |
@@ -831,8 +842,40 @@ ls` and no edit or write; `acceptance-judge/bin/scratch-copy` makes the
 throwaway copies under the temp dir, and with `MANDATE=true` the `reviewer`
 role enforces that. Nothing is installed. For a panel, the model can run
 the same brief two or three times with `runs:` (two at a time) and accept
-only if every judge does. A plain code review stays with `reviewer`, and
-running the tests with the model.
+only if every judge does. A bug review of a diff goes to
+`expert-reviewer`, and running the tests stays with the model.
+
+**Developer and reviewers.** Three experts for the stages of a software
+factory, each a fresh context with a built brief, usable on their own too.
+`developer` implements one ticket in the current folder: it explores, runs
+the suite for a baseline, writes per criterion a test that fails without
+the change, then the code, runs everything, and reads its own diff; with
+`mode: plan` it returns only a plan, and with `findings` it fixes those by
+id. It has pi's file tools under the `developer` role (writes only in its
+working folder and the temp dir, no git writes or installs), so it leaves
+the change uncommitted for you. Its reply starts `STATUS: PLAN`, `DONE` or
+`BLOCKED`, then fixed headings (changes, tests with exit codes, criteria
+covered, findings fixed). `expert-reviewer` asks whether the code does what
+the criteria say for every input: logic, edge cases, error paths,
+concurrency, security, data loss, broken contracts, tests that do not test
+the criterion; it reproduces suspects with a script under the temp dir and
+marks each finding confirmed or suspected. `design-reviewer` asks whether
+the change fits how the codebase already does things and stays easy to
+change: reuse, responsibility, coupling, abstraction, names, interfaces,
+tests as code, linters in check mode only; bugs it notices go to a note,
+not its findings. Both have `read, bash, grep, find, ls` under the
+`reviewer` role, a checklist read on demand, and reply with `VERDICT:
+APPROVE` or `REVISE` (REVISE when a blocker or major is open), then one
+line per finding, `R<n>` or `D<n> | blocker|major|minor|nit | file:line |
+title`, with ids kept across fix rounds so a repeated finding can be
+spotted. Whether the criteria are met stays with `acceptance-judge`, and
+browser work with `tester`. `developer` has `route: false`: it is a stage
+the factory dispatches by name, not in the always-on line. Measured, the
+model kept implementing tickets itself whatever its `use_for` said (2 of 48
+prompts routed over five wordings), and its entry made the model check
+acceptance criteria by hand more often (acceptance-judge recall 15/24 with
+it in the line, 22/24 without); `list` still shows it, and the model or you
+can run it by name.
 
 **Dormant until you say yes.** Every expert starts dormant: listed, nothing
 installed, nothing else in the context. It is enabled only by you: the
@@ -861,14 +904,16 @@ Past about a dozen experts the line switches to a compact form, each
 is one (a project's agent files never are). On top of the usual agent fields
 (`description`, `tools`, `thinking`, `role`, `agent_dir`, `skills`,
 `append_prompt`, `timeout`, `requires`; see [Subagents](#subagents);
-`role: readonly`, or `role: reviewer` for one that runs checks but
-changes nothing):
+`role: readonly`, `role: reviewer` for one that runs checks but
+changes nothing, or `role: developer` for one that edits only its working
+folder):
 
 | Field | Meaning |
 |---|---|
 | `expert` | `true` |
 | `use_for` | A few words on the tasks it takes, shown in the always-on line; write what a user would ask for, not what the expert is |
 | `keywords` | Two or three words that replace `use_for` in the compact line |
+| `route` | `false` keeps it out of the always-on line (and its `dispatch_rule` out of the prompt): the model does not route tasks to it, it runs by name, as a pipeline stage, and `list` shows it. `developer` is one |
 | `dispatch_rule` | One imperative line added to the system prompt while the expert is usable (up to 300 characters, paid on every request): only for tasks the model keeps doing by hand. termux-device has one for phone actions |
 | `job` | One line for `list` (default: `description`) |
 | `brief` | The template, one `- name (required): hint` or `- name: hint` item per field (none: one required `task`) |

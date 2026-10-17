@@ -155,6 +155,34 @@ const blocked = (r) => r?.block === true;
 	if (tmpWas === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = tmpWas;
 }
 
+// --- developer: the developer expert's role: edits and runs in its workspace
+// (the working folder) and the temp dir, never outside; no git writes, installs,
+// recursive deletes or sudo
+{
+	const tmpWas = process.env.TMPDIR; const scratch = join(work, "dev-tmp"); mkdirSync(scratch); process.env.TMPDIR = scratch;
+	const h = await load({ LETS_CODE_ROLE: "developer", LETS_CODE_SUBAGENT_DEPTH: "1" }); const d = repo(); await h.start(d);
+	const outside = repo();
+	t("developer: edit in the workspace passes", await h.call(d, "edit", { path: join(d, "src", "a.txt") }), undefined);
+	t("developer: write a new file passes", await h.call(d, "write", { path: join(d, "src", "new.js") }), undefined);
+	t("developer: write outside blocked", blocked(await h.call(d, "write", { path: join(outside, "src", "x.js") })), true);
+	t("developer: edit outside blocked", blocked(await h.call(d, "edit", { path: join(outside, "src", "a.txt") })), true);
+	t("developer: no prompt for outside (denied)", h.notices.length, 0);
+	t("developer: .git protected", blocked(await h.call(d, "write", { path: join(d, ".git", "config") })), true);
+	t("developer: test runner passes", await h.call(d, "bash", { command: "npm test 2>&1 | tail -n 20" }), undefined);
+	t("developer: output in the workspace passes", await h.call(d, "bash", { command: "node gen.js > src/out.txt" }), undefined);
+	t("developer: output to the temp dir passes", await h.call(d, "bash", { command: `node app.js > ${join(scratch, "out.txt")}` }), undefined);
+	t("developer: output outside blocked", blocked(await h.call(d, "bash", { command: `node app.js > ${join(outside, "out.txt")}` })), true);
+	t("developer: git diff passes", await h.call(d, "bash", { command: "git diff -- src" }), undefined);
+	t("developer: git commit blocked", blocked(await h.call(d, "bash", { command: "git commit -am wip" })), true);
+	t("developer: git stash blocked", blocked(await h.call(d, "bash", { command: "git stash" })), true);
+	t("developer: npm install blocked", blocked(await h.call(d, "bash", { command: "npm install left-pad" })), true);
+	t("developer: rm -rf blocked", blocked(await h.call(d, "bash", { command: "rm -rf src" })), true);
+	t("developer: sudo blocked", blocked(await h.call(d, "bash", { command: "sudo ls" })), true);
+	t("developer: cannot dispatch", blocked(await h.call(d, "subagent", { agent: "worker", task: "x" })), true);
+	t("developer: no prompt section", (() => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), []);
+	if (tmpWas === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = tmpWas;
+}
+
 // --- a user's global role named reviewer merges over the built-in: the
 // fields it sets win, the rest stays; a project may only tighten it
 {

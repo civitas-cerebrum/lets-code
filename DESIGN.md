@@ -511,6 +511,64 @@ built-in is drafted in `expert-builder/work/draft` (a user's file of that
 name would block the built-in) and packed into a writer function by
 `expert-new pack`.
 
+**Developer and reviewers (the factory's stages).** The software factory
+runs a ticket through stages that each get a fresh context and a brief
+built from artifacts (criteria, plan, diff, earlier findings), never the
+transcript. Phase 1 adds the three stages lets-code did not have, built
+with the expert-builder's method (drafted in a scratch agent dir, linted,
+route-checked, packed with `expert-new pack`). Their final messages are an
+interface for a program, so each is fixed: the developer's first line is
+`STATUS: PLAN|DONE|BLOCKED`, then fixed headings (changes; tests with exit
+codes; `C<n>: covered by <test>`; `<id>: fixed: <how>`); the reviewers'
+first line is `VERDICT: APPROVE|REVISE`, REVISE exactly when a blocker or
+major is open, then one line per finding (`R<n>` or `D<n> | severity |
+file:line | ...`) and `R<n>: FIXED|OPEN` for a re-check. Ids stay stable
+across fix rounds, so the engine can see a finding repeat and stop. The
+two reviews split by question, not by depth: does the code do what the
+criteria say for every input (expert-reviewer: it reproduces suspects with
+a script under the temp dir), and does it fit how the codebase already
+does things and stay cheap to change (design-reviewer: a finding needs a
+convention or a concrete cost; bugs it sees go to a note). Whether the
+criteria are met stays with acceptance-judge, which runs negative controls;
+the reviewers do not. Both use `reviewer`. The developer needed a role the
+built-ins lacked: `auto` lets it write anywhere, `ask` would prompt a child
+that has no UI. The new `developer` role has the file tools, writes only
+in its working folder and the temp dir (outside is denied, not asked),
+and denies git writes (the caller commits after the user's checkpoint),
+installs, recursive deletes, sudo and remote shells. The phase-2 engine
+runs it with the run's worktree as its working folder (`runAgent`'s cwd).
+
+Routing was measured with route-check on a toy repo (a ticket with four
+criteria, an approved plan, a feature branch with seeded bugs), 6 positives,
+6 near-misses and 2 or 3 neighbours per expert, thinking low, each file run
+twice since one run varied by up to three prompts. The reviewers route at
+3 to 5 of 6 with no false trigger in any run and no task taken from another
+expert. The developer did not route: 2 of 48 over five wordings, the model
+implements tickets itself (writes after a few reads), and with its entry in
+the line acceptance-judge's recall fell from 22/24 to 15/24 (its misses
+became the model's own checks, not the developer's). So an expert can now
+say `route: false`: it stays out of the always-on line and its
+dispatch_rule out of the prompt, `list` and `run` are unchanged, and
+expert-lint skips its line cost. The developer is the first; the factory
+dispatches it by name. With the two reviewers the line grows by 38 tokens
+(122 to 160 on Linux, 118 to 156 on Termux, vLLM's tokenizer), 707 and 685
+characters, under the 900 where entries shrink to keywords; no dispatch
+rule. The bodies (about 750 to 820 tokens each) and the two checklists
+(730 and 870) reach only the child.
+
+A live run of each on the toy repo (thinking low, `--mandate`): the expert
+reviewer confirmed both seeded bugs (31 days instead of 30, rounding to
+nearest instead of down) as blockers with a reproduction each, plus the
+missing tests, and said REVISE; the design reviewer flagged the inlined
+discount table against the plan's module layout and the missing test
+file, and passed both bugs on under Notes; the developer followed the plan
+(a new module, one test per criterion, 5 of 5 passing), left the change
+uncommitted and reported each criterion's test. The first line came first
+in two of three runs once the prompt said nothing may precede it; the
+third put one sentence before `VERDICT:`, and finding lines come wrapped
+in backticks, so the engine looks for the first `^STATUS:` / `^VERDICT:`
+line and strips backticks rather than trusting the first line.
+
 **Claude Code adapter.** Automatic: the launcher switches it on only where
 the project's `.claude` (up to the git root) has hooks or workflow scripts,
 the parts that need the adapter to work at all; skills and commands alone

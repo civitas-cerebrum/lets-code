@@ -602,6 +602,20 @@ as on the main session's (<kbd>Ctrl</kbd>+<kbd>T</kbd> thinking blocks,
   its own session) replied: …`, as soon as you are back there), so the
   model there knows; it does not start a turn.
 
+**Switching never stops anything.** While the main session works (the
+model streaming, a tool or a `subagent` call running, messages queued), a
+switch would make pi stop its turn, so the subagent's session is shown in
+place instead: its messages, drawn as pi draws them, where the main chat
+is, while the main session's turn goes on unseen and lands in its own
+session; back, its chat is as the turn left it. Shown that way, typing,
+<kbd>Esc</kbd>, `!`, <kbd>Shift</kbd>+<kbd>Tab</kbd>, <kbd>Ctrl</kbd>+<kbd>P</kbd>,
+`/thinking <level>` and `/compact` act on the child, and <kbd>Esc</kbd> never
+reaches the main session; the commands that read or change the open
+session itself (`/model`, `/copy`, `/export`, `/tree`, `/fork`, ...) wait,
+with a note, until the main session's turn has ended, then run in the
+child's own session. Switching between subagents, or back, never stops a
+child either: each runs in its own process.
+
 Children go when the main session ends (quit, `/new`, `/resume` of another
 session), when their run is pruned, or after resting as above.
 

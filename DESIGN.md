@@ -307,6 +307,33 @@ is sent to the session the call came from with `pi.sendMessage(...,
 { triggerTurn: true, deliverAs: "followUp" })`, held while another
 session is open. A plain abort (Esc) still stops the children.
 
+Switching while the main session works: the teardown above aborts the
+turn in flight (the model's reply, a running tool, queued messages, and
+pi prints `This operation was aborted`), and pi 0.87 and 1.0 have no
+switch that keeps the old session running. So no `switchSession` is made
+while the main session works (`agent_start` .. `agent_settled`,
+`ctx.isIdle()`, `ctx.hasPendingMessages()`): the child is shown in place.
+pi's interactive layout is the same in both versions (`tui.children`:
+the document of header, resources and chat, then the pending messages,
+the status, the widgets above, the editor, the widgets below, the
+footer); the chat container is swapped for a component that draws the
+run's completed events with pi's message components (the `Transcript` of
+the live widget), the pending and status containers for empty ones. The
+main session object is untouched: its turn runs on, writes its session
+file and fills its own chat, which comes back on `back`. In place the key
+hook keeps the main session's keys off it: Esc stops the child or is
+eaten, shift+tab and ctrl+p go to the child's RPC (`cycle_thinking_level`,
+`cycle_model`), `!` runs as the child's `bash` command (the `user_bash`
+hook refuses it, so nothing lands in the main session), `/thinking
+<level>` and `/compact` are passed on, and the commands that read or
+change the open session (`IN_PLACE_DEFER`, ctrl+l, ctrl+x) are held with
+a note until the main session is idle, then run in the child's real
+session. Completed child messages are not added to the main session as
+custom messages in place (the view draws them). When the main session is
+idle the switch is the real one as before (no turn to abort). If pi's
+layout is not as expected the switch is deferred with a note (the last
+resort).
+
 The registry lives on `globalThis`, so the copies of `subagents.ts` that
 the experts and Claude Code modules import share it, and a switch or
 `/reload` (which load the module again) keep it. The footer list

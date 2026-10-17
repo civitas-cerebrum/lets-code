@@ -359,12 +359,38 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	const builtins = [...lc.matchAll(/\n---\n(?:#[^\n]*\n)*name: ([\w-]+)\n[\s\S]*?\n---\n/g)].map((m) => m[0]).filter((fm) => /\nexpert: true\n/.test(fm))
 		.map((fm) => ({ name: fm.match(/\nname: ([\w-]+)\n/)[1], platform: (fm.match(/\nplatform: (.*)\n/) || [])[1], expert: { useFor: (fm.match(/\nuse_for: (.*)\n/) || [])[1], keywords: (fm.match(/\nkeywords: (.*)\n/) || [])[1], routed: !/\nroute: false\n/.test(fm) } }));
 	const names = builtins.map((b) => b.name).sort();
-	t("built-ins found", names, ["acceptance-judge", "design-reviewer", "developer", "expert-builder", "expert-reviewer", "reverse-engineer", "termux-device", "tester"]);
+	t("built-ins found", names, ["acceptance-judge", "design-reviewer", "developer", "expert-builder", "expert-reviewer", "reverse-engineer", "software-factory", "termux-device", "tester"]);
 	const linux = builtins.filter((b) => b.platform !== "termux"), termux = builtins.filter((b) => !b.platform || b.platform === "termux");
 	for (const [where, set] of [["Linux", linux], ["Termux", termux]]) {
 		const line = mod.snippet(set);
 		t(`every built-in on ${where}: the full line, under the budget`, [line.length <= mod.LINE_BUDGET, set.every((b) => line.includes(`${b.name} (${b.expert.useFor})`) === b.expert.routed)], [true, true]);
 	}
+}
+
+// an expert with runner: factory runs in this session through factory.ts's
+// runExpert (a child cannot start the stages' children), never as a child
+{
+	const sub = await import(pathToFileURL(join(ext, "subagents.ts")).href);
+	const lc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lets-code"), "utf8");
+	const from = lc.indexOf("\npi_write_software_factory() {"); const start = lc.indexOf("<<'LC_EOF'\n---\n", from) + 11;
+	const body = lc.slice(start, lc.indexOf("\nLC_EOF\n", start) + 1);
+	const a = sub.parseAgentFile(body, join(agentDir, "agents", "software-factory.md"), "user", undefined, false, true);
+	t("software-factory: an expert with the factory runner", [a?.name, !!a?.expert, a?.expert?.runner, a?.expert?.ready, a?.expert?.routed], ["software-factory", true, "factory", true, true]);
+	t("software-factory: brief", a?.expert?.brief.map((f) => `${f.name}${f.required ? "*" : ""}`), ["ticket*", "repo", "how_to_run", "start", "constraints"]);
+	t("an unknown runner: the file is ignored", sub.parseAgentFile("---\nname: x\ndescription: y\nexpert: true\nrunner: rocket\n---\nz\n", join(agentDir, "agents", "x.md"), "user", undefined, false, true), null);
+	writeFileSync(join(ext, "factory.ts"), "export const got = [];\nexport async function runExpert(brief, ctx, signal, progress, callId) { got.push({ brief, callId, cwd: ctx.cwd }); if (progress) progress('factory: plan'); return { text: 'factory run X: done', isError: false }; }\n");
+	A("sf.md", "---\nname: sf\ndescription: a pipeline\nrunner: factory\nexpert: true\nuse_for: pipelines of experts\nbrief:\n  - ticket (required): the ticket\n---\nDocumentation only.\n");
+	const { tool } = await load();
+	clearCalls();
+	const c = ctx([true]); const lines = [];
+	const r = await tool.execute("call-9", { action: "run", name: "sf", brief: { ticket: "T-1" } }, undefined, (u) => lines.push(u.content[0].text), c);
+	const fac = await import(pathToFileURL(join(ext, "factory.ts")).href);
+	t("runner: runs in this session, not as a child", [out(r), fac.got.length, fac.got[0]?.brief.ticket, fac.got[0]?.callId, calls().length], ["factory run X: done", 1, "T-1", "call-9", 0]);
+	t("runner: the enable dialog first, its progress shown", [c.asked.length, lines.includes("factory: plan")], [1, true]);
+	has("runner: alone, never in runs:[..]", out(await run(tool, { action: "run", runs: [{ name: "sf", brief: { ticket: "T" } }, { name: "helper", brief: { target: "x", question: "y" } }] }, ctx([true]))), "sf runs alone");
+	has("runner: a brief without its ticket runs nothing", out(await run(tool, { action: "run", name: "sf", brief: {} }, ctx([true]))), "lacks ticket");
+	t("runner: nothing more ran", [fac.got.length, calls().length], [1, 0]);
+	rmSync(join(agentDir, "agents", "sf.md")); rmSync(join(ext, "factory.ts"));
 }
 
 console.log(`\n${n} checks, ${fail ? "FAILURES" : "all passed"}`);

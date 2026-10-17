@@ -77,6 +77,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | ⚖️ **Acceptance judge** (expert) | "Is it done?" answered by trying to break it: the `acceptance-judge` expert takes the acceptance criteria and the work (a diff, branch, commit or PR), runs the checks itself with negative controls, and returns PASS / FAIL / UNVERIFIABLE per criterion with the evidence, then ACCEPT or REJECT. It never edits the work. The method is distilled from achilles' review roles; nothing to install, so it works everywhere, the phone included. |
 | 🏗️ **Expert builder** (expert) | Ask for a new expert ("make me an expert that converts and validates config files") and the `expert-builder` expert designs it, distills its sources (docs, a repo, a method, your scripts) into instructions and references, writes the files as your own, lints them and measures how well the model routes to it. It can also prepare a built-in for lets-code on a git branch. Files only, so it works everywhere. |
 | 🏭 **Developer and reviewers** (experts) | The software factory's stages, usable on their own: `developer` implements a ticket from its acceptance criteria and an approved plan, with its tests, confined to its working folder and never committing (or returns only a plan); `expert-reviewer` hunts bugs and edge cases in a diff against its criteria; `design-reviewer` judges its design against the codebase's own conventions. Each answers in a fixed format a program can parse (`STATUS:` / `VERDICT:` lines, one line per finding with its severity). Files only, so they work everywhere. |
+| 🔎 **Researcher** (expert) | Research on an open question from the web: the `researcher` expert splits it into sub-questions, searches and fetches sources in parallel, scores each source's quality and relevance, verifies each claim with two independent sources (or one primary source about itself), tags every claim with its sources and returns a report with confidence and gaps. Fetched pages are data, never instructions; robots.txt is honoured. Its plan and pages stay in a state folder, so a later run resumes. Pages a plain fetch cannot read (JavaScript, bot walls), sites you logged in to once by hand, and search go through a headed Chromium with its own profile (Playwright CLI, installed when you enable it); it only navigates and reads. On the phone it falls back to plain HTTP. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -773,15 +774,15 @@ roles see every MCP call and can allow, ask or deny per server.
 
 An expert is a subagent with knowledge of its own: standing instructions
 (recipes, traps, a report format), a brief template that says what its
-caller must tell it, and, where it needs one, a setup. lets-code ships eight,
+caller must tell it, and, where it needs one, a setup. lets-code ships nine,
 `acceptance-judge`, `design-reviewer`, `developer`, `expert-builder`,
-`expert-reviewer` and `reverse-engineer` (anywhere), `termux-device` (on
+`expert-reviewer`, `researcher` and `reverse-engineer` (anywhere), `termux-device` (on
 Termux only) and `tester` (Linux and macOS), and you can
 add your own (see [Build your own expert](#build-your-own-expert)). They sit behind one tool, `expert`, whose line in the
 context names each expert usable here with a few words on what it is for:
 
 ```text
-expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); design-reviewer (clean-code and design review of a change: patterns, maintainability); expert-builder (making or fixing an expert: from docs, a runbook or scripts; its knowledge, brief and routing); expert-reviewer (bug review of a diff or PR: what breaks, edge cases, severity); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
+expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); design-reviewer (clean-code and design review of a change: patterns, maintainability); expert-builder (making or fixing an expert: from docs, a runbook or scripts; its knowledge, brief and routing); expert-reviewer (bug review of a diff or PR: what breaks, edge cases, severity); researcher (web research: compare tools, licences, prices, facts from the web; cited, cross-checked report); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
 ```
 
 (On Linux and macOS `tester (anything on a web app that needs a browser:
@@ -805,6 +806,7 @@ The templates:
 | `expert-reviewer` | `diff`*: the repo path and base..head, a commit, a branch or a PR; `criteria`: the acceptance criteria; `context`: the ticket or plan; `previous_findings`: an earlier round's findings to re-check; `how_to_run`: test and build commands; `constraints`: what must not be run, limits |
 | `design-reviewer` | `diff`*: the repo path and base..head, a commit, a branch or a PR; `context`: the ticket or plan; `conventions`: style guides, lint config, architecture notes; `previous_findings`: an earlier round's findings to re-check; `constraints`: what must not be run, limits |
 | `expert-builder` | `domain`*: what the new expert is for, in your words; `sources`: docs, repos, a method or scripts to distill; `scope`: `user` (default, your own) or `builtin` (a lets-code contribution on a branch); `name`; `platform`; `constraints`: what it must never do, limits; for builtin, the checkout and whether to push |
+| `researcher` | `question`*: what to find out, in your words; `scope`: options to cover, region, time window, sources to prefer or avoid; `criteria`: what to compare or decide on, hard constraints; `known`: what you already believe, to be checked; `state`: an earlier run's state folder, to resume it |
 | `termux-device` | `goal`*: the user's goal, verbatim; `confirmed`: only after you approved the exact final step it reported (app, recipient, text) |
 | `reverse-engineer` | `target`*: absolute path or URL of the artifact; `question`*: what to find out; `purpose`: what the answer is for |
 | `tester` | `target`*: the web URL, the app's project path, or the mobile app id or .apk; `platform`: web (default), android or ios; `goal`*: the QA task in the user's words; `how_to_run`: commands that start the app and run the existing tests; `scope`: which pages, journeys or files, how deep; `constraints`: what not to touch, logins or test data, time limits |
@@ -890,6 +892,64 @@ prompts routed over five wordings), and its entry made the model check
 acceptance criteria by hand more often (acceptance-judge recall 15/24 with
 it in the line, 22/24 without); `list` still shows it, and the model or you
 can run it by name.
+
+**Researcher.** For questions the code cannot answer: comparing products,
+licences, prices, policies, or checking a claim. `researcher` writes a plan
+of 3 to 7 sub-questions, each with the source that would settle it, then
+searches them all in one call and fetches the best pages in parallel. Each
+page becomes a source `S<n>` in a ledger; the same URL (without tracking
+parameters or fragment) is fetched once and served from disk for 30 days.
+It scores sources (quality: primary 3, accountable secondary 2, blogs and
+aggregators 1; relevance 0 to 3) and cites only those at 2 or more. A
+claim is `verified` with two independent sources or one primary source
+about itself (a project's own licence file), else `single`, `conflict`
+(both sides kept, with dates) or `unverified`. Every claim in the reply
+carries its source ids; a comparison scores options only from cited
+claims, hard constraints veto, and an unknown stays unknown. Fetched text
+is untrusted: its helper (`researcher/bin/web`, Python's standard library)
+prints it inside `<<<UNTRUSTED S<n>` fences, drops hidden elements and
+comments, flags lines that address an assistant, and the expert never
+follows a page's instructions or its links to other organisations. The
+helper honours robots.txt strictly (a 401/403 is retried with browser
+headers only where robots.txt allows it) and searches a public HTML
+search page; pi has no web tool. It runs under the `reviewer` role
+(network on, writes only under the temp dir), never posts, signs in or
+submits anything, and replies with fixed headings (answer, findings with
+status and confidence, sources with dates, gaps, the state folder to pass
+as `state` to resume). Questions about the local code stay with the model
+and the `general` and `scout` subagents.
+
+**The researcher's browser.** Its setup installs the Playwright CLI
+(`@playwright/cli`, pinned, `--ignore-scripts`) into
+`~/.pi/agent/researcher/runtime` and reuses a Chromium already in
+Playwright's cache (the tester's), so there is no second copy. The helper
+then reads a page in that browser when the plain fetch is empty, refused,
+a bot wall, a login wall or a JavaScript shell, and first for the domains
+you logged in to; it searches through real result pages there
+(DuckDuckGo, then Startpage), with the plain HTML page as the fallback. It
+runs headed: on the desktop's display, else on an Xvfb display of its own
+(no monitor needed), one page at a time, with a persistent profile in
+`~/.pi/agent/researcher/browser-profile` (mode 700) and an idle exit after
+5 minutes. The helper allows only `open`, `goto`, `mousewheel`, `list`,
+`close` and `eval` of its own read-only extractors: no clicks, typing,
+forms, uploads, downloads or cookie and storage commands, and it refuses
+hosts on private networks. Page text gets the same hidden-text stripping
+(computed styles, shadow DOM) and injection flagging; the CLI's snapshots
+and console logs are deleted after every call, and nothing from the
+profile reaches the ledger, the cache or the report.
+
+To log the browser in to a site, once, by hand (on the machine that runs
+lets-code, in a terminal):
+```bash
+~/.pi/agent/researcher/bin/web login https://example.com/login
+# then, from your laptop or phone:  ssh -N -L 9417:127.0.0.1:9417 you@that-machine
+# open http://127.0.0.1:9417, pick the session "researcher", switch on interactive mode, log in,
+# and press Enter in the first terminal (the dashboard closes again; the domain is remembered)
+```
+The dashboard listens on 127.0.0.1 only. `web browser status` shows
+whether the browser is usable and its memory, `web browser close` closes it
+and its Xvfb; `RESEARCH_BROWSER=off` disables it; deleting
+`browser-profile` forgets every login.
 
 **Dormant until you say yes.** Every expert starts dormant: listed, nothing
 installed, nothing else in the context. It is enabled only by you: the

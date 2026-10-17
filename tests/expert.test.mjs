@@ -343,6 +343,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 		developer: { tools: ["read", "bash", "edit", "write", "grep", "find", "ls"], role: "developer", timeout: 3600, brief: ["task*", "criteria", "mode", "plan", "findings", "how_to_run", "constraints"] },
 		"expert-reviewer": { tools: ["read", "bash", "grep", "find", "ls"], role: "reviewer", timeout: 1800, brief: ["diff*", "criteria", "context", "previous_findings", "how_to_run", "constraints"] },
 		"design-reviewer": { tools: ["read", "bash", "grep", "find", "ls"], role: "reviewer", timeout: 1800, brief: ["diff*", "context", "conventions", "previous_findings", "constraints"] },
+		researcher: { tools: ["read", "bash", "grep", "find", "ls"], role: "reviewer", timeout: 2700, brief: ["question*", "scope", "criteria", "known", "state"] },
 	};
 	for (const [name, w] of Object.entries(want)) {
 		const body = agentOf(name);
@@ -350,7 +351,8 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 		t(`${name}: an expert`, [a?.name, !!a?.expert], [name, true]);
 		t(`${name}: brief`, a?.expert?.brief.map((f) => `${f.name}${f.required ? "*" : ""}`), w.brief);
 		t(`${name}: tools, role, timeout`, [a?.tools, a?.role, a?.timeout], [w.tools, w.role, w.timeout]);
-		t(`${name}: ready, no setup, every platform`, [a?.expert?.ready, a?.expert?.setup, a?.expert?.platform], [true, undefined, undefined]);
+		if (name === "researcher") t(`${name}: its browser setup gates it, every platform`, [a?.expert?.ready, String(a?.expert?.setup).endsWith("researcher/setup"), a?.expert?.platform], [false, true, undefined]);
+		else t(`${name}: ready, no setup, every platform`, [a?.expert?.ready, a?.expert?.setup, a?.expert?.platform], [true, undefined, undefined]);
 		t(`${name}: use_for kept`, a?.expert?.useFor, body.match(/^use_for: (.*)$/m)[1]);
 		t(`${name}: in the always-on line`, a?.expert?.routed, name !== "developer");
 		t(`${name}: in the line built from it`, mod.snippet([a]).includes(`${name} (`), name !== "developer");
@@ -359,7 +361,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	const builtins = [...lc.matchAll(/\n---\n(?:#[^\n]*\n)*name: ([\w-]+)\n[\s\S]*?\n---\n/g)].map((m) => m[0]).filter((fm) => /\nexpert: true\n/.test(fm))
 		.map((fm) => ({ name: fm.match(/\nname: ([\w-]+)\n/)[1], platform: (fm.match(/\nplatform: (.*)\n/) || [])[1], expert: { useFor: (fm.match(/\nuse_for: (.*)\n/) || [])[1], keywords: (fm.match(/\nkeywords: (.*)\n/) || [])[1], routed: !/\nroute: false\n/.test(fm) } }));
 	const names = builtins.map((b) => b.name).sort();
-	t("built-ins found", names, ["acceptance-judge", "design-reviewer", "developer", "expert-builder", "expert-reviewer", "reverse-engineer", "termux-device", "tester"]);
+	t("built-ins found", names, ["acceptance-judge", "design-reviewer", "developer", "expert-builder", "expert-reviewer", "researcher", "reverse-engineer", "termux-device", "tester"]);
 	const linux = builtins.filter((b) => b.platform !== "termux"), termux = builtins.filter((b) => !b.platform || b.platform === "termux");
 	for (const [where, set] of [["Linux", linux], ["Termux", termux]]) {
 		const line = mod.snippet(set);

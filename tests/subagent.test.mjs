@@ -369,7 +369,7 @@ async function load(env = {}) {
 	const h = await load({});
 	const { mod } = h;
 	t("view: a /subagents command and the alt+s shortcut", [typeof h.commands.subagents?.handler, typeof h.shortcuts["alt+s"]?.handler], ["function", "function"]);
-	t("view: no new tool and no prompt hook (zero context)", [h.tools.map((x) => x.name), Object.keys(h.handlers).sort()], [["subagent"], ["before_agent_start", "input", "model_select", "session_before_compact", "session_before_fork", "session_before_switch", "session_shutdown", "session_start", "thinking_level_select", "user_bash"]]);
+	t("view: no new tool and no prompt hook (zero context); agent_start/settled only mark the main session busy", [h.tools.map((x) => x.name), Object.keys(h.handlers).sort()], [["subagent"], ["agent_settled", "agent_start", "before_agent_start", "input", "model_select", "session_before_compact", "session_before_fork", "session_before_switch", "session_shutdown", "session_start", "thinking_level_select", "user_bash"]]);
 	t("view: nothing about it in the tool's text", /subagents to (watch|switch)|\/subagents|alt\+s|session/.test(JSON.stringify([h.tool.description, h.tool.promptSnippet, h.tool.promptGuidelines, h.tool.parameters])), false);
 	const sections = {};
 	await h.handlers.before_agent_start({ prompt: "fix the typo", systemPromptOptions: { sections } }, { getContextUsage: () => ({ percent: 1 }) });
@@ -743,6 +743,76 @@ async function load(env = {}) {
 	await h.handlers.session_shutdown({ reason: "quit" });
 	await wait(() => [...(reg().children?.values() ?? [])].every((c) => !c.alive), 6000);
 	t("quit: every child process goes", [...(reg().children?.values() ?? [])].filter((c) => c.alive).length, 0);
+}
+
+// --- switching while the main session works: never an abort; the child is shown in place
+{
+	const reg = () => globalThis[Symbol.for("lets-code.subagent-runs")];
+	const h = await load({});
+	const { mod } = h;
+	const home = join(work, "sessions", "home3.jsonl"); writeFileSync(home, "{}\n");
+	const notes = []; let termHandler, editor = "";
+	const ui = { setStatus() {}, notify: (m, ty) => notes.push([ty, m]), theme: { fg: (_c, s) => s, bg: (_c, s) => s, bold: (s) => s, italic: (s) => s }, setWidget() {}, getEditorText: () => editor, setEditorText: (x) => { editor = x; },
+		getToolsExpanded: () => false, onTerminalInput: (f) => { termHandler = f; return () => {}; } };
+	const sm = (file, id, entries = []) => ({ getSessionFile: () => file, getSessionId: () => id, getEntries: () => entries });
+	await h.handlers.session_start({ reason: "startup" }, { hasUI: true, ui, sessionManager: sm(home, "sess-i") });
+	const cmds = () => (existsSync(join(fake, "cmds")) ? readFileSync(join(fake, "cmds"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
+	const wait = async (f, ms = 3000) => { for (let i = 0; i < ms / 20 && !f(); i++) await new Promise((r) => setTimeout(r, 20)); return f(); };
+	// pi's layout: [document(header, resources, chat), pending, status, widgets above, editor, widgets below, footer]
+	const part = (name) => ({ name, render: () => [name], invalidate() {} });
+	const chat = part("main chat"), pending = part("main pending"), statusC = part("main status");
+	const doc = { children: [part("header"), part("resources"), chat] };
+	let renders = 0;
+	const ed = { getText: () => editor, onSubmit: () => {}, historyIndex: -1, isShowingAutocomplete: () => false, isEditorEmpty: () => !editor, isOnLastVisualLine: () => true };
+	const tui = { children: [doc, pending, statusC, part("above"), part("editor"), part("below"), part("footer")], focusedComponent: ed, requestRender: () => { renders++; }, handleTerminalInput() {} };
+	reg().tui = tui;
+	const switched = [];
+	let idle = false;
+	const ctx = () => ({ hasUI: true, ui, isIdle: () => idle, hasPendingMessages: () => false, switchSession: async (file, o) => { switched.push(file); await h.handlers.session_start({ reason: "resume" }, { hasUI: true, ui, sessionManager: sm(file, "x", []) }); await o?.withSession?.({}); return { cancelled: false }; } });
+	// the main session's turn runs (a subagent call of its own, as pi runs a tool)
+	h.handlers.agent_start?.({});
+	const call = h.tool.execute("call-i", { agent: "worker", task: "hang in place" }, undefined, undefined, { cwd: work, isProjectTrusted: true });
+	let r; await wait(() => (r = reg().runs.find((x) => x.task === "hang in place")) && r.events.length > 1);
+	const sent0 = h.sent.length;
+	await h.commands.subagents.handler(`id:${r.id}`, ctx());
+	t("main working: no switchSession (it would abort the turn); the child shown in place", [switched.length, reg().view.inplace?.run, doc.children[2] !== chat, tui.children[1] !== pending, tui.children[2] !== statusC, renders > 0], [0, r.id, true, true, true, true]);
+	t("in place: the child's transcript where the chat was, within the width", [doc.children[2].render(70).some((l) => /hang in place/.test(l)), doc.children[2].render(70).every((l) => l.replace(/\x1b\[[0-9;]*m|\x1b\][^\x07]*\x07/g, "").length <= 70), tui.children[1].render(70), tui.children[2].render(70)], [true, true, [], []]);
+	t("in place: nothing is added to the main session", h.sent.slice(sent0).filter(([m]) => m?.customType === "lets-code-subagent-message").length, 0);
+	t("in place: the main session's tool call runs on", await Promise.race([call.then(() => "returned"), new Promise((res) => setTimeout(() => res("running"), 50))]), "running");
+	// keys: nothing reaches pi as an abort of the main session's turn
+	t("in place: Esc with the child working stops the child, consumed", [termHandler("\x1b")?.consume], [true]);
+	await wait(() => r.status === "aborted");
+	t("in place: Esc at rest is consumed too (pi would stop the main session's turn)", [r.status, termHandler("\x1b")?.consume], ["aborted", true]);
+	t("navigator in place: alt+s, ↓, Esc out of the list: only the list", [termHandler("\x1bs")?.consume, termHandler("\x1b[B")?.consume, termHandler("\x1b")?.consume, reg().view.nav, reg().view.inplace?.run], [true, true, true, false, r.id]);
+	// ! and commands that would act on the main session
+	const pid = mod.childOf(r).proc?.pid;
+	editor = "!echo hi";
+	t("in place: ! runs in the child", termHandler("\r")?.consume, true);
+	await wait(() => cmds().some((c) => c.type === "bash" && c.command === "echo hi" && c.pid === pid));
+	t("in place: ! runs in the child, shown in its transcript", [cmds().some((c) => c.type === "bash" && c.command === "echo hi"), r.events.some((e) => e.t === "tool" && e.args?.command === "echo hi")], [true, true]);
+	t("in place: the ! line never reaches the main session", await (async () => { try { await h.handlers.user_bash({ command: "echo hi" }); return "ran"; } catch { return "refused"; } })(), "refused");
+	editor = "/model";
+	const us0 = h.userSent.length;
+	t("in place: /model is held for the child's own session", [termHandler("\r")?.consume, h.userSent.slice(us0).map(([m]) => m)], [true, ["/subagents refresh"]]);
+	await h.commands.subagents.handler("refresh", ctx());
+	t("held while the main session works: a warning, no switch", [switched.length, /main session is working/.test(notes.at(-1)?.[1] ?? ""), reg().view.inplace?.run], [0, true, r.id]);
+	editor = "";
+	t("in place: shift+tab cycles the child's thinking level", termHandler("\x1b[Z")?.consume, true);
+	await wait(() => cmds().some((c) => c.type === "cycle_thinking_level"));
+	t("in place: shift+tab cycles the child's thinking level", cmds().some((c) => c.type === "cycle_thinking_level" && c.pid === pid), true);
+	// back: pi's own containers again, with what the turn did meanwhile
+	await h.commands.subagents.handler("back", ctx());
+	t("back from in place: pi's containers restored, no switch", [doc.children[2] === chat, tui.children[1] === pending, tui.children[2] === statusC, reg().view.inplace, switched.length], [true, true, true, undefined, 0]);
+	t("back: the editor's keys are pi's again", termHandler("\x1b"), undefined);
+	// once the main session is idle, the switch is a real one again
+	h.handlers.agent_settled?.({}); idle = true;
+	await h.commands.subagents.handler(`id:${r.id}`, ctx());
+	t("main idle: a real switch into the child's session", [switched.length, mod.isChildSession(switched[0] ?? ""), reg().view.inplace], [1, true, undefined]);
+	await h.commands.subagents.handler("back", ctx());
+	t("held commands: the list", ["/copy", "/export x.html", "/tree", "/thinking", "/fork"].every((c) => mod.IN_PLACE_DEFER.test(c)) && !mod.IN_PLACE_DEFER.test("/compact") && !mod.IN_PLACE_DEFER.test("/copyright"), true);
+	mod.childOf(r).abort?.(true);
+	await h.handlers.session_shutdown({ reason: "quit" });
+	await call.catch(() => {});
 }
 
 rmSync(work, { recursive: true, force: true });

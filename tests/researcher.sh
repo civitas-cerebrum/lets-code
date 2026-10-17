@@ -57,7 +57,7 @@ t "no temp files left"           "$(ls "${PI_AGENT_DIR}/agents" | tr '\n' ' ')" 
 # ---- the helper against a fake web on 127.0.0.1
 F="${PI_AGENT_DIR}/fake"; mkdir -p "${F}"
 cat > "${F}/server.py" <<'PY'
-import http.server, sys
+import http.server, os, sys
 PAGE = b"""<html><head><title>Acme DB licence</title>
 <meta property="article:published_time" content="2026-03-01"></head><body>
 <h1>Licence</h1><p>Acme DB is released under the Apache License 2.0.</p>
@@ -95,11 +95,13 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.send(200, RESULTS.replace(b"PORT", str(self.server.server_port).encode()))
         self.send(500, b"")
 s = http.server.HTTPServer(("127.0.0.1", 0), H)
-open(sys.argv[1], "w").write(str(s.server_port))
+open(sys.argv[1] + ".tmp", "w").write(str(s.server_port))
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])   # whole, or not there yet
 s.serve_forever()
 PY
 python3 "${F}/server.py" "${F}/port" & srv=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "${F}/port" ] && break; sleep 0.3; done
+i=0; while [ ! -s "${F}/port" ] && [ "${i}" -lt 150 ]; do sleep 0.2; i=$((i + 1)); done   # a cold python on CI takes seconds
+[ -s "${F}/port" ] || { echo "FAIL  the fake web server did not start"; exit 1; }
 P="$(cat "${F}/port")"; U="http://127.0.0.1:${P}"; ST="${F}/state"
 export LC_RESEARCH_SEARCH="${U}/search" LC_RESEARCH_SEARCH_LITE="${U}/search" LC_RESEARCH_RETRY_WAIT=0
 out="$(python3 "${W}" search --state "${ST}" "acme licence")"; rc=$?

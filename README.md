@@ -529,15 +529,22 @@ the sessions: `◂ main` (the main session) first, then the runs, running
 first, then finished ones, newest first; each row shows a status mark (`●`
 running, `✓` done, `✗` failed or timed out, `■` stopped), the agent, the
 task (wide terminals), the elapsed time and the tokens, and `▸` marks the
-session that is open. <kbd>Alt</kbd>+<kbd>S</kbd> (or `/subagents`) hands the
-keys to that list: <kbd>↑</kbd>/<kbd>↓</kbd> select, <kbd>Enter</kbd> switches
-to the selected session the way `/resume` does (so pi draws it like any
-session), <kbd>x</kbd> twice stops a running child (the others in the call go
-on), <kbd>Esc</kbd> gives the keys back to the editor. The list keeps its
-height while it has the keys, so nothing moves. In a subagent's session the
-list is always there (it is the way back: <kbd>Alt</kbd>+<kbd>S</kbd>,
-<kbd>Enter</kbd> on `◂ main`); in the main session it shows when
-`/subagents toggle` put it there, or while it has the keys.
+session that is open. As in Claude Code, <kbd>↓</kbd> on the input's last
+line (or in an empty input) moves into the list; <kbd>Alt</kbd>+<kbd>S</kbd>
+or `/subagents` does too. While the list has the keys its selected row is
+drawn in the theme's accent colour, as pi's own lists draw theirs (the
+rows keep their own marks) and its last line shows the keys: <kbd>↑</kbd>/<kbd>↓</kbd>
+select, <kbd>Enter</kbd> switches to the selected session the way `/resume`
+does (so pi draws it like any session), <kbd>x</kbd> twice stops a running
+child (the others in the call go on), <kbd>↑</kbd> above the first row,
+<kbd>Esc</kbd> or any typed character give the keys back to the input (the
+character is typed there). Otherwise the list is dim and says `↓ or alt+s:
+switch session`. <kbd>↓</kbd> stays the input's own on any other line, while
+pi's history is browsed and while its autocomplete is open. The list keeps
+its height when it gets or gives back the keys, so nothing moves. In a
+subagent's session the list is always there (it is the way back:
+<kbd>↓</kbd> to `◂ main`, <kbd>Enter</kbd>); in the main session it shows
+when `/subagents toggle` put it there, or while it has the keys.
 `/subagents back`, `/subagents 2` or `/subagents scout` switch directly.
 
 In a subagent's session the status line says whose it is, for example

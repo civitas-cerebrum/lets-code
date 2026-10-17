@@ -176,10 +176,20 @@ store, so `/resume` and `-c` never list it. The footer navigator and
 `switchSession`, as `/resume` does, so pi itself draws it. The navigator
 is the footer list (a block the footer module draws, or a widget below
 the editor without it): `◂ main` and the runs. A terminal input hook
-(`onTerminalInput`) gives it the keys on alt+s and while it has them takes
-↑ ↓ enter x esc; any other key gives them back and goes to the editor. It
-acts only while pi's editor is the focused component, so a selector or a
-dialog keeps its keys. The list has the same height with and without the
+(`onTerminalInput`) gives it the keys on ↓ when pi's editor has its cursor
+on its last visual line (`isOnLastVisualLine`, or `isEditorEmpty`) and
+neither its history (`historyIndex`) nor its autocomplete
+(`isShowingAutocomplete`) has ↓, as Claude Code moves into its tasks
+footer; and on alt+s. While the list has them it takes ↑ ↓ enter x esc; ↑
+above the first row, esc or any other key give them back (that key goes to
+the editor). It acts only while pi's editor is the focused component, so a
+selector or a dialog keeps its keys. The arrow sequences are pi-tui's key
+matching, so both `ESC [ B` and the application-cursor `ESC O B` that
+Termux sends count (tested with the bytes on the phone). Focused, the
+selected row is drawn as pi's `SelectList` (the /model list) draws its
+own: the whole line in the theme's `accent`, no background and no marker
+of its own (the row keeps `◂`, `▸` and its status mark), so it follows
+every theme; the keys line is in the accent too; unfocused, the names are dim and nothing is marked selectable. The list has the same height with and without the
 keys (its last line is the keys line either way). The hook has no
 `switchSession`, so a switch sends the command (`/subagents back`,
 `/subagents id:<run>`) with `pi.sendUserMessage(..., {

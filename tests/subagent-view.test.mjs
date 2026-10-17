@@ -58,12 +58,23 @@ t("status labels", runs.map(v.statusLabel), ["done", "running", "running", "fail
 	t("footer: every line fits, at any width, navigating or not", [40, 70, 90, 120].every((w) => [undefined, 0, 3].every((sel) => v.footerLines(runs, { width: w, now, selected: sel }).every((l) => W(l) <= w))), true);
 	const many = Array.from({ length: 14 }, (_, i) => run({ id: `m${i}`, agent: `w${i}`, task: `job ${i}`, status: "done", started: now - 1000 * i, ended: now - 500 * i }));
 	const still = v.footerLines(many, { width: 70, now }).map(strip);
-	t("footer: more runs than rows: the first rows and how many more", [still.length, /↓9 more · alt\+s: switch session/.test(still.at(-1))], [v.FOOTER_ROWS + 1, true]);
+	t("footer: more runs than rows: the first rows and how many more", [still.length, /↓9 more · ↓ or alt\+s: switch session/.test(still.at(-1))], [v.FOOTER_ROWS + 1, true]);
 	const nav = v.footerLines(many, { width: 70, now, selected: 10 }).map(strip);
-	t("navigating: a window around the selection, the same height, the keys", [nav.length, nav.some((l) => l.startsWith("❯") && /w9 /.test(l)), /^↑\d+ ↓\d+ more · ↑↓ select · enter switch · esc editor$/.test(nav.at(-1))], [v.FOOTER_ROWS + 1, true, true]);
+	t("navigating: a window around the selection, the same height, the keys", [nav.length, nav.length > 0 && !nav.some((l) => l.includes("→")), /^↑\d+ ↓\d+ more · ↑↓ select · enter switch · esc back$/.test(nav.at(-1))], [v.FOOTER_ROWS + 1, true, true]);
 	const nav0 = v.footerLines(runs, { width: 70, now, selected: 0, current: "b" }).map(strip);
-	t("navigating: the main row selectable; x only offered on a running run", [nav0[0].startsWith("❯◂ main"), /x stop/.test(nav0.at(-1)), /x stop/.test(v.footerLines(runs, { width: 70, now, selected: 1 }).map(strip).at(-1))], [true, false, true]);
+	t("navigating: the main row selectable; x only offered on a running run", [nav0[0].startsWith(" ◂ main"), /x stop/.test(nav0.at(-1)), /x stop/.test(v.footerLines(runs, { width: 70, now, selected: 1 }).map(strip).at(-1))], [true, false, true]);
 	t("navigating: the stop asks first", strip(v.footerLines(runs, { width: 70, now, selected: 1, confirm: true }).at(-1)), "Stop scout? x again stops it");
+	const accent = { fg: (c, x) => `<${c}>${x}</${c}>` };
+	const focA = v.footerLines(runs, { width: 70, now, selected: 2, current: "c", theme: accent });
+	t("focused: the selected row in the accent only (pi's list colour), no marker of its own, no inversion, no other colour inside", [/^<accent> ● reviewer/.test(focA[2]), (focA[2].match(/<[a-z]+>/g) ?? []).join(), focA.some((l) => l.includes("\x1b[7m"))], [true, "<accent>", false]);
+	const both = v.footerLines(runs, { width: 70, now, selected: 2, current: "b" }).map(strip), bothW = v.footerLines(runs, { width: 120, now, selected: 2, current: "b" }).map(strip);
+	t("selected and open: ▸ stays, with every cue, with every cue (mark, name, elapsed, tokens)", [both[2].startsWith("▸● reviewer"), /20s · 1\.5k$/.test(both[2].trimEnd()), bothW[2].startsWith("▸● reviewer"), /Review the parser/.test(bothW[2]), /20s/.test(bothW[2]), /↑1\.2k ↓340/.test(bothW[2])], [true, true, true, true, true, true]);
+	t("selected, not open: the cues stay too", [v.footerLines(runs, { width: 70, now, selected: 3, current: "b" }).map(strip)[3].startsWith(" ■ worker"), /50s · 1\.5k$/.test(v.footerLines(runs, { width: 70, now, selected: 3, current: "b" }).map(strip)[3].trimEnd())], [true, true]);
+	t("the columns stay put as the selection moves: every row the same width up to the name", [0, 1, 2, 3].every((sel) => v.footerLines(runs, { width: 70, now, selected: sel, current: "b" }).slice(0, -1).map(strip).every((l) => /^[▸ ][●✓✗■◂] /.test(l) && !l.includes("→"))), true);
+	t("focused: the other rows keep their colours; the open session keeps ▸", [/^<accent>▸<\/accent><accent>●<\/accent> scout/.test(focA[1]), /<success>✓<\/success>/.test(focA.join("\n"))], [true, true]);
+	const unf = v.footerLines(runs, { width: 70, now, theme: accent }), foc = v.footerLines(runs, { width: 70, now, selected: 1, theme: accent });
+	t("not focused: dim names, no accent row; the keys line says ↓ or alt+s", [unf.slice(0, -1).every((l) => !/^<accent> |^<accent>▸.*<\/accent>$/.test(l)), /<muted>scout/.test(unf[1]), /↓ or alt\+s: switch session/.test(unf.at(-1))], [true, true, true]);
+	t("focused: the keys line in the accent", /^<accent>.*esc back<\/accent>$/.test(foc.at(-1)), true);
 	t("footer: the same height navigating or not (no jump when focus moves)", [v.footerLines(runs, { width: 70, now }).length, v.footerLines(runs, { width: 70, now, selected: 2 }).length], [v.FOOTER_ROWS + 1, v.FOOTER_ROWS + 1]);
 }
 

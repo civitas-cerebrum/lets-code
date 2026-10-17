@@ -4904,7 +4904,7 @@ export function markerText(r: { agent: string; status: string; exitCode?: number
 // pi's keybindings this view follows: <agent dir>/keybindings.json over pi's defaults
 export const KEY_DEFAULTS: Record<string, string[]> = {
 	"app.interrupt": ["escape"], "app.thinking.toggle": ["ctrl+t"], "app.tools.expand": ["ctrl+o"], "app.message.copy": ["ctrl+x"],
-	"app.message.followUp": process.platform === "win32" ? ["ctrl+q"] : ["alt+enter"], "app.message.dequeue": process.platform === "win32" ? ["alt+q"] : ["alt+up"], "app.session.resume": [],
+	"app.message.followUp": process.platform === "win32" ? ["ctrl+q"] : ["alt+enter"], "app.message.dequeue": process.platform === "win32" ? ["alt+q"] : ["alt+up"], "app.session.resume": [], "tui.editor.cursorDown": ["down"],
 };
 export function keyBindings(dir = AGENT_DIR): Record<string, string[]> {
 	const out: Record<string, string[]> = { ...KEY_DEFAULTS };
@@ -5095,12 +5095,24 @@ function setupSessions(pi: ExtensionAPI) {
 		if (!fc) return true;   // no TUI handle here: as before
 		return typeof fc.getText === "function" && "onSubmit" in fc;
 	};
+	// the editor's cursor is on its last line, and ↓ is not pi's (history being browsed, autocomplete open)
+	const atEditorBottom = () => {
+		const ed = (reg as any).tui?.focusedComponent;
+		if (!ed) return false;
+		try {
+			if (ed.isShowingAutocomplete?.()) return false;
+			if (typeof ed.historyIndex === "number" && ed.historyIndex > -1) return false;
+			if (typeof ed.isEditorEmpty === "function" && ed.isEditorEmpty()) return true;
+			return typeof ed.isOnLastVisualLine === "function" ? !!ed.isOnLastVisualLine() : false;
+		} catch { return false; }
+	};
 	const navRows = () => (view ? view.navRows(reg.runs) : [{ kind: "main" }]);
-	const openNav = () => {
+	const openNav = (sel?: number) => {
 		if (!view) return;
 		if (!reg.runs.length) { notify("No subagent or expert runs in this session yet."); return; }
 		vs.nav = true; vs.confirm = false;
-		vs.sel = inChild() ? 0 : Math.min(1, navRows().length - 1);   // from a child: the main session; from the main session: the first run
+		// ↓ from the editor: the first row; alt+s or /subagents: from a child the main session, from the main session the first run
+		vs.sel = sel ?? (inChild() ? 0 : Math.min(1, navRows().length - 1));
 		repaint();
 	};
 	const closeNav = () => { if (!vs.nav) return; vs.nav = false; vs.confirm = false; repaint(); };
@@ -5110,7 +5122,10 @@ function setupSessions(pi: ExtensionAPI) {
 		const sel = Math.max(0, Math.min(vs.sel ?? 0, rows.length - 1));
 		const row = rows[sel], run = row?.kind === "run" ? reg.runs.find((x) => x.id === row.id) : undefined;
 		if (vs.confirm) { vs.confirm = false; if ((data === "x" || data === "X") && run?.status === "running") reg.stops.get(run.id)?.(); repaint(); return { consume: true }; }
-		if (k("up")) { vs.sel = Math.max(0, sel - 1); repaint(); return { consume: true }; }
+		if (k("up")) {
+			if (sel === 0) { closeNav(); return { consume: true }; }   // above the first row: back to the editor
+			vs.sel = sel - 1; repaint(); return { consume: true };
+		}
 		if (k("down")) { vs.sel = Math.min(rows.length - 1, sel + 1); repaint(); return { consume: true }; }
 		if (k("escape") || (keyOn() && k(VIEW_KEY))) { closeNav(); return { consume: true }; }
 		if (data === "x" || data === "X") { if (run?.status === "running") { vs.confirm = true; repaint(); } return { consume: true }; }
@@ -5232,6 +5247,9 @@ function setupSessions(pi: ExtensionAPI) {
 						// pi's own selectors and dialogs keep their keys (Esc closes a selector, it does not stop the child)
 						if (!editorFocused()) return undefined;
 						if (keyOn() && keyIs(data, VIEW_KEY)) { openNav(); return { consume: true }; }
+						// ↓ on the editor's last line (or an empty editor) moves into the list
+						// below it, as in Claude Code; while pi's history or autocomplete has ↓, it keeps it
+						if (footerShown() && reg.runs.length && action(data, "tui.editor.cursorDown") && atEditorBottom()) { openNav(0); return { consume: true }; }
 						if (!inChild()) return undefined;
 						if (vs.passOnce) { vs.passOnce = false; return undefined; }   // a held command or key, sent again
 						if (action(data, "app.interrupt")) {
@@ -5707,29 +5725,34 @@ export function footerLines(runs: Run[], o: { width: number; now: number; curren
 	for (let i = start; i < end; i++) {
 		const r = i === 0 ? undefined : rs[i - 1];
 		const here = r ? r.id === cur : cur === "main";
-		const lead = i === sel ? th.fg("accent", "❯") : here ? th.fg("accent", "▸") : " ";
-		const mark = r ? th.fg(COLOR[r.status] ?? "dim", MARK[r.status] ?? "?") : th.fg("muted", "◂");
+		// the selected row: the whole line in the theme's accent (pi's SelectList colour,
+		// no background, no marker of its own); every row keeps its glyphs, the others their colours
+		const selRow = i === sel, t = selRow ? ident : th;
+		const lead = here ? t.fg("accent", "▸") : " ";
+		const mark = r ? t.fg(COLOR[r.status] ?? "dim", MARK[r.status] ?? "?") : t.fg("muted", "◂");
 		const nameS = pad(cutTo(r ? r.agent : "main", nw, deps), nw, deps);
-		const name = i === sel && th.bold ? th.bold(nameS) : nameS;
+		// not focused: names dim, nothing looks selectable
+		const name = !nav ? th.fg("muted", nameS) : nameS;
+		const push = (row: string) => { const line = cutTo(row, W, deps); lines.push(selRow ? th.fg("accent", line) : line); };
 		if (!r) {
-			const what = W < TASK_MIN_WIDTH ? "" : `  ${th.fg("muted", "the main session")}`;
-			lines.push(cutTo(`${lead}${mark} ${name}${what}`, W, deps));
+			const what = W < TASK_MIN_WIDTH ? "" : `  ${t.fg("muted", "the main session")}`;
+			push(`${lead}${mark} ${name}${what}`);
 			continue;
 		}
 		const time = elapsed(runMs(r, o.now));
-		if (W < NARROW_WIDTH) { lines.push(cutTo(`${lead}${mark} ${name} ${th.fg("dim", `${time} · ${compact(tokens(r))}`)}`, W, deps)); continue; }
-		const tail = `${th.fg("dim", time.padStart(7))}  ${th.fg("dim", io(r).padStart(13))}`;
-		if (W < TASK_MIN_WIDTH) { lines.push(cutTo(`${lead}${mark} ${name}  ${tail}`, W, deps)); continue; }
+		if (W < NARROW_WIDTH) { push(`${lead}${mark} ${name} ${t.fg("dim", `${time} · ${compact(tokens(r))}`)}`); continue; }
+		const tail = `${t.fg("dim", time.padStart(7))}  ${t.fg("dim", io(r).padStart(13))}`;
+		if (W < TASK_MIN_WIDTH) { push(`${lead}${mark} ${name}  ${tail}`); continue; }
 		const tw = W - (2 + 1 + nw + 2 + 2 + 7 + 2 + 13);
-		lines.push(cutTo(`${lead}${mark} ${name}  ${th.fg("muted", pad(cutTo(summary(r.task) || "(no task)", tw, deps), tw, deps))}  ${tail}`, W, deps));
+		push(`${lead}${mark} ${name}  ${t.fg("muted", pad(cutTo(summary(r.task) || "(no task)", tw, deps), tw, deps))}  ${tail}`);
 	}
 	const above = start, below = total - end;
 	const more = above || below ? `${above ? `↑${above} ` : ""}${below ? `↓${below} ` : ""}more · ` : "";
 	const selRun = sel > 0 ? rs[sel - 1] : undefined;
 	let keys: string;
 	if (nav && o.confirm && selRun) keys = th.fg("warning", `Stop ${selRun.agent}? x again stops it`);
-	else if (nav) keys = th.fg("dim", `${more}↑↓ select · enter switch${selRun?.status === "running" ? " · x stop" : ""} · esc editor`);
-	else keys = th.fg("dim", `${more}${o.key ?? "alt+s"}: switch session`);
+	else if (nav) keys = th.fg("accent", `${more}↑↓ select · enter switch${selRun?.status === "running" ? " · x stop" : ""} · esc back`);
+	else keys = th.fg("dim", `${more}↓ or ${o.key ?? "alt+s"}: switch session`);
 	lines.push(cutTo(keys, W, deps));
 	return lines;
 }

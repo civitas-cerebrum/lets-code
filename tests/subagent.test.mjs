@@ -684,8 +684,24 @@ async function load(env = {}) {
 	const rowsNow = (await import(pathToFileURL(join(agentDir, "extensions", "subagent-view.ts")).href)).navRows(reg().runs);
 	const us0 = h.userSent.length;
 	t("navigator: enter switches to the selected run (or the main session)", [termHandler("\r")?.consume, vsx.nav, h.userSent.slice(us0).map(([m]) => m)], [true, false, rowsNow[1].id === vsx.viewing ? [] : [`/subagents id:${rowsNow[1].id}`]]);
-	termHandler("\x1bs"); termHandler("\x1b[A"); const us1 = h.userSent.length; termHandler("\r");
+	termHandler("\x1bs"); const us1 = h.userSent.length; termHandler("\r");
 	t("navigator: the main row goes back", h.userSent.slice(us1).map(([m]) => m), ["/subagents back"]);
+	// ↓ from the editor's last line moves into the list (as in Claude Code); ↑ above the first row leaves it
+	const ed = { getText: () => "", onSubmit: () => {}, historyIndex: -1, isShowingAutocomplete: () => false, isEditorEmpty: () => false, isOnLastVisualLine: () => true };
+	reg().tui = { focusedComponent: ed };
+	t("↓ on the editor's last line: the list takes the keys, on its first row", [termHandler("\x1b[B")?.consume, vsx.nav, vsx.sel], [true, true, 0]);
+	t("↓ / ↑ in the list move; ↑ above the first row gives the keys back to the editor", [termHandler("\x1bOB")?.consume, vsx.sel, termHandler("\x1b[A")?.consume, vsx.sel, termHandler("\x1b[A")?.consume, vsx.nav], [true, 1, true, 0, true, false]);
+	t("a printable key leaves the list and goes to the editor", [termHandler("\x1b[B")?.consume, termHandler("h"), vsx.nav], [true, undefined, false]);
+	ed.isOnLastVisualLine = () => false;
+	t("↓ above the editor's last line: the editor's", [termHandler("\x1b[B"), vsx.nav], [undefined, false]);
+	ed.isOnLastVisualLine = () => true; ed.historyIndex = 0;
+	t("↓ while pi's history is browsed: the history's", [termHandler("\x1b[B"), vsx.nav], [undefined, false]);
+	ed.historyIndex = -1; ed.isShowingAutocomplete = () => true;
+	t("↓ while pi's autocomplete is open: the autocomplete's", [termHandler("\x1b[B"), vsx.nav], [undefined, false]);
+	ed.isShowingAutocomplete = () => false;
+	reg().tui = { focusedComponent: { handleInput() {} } };
+	t("↓ while a pi selector has the focus: the selector's", [termHandler("\x1b[B"), vsx.nav], [undefined, false]);
+	reg().tui = { focusedComponent: { getText: () => "", onSubmit: () => {} } };
 	// alt+enter then a prompt while the child works: a follow-up, shown as pi shows it
 	await h.handlers.input({ text: "hang deeper", source: "interactive" }, { ui });
 	await wait(() => hr.status === "running");

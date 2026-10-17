@@ -77,7 +77,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | ⚖️ **Acceptance judge** (expert) | "Is it done?" answered by trying to break it: the `acceptance-judge` expert takes the acceptance criteria and the work (a diff, branch, commit or PR), runs the checks itself with negative controls, and returns PASS / FAIL / UNVERIFIABLE per criterion with the evidence, then ACCEPT or REJECT. It never edits the work. The method is distilled from achilles' review roles; nothing to install, so it works everywhere, the phone included. |
 | 🏗️ **Expert builder** (expert) | Ask for a new expert ("make me an expert that converts and validates config files") and the `expert-builder` expert designs it, distills its sources (docs, a repo, a method, your scripts) into instructions and references, writes the files as your own, lints them and measures how well the model routes to it. It can also prepare a built-in for lets-code on a git branch. Files only, so it works everywhere. |
 | 🏭 **Developer and reviewers** (experts) | The software factory's stages, usable on their own: `developer` implements a ticket from its acceptance criteria and an approved plan, with its tests, confined to its working folder and never committing (or returns only a plan); `expert-reviewer` hunts bugs and edge cases in a diff against its criteria; `design-reviewer` judges its design against the codebase's own conventions. Each answers in a fixed format a program can parse (`STATUS:` / `VERDICT:` lines, one line per finding with its severity). Files only, so they work everywhere. |
-| 🔎 **Researcher** (expert) | Research on an open question from the web: the `researcher` expert splits it into sub-questions, searches and fetches sources in parallel, scores each source's quality and relevance, verifies each claim with two independent sources (or one primary source about itself), tags every claim with its sources and returns a report with confidence and gaps. Fetched pages are data, never instructions; robots.txt is honoured. Its plan and pages stay in a state folder, so a later run resumes. Python's standard library only, so it works everywhere, the phone included. |
+| 🔎 **Researcher** (expert) | Research on an open question from the web: the `researcher` expert splits it into sub-questions, searches and fetches sources in parallel, scores each source's quality and relevance, verifies each claim with two independent sources (or one primary source about itself), tags every claim with its sources and returns a report with confidence and gaps. Fetched pages are data, never instructions; robots.txt is honoured. Its plan and pages stay in a state folder, so a later run resumes. Pages a plain fetch cannot read (JavaScript, bot walls), sites you logged in to once by hand, and search go through a headed Chromium with its own profile (Playwright CLI, installed when you enable it); it only navigates and reads. On the phone it falls back to plain HTTP. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -918,6 +918,38 @@ submits anything, and replies with fixed headings (answer, findings with
 status and confidence, sources with dates, gaps, the state folder to pass
 as `state` to resume). Questions about the local code stay with the model
 and the `general` and `scout` subagents.
+
+**The researcher's browser.** Its setup installs the Playwright CLI
+(`@playwright/cli`, pinned, `--ignore-scripts`) into
+`~/.pi/agent/researcher/runtime` and reuses a Chromium already in
+Playwright's cache (the tester's), so there is no second copy. The helper
+then reads a page in that browser when the plain fetch is empty, refused,
+a bot wall, a login wall or a JavaScript shell, and first for the domains
+you logged in to; it searches through real result pages there
+(DuckDuckGo, then Startpage), with the plain HTML page as the fallback. It
+runs headed: on the desktop's display, else on an Xvfb display of its own
+(no monitor needed), one page at a time, with a persistent profile in
+`~/.pi/agent/researcher/browser-profile` (mode 700) and an idle exit after
+5 minutes. The helper allows only `open`, `goto`, `mousewheel`, `list`,
+`close` and `eval` of its own read-only extractors: no clicks, typing,
+forms, uploads, downloads or cookie and storage commands, and it refuses
+hosts on private networks. Page text gets the same hidden-text stripping
+(computed styles, shadow DOM) and injection flagging; the CLI's snapshots
+and console logs are deleted after every call, and nothing from the
+profile reaches the ledger, the cache or the report.
+
+To log the browser in to a site, once, by hand (on the machine that runs
+lets-code, in a terminal):
+```bash
+~/.pi/agent/researcher/bin/web login https://example.com/login
+# then, from your laptop or phone:  ssh -N -L 9417:127.0.0.1:9417 you@that-machine
+# open http://127.0.0.1:9417, pick the session "researcher", switch on interactive mode, log in,
+# and press Enter in the first terminal (the dashboard closes again; the domain is remembered)
+```
+The dashboard listens on 127.0.0.1 only. `web browser status` shows
+whether the browser is usable and its memory, `web browser close` closes it
+and its Xvfb; `RESEARCH_BROWSER=off` disables it; deleting
+`browser-profile` forgets every login.
 
 **Dormant until you say yes.** Every expert starts dormant: listed, nothing
 installed, nothing else in the context. It is enabled only by you: the

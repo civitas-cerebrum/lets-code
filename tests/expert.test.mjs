@@ -351,7 +351,8 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 		t(`${name}: an expert`, [a?.name, !!a?.expert], [name, true]);
 		t(`${name}: brief`, a?.expert?.brief.map((f) => `${f.name}${f.required ? "*" : ""}`), w.brief);
 		t(`${name}: tools, role, timeout`, [a?.tools, a?.role, a?.timeout], [w.tools, w.role, w.timeout]);
-		t(`${name}: ready, no setup, every platform`, [a?.expert?.ready, a?.expert?.setup, a?.expert?.platform], [true, undefined, undefined]);
+		if (name === "researcher") t(`${name}: its browser setup gates it, every platform`, [a?.expert?.ready, String(a?.expert?.setup).endsWith("researcher/setup"), a?.expert?.platform], [false, true, undefined]);
+		else t(`${name}: ready, no setup, every platform`, [a?.expert?.ready, a?.expert?.setup, a?.expert?.platform], [true, undefined, undefined]);
 		t(`${name}: use_for kept`, a?.expert?.useFor, body.match(/^use_for: (.*)$/m)[1]);
 		t(`${name}: in the always-on line`, a?.expert?.routed, name !== "developer");
 		t(`${name}: in the line built from it`, mod.snippet([a]).includes(`${name} (`), name !== "developer");

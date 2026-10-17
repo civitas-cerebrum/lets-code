@@ -640,10 +640,10 @@ sample workflows).
 
 The researcher expert answers open questions from the web, so it needs
 what pi does not have: a search and a fetch. Its `bin/web` is one Python
-file on the standard library (urllib, html.parser, threads), so it needs
-no setup and runs on Termux as on Linux; search parses a public HTML
-search page (the lite page as a fallback), and the endpoint is an
-environment variable so the unit test serves a fake one on 127.0.0.1.
+file on the standard library (urllib, html.parser, threads), which runs on
+Termux as on Linux; its plain search parses a public HTML search page
+(the lite page as a fallback), and the endpoints are environment variables
+so the unit test serves fakes on 127.0.0.1.
 The method is the information-gathering loop of a staged pipeline,
 generalised: plan sub-questions, fan out (all queries in one call, fetches
 four at a time), dedupe (a ledger keyed by canonical URL; syndicated
@@ -663,6 +663,33 @@ the state folder lives. Context: its entry adds 23 (160 -> 183 on Linux, by the 
 always-on expert line; the child's prompt section is 1043 tokens; the
 three refs (939, 737 and 883 tokens) are read on demand. Routing (route-check,
 thinking low): recall 11/12 over two runs of 6 positives, and none of 24 near-misses (local-code questions for the model, general or scout, a licence explained from knowledge, a one-line edit, a phone task, unrelated prompts) went to it, precision 100%. The neighbours' prompts it never took; their misses went to the model itself, as on main (a 6-prompt regression file run three times each: tester 6/9 with it, 7/9 without; acceptance-judge 7/9 both).
+
+The browser came after two measurements. The plain HTML search page
+rate-limits after a few bursts (a live run lost search after four
+queries), and a self-hosted Firecrawl did not fit the dev box (a Pi 5 with
+8 GB): about 3 GB idle for its API's ten Node workers, swap full, and
+memory limits not enforceable on a kernel booted with memory cgroups off.
+The Playwright CLI drives one Chromium for the whole machine instead.
+@@BROWSER@@
+The fetch order is site API or raw files, then a plain fetch, then the
+browser, which the helper picks itself (empty, refused, bot wall, login
+wall, a JavaScript shell under 200 characters with a script tag, or a
+domain in `logged-in-domains`). Safety is enforced in the helper, not
+only the prompt: one `pw()` runner allows six CLI commands, `eval` only
+of the helper's two extractor functions, and `goto`/`open` only of
+http(s) URLs; private hosts are refused for plain and browser fetches
+alike (the dev box also runs other browser-control
+services on localhost). The CLI writes snapshots and console logs into
+its output dir; the helper points that at a private work dir and empties
+it after every call, since they hold page text. Logins are by hand
+through the CLI's own dashboard (a live screencast with an interactive
+mode, bound to 127.0.0.1, reached over an ssh tunnel): `web login` only
+runs in a terminal, waits for Enter, then waits 35 s so Chromium writes
+its cookies to disk (it does every 30 s; a close right after a login lost
+it in testing), and closes the dashboard again. The CLI keeps a session
+registry per install, so the dashboard and the helper must use the same
+CLI. The setup never fails the expert: on Termux, without npm or when a
+download fails it records why and the helper falls back to plain HTTP.
 
 ## Script layout
 

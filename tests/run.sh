@@ -78,7 +78,7 @@ sys.stdout.write(cut("\npi_write_expert_builder() {", "\npi_write_expert_builder
 sys.stdout.write(cut("\npi_write_developer() {", "\npi_write_developer() {", "\n}  # end of pi_write_developer\n"))
 sys.stdout.write(cut("\npi_write_expert_reviewer() {", "\npi_write_expert_reviewer() {", "\n}  # end of pi_write_expert_reviewer\n"))
 sys.stdout.write(cut("\npi_write_design_reviewer() {", "\npi_write_design_reviewer() {", "\n}  # end of pi_write_design_reviewer\n"))
-sys.stdout.write(cut("\npi_write_researcher() {", "\npi_write_researcher() {", "\n}  # end of pi_write_researcher\n"))
+sys.stdout.write(cut("\nRESEARCHER_PINS=", "\npi_write_researcher() {", "\n}  # end of pi_write_researcher\n"))
 PYX
 (
     set -e

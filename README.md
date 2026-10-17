@@ -77,6 +77,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | ⚖️ **Acceptance judge** (expert) | "Is it done?" answered by trying to break it: the `acceptance-judge` expert takes the acceptance criteria and the work (a diff, branch, commit or PR), runs the checks itself with negative controls, and returns PASS / FAIL / UNVERIFIABLE per criterion with the evidence, then ACCEPT or REJECT. It never edits the work. The method is distilled from achilles' review roles; nothing to install, so it works everywhere, the phone included. |
 | 🏗️ **Expert builder** (expert) | Ask for a new expert ("make me an expert that converts and validates config files") and the `expert-builder` expert designs it, distills its sources (docs, a repo, a method, your scripts) into instructions and references, writes the files as your own, lints them and measures how well the model routes to it. It can also prepare a built-in for lets-code on a git branch. Files only, so it works everywhere. |
 | 🏭 **Developer and reviewers** (experts) | The software factory's stages, usable on their own: `developer` implements a ticket from its acceptance criteria and an approved plan, with its tests, confined to its working folder and never committing (or returns only a plan); `expert-reviewer` hunts bugs and edge cases in a diff against its criteria; `design-reviewer` judges its design against the codebase's own conventions. Each answers in a fixed format a program can parse (`STATUS:` / `VERDICT:` lines, one line per finding with its severity). Files only, so they work everywhere. |
+| 🏭 **Software factory** (expert) | Hand it a ticket and the `software-factory` expert takes it through the whole pipeline in its own git worktree and branch: the developer plans, you approve the plan, the developer builds with tests, then the expert and design reviewers, the tester (where it is set up), the acceptance judge and your full test suite check it, with up to five fix rounds. You confirm the acceptance criteria first and approve the result last; nothing is committed before that, and nothing is pushed. Every stage is a fresh expert run with a brief built from the run's artifacts, never the conversation; the main session gets stage summaries. `/factory` lists, resumes and shows runs. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -773,10 +774,10 @@ roles see every MCP call and can allow, ask or deny per server.
 
 An expert is a subagent with knowledge of its own: standing instructions
 (recipes, traps, a report format), a brief template that says what its
-caller must tell it, and, where it needs one, a setup. lets-code ships eight,
+caller must tell it, and, where it needs one, a setup. lets-code ships nine,
 `acceptance-judge`, `design-reviewer`, `developer`, `expert-builder`,
-`expert-reviewer` and `reverse-engineer` (anywhere), `termux-device` (on
-Termux only) and `tester` (Linux and macOS), and you can
+`expert-reviewer`, `reverse-engineer` and `software-factory` (anywhere),
+`termux-device` (on Termux only) and `tester` (Linux and macOS), and you can
 add your own (see [Build your own expert](#build-your-own-expert)). They sit behind one tool, `expert`, whose line in the
 context names each expert usable here with a few words on what it is for:
 
@@ -803,6 +804,7 @@ The templates:
 | `acceptance-judge` | `criteria`*: the acceptance criteria verbatim (a list, or the ticket's text); `artifact`*: what to judge, the repo path plus a diff, commit, branch, PR or URL; `claim`: what the implementer says was done and how they checked it; `how_to_run`: test, build or start commands, a dev server URL; `constraints`: what must not be run or touched, time limits |
 | `developer` | `task`*: the ticket or goal, verbatim; `criteria`: the acceptance criteria, numbered; `mode`: `plan` (a plan, no change) or `build` (default); `plan`: the approved plan; `findings`: review or test findings to fix, with their ids; `how_to_run`: test and build commands; `constraints`: what not to touch, style, limits |
 | `expert-reviewer` | `diff`*: the repo path and base..head, a commit, a branch or a PR; `criteria`: the acceptance criteria; `context`: the ticket or plan; `previous_findings`: an earlier round's findings to re-check; `how_to_run`: test and build commands; `constraints`: what must not be run, limits |
+| `software-factory` | `ticket`*: the ticket verbatim, or the path of a file holding it, with its acceptance criteria; `repo`: the git repo (default: the current folder); `how_to_run`: the command that runs the test suite; `start`: how to start the app, for the tester's browser checks; `constraints`: what must not be touched, style rules, limits |
 | `design-reviewer` | `diff`*: the repo path and base..head, a commit, a branch or a PR; `context`: the ticket or plan; `conventions`: style guides, lint config, architecture notes; `previous_findings`: an earlier round's findings to re-check; `constraints`: what must not be run, limits |
 | `expert-builder` | `domain`*: what the new expert is for, in your words; `sources`: docs, repos, a method or scripts to distill; `scope`: `user` (default, your own) or `builtin` (a lets-code contribution on a branch); `name`; `platform`; `constraints`: what it must never do, limits; for builtin, the checkout and whether to push |
 | `termux-device` | `goal`*: the user's goal, verbatim; `confirmed`: only after you approved the exact final step it reported (app, recipient, text) |
@@ -891,6 +893,47 @@ acceptance criteria by hand more often (acceptance-judge recall 15/24 with
 it in the line, 22/24 without); `list` still shows it, and the model or you
 can run it by name.
 
+**Software factory.** `software-factory` takes one ticket through those
+stages and the existing ones, each a fresh expert run whose brief is built
+from the run's artifacts (the ticket, the confirmed criteria, the approved
+plan, the diff, earlier findings with their ids), never from the
+conversation:
+
+```text
+intake          the criteria from the ticket, the suite run once as a baseline
+  ✋ you confirm or edit the acceptance criteria
+developer       plan
+  ✋ you approve or edit the plan
+developer       build, with a test per criterion
+expert-reviewer → design-reviewer → tester → acceptance-judge
+regression      your suite again, run by the factory
+  ✋ you approve the result: commit on the run's branch, keep it uncommitted, or stop
+```
+
+A REVISE, a REJECT or a suite that passed before and fails now sends the
+blocker and major findings back to the developer, and the stage that failed
+runs again with them; at most five rounds, and a finding that comes back
+after it was sent to be fixed stops the loop and asks you (one more round,
+the final approval as it is, or stop). The tester stage runs where `tester`
+is set up and enabled, with `start` telling it how to start the app;
+elsewhere it is skipped and says so. Each run has its own git worktree and
+branch, `pi/factory-<id>`, under `~/.pi/agent/lets-code-factory/<id>/`,
+next to its ledger (each stage's brief, reply, verdict, findings, tokens and
+time) and artifacts; your checkout is not touched, and the only commit is
+the one you approve, nothing pushed. It is not a child: the experts module
+runs it in the main session (`runner: factory`), since its stages are
+children of their own, so they show in `/subagents` and its footer list
+and you can switch into one while the factory works; the main session gets
+one line per stage. Without a UI (`-p`) a run stops at its first checkpoint
+and waits.
+
+```text
+/factory start <ticket.md> [how-to-run]   start a run from a ticket file
+/factory resume <id>                      go on: a run waiting for you, stopped or interrupted
+/factory list                             the runs, newest first, with where each stands
+/factory status [id]                      one run's stage lines (default: the newest)
+```
+
 **Dormant until you say yes.** Every expert starts dormant: listed, nothing
 installed, nothing else in the context. It is enabled only by you: the
 yes/no dialog when the model first runs it (or proposes `enable`), or
@@ -934,6 +977,7 @@ folder):
 | `platform` | `termux`, or Node platform names (`linux`, `darwin`); elsewhere it is not listed |
 | `setup` | A script under `~/.pi/agent`, run with bash once the expert is enabled and what `agent_dir`, `skills`, `append_prompt` or `requires` names is missing. Progress on stderr, the reason on its last stdout line when it fails |
 | `setup_note` | What the setup does, shown in the dialog |
+| `runner` | `factory`: the experts module runs it in the main session through lets-code's factory module instead of as a child (`software-factory`); no other runner exists |
 
 ```markdown
 ---

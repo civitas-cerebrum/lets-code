@@ -333,9 +333,14 @@ async function load(env = {}) {
 	rmSync(join(agentDir, "agents", "re.md")); rmSync(join(agentDir, "agents", "slow.md"));
 
 	// the description budget with the starter agents plus reverse-engineer
-	const four = [["scout", "Fast read-only recon of a codebase; returns the files, line ranges and key code another agent needs"], ["worker", "General-purpose agent with full tools for a delegated change; isolated context"], ["reviewer", "Reviews a change for correctness and missed cases; reports findings, does not edit"], ["reverse-engineer", "Reverse engineers binaries, apps, APKs, firmware, websites"]].map(([name, description]) => ({ name, description }));
-	t("description names each agent with its job", ["scout (Fast read-only recon", "reviewer (Reviews a change", "reverse-engineer (Reverse engineers"].every((x) => mod.agentsBlurb(four).includes(x)), true);
-	t("description < 420 with the four default agents", mod.agentsBlurb(four).length < 420, true);
+	const four = [["scout", "Fast read-only recon of a codebase; returns the files, line ranges and key code another agent needs"], ["worker", "Makes a delegated change and tests it"], ["general", "Researches open questions; runs multi-step tasks"], ["reviewer", "Reviews a change for correctness and missed cases; reports findings, does not edit"], ["reverse-engineer", "Reverse engineers binaries, apps, APKs, firmware, websites"]].map(([name, description]) => ({ name, description }));
+	t("description names each agent with its job", ["scout (Fast read-only recon", "worker (Makes a delegated change", "general (Researches open questions; runs multi-step tasks)", "reviewer (Reviews a change", "reverse-engineer (Reverse engineers"].every((x) => mod.agentsBlurb(four).includes(x)), true);
+	t("description < 440 with the starters and reverse-engineer", mod.agentsBlurb(four).length < 440, true);
+	// the method routes research to general, only when there is one
+	const m = mod.orchestration(four), m3 = mod.orchestration(four.filter((a) => a.name !== "general"));
+	t("method: a question -> general", /Usual flow: a question -> general \(it answers\); a change -> scouts in parallel .* you run the tests\./.test(m), true);
+	t("method: no general, no route to it", [/general/.test(m3), /Usual flow: scouts in parallel .* you run the tests\./.test(m3)], [false, true]);
+	t("method: one line longer at most", m.split("\n").length, m3.split("\n").length);
 
 	// the reverse-engineer file lets-code writes, as this extension reads it
 	const script = join(new URL(".", import.meta.url).pathname, "..", "lets-code");

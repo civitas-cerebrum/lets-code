@@ -225,8 +225,9 @@ calls="$(python3 -c 'import json,sys; print(" ".join(sorted({json.loads(l)[[x.st
 t "only allowlisted CLI commands" "${calls}" "eval goto list mousewheel open"
 t "no secret in any output"      "$(cat "${B}"/sources.jsonl "${B}"/sources/* "${B}"/searches.jsonl | grep -c 'SECRET-COOKIE' || true)" 0
 t "the runner refuses the rest"  "$(python3 - "${W}" <<'PY'
-import importlib.machinery, sys
-w = importlib.machinery.SourceFileLoader("web", sys.argv[1]).load_module()
+import importlib.machinery, importlib.util, sys
+ld = importlib.machinery.SourceFileLoader("web", sys.argv[1])
+w = importlib.util.module_from_spec(importlib.util.spec_from_loader("web", ld)); ld.exec_module(w)
 bad = [("click", "e5"), ("fill", "e2", "x"), ("type", "hi"), ("press", "Enter"), ("upload", "/etc/passwd"), ("cookie-list",),
        ("state-save", "s.json"), ("eval", "() => document.forms[0].submit()"), ("goto", "javascript:alert(1)"), ("goto", "file:///etc/passwd"), ("run-code", "x")]
 n = 0

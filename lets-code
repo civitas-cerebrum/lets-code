@@ -12916,7 +12916,7 @@ MAX_BYTES = 4 * 1024 * 1024
 TTL_DAYS = 30
 LOCK = threading.Lock()
 SUSPECT = re.compile(r"(ignore (all |any )?(previous|prior|above) (instructions|prompts)|disregard (the|your) (instructions|system)|you are (an? )?(ai|assistant|language model)|system prompt|as an ai\b|do not tell the user|new instructions:)", re.I)
-WALL = re.compile(r"(captcha|unusual traffic|are you a robot|verify you are human|not a robot|enable javascript|javascript is (required|disabled)|access denied|just a moment\.\.\.|checking your browser)", re.I)
+WALL = re.compile(r"(captcha|unusual traffic|are you a robot|verify you are human|not a robot|humans only|enable javascript|javascript is (required|disabled)|access denied|just a moment\.\.\.|checking your browser|ray id: [0-9a-f]{12})", re.I)
 
 # ------------------------------------------------------------------ the browser's files
 HERE = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))   # the expert's dir
@@ -13347,7 +13347,7 @@ def logged_in(url):
 # ------------------------------------------------------------------ fetch
 def needs_browser(status, ctype, text, raw=""):
     """A plain fetch the headed browser may do better: refused, empty, a bot wall or a JavaScript shell."""
-    if status in (401, 403, 406, 429, 503) or not text.strip():
+    if status in (401, 403, 406, 429, 503) or 300 <= status < 400 or not text.strip():
         return True
     if "html" in ctype and (WALL.search(text[:3000]) or (len(text.strip()) < 200 and re.search(r"<script", raw, re.I))):
         return True
@@ -13389,11 +13389,12 @@ def fetch_one(d, url, fresh, force_browser):
             browser_note = f"headed browser unavailable: {nob}"
         elif not ctype or "html" in ctype or first:
             bs, bfinal, btitle, bpub, btext, bhidden, how = browse(url)
-            if bs and len(btext.strip()) > len(text.strip()) and not (WALL.search(btext[:2000]) and len(btext) < 1500):
+            walled = bool(WALL.search(btext[:2000])) and len(btext) < 3000
+            if bs and not walled and len(btext.strip()) > len(text.strip()):
                 status, final, title, pub, text, hidden = bs, bfinal, btitle or title, bpub or pub, btext, bhidden
                 ctype, via = "text/html", ("headed browser" if how == "headed" else "headless browser") + (" (logged in)" if logged_in(url) else "")
             else:
-                browser_note = "the headed browser got no more text"
+                browser_note = "a bot wall in the headed browser too" if walled else "the headed browser got no more text"
     ok = 200 <= status < 300 and len(text.strip()) > 0
     login = bool(re.search(r"\b(sign in|log in|login)\b", text[:3000], re.I)) and len(text) < 3000
     meta = {"ok": ok, "status": status, "final": final, "type": ctype.split(";")[0], "title": title,

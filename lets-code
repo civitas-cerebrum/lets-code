@@ -1950,6 +1950,7 @@ class Session {
   constructor({ model, thinking, system, tools, compat, token = null }) {
     this.id = randomUUID();
     this.model = model; // switched live with setModel, like Claude Code's /model
+    this.token = token;
     this.compat = compat;
     this.tools = tools;
     this.state = "starting"; // busy | awaiting_tools | finishing | idle | dead
@@ -2085,7 +2086,13 @@ class Session {
       return;
     }
     if (ev.type === "result") {
-      if (ev.is_error && this.sink) this.sink.error(ev.result || ev.subtype || "claude error");
+      if (ev.is_error && this.sink) {
+        let msg = ev.result || ev.subtype || "claude error";
+        // a token Anthropic rejects is most often one cut off when copied
+        if (this.token && /OAuth access token is invalid/i.test(msg))
+          msg += ` (CLAUDE_TOKEN is ${this.token.length} characters long: check it was copied whole, as a narrow terminal wraps it over lines, or make a new one with 'claude setup-token')`;
+        this.sink.error(msg);
+      }
       this.sink = null;
       this.state = "idle";
       this.idleWaiters.splice(0).forEach((f) => f());

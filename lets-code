@@ -129,6 +129,13 @@
 #      enables it (a dialog or /experts enable, remembered): termux-device
 #      (phone tasks, on Termux) and reverse-engineer (REA's MCP server in a
 #      separate pi, so its tools never enter this session).
+#  10. Claude Code adapter (on by default): a project or user set up for
+#      Claude Code works as it is, read at each start: CLAUDE.md files and
+#      their @imports, .claude/skills, .claude/commands (/name), agents
+#      (as subagents), hooks (Claude's events, stdin JSON and exit codes on
+#      pi's), permission rules, MCP servers, workflow scripts and settings
+#      env. Project hooks, MCP, env and agents need the folder trusted
+#      (in Claude Code, in pi, or once here).
 #  11. Claude backend (needs Claude Code installed and signed in): pi's
 #      requests go to a local proxy that runs each conversation in one
 #      `claude -p` process with Claude Code's own tools off and pi's tools
@@ -138,18 +145,11 @@
 #      /model and /effort do in Claude Code. Your claude.ai connectors,
 #      skills, hooks and CLAUDE.md stay out of it. CLAUDE_MODELS picks the
 #      models listed; LETS_CODE_CLAUDE_PORT (8795) the proxy's port. The
-#      first session on Claude starts the proxy on its own machine and every
-#      later session there shares it; CLAUDE_URL (+ CLAUDE_TOKEN, your Claude
+#      first session on Claude starts the proxy as a sidecar on its own
+#      machine, which outlives that session and serves every later one; CLAUDE_URL (+ CLAUDE_TOKEN, your Claude
 #      Code token from `claude setup-token`) points a machine at another
 #      one's proxy instead (see claude-remote), so it needs no Claude Code of
 #      its own and starts nothing; its requests run on that token.
-#  10. Claude Code adapter (on by default): a project or user set up for
-#      Claude Code works as it is, read at each start: CLAUDE.md files and
-#      their @imports, .claude/skills, .claude/commands (/name), agents
-#      (as subagents), hooks (Claude's events, stdin JSON and exit codes on
-#      pi's), permission rules, MCP servers, workflow scripts and settings
-#      env. Project hooks, MCP, env and agents need the folder trusted
-#      (in Claude Code, in pi, or once here).
 #
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
 # Presets: ~/.config/lets-code/presets/<name>   (`lets-code setup --preset <name>`)
@@ -557,18 +557,20 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 # ~/.config/lets-code/config (mode 600). Writes are atomic (tmp + rename),
 # every other key in the files is preserved, and a corrupt file fails loudly.
 pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-cap> <vision> <reasoning> <thinking> [<effort-map-json>]
-    # Claude models go in too wherever Claude Code is installed (see pi_write_claude_extension)
+    # Claude models go in too wherever Claude Code is installed (see
+    # pi_write_claude_extension); the inline defaults are CLAUDE_DEFAULT_* for
+    # when this function runs on its own (setup's preset path, the tests)
     local claude_base="" claude_key="claude"
     if [ -n "${CLAUDE_URL:-}" ]; then
         claude_base="${CLAUDE_URL%/}/v1"
     elif command -v claude >/dev/null 2>&1; then
-        claude_base="http://127.0.0.1:${LETS_CODE_CLAUDE_PORT:-8795}/v1"
+        claude_base="http://127.0.0.1:${LETS_CODE_CLAUDE_PORT:-${CLAUDE_DEFAULT_PORT:-8795}}/v1"
     fi
     # CLAUDE_TOKEN (claude setup-token) goes with every request and the
     # proxy runs the conversation on it; without it a local proxy uses this
     # machine's Claude Code sign-in. pi resolves it from the environment.
     [ -z "${CLAUDE_TOKEN:-}" ] || claude_key='$LETS_CODE_CLAUDE_TOKEN'
-    LC_CLAUDE_BASE="${claude_base}" LC_CLAUDE_KEY="${claude_key}" LC_CLAUDE_MODELS="${CLAUDE_MODELS:-}" LC_CLAUDE_CONTEXT="${CLAUDE_CONTEXT:-200000}" LC_CLAUDE_CAP="${CLAUDE_OUTPUT_CAP:-32000}" \
+    LC_CLAUDE_BASE="${claude_base}" LC_CLAUDE_KEY="${claude_key}" LC_CLAUDE_MODELS="${CLAUDE_MODELS:-${CLAUDE_DEFAULT_MODELS:-haiku sonnet opus fable}}" LC_CLAUDE_CONTEXT="${CLAUDE_CONTEXT:-200000}" LC_CLAUDE_CAP="${CLAUDE_OUTPUT_CAP:-32000}" \
     PI_AGENT_DIR="${PI_AGENT_DIR}" LC_PROVIDER="${PROVIDER_ID:-lets-code}" LC_XHIGH_BUDGET="${XHIGH_THINKING_BUDGET:-}" LC_XHIGH_ROOM="${XHIGH_ANSWER_ROOM:-}" LC_XHIGH_CAP="${XHIGH_LEVEL_CAP:-}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
 import json, os, sys, tempfile
 
@@ -620,7 +622,7 @@ def claude_doc():
     # minimal (hidden here, so a saved minimal clamps up to low).
     import re
     levels = {"off": "none", "minimal": None, "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max"}
-    entries = [m for m in re.split(r"[\s,]+", os.environ.get("LC_CLAUDE_MODELS") or "haiku sonnet opus fable") if m]
+    entries = [m for m in re.split(r"[\s,]+", os.environ["LC_CLAUDE_MODELS"]) if m]
     ids = [m if m.startswith("claude-") else "claude-" + m for m in entries]
     if provider == CLAUDE_PROVIDER and model not in ids:
         ids.append(model)
@@ -631,19 +633,22 @@ def claude_doc():
     # Code writes with. Haiku 5.5 costs more above 100K tokens of input (a pi
     # cost tier). Rates as of 2026-10; a model not listed here gets no cost
     # (pi shows none).
-    rates = {
-        "haiku": (0.10, 0.50, 0.01, 0.20), "claude-haiku-5-5": (0.10, 0.50, 0.01, 0.20),
-        "sonnet": (2.0, 10.0, 0.20, 4.0), "claude-sonnet-5-5": (2.0, 10.0, 0.20, 4.0),
-        "opus": (4.0, 20.0, 0.20, 8.0), "claude-opus-5-5": (4.0, 20.0, 0.20, 8.0),
-        "fable": (10.0, 50.0, 0.25, 20.0), "claude-fable-5-1": (10.0, 50.0, 0.25, 20.0),
+    rates = {   # per family: (input, output, cache read, 1-hour cache write)
+        "haiku": (0.10, 0.50, 0.01, 0.20),
+        "sonnet": (2.0, 10.0, 0.20, 4.0),
+        "opus": (4.0, 20.0, 0.20, 8.0),
+        "fable": (10.0, 50.0, 0.25, 20.0),
     }
+    # the alias the CLI resolves to them, and their full names
+    family = {**{f: f for f in rates}, "claude-haiku-5-5": "haiku", "claude-sonnet-5-5": "sonnet",
+              "claude-opus-5-5": "opus", "claude-fable-5-1": "fable"}
     fields = ("input", "output", "cacheRead", "cacheWrite")
     def cost(i):
-        r = rates.get(i) or rates.get(i[len("claude-"):])
-        if not r:
+        f = family.get(i) or family.get(i[len("claude-"):])
+        if not f:
             return {}
-        c = dict(zip(fields, r))
-        if "haiku" in i:
+        c = dict(zip(fields, rates[f]))
+        if f == "haiku":
             c["tiers"] = [{"inputTokensAbove": 100000, **dict(zip(fields, (0.50, 2.50, 0.05, 1.00)))}]
         return {"cost": c}
     def name(i):
@@ -671,6 +676,8 @@ def to_models(doc):
         providers = {}
     if os.environ.get("LC_CLAUDE_BASE"):
         providers[CLAUDE_PROVIDER] = claude_doc()
+    else:
+        providers.pop(CLAUDE_PROVIDER, None)   # Claude Code gone and no CLAUDE_URL
     if provider == CLAUDE_PROVIDER:
         doc["providers"] = providers
         return
@@ -1840,8 +1847,11 @@ const HOST = env.HOST || "127.0.0.1";
 const API_KEY = env.PROXY_API_KEY || "";
 const CLAUDE_BIN = env.CLAUDE_BIN || "claude";
 const MAX_SESSIONS = +(env.MAX_SESSIONS || 8);
+const MAX_PER_TOKEN = +(env.MAX_SESSIONS_PER_TOKEN || 4); // a remote token cannot take every slot
 const IDLE_MS = +(env.IDLE_TTL_S || 600) * 1000;
-const STATE_DIR = env.STATE_DIR || path.join(os.homedir(), ".cache", "claude-sub-proxy");
+// a process waiting for pi to run tools (a long test suite, say) is not idle
+const TOOL_WAIT_MS = Math.max(IDLE_MS, 3600 * 1000);
+const STATE_DIR = env.STATE_DIR || path.join(os.homedir(), ".pi", "agent", "lets-code-claude");
 const DEBUG = !!env.DEBUG;
 const BRIDGE = new URL("./bridge.mjs", import.meta.url).pathname;
 // index.ts compares this with its copy of the file and restarts an older daemon
@@ -1858,7 +1868,7 @@ const WORK_DIR = path.join(STATE_DIR, "empty"); // cwd for claude: no CLAUDE.md 
 // full model name and its own id). Unknown ids are passed through as well,
 // so any model name the CLI takes works.
 const MODELS = Object.fromEntries(
-  (env.LETS_CODE_CLAUDE_MODELS || "haiku sonnet opus fable")
+  (env.LETS_CODE_CLAUDE_MODELS || "haiku sonnet opus fable") // CLAUDE_DEFAULT_MODELS in lets-code
     .split(/[\s,]+/)
     .filter(Boolean)
     .map((m) => (m.startsWith("claude-") ? [m, m] : ["claude-" + m, m])),
@@ -1873,8 +1883,10 @@ const log = (...a) => console.error(new Date().toISOString(), ...a);
 const dbg = (...a) => DEBUG && log(...a);
 const sha = (s) => createHash("sha256").update(s).digest("hex").slice(0, 16);
 
+// session dirs hold system prompts (remote users' too): this user only
+fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+fs.chmodSync(STATE_DIR, 0o700);
 fs.mkdirSync(WORK_DIR, { recursive: true });
-fs.mkdirSync(path.join(STATE_DIR, "sessions"), { recursive: true });
 
 // ---------- OpenAI <-> Anthropic content ----------
 
@@ -1969,11 +1981,33 @@ function thinkingFor(level) {
 
 const sessions = new Map();
 
+// The environment claude runs in: the sidecar's (that of whichever session
+// started it) without that session's lets-code settings and keys. A session
+// on a token gets no other Anthropic credential either: an ANTHROPIC_API_KEY
+// or ANTHROPIC_AUTH_TOKEN would outrank the token, and the conversation would
+// run on this machine's account instead of the token owner's.
+function childEnv(token, thinkingOff) {
+  const e = { ...env };
+  for (const k of Object.keys(e))
+    if (k.startsWith("LETS_CODE_") || k === "PROXY_API_KEY" || (token && (k.startsWith("ANTHROPIC_") || k === "CLAUDE_CODE_OAUTH_TOKEN"))) delete e[k];
+  return {
+    ...e,
+    MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000),
+    MCP_TIMEOUT: "30000",
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    ...(token && { CLAUDE_CODE_OAUTH_TOKEN: token }),
+    ...(thinkingOff && { CLAUDE_CODE_DISABLE_THINKING: "1" }),
+  };
+}
+
 class Session {
   constructor({ model, thinking, system, tools, compat, token = null }) {
     this.id = randomUUID();
     this.model = model; // switched live with setModel, like Claude Code's /model
     this.token = token;
+    this.tokenKey = token ? sha(token) : null;
+    this.claimed = false; // a request is about to continue it
     this.compat = compat;
     this.tools = tools;
     this.state = "starting"; // busy | awaiting_tools | finishing | idle | dead
@@ -2021,20 +2055,7 @@ class Session {
       "--thinking-display", "summarized",
     ];
     if (this.effort) args.push("--effort", this.effort);
-    this.proc = spawn(CLAUDE_BIN, args, {
-      cwd: WORK_DIR,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...env,
-        MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000),
-        MCP_TIMEOUT: "30000",
-        CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
-        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-        // a remote caller's own Claude Code token; local sessions use this machine's login
-        ...(token && { CLAUDE_CODE_OAUTH_TOKEN: token }),
-        ...(this.thinkingOff && { CLAUDE_CODE_DISABLE_THINKING: "1" }),
-      },
-    });
+    this.proc = spawn(CLAUDE_BIN, args, { cwd: WORK_DIR, stdio: ["pipe", "pipe", "pipe"], env: childEnv(token, this.thinkingOff) });
     this.stderr = "";
     this.proc.stderr.on("data", (d) => {
       this.stderr = (this.stderr + d).slice(-4000);
@@ -2067,29 +2088,34 @@ class Session {
     return t.off === this.thinkingOff && (t.effort === this.effort || t.effort === null || LIVE_EFFORTS.has(t.effort));
   }
 
-  // what /effort does in Claude Code: applies from the next API request on
-  setEffort(effort) {
-    if (effort === this.effort) return Promise.resolve();
+  // what /effort does in Claude Code: applies from the next API request on.
+  // Resolves to whether claude took it (an older Claude Code may not).
+  async setEffort(effort) {
+    if (effort === this.effort) return true;
     log(`session ${this.id.slice(0, 8)} effort ${this.effort ?? "default"} -> ${effort ?? "default"}`);
-    this.effort = effort;
-    return this.control({ subtype: "apply_flag_settings", settings: { effortLevel: effort } });
+    const ok = await this.control({ subtype: "apply_flag_settings", settings: { effortLevel: effort } });
+    if (ok) this.effort = effort;
+    return ok;
   }
 
   // what /model does in Claude Code: the conversation carries on, the next
   // API request goes to the other model (effort and thinking stay)
-  setModel(model) {
-    if (model === this.model) return Promise.resolve();
+  async setModel(model) {
+    if (model === this.model) return true;
     log(`session ${this.id.slice(0, 8)} model ${this.model} -> ${model}`);
-    this.model = model;
-    return this.control({ subtype: "set_model", model });
+    const ok = await this.control({ subtype: "set_model", model });
+    if (ok) this.model = model;
+    return ok;
   }
 
+  // a stream-json control request; resolves to true on success, false on an
+  // error answer or none within 5 s
   control(request) {
     const id = "ctl-" + randomUUID();
     this.proc.stdin.write(JSON.stringify({ type: "control_request", request_id: id, request }) + "\n");
     return new Promise((resolve) => {
       this.controlWaiters.set(id, resolve);
-      setTimeout(() => this.controlWaiters.delete(id) && resolve(), 5000);
+      setTimeout(() => this.controlWaiters.delete(id) && resolve(false), 5000);
     });
   }
 
@@ -2103,8 +2129,9 @@ class Session {
     if (ev.type === "stream_event") return this.onStream(ev.event);
     if (ev.type === "control_response") {
       const id = ev.response?.request_id;
-      if (ev.response?.subtype !== "success") log(`session ${this.id.slice(0, 8)} control ${id} failed: ${ev.response?.error}`);
-      this.controlWaiters.get(id)?.();
+      const ok = ev.response?.subtype === "success";
+      if (!ok) log(`session ${this.id.slice(0, 8)} control ${id} failed: ${ev.response?.error}`);
+      this.controlWaiters.get(id)?.(ok);
       this.controlWaiters.delete(id);
       return;
     }
@@ -2118,6 +2145,7 @@ class Session {
       }
       this.sink = null;
       this.state = "idle";
+      this.lastUsed = Date.now();
       this.idleWaiters.splice(0).forEach((f) => f());
     }
   }
@@ -2159,6 +2187,7 @@ class Session {
         break;
       case "message_stop": {
         const usage = this.usage;
+        this.lastUsed = Date.now();
         if (this.stopReason === "tool_use") {
           this.state = "awaiting_tools";
           this.sink = null;
@@ -2208,34 +2237,50 @@ class Session {
     try {
       this.proc.kill("SIGTERM");
     } catch {}
-    fs.rm(this.dir, { recursive: true, force: true }, () => {});
+    fs.rmSync(this.dir, { recursive: true, force: true }); // sync: shutdown exits right after
   }
 }
 
-function evict() {
+// least worth keeping first: idle before waiting for tools, then oldest
+const victims = (list) =>
+  list.filter((s) => s.state !== "busy" && !s.claimed).sort((a, b) => (a.state === "awaiting_tools") - (b.state === "awaiting_tools") || a.lastUsed - b.lastUsed);
+
+// Makes room for a new process (of `tokenKey`'s, null for this machine's
+// login); false when there is none to make.
+function evict(tokenKey = null) {
   const now = Date.now();
   for (const s of sessions.values())
-    if (s.state !== "busy" && now - s.lastUsed > IDLE_MS) {
+    if (s.state !== "busy" && !s.claimed && now - s.lastUsed > (s.state === "awaiting_tools" ? TOOL_WAIT_MS : IDLE_MS)) {
       log(`session ${s.id.slice(0, 8)} idle, closing`);
       s.die("idle timeout");
     }
-  while (sessions.size >= MAX_SESSIONS) {
-    const victims = [...sessions.values()].filter((s) => s.state !== "busy").sort((a, b) => a.lastUsed - b.lastUsed);
-    if (!victims.length) break;
-    victims[0].die("evicted");
+  if (tokenKey) {
+    const own = [...sessions.values()].filter((s) => s.tokenKey === tokenKey);
+    if (own.length >= MAX_PER_TOKEN) {
+      const v = victims(own)[0];
+      if (!v) return false;
+      v.die("evicted");
+    }
   }
+  while (sessions.size >= MAX_SESSIONS) {
+    const v = victims([...sessions.values()])[0];
+    if (!v) break;
+    v.die("evicted");
+  }
+  return true;
 }
 setInterval(evict, 60_000).unref();
 
 // ---------- bridge socket ----------
 
-try {
-  fs.unlinkSync(SOCK);
-} catch {}
-net
-  .createServer((conn) => {
+const bridges = net.createServer((conn) => {
     readline.createInterface({ input: conn }).on("line", (line) => {
-      const m = JSON.parse(line);
+      let m;
+      try {
+        m = JSON.parse(line);
+      } catch {
+        return dbg("bridge: not json:", line);
+      }
       const s = sessions.get(m.session);
       const reply = (o) => conn.writable && conn.write(JSON.stringify({ ...o, rid: m.rid }) + "\n");
       if (!s) return reply({ tools: [], content: [{ type: "text", text: "unknown session" }], isError: true });
@@ -2253,8 +2298,7 @@ net
       }
     });
     conn.on("error", () => {});
-  })
-  .listen(SOCK);
+  });
 
 // ---------- response sinks ----------
 
@@ -2351,6 +2395,17 @@ function sendJson(res, status, body) {
 // ---------- chat completions ----------
 
 async function chat(req, res, body, token = null) {
+  // a client gone before its answer: noticed even while this waits below
+  let gone = false;
+  res.on("close", () => {
+    gone = !sink?.done;
+    if (gone && session?.sink === sink) {
+      log(`client went away, closing session ${session.id.slice(0, 8)}`);
+      session.die("client disconnected");
+    }
+  });
+  let session = null;
+  let sink = null;
   const modelId = body.model || "claude-haiku";
   const model = MODELS[modelId] ?? modelId;
   const thinking = thinkingFor(body.reasoning_effort);
@@ -2361,8 +2416,10 @@ async function chat(req, res, body, token = null) {
     .join("\n\n");
   const conv = all.filter((m) => m.role !== "system" && m.role !== "developer");
   const tools = (body.tools ?? []).filter((t) => t.type === "function").map((t) => t.function);
-  // a conversation only continues in a process of the same token
-  const compat = sha(JSON.stringify([system, tools, token ? sha(token) : null]));
+  // a conversation only continues in a process of the same token and the same
+  // pi session (lets-code's session tag), so two sessions that happen to share
+  // a prompt, tools and user turns never swap processes
+  const compat = sha(JSON.stringify([system, tools, token ? sha(token) : null, req.headers["x-lets-code-session"] ?? null]));
   if (!conv.length) return sendJson(res, 400, { error: { message: "no messages" } });
 
   // tail = what is new since the previous request: tool results and/or user turns
@@ -2374,27 +2431,35 @@ async function chat(req, res, body, token = null) {
   const prevAssistant = conv[tailStart - 1];
 
   // find the live process this request continues
-  let session = null;
   if (prevAssistant) {
     const prefixLen = tailStart - 1;
     const prefixFp = fingerprint(conv.slice(0, prefixLen));
     for (const s of sessions.values()) {
-      if (s.compat !== compat || s.convLen !== prefixLen || s.convFp !== prefixFp || !s.canTake(thinking)) continue;
+      if (s.claimed || s.compat !== compat || s.convLen !== prefixLen || s.convFp !== prefixFp || !s.canTake(thinking)) continue;
       const ids = (prevAssistant.tool_calls ?? []).map((t) => t.id);
       if (JSON.stringify(ids) !== JSON.stringify(s.lastToolCallIds)) continue;
       if (toolMsgs.length ? s.state === "awaiting_tools" : ["idle", "finishing"].includes(s.state)) {
         session = s;
+        session.claimed = true; // before any await: no second request takes it
         break;
       }
     }
   }
 
   const stream = !!body.stream;
-  const sink = stream ? sseSink(res, modelId, body.stream_options?.include_usage !== false) : jsonSink(res, modelId);
+  sink = stream ? sseSink(res, modelId, body.stream_options?.include_usage !== false) : jsonSink(res, modelId);
 
   if (session) {
     if (session.state === "finishing") await session.waitIdle();
+    // a switch claude does not take (an older Claude Code): a fresh process
+    // with the new settings instead
+    if (session.state !== "dead" && !((await session.setModel(model)) && (await session.setEffort(thinking.effort)))) session.die("switch not taken");
+    session.claimed = false;
     if (session.state === "dead") session = null;
+  }
+  if (gone) {
+    session?.die("client disconnected");
+    return;
   }
 
   if (session) {
@@ -2404,8 +2469,6 @@ async function chat(req, res, body, token = null) {
     session.convLen = conv.length;
     session.convFp = fingerprint(conv);
     session.lastToolCallIds = [];
-    await session.setModel(model);
-    await session.setEffort(thinking.effort);
     if (toolMsgs.length) {
       session.state = "busy";
       // images pi attaches after tool results go with the last result
@@ -2421,7 +2484,8 @@ async function chat(req, res, body, token = null) {
       session.send(userMsgs.flatMap((m) => toAnthropicBlocks(m.content)));
     }
   } else {
-    evict();
+    if (!evict(token ? sha(token) : null))
+      return sink.error(`this token already has ${MAX_PER_TOKEN} conversations working; try again when one is done`);
     session = new Session({ model, thinking, system, tools, compat, token });
     session.sink = sink;
     session.convLen = conv.length;
@@ -2449,13 +2513,6 @@ async function chat(req, res, body, token = null) {
     }
     session.send(blocks);
   }
-
-  res.on("close", () => {
-    if (!sink.done && session.sink === sink) {
-      log(`client went away, closing session ${session.id.slice(0, 8)}`);
-      session.die("client disconnected");
-    }
-  });
 }
 
 // ---------- http ----------
@@ -2472,7 +2529,10 @@ const server = http.createServer(async (req, res) => {
     // comes from another machine and must bring its token.
     const bearer = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "").trim();
     const token = CLAUDE_TOKEN_RE.test(bearer) ? bearer : null;
-    if (!token && (req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || req.headers.forwarded))
+    const forwarded = !!(req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || req.headers.forwarded);
+    if (!token && bearer.startsWith("sk-ant-oat"))
+      return sendJson(res, 401, { error: { message: `that Claude Code token is not whole (${bearer.length} characters); copy it again or make a new one with 'claude setup-token'` } });
+    if (!token && forwarded)
       return sendJson(res, 401, { error: { message: "send your Claude Code token (from `claude setup-token`) as the API key (CLAUDE_TOKEN in lets-code)" } });
     const url = new URL(req.url, "http://x");
     if (req.method === "GET" && url.pathname === "/v1/models")
@@ -2486,7 +2546,8 @@ const server = http.createServer(async (req, res) => {
         name: "lets-code-claude",
         version: VERSION,
         pid: process.pid,
-        sessions: [...sessions.values()].map((s) => ({
+        // the conversations are this machine's business, not a remote caller's
+        sessions: forwarded ? undefined : [...sessions.values()].map((s) => ({
           id: s.id,
           model: s.model,
           effort: s.effort ?? "default",
@@ -2508,7 +2569,20 @@ const server = http.createServer(async (req, res) => {
     else res.end();
   }
 });
-server.listen(PORT, HOST, () => log(`lets-code Claude proxy on http://${HOST}:${PORT}/v1 (version ${VERSION})`));
+server.on("error", (e) => {
+  log(`cannot listen on ${HOST}:${PORT}: ${e.message}`); // another sidecar has the port: it serves
+  process.exit(1);
+});
+server.listen(PORT, HOST, () => {
+  // the port is ours: what an earlier sidecar left behind can go
+  fs.rmSync(path.join(STATE_DIR, "sessions"), { recursive: true, force: true });
+  fs.mkdirSync(path.join(STATE_DIR, "sessions"), { recursive: true });
+  try {
+    fs.unlinkSync(SOCK);
+  } catch {}
+  bridges.listen(SOCK);
+  log(`lets-code Claude proxy on http://${HOST}:${PORT}/v1 (version ${VERSION})`);
+});
 
 const shutdown = () => {
   for (const s of sessions.values()) s.die("shutdown");
@@ -2541,7 +2615,12 @@ const ask = (msg) =>
     conn.write(JSON.stringify({ ...msg, rid, session }) + "\n");
   });
 readline.createInterface({ input: conn }).on("line", (line) => {
-  const m = JSON.parse(line);
+  let m;
+  try {
+    m = JSON.parse(line);
+  } catch {
+    return;
+  }
   waiting.get(m.rid)?.(m);
   waiting.delete(m.rid);
 });
@@ -2552,7 +2631,12 @@ conn.on("error", (e) => {
 conn.on("close", () => process.exit(0));
 
 readline.createInterface({ input: process.stdin }).on("line", async (line) => {
-  const m = JSON.parse(line);
+  let m;
+  try {
+    m = JSON.parse(line);
+  } catch {
+    return; // not JSON-RPC: nothing to answer
+  }
   const reply = (result) => out({ jsonrpc: "2.0", id: m.id, result });
   switch (m.method) {
     case "initialize":
@@ -2601,7 +2685,7 @@ BRIDGE
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, openSync, readFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2646,10 +2730,12 @@ export async function ensureProxy(env: Record<string, string | undefined> = proc
 	mkdirSync(state, { recursive: true });
 	const logFd = openSync(join(state, "proxy.log"), "a");
 	spawn(process.execPath, [file], {
-		detached: true,
+		detached: true,   // the sidecar outlives this session
+		cwd: state,       // not pi's project directory
 		stdio: ["ignore", logFd, logFd],
 		env: { ...env, PORT: String(port), HOST: "127.0.0.1", STATE_DIR: state },
 	}).unref();
+	closeSync(logFd);   // the sidecar has its own copy
 	// a second pi starting at the same moment loses the port and exits; either
 	// daemon answering with this version is fine
 	for (let i = 0; i < 100; i++) {
@@ -2678,10 +2764,14 @@ export default function (pi: ExtensionAPI) {
 	if (!provider) return;
 	const onClaude = (ctx: any) => ctx?.model?.provider === provider;
 	let pending: Promise<string> | null = null;
-	let okUntil = 0;   // a proxy that just answered is trusted for a minute (the remote one is a round trip away)
+	// a remote proxy that just answered is trusted for a minute (each check is
+	// a round trip); the local one is checked before every request, so a
+	// stopped sidecar is back before the request that finds it gone
+	const remote = !!process.env.LETS_CODE_CLAUDE_URL;
+	let okUntil = 0;
 	const ensure = async (ctx: any) => {
-		if (Date.now() < okUntil) return;
-		pending ??= (process.env.LETS_CODE_CLAUDE_URL ? checkRemote() : ensureProxy()).finally(() => { pending = null; });
+		if (remote && Date.now() < okUntil) return;
+		pending ??= (remote ? checkRemote() : ensureProxy()).finally(() => { pending = null; });
 		const err = await pending;
 		if (err) ctx?.ui?.notify?.(`Claude: ${err}`, "error");
 		else okUntil = Date.now() + 60_000;
@@ -14163,9 +14253,9 @@ run_setup() {  # run_setup [full|granular]
     # a Claude Code token at the Token prompt: the endpoint is a lets-code
     # Claude proxy (see CLAUDE_TOKEN), so Claude's models are registered
     # instead of probing a server
-    case "${token}" in sk-ant-oat[0-9]*-*)
+    if is_claude_token "${token}"; then
         local proxy; proxy="$(normalize_endpoint "${endpoints%% *}")"
-        case "$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Authorization: Bearer ${token}" "${proxy}/health" 2>/dev/null)" in
+        case "$(claude_proxy_status "${proxy}" "${token}")" in
             200) log "Claude proxy: ${proxy} (Claude runs on your token)" ;;
             *)   log_error "no lets-code Claude proxy answered at ${proxy} — config saved; check the address ('lets-code claude-remote' on that machine)." ;;
         esac
@@ -14177,8 +14267,8 @@ run_setup() {  # run_setup [full|granular]
         echo ""
         echo "All set. Run:  lets-code"
         offer_fresh_shell
-        exit 0 ;;
-    esac
+        exit 0
+    fi
     local found=""
     for cand in ${endpoints}; do
         if probe "${cand%/}" > "${PROBE_OUT}"; then found="${cand%/}"; MODELS_JSON="$(cat "${PROBE_OUT}")"; break; fi
@@ -14283,6 +14373,19 @@ print("%s|%s|%s" % (d.get("id", ""), d.get("max_model_len") or d.get("context_le
 # The Claude backend's models and facts (see pi_write_claude_extension).
 CLAUDE_CONTEXT=200000
 CLAUDE_OUTPUT_CAP=32000
+CLAUDE_DEFAULT_MODELS="haiku sonnet opus fable"   # CLAUDE_MODELS when not set (server.mjs lists the same)
+CLAUDE_DEFAULT_PORT=8795                          # LETS_CODE_CLAUDE_PORT when not set (index.ts, server.mjs too)
+# a whole Claude Code OAuth token, as `claude setup-token` prints it (the
+# proxy checks the same pattern, CLAUDE_TOKEN_RE in server.mjs)
+is_claude_token() {  # is_claude_token <string>
+    [[ "$1" =~ ^sk-ant-oat[0-9]+-[A-Za-z0-9_-]{20,}$ ]]
+}
+# what a Claude proxy's /health says to <token>: 200 (here and takes it),
+# 401 (token refused), 502-504 (nothing running behind a reverse proxy),
+# 000 (not reachable, or a certificate not trusted)
+claude_proxy_status() {  # claude_proxy_status <base-url> <token>
+    curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Authorization: Bearer $2" "$1/health" 2>/dev/null || true
+}
 # pi's startup default (Ctrl+S in /model) from its settings.json: the
 # provider or the model id, empty when none is saved
 pi_saved_default() {  # pi_saved_default provider|model
@@ -14295,8 +14398,8 @@ print(v if isinstance(v, str) else "")' "$1" 2>/dev/null
 # what the proxy's /v1/models says, without asking it: the CLAUDE_MODELS
 # entries as ids (claude-<alias>, or a full model name as is), plus <model>
 claude_models_json() {  # claude_models_json [<model>]
-    LC_MODELS="${CLAUDE_MODELS:-}" LC_CONTEXT="${CLAUDE_CONTEXT}" python3 -c 'import json, os, re, sys
-ids = [m if m.startswith("claude-") else "claude-" + m for m in re.split(r"[\s,]+", os.environ["LC_MODELS"] or "haiku sonnet opus fable") if m]
+    LC_MODELS="${CLAUDE_MODELS:-${CLAUDE_DEFAULT_MODELS}}" LC_CONTEXT="${CLAUDE_CONTEXT}" python3 -c 'import json, os, re, sys
+ids = [m if m.startswith("claude-") else "claude-" + m for m in re.split(r"[\s,]+", os.environ["LC_MODELS"]) if m]
 if sys.argv[1] and sys.argv[1] not in ids: ids.append(sys.argv[1])
 print(json.dumps({"data": [{"id": i, "owned_by": "anthropic", "max_model_len": int(os.environ["LC_CONTEXT"])} for i in ids]}))' "${1:-}"
 }
@@ -14309,12 +14412,12 @@ print(json.dumps({"data": [{"id": i, "owned_by": "anthropic", "max_model_len": i
 # its conversations run on that token, so they use that user's subscription
 # and never this machine's login. Sessions here need no token.
 claude_remote() {
-    local state port="${LETS_CODE_CLAUDE_PORT:-8795}" err
+    local state port="${LETS_CODE_CLAUDE_PORT:-${CLAUDE_DEFAULT_PORT}}" err
     command -v claude >/dev/null 2>&1 || { log_error "this machine needs Claude Code (the claude command) to serve Claude."; exit 1; }
     command -v node >/dev/null 2>&1 || { log_error "node not found."; exit 1; }
     state="${LETS_CODE_CLAUDE_STATE:-${PI_AGENT_DIR}/lets-code-claude}"
     pi_write_claude_extension
-    if ! err="$(PI_CODING_AGENT_DIR="${PI_AGENT_DIR}" LETS_CODE_CLAUDE_PORT="${port}" node -e '
+    if ! err="$(PI_CODING_AGENT_DIR="${PI_AGENT_DIR}" LETS_CODE_CLAUDE_PORT="${port}" LETS_CODE_CLAUDE_MODELS="${CLAUDE_MODELS:-${CLAUDE_DEFAULT_MODELS}}" node -e '
         import(process.argv[1]).then((m) => m.ensureProxy()).then((e) => { if (e) { console.log(e); process.exit(1); } })' \
         "${LC_EXT_ROOT}/claude/index.ts" 2>&1)"; then
         log_error "${err}"; exit 1
@@ -14649,7 +14752,7 @@ if [ "${1:-}" = "setup" ]; then
     run_setup "${2:-}"
 fi
 [ "${1:-}" = "presets" ] && list_presets
-[ "${1:-}" = "claude-remote" ] && claude_remote "${2:-}"
+[ "${1:-}" = "claude-remote" ] && claude_remote
 [ "${1:-}" = "update" ] && run_update "${2:-}"
 case "${1:-}" in --version|-V) echo "lets-code ${LETS_CODE_VERSION}"; exit 0 ;; esac
 [ "${1:-}" = "mandate" ] && { [ "${2:-}" = "init" ] || { log_error "usage: lets-code mandate init [--global]"; exit 1; }; mandate_init "${3:-}"; }
@@ -14687,7 +14790,7 @@ set -- ${ARGS[@]+"${ARGS[@]}"}
 
 # load config (defaults, then file, then preset, then env overrides)
 BACKEND=""            # claude: Claude through Claude Code (or --claude, or a Claude Code token as TOKEN); empty: the server at ENDPOINTS
-CLAUDE_MODELS="haiku sonnet opus fable"   # the Claude models in /model: CLI aliases (claude-<alias>) or full model names
+CLAUDE_MODELS="${CLAUDE_DEFAULT_MODELS}"   # the Claude models in /model: CLI aliases (claude-<alias>) or full model names
 CLAUDE_URL=""         # another machine's Claude proxy (lets-code claude-remote there); empty: the proxy runs here
 CLAUDE_TOKEN=""       # your Claude Code token (claude setup-token): Claude runs on it, here or on CLAUDE_URL; empty: this machine's Claude Code sign-in
 ENDPOINTS=""
@@ -14829,31 +14932,35 @@ harness_gate "${HARNESS}"
 # picks something else. Nothing is probed: the proxy is local and its facts
 # are known, and the claude module starts it when the session begins.
 CLAUDE_PROVIDER_ID="lets-code-claude"
-CLAUDE_PORT="${LETS_CODE_CLAUDE_PORT:-8795}"
+CLAUDE_PORT="${LETS_CODE_CLAUDE_PORT:-${CLAUDE_DEFAULT_PORT}}"
 # a Claude Code token as the server token (setup's Token prompt): the
 # endpoint is a lets-code Claude proxy and Claude runs on that token
-case "${TOKEN}" in sk-ant-oat[0-9]*-*)
-    if [ -z "${BACKEND}" ] && [ -z "${URL_OVERRIDE}" ]; then
-        BACKEND=claude
-        [ -n "${CLAUDE_URL}" ] || CLAUDE_URL="$(normalize_endpoint "${ENDPOINTS%% *}")"
-        CLAUDE_TOKEN="${CLAUDE_TOKEN:-${TOKEN}}"
-    fi ;;
-esac
+if is_claude_token "${TOKEN}" && [ -z "${BACKEND}" ] && [ -z "${URL_OVERRIDE}" ]; then
+    BACKEND=claude
+    [ -n "${CLAUDE_URL}" ] || CLAUDE_URL="$(normalize_endpoint "${ENDPOINTS%% *}")"
+    CLAUDE_TOKEN="${CLAUDE_TOKEN:-${TOKEN}}"
+fi
+# a Claude model saved as pi's default, followed only while Claude can run
+# here; otherwise the configured server (so pi still opens to change it)
 if [ "${BACKEND}" != claude ] && [ -z "${PRESET}" ] && [ -z "${URL_OVERRIDE}" ] \
     && [ "$(pi_saved_default provider)" = "${CLAUDE_PROVIDER_ID}" ]; then
-    BACKEND=claude; MODEL=""; CONTEXT=""; OUTPUT_CAP=""
-    log_verbose "backend: Claude (a Claude model is saved as pi's default; Ctrl+S on another model in /model changes it)"
+    if [ -n "${CLAUDE_URL}" ] || command -v claude >/dev/null 2>&1; then
+        BACKEND=claude; MODEL=""; CONTEXT=""; OUTPUT_CAP=""
+        log_verbose "backend: Claude (a Claude model is saved as pi's default; Ctrl+S on another model in /model changes it)"
+    else
+        log_verbose "backend: a Claude model is saved as pi's default, but Claude Code is not installed here and CLAUDE_URL is not set; using the configured server"
+    fi
 fi
 if [ "${BACKEND}" = claude ]; then
     [ -z "${URL_OVERRIDE}" ] || { log_error "--url picks a server and does not combine with the Claude backend."; exit 1; }
-    case "${CLAUDE_TOKEN}" in
-        ""|sk-ant-oat[0-9]*-*) ;;
-        *) log_error "CLAUDE_TOKEN is not a Claude Code token (those start with sk-ant-oat01-; 'claude setup-token' prints one)."; exit 1 ;;
-    esac
+    if [ -n "${CLAUDE_TOKEN}" ] && ! is_claude_token "${CLAUDE_TOKEN}"; then
+        log_error "CLAUDE_TOKEN is not a whole Claude Code token (${#CLAUDE_TOKEN} characters; 'claude setup-token' prints one, sk-ant-oat01-..., and a narrow terminal can wrap it over lines)."
+        exit 1
+    fi
     if [ -n "${CLAUDE_URL}" ]; then
         # another machine's proxy: checked now, so a problem is one clear line
         # instead of a failed first request
-        case "$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Authorization: Bearer ${CLAUDE_TOKEN}" "${CLAUDE_URL}/health" 2>/dev/null)" in
+        case "$(claude_proxy_status "${CLAUDE_URL}" "${CLAUDE_TOKEN}")" in
             200) ;;
             401) log_error "the Claude proxy at ${CLAUDE_URL} wants your Claude Code token in CLAUDE_TOKEN: run 'claude setup-token' (on any machine signed in to Claude Code) and put the sk-ant-oat... token it prints there."; exit 1 ;;
             502|503|504) log_error "no Claude proxy is running behind ${CLAUDE_URL}; start one there with 'lets-code claude-remote' (or any 'lets-code --claude' session)."; exit 1 ;;

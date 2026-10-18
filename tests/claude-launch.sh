@@ -8,7 +8,9 @@
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 lc="${here}/../lets-code"
-work="$(mktemp -d)"; trap 'kill "${srv:-}" 2>/dev/null; rm -rf "${work}"' EXIT
+work="$(mktemp -d)"
+# the stand-in servers and the sidecar claude-remote starts go too, also when a check fails
+trap 'kill ${srv:-} ${rsrv:-} ${rpid:-} 2>/dev/null; rm -rf "${work}"' EXIT
 fail=0
 t() { if [ "$2" = "$3" ]; then echo "ok    $1 -> $2"; else echo "FAIL  $1 -> '$2' (want '$3')"; fail=1; fi; }
 
@@ -105,6 +107,13 @@ t "server launch: the module is on" "$(sed -n 2p "${h}/pi-args")" "claude-provid
 h="${work}/h7"; mkdir -p "${h}/.config/lets-code"; cp "${work}/h6/.config/lets-code/config" "${h}/.config/lets-code/config"
 LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
 t "server launch without Claude Code: no Claude models" "$(models "${h}" lets-code-claude)|$(sed -n 2p "${h}/pi-args")" "|claude-provider="
+LC_PATH="${noclaude}:/usr/bin:/bin" launch "${work}/h6"
+t "Claude Code gone: the Claude models leave /model" "$(models "${work}/h6" lets-code-claude)" ""
+# Claude saved as pi's default, but nothing to run it with: the configured
+# server, so pi still opens (and Ctrl+S there can change the default)
+printf '{"defaultProvider": "lets-code-claude", "defaultModel": "claude-opus"}\n' > "${work}/h7/.pi/agent/settings.json"
+LC_PATH="${noclaude}:/usr/bin:/bin" launch "${work}/h7"
+t "pi default on Claude without Claude Code: the server" "$(cat "${work}/h7/rc")|$(args "${work}/h7")" "0|--provider lets-code --model srv-model -p hi"
 
 # --claude without Claude Code
 LC_PATH="${noclaude}:/usr/bin:/bin" launch "${work}/h8" --claude
@@ -161,7 +170,10 @@ launch "${h}"
 t "local + CLAUDE_TOKEN: the token goes with each request" "$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1]))["providers"]["lets-code-claude"]; print(p["baseUrl"], p["apiKey"])' "${h}/.pi/agent/models.json")|$(sed -n 3p "${h}/pi-args")" "http://127.0.0.1:8795/v1 \$LETS_CODE_CLAUDE_TOKEN|claude-url= token=${tok}"
 printf 'BACKEND="claude"\nCLAUDE_TOKEN="sk-ant-api03-xyz"\n' > "${h}/.config/lets-code/config"
 launch "${h}"
-t "CLAUDE_TOKEN that is not a Claude Code token: refused" "$(cat "${h}/rc")|$(grep -c 'not a Claude Code token' "${h}/out")" "1|1"
+t "CLAUDE_TOKEN that is not a Claude Code token: refused" "$(cat "${h}/rc")|$(grep -c 'not a whole Claude Code token' "${h}/out")" "1|1"
+printf 'BACKEND="claude"\nCLAUDE_TOKEN="sk-ant-oat01-cutoff"\n' > "${h}/.config/lets-code/config"
+launch "${h}"
+t "CLAUDE_TOKEN cut off when copied: refused with its length" "$(cat "${h}/rc")|$(grep -c '(19 characters' "${h}/out")" "1|1"
 
 # lets-code claude-remote: proxy started, what to set printed; requests
 # through a reverse proxy need a Claude Code token
@@ -169,9 +181,9 @@ h="${work}/h10"; mkdir -p "${h}"
 port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
 ( cd "${work}/proj" && HOME="${h}" PATH="${work}/bin:${PATH}" LETS_CODE_CLAUDE_PORT="${port}" bash "${lc}" claude-remote > "${h}/out" 2>&1 < /dev/null; echo $? > "${h}/rc" )
 t "claude-remote: exit status" "$(cat "${h}/rc")" 0
+rpid="$(curl -s "http://127.0.0.1:${port}/health" | python3 -c 'import json, sys; print(json.load(sys.stdin)["pid"])' 2>/dev/null)"
 t "claude-remote: says how to get the token" "$(grep -c "claude setup-token" "${h}/out")|$(grep -c 'CLAUDE_URL=' "${h}/out")" "1|1"
 via() { curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: 10.6.0.2" ${1:+-H "Authorization: Bearer $1"} "http://127.0.0.1:${port}/health"; }
 t "claude-remote: proxy up; a reverse-proxied request needs a token" "$(via "${tok}")|$(via)|$(via nope)" "200|401|401"
-kill "$(curl -s "http://127.0.0.1:${port}/health" | python3 -c 'import json, sys; print(json.load(sys.stdin)["pid"])')" 2>/dev/null
 
 exit "${fail}"

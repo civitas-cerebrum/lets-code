@@ -177,24 +177,60 @@ back). `CLAUDE_MODELS` in the config sets the list: Claude Code's aliases
 model names such as `claude-opus-5-5`. A saved preset named `claude` adds to
 the built-in one, e.g. `MODEL="claude-sonnet"`.
 
-**How it works.** A small proxy in the `claude` module (a vLLM-style
-OpenAI-compatible server on `127.0.0.1:8795`, `LETS_CODE_CLAUDE_PORT`) runs
-each conversation in one `claude -p` process with Claude Code's own tools
-off. pi's tools reach Claude through MCP, so Claude calls them natively: a
-call goes to pi as a tool call, pi runs it, and its result goes back into the
-same process. Follow-up turns go to the same process too, so Claude's prompt
-cache keeps working. Your claude.ai connectors, skills, hooks and CLAUDE.md
-stay out of it. The module starts the proxy when a session begins on Claude
-(and again if it stops), one per user, shared by sessions and subagents; its
-log is `~/.pi/agent/lets-code-claude/proxy.log`.
+**How it works: a proxy sidecar.** pi talks to Claude the way it talks to a
+vLLM server, over an OpenAI-compatible API. Behind that API is a small proxy
+that lets-code ships in its `claude` module and runs as a **sidecar**: a
+background process of its own, next to pi rather than inside it.
 
-**One proxy per machine, or another machine's.** The first session on
-Claude starts the proxy on its own machine, and every later session there
-shares it. A machine where Claude Code is slow or missing (a phone) can use
-another machine's proxy instead. On the serving machine, `lets-code
-claude-remote` starts the proxy and says what to set; on the other machine,
-in its config (with `BACKEND="claude"` to make it the default) or in
-`presets/claude` (or through setup, as above):
+```
+pi session ─┐                              ┌─ claude -p  (conversation 1)
+pi session ─┼─ HTTP ─▶ proxy sidecar ──────┼─ claude -p  (conversation 2)
+subagents  ─┘         127.0.0.1:8795       └─ ...
+                      one per user          each: Claude Code's tools off,
+                                            pi's tools over MCP
+```
+
+- **Started by default, on the same machine.** The first session on a
+  Claude model (`--claude`, `BACKEND=claude`, or a Claude model picked in
+  `/model`) starts the sidecar before its first request. Nothing to set up.
+- **Survives session changes.** The sidecar is detached from the session that
+  started it: `/new`, `/resume`, switching models, quitting pi or closing the
+  terminal leave it running, and every later session and subagent on the
+  machine shares it. A conversation you come back to continues in its claude
+  process while that is alive; idle claude processes close after 10 minutes
+  (`IDLE_TTL_S`), and a conversation that no longer has one is replayed into a
+  fresh process.
+- **Restarts on its own when needed.** If the sidecar stopped (a reboot, a
+  crash), the next Claude request starts it again; if lets-code was updated,
+  the next session replaces the older sidecar with the new code.
+- **One conversation, one claude process.** Each conversation runs in one
+  long-lived `claude -p` process with Claude Code's own tools off. pi's tools
+  reach Claude through MCP, so Claude calls them natively: the call goes to
+  pi as a tool call, pi runs it, and the result goes back into the same
+  process, which carries on. Follow-up turns go to the same process too, so
+  Claude's prompt cache keeps working. Your claude.ai connectors, skills,
+  hooks and CLAUDE.md stay out of it.
+
+Checking on it and stopping it:
+
+```bash
+curl -s 127.0.0.1:8795/status    # the sidecar's live conversations (model, effort, state)
+tail ~/.pi/agent/lets-code-claude/proxy.log
+kill "$(curl -s 127.0.0.1:8795/health | python3 -c 'import json,sys; print(json.load(sys.stdin)["pid"])')"
+```
+
+A stopped sidecar comes back with the next Claude request. The port is
+`LETS_CODE_CLAUDE_PORT` (default 8795).
+
+**Cost.** pi's cost figures for Claude use Anthropic's API rates, so on a
+subscription they read as what the same use would cost on the API.
+
+**Using another machine's sidecar.** By default every machine runs its own
+sidecar, as above. A machine where Claude Code is slow or missing (a phone)
+can use another machine's sidecar instead, and then starts none of its own.
+On the serving machine, `lets-code claude-remote` starts the proxy and says
+what to set; on the other machine, in its config (with `BACKEND="claude"` to
+make it the default) or in `presets/claude` (or through setup, as above):
 
 ```bash
 CLAUDE_URL="https://claude.example.net"   # a reverse proxy in front of 127.0.0.1:8795
@@ -207,8 +243,13 @@ tokens never share a process. pi's tools still run on the machine pi runs
 on. The proxy listens on 127.0.0.1 only; a request that comes through a
 reverse proxy (one that sets `X-Forwarded-For`, as nginx does with
 `proxy_set_header X-Forwarded-For`) is refused without a token. Give the
-reverse proxy `proxy_buffering off` and a long `proxy_read_timeout`, and keep
-it to your own network or VPN.
+reverse proxy `proxy_buffering off` and a long `proxy_read_timeout`, and
+keep it to your own network or VPN. Only a request with such a header counts
+as remote: a forwarder that sets none (`ssh -R`, `socat`) makes every
+request look local, and a local request without a token runs on this
+machine's own sign-in, as does anyone else who can reach 127.0.0.1:8795 on
+this machine. Each token holds at most 4 conversations at a time
+(`MAX_SESSIONS_PER_TOKEN`), so one caller cannot take every process slot.
 
 **Getting the token.** On any machine where Claude Code is signed in with
 your Claude subscription (the phone itself works too):

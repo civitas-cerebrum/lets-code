@@ -32,7 +32,8 @@ const fs = require("fs"); const cp = require("child_process"); const rl = requir
 const argv = process.argv.slice(2); const arg = (k) => { const i = argv.indexOf(k); return i < 0 ? null : argv[i + 1]; };
 let model = arg("--model"); const effort = arg("--effort");
 const rec = (o) => fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ pid: process.pid, ...o }) + "\\n");
-rec({ event: "start", model, effort, thinkingOff: process.env.CLAUDE_CODE_DISABLE_THINKING === "1", display: arg("--thinking-display"), token: process.env.CLAUDE_CODE_OAUTH_TOKEN || null });
+rec({ event: "start", model, effort, thinkingOff: process.env.CLAUDE_CODE_DISABLE_THINKING === "1", display: arg("--thinking-display"), token: process.env.CLAUDE_CODE_OAUTH_TOKEN || null,
+  apiKey: process.env.ANTHROPIC_API_KEY || null, lcToken: process.env.LETS_CODE_TOKEN || null });
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const ev = (e) => out({ type: "stream_event", event: e });
 const srv = JSON.parse(fs.readFileSync(arg("--mcp-config"), "utf8")).mcpServers.pi;
@@ -48,11 +49,14 @@ rl.createInterface({ input: process.stdin }).on("line", (l) => { const m = JSON.
 async function handle(m) {
   if (m.type === "control_request") {
     rec({ event: "control", request: m.request });
+    if (m.request.subtype === "set_model" && m.request.model.includes("broken"))   // an older Claude Code, say
+      return out({ type: "control_response", response: { subtype: "error", request_id: m.request_id, error: "unknown subtype" } });
     if (m.request.subtype === "set_model") model = m.request.model;
     return out({ type: "control_response", response: { subtype: "success", request_id: m.request_id } });
   }
   const said = m.message.content.filter((b) => b.type === "text").map((b) => b.text).join(" ");
   rec({ event: "user", text: said, model });
+  if (said.includes("slow")) await new Promise((r) => setTimeout(r, 1500));
   const { tools } = await ready;
   ev({ type: "message_start", message: { usage: { input_tokens: 10, cache_read_input_tokens: 300, cache_creation_input_tokens: 40 } } });
   if (said.includes("use tool") && tools.length) {
@@ -81,6 +85,8 @@ const env = {
 	LETS_CODE_CLAUDE_STATE: join(work, "state"),
 	CLAUDE_BIN: fake,
 	FAKE_CLAUDE_LOG: log,
+	ANTHROPIC_API_KEY: "host-api-key",   // must never reach a session on someone's token
+	LETS_CODE_TOKEN: "session-secret",   // the starting session's, reaches no claude at all
 };
 Object.assign(process.env, env);
 const mod = await import(pathToFileURL(extPath).href);
@@ -170,10 +176,48 @@ try {
 	const tokStarts = records().filter((x) => x.event === "start").map((x) => x.token);
 	t("remote turns run on the caller's token, one process each", tokStarts.slice(-2), [T1, T2]);
 	t("local sessions without a token run on this machine's login", tokStarts.slice(0, -2).every((x) => x === null), true);
+	const allStarts = records().filter((x) => x.event === "start");
+	t("token sessions see no other Anthropic credential; local ones keep this machine's",
+		[allStarts.slice(-2).map((x) => x.apiKey), allStarts[0].apiKey], [[null, null], "host-api-key"]);
+	t("no claude sees the starting session's lets-code settings", allStarts.every((x) => x.lcToken === null), true);
+	// T1's conversation continued with T2's token: never in T1's process
+	const onlyT1 = [{ role: "system", content: "sys R2" }, { role: "user", content: "only T1 said this" }];
+	const r1 = await chat({ model: "claude-haiku", messages: onlyT1 }, fwd(T1));
+	const cont = [...onlyT1, { role: "assistant", content: r1.content }, { role: "user", content: "and now?" }];
+	const nT = records().filter((x) => x.event === "start").length;
+	r = await chat({ model: "claude-haiku", messages: cont }, fwd(T2));
+	const lastStart = records().filter((x) => x.event === "start");
+	t("a conversation continued with another token gets a process of its own", [lastStart.length, lastStart.slice(-1)[0].token], [nT + 1, T2]);
+	t("a Claude Code token that is not whole is refused, not ignored", await via("sk-ant-oat01-short"), 401);
+	const hv = await (await fetch(`${base}/health`, { headers: fwd(T1) })).json();
+	t("/health shows the conversations only on this machine", [hv.sessions, Array.isArray((await (await fetch(`${base}/health`)).json()).sessions)], [undefined, true]);
 	r = await chat({ model: "claude-haiku", messages: [{ role: "system", content: "sys L" }, { role: "user", content: "local with a token" }] }, { Authorization: `Bearer ${T1}` });
 	t("a local request with a token runs on it", [r.content, records().filter((x) => x.event === "start").slice(-1)[0].token], ["echo[haiku]: local with a token", T1]);
 	t("checkRemote: a proxy that answers", await mod.checkRemote({ LETS_CODE_CLAUDE_URL: base + "/", LETS_CODE_CLAUDE_TOKEN: T1 }), "");
 	t("checkRemote: nothing there", (await mod.checkRemote({ LETS_CODE_CLAUDE_URL: `http://127.0.0.1:${await freePort()}` })).includes("not reachable"), true);
+
+	// two pi sessions (lets-code's session tag) never share a process, even
+	// with the same prompt, tools and user turns
+	const tagged = [{ role: "system", content: "sys T" }, { role: "user", content: "same words" }];
+	const a1 = await chat({ model: "claude-haiku", messages: tagged }, { "X-Lets-Code-Session": "host:app:aaa" });
+	const n0 = records().filter((x) => x.event === "start").length;
+	await chat({ model: "claude-haiku", messages: [...tagged, { role: "assistant", content: a1.content }, { role: "user", content: "next" }] }, { "X-Lets-Code-Session": "host:app:bbb" });
+	t("another pi session's identical conversation: its own process", records().filter((x) => x.event === "start").length, n0 + 1);
+	// a model switch claude does not take: a fresh process with the new model
+	const sw = [{ role: "system", content: "sys S" }, { role: "user", content: "first" }];
+	const s1 = await chat({ model: "claude-haiku", messages: sw });
+	r = await chat({ model: "claude-broken", messages: [...sw, { role: "assistant", content: s1.content }, { role: "user", content: "second" }] });
+	t("a switch claude refuses: new process on the new model, conversation replayed",
+		[records().filter((x) => x.event === "start").slice(-1)[0].model, r.content.endsWith("second")], ["claude-broken", true]);
+	// a client that goes away mid-answer: its process is closed
+	const ac = new AbortController();
+	const slow = fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, signal: ac.signal,
+		body: JSON.stringify({ stream: true, model: "claude-haiku", messages: [{ role: "system", content: "sys D" }, { role: "user", content: "slow please" }] }) }).catch(() => {});
+	await new Promise((r2) => setTimeout(r2, 500));
+	const busyBefore = (await (await fetch(`${base}/health`)).json()).sessions.length;
+	ac.abort(); await slow;
+	await new Promise((r2) => setTimeout(r2, 500));
+	t("client gone mid-answer: its process closed", (await (await fetch(`${base}/health`)).json()).sessions.length, busyBefore - 1);
 
 	// a newer server.mjs (lets-code updated): the old daemon is replaced
 	const dir2 = join(work, "v2"); mkdirSync(dir2);
@@ -184,6 +228,22 @@ try {
 	const h2 = await mod.health(port);
 	t("newer server.mjs: new daemon with its version", [h2?.version === mod.proxyVersion(server2), h2?.pid !== h1?.pid], [true, true]);
 	pids.add(h2?.pid);
+
+	// the sidecar outlives sessions; one that stopped is back with the next
+	// Claude request, which waits for it
+	process.env.LETS_CODE_CLAUDE_PROVIDER = "lets-code-claude";
+	const hooks = {};
+	mod.default({ on: (ev, h) => { hooks[ev] = h; } });
+	const onClaude = { model: { provider: "lets-code-claude" }, ui: { notify() {} } };
+	await hooks.before_provider_request({}, onClaude);
+	const before = await mod.health(port);
+	try { process.kill(before.pid, "SIGTERM"); } catch {}
+	for (let i = 0; i < 50 && (await mod.health(port)); i++) await new Promise((r) => setTimeout(r, 100));
+	await hooks.before_provider_request({}, onClaude);
+	const after = await mod.health(port);
+	t("a stopped sidecar is back before the next Claude request", [after?.version === mod.proxyVersion(), after?.pid !== before?.pid], [true, true]);
+	await hooks.before_provider_request({}, { model: { provider: "lets-code" } });
+	t("a request to another provider leaves the sidecar alone", (await mod.health(port))?.pid, after?.pid);
 
 	// a port taken by something else is reported, not fought over
 	const other = await freePort();

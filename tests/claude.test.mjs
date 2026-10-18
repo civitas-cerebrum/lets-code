@@ -232,10 +232,10 @@ try {
 
 	// the sidecar outlives sessions; one that stopped is back with the next
 	// Claude request, which waits for it
-	process.env.LETS_CODE_CLAUDE_PROVIDER = "lets-code-claude";
+	process.env.LETS_CODE_CLAUDE_PROVIDER = "Anthropic";
 	const hooks = {};
 	mod.default({ on: (ev, h) => { hooks[ev] = h; } });
-	const onClaude = { model: { provider: "lets-code-claude" }, ui: { notify() {} } };
+	const onClaude = { model: { provider: "Anthropic" }, ui: { notify() {} } };
 	await hooks.before_provider_request({}, onClaude);
 	const before = await mod.health(port);
 	try { process.kill(before.pid, "SIGTERM"); } catch {}

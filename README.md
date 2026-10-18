@@ -168,7 +168,9 @@ prompt: a token that starts with `sk-ant-oat` makes the endpoint a Claude
 proxy, so the same config then launches Claude.
 
 **Picking a model in pi.** Wherever Claude Code is installed, every launch
-registers the Claude models with pi as the provider `lets-code-claude`, so
+registers the Claude models with pi as the provider `Anthropic` (listed as
+`claude-haiku [Anthropic]`; it was `lets-code-claude` before, and saved settings
+follow the rename), so
 `/model` lists them next to your server's model and switches to one mid-session.
 Ctrl+S on a Claude model there saves it as pi's default, and later launches
 without a preset or `--url` start on it (Ctrl+S on your server's model goes

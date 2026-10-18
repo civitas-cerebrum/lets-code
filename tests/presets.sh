@@ -89,8 +89,8 @@ check "--preset <name> works too" "$(bash "${lc}" --preset qwen -p hi >/dev/null
 bash "${lc}" -p hi > "${d}/launch.log" 2>&1 || { cat "${d}/launch.log"; echo "FAIL  plain launch"; exit 1; }
 check "plain: main provider and first model" "$(sed -n 's/^args=//p' "${d}/record")" "--provider lets-code --model served-a -p hi"
 check "plain: main token" "$(sed -n 's/^token=//p' "${d}/record")" main-token
-# (lets-code-claude is there too where Claude Code is installed; see claude-launch.sh)
-check "both providers kept in models.json" "$(python3 -c "import json;print(sorted(p for p in json.load(open('$m'))['providers'] if p != 'lets-code-claude'))")" "['lets-code', 'lets-code-qwen']"
+# (Anthropic, the Claude provider, is there too where Claude Code is installed; see claude-launch.sh)
+check "both providers kept in models.json" "$(python3 -c "import json;print(sorted(p for p in json.load(open('$m'))['providers'] if p != 'Anthropic'))")" "['lets-code', 'lets-code-qwen']"
 
 # errors and listing
 check "unknown --preset name fails" "$(bash "${lc}" --preset nope -p hi >/dev/null 2>&1 && echo ran || echo failed)" failed

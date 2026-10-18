@@ -612,7 +612,11 @@ def upsert(path, mutate):
             pass
         raise
 
-CLAUDE_PROVIDER = "lets-code-claude"
+# shown as the badge in /model: claude-haiku [Anthropic]. pi matches provider
+# names case-insensitively, so pi's own "anthropic" (an API key or /login
+# anthropic) would shadow it; lets-code does not set that one up.
+CLAUDE_PROVIDER = "Anthropic"
+CLAUDE_PROVIDER_LEGACY = "lets-code-claude"   # its name before; renamed in saved settings
 
 def claude_doc():
     # Claude through Claude Code (see pi_write_claude_extension), one entry
@@ -653,7 +657,7 @@ def claude_doc():
         return {"cost": c}
     def name(i):
         alias = i[len("claude-"):]
-        return ("Claude " + alias.capitalize() if re.fullmatch(r"[a-z]+", alias) else i) + " (Claude Code)"
+        return "(Anthropic) " + ("Claude " + alias.capitalize() if re.fullmatch(r"[a-z]+", alias) else i)
     return {
         "baseUrl": os.environ["LC_CLAUDE_BASE"],
         "api": "openai-completions",
@@ -674,6 +678,7 @@ def to_models(doc):
     providers = doc.get("providers")
     if not isinstance(providers, dict):
         providers = {}
+    providers.pop(CLAUDE_PROVIDER_LEGACY, None)
     if os.environ.get("LC_CLAUDE_BASE"):
         providers[CLAUDE_PROVIDER] = claude_doc()
     else:
@@ -767,6 +772,17 @@ def to_models(doc):
     doc["providers"] = providers
 
 def to_settings(doc):
+    # the Claude provider's old name in what pi saved: the startup default,
+    # scoped models and per-model keys follow the rename
+    old = CLAUDE_PROVIDER_LEGACY + "/"
+    if doc.get("defaultProvider") == CLAUDE_PROVIDER_LEGACY:
+        doc["defaultProvider"] = CLAUDE_PROVIDER
+    if isinstance(doc.get("enabledModels"), list):
+        doc["enabledModels"] = [CLAUDE_PROVIDER + "/" + m[len(old):] if isinstance(m, str) and m.startswith(old) else m for m in doc["enabledModels"]]
+    for keyed in (doc.get("modelThinkingLevels"), (doc.get("compaction") or {}).get("modelOverrides") if isinstance(doc.get("compaction"), dict) else None):
+        if isinstance(keyed, dict):
+            for k in [k for k in keyed if k.startswith(old)]:
+                keyed.setdefault(CLAUDE_PROVIDER + "/" + k[len(old):], keyed.pop(k))
     compaction = doc.get("compaction")
     if not isinstance(compaction, dict):
         compaction = {}
@@ -1488,7 +1504,7 @@ export default function (pi: ExtensionAPI) {
 		if (name) where += ` • ${name}`;
 		const m = ui?.model;
 		// Claude through Claude Code (the claude module) reads as Anthropic's: (anthropic) haiku
-		const claude = !!m?.provider && m.provider === (process.env.LETS_CODE_CLAUDE_PROVIDER || "lets-code-claude");
+		const claude = !!m?.provider && m.provider === (process.env.LETS_CODE_CLAUDE_PROVIDER || "Anthropic");
 		let model = m?.id ? (claude ? m.id.replace(/^claude-/, "") : m.id) : "no model";
 		if (m?.reasoning) { const lvl = pi.getThinkingLevel?.() ?? "off"; model += lvl === "off" ? " • thinking off" : ` • ${lvl}`; }
 		if ((data.getAvailableProviderCount?.() ?? 1) > 1 && m?.provider) model = `(${claude ? "anthropic" : m.provider}) ${model}`;
@@ -2681,7 +2697,7 @@ BRIDGE
 // Written by lets-code (claude); regenerated on launch, edits are overwritten.
 // Claude models through the Claude Code CLI, on the user's own Claude
 // subscription. lets-code registers them with pi as the provider
-// LETS_CODE_CLAUDE_PROVIDER (lets-code-claude) whenever `claude` is
+// LETS_CODE_CLAUDE_PROVIDER (Anthropic) whenever `claude` is
 // installed, so they are in /model next to the server's model; --claude (or
 // Ctrl+S on one of them in /model) starts sessions on them. Requests go to
 // the proxy next to this file: server.mjs, an OpenAI-compatible server over
@@ -2897,7 +2913,10 @@ lc_saved_thinking() {
     LC_STATE="${PI_AGENT_DIR}/lets-code-state.json" python3 - "$1" <<'PY' 2>/dev/null || true
 import json, os, sys
 try:
-    v = json.load(open(os.environ["LC_STATE"]))["thinkingLevels"][sys.argv[1]]
+    levels = json.load(open(os.environ["LC_STATE"]))["thinkingLevels"]
+    k = sys.argv[1]
+    # the Claude provider was lets-code-claude before: a level saved under that name still counts
+    v = levels[k] if k in levels or not k.startswith("Anthropic/") else levels["lets-code-claude/" + k[len("Anthropic/"):]]
 except Exception:
     sys.exit(0)
 if v in ("off", "minimal", "low", "medium", "high", "xhigh", "max"):
@@ -14269,7 +14288,7 @@ run_setup() {  # run_setup [full|granular]
             200) log "Claude proxy: ${proxy} (Claude runs on your token)" ;;
             *)   log_error "no lets-code Claude proxy answered at ${proxy} — config saved; check the address ('lets-code claude-remote' on that machine)." ;;
         esac
-        PROVIDER_ID="lets-code-claude"; CLAUDE_URL="${proxy}"; CLAUDE_TOKEN="${token}"
+        PROVIDER_ID="Anthropic"; CLAUDE_URL="${proxy}"; CLAUDE_TOKEN="${token}"
         pi_write_configs "${proxy}/v1" "${DEFAULT_API}" "claude-haiku" "${CLAUDE_CONTEXT}" "${CLAUDE_OUTPUT_CAP}" true true "${DEFAULT_THINKING}" ""
         log "registered with pi: Claude Haiku, Sonnet, Opus and Fable; /model switches, Ctrl+S makes one the default"
         [ "${feat_subagents}" = "true" ] && write_default_agents
@@ -14403,6 +14422,7 @@ pi_saved_default() {  # pi_saved_default provider|model
 try: d = json.load(open(os.environ["LC_SETTINGS"]))
 except Exception: d = {}
 v = d.get("defaultProvider" if sys.argv[1] == "provider" else "defaultModel") if isinstance(d, dict) else None
+if v == "lets-code-claude": v = "Anthropic"   # the Claude provider before its rename
 print(v if isinstance(v, str) else "")' "$1" 2>/dev/null
 }
 # what the proxy's /v1/models says, without asking it: the CLAUDE_MODELS
@@ -14941,7 +14961,7 @@ harness_gate "${HARNESS}"
 # model saved as pi's default (Ctrl+S in /model) when no preset or --url
 # picks something else. Nothing is probed: the proxy is local and its facts
 # are known, and the claude module starts it when the session begins.
-CLAUDE_PROVIDER_ID="lets-code-claude"
+CLAUDE_PROVIDER_ID="Anthropic"
 CLAUDE_PORT="${LETS_CODE_CLAUDE_PORT:-${CLAUDE_DEFAULT_PORT}}"
 # a Claude Code token as the server token (setup's Token prompt): the
 # endpoint is a lets-code Claude proxy and Claude runs on that token

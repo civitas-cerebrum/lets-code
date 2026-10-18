@@ -77,6 +77,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | ⚖️ **Acceptance judge** (expert) | "Is it done?" answered by trying to break it: the `acceptance-judge` expert takes the acceptance criteria and the work (a diff, branch, commit or PR), runs the checks itself with negative controls, and returns PASS / FAIL / UNVERIFIABLE per criterion with the evidence, then ACCEPT or REJECT. It never edits the work. The method is distilled from achilles' review roles; nothing to install, so it works everywhere, the phone included. |
 | 🏗️ **Expert builder** (expert) | Ask for a new expert ("make me an expert that converts and validates config files") and the `expert-builder` expert designs it, distills its sources (docs, a repo, a method, your scripts) into instructions and references, writes the files as your own, lints them and measures how well the model routes to it. It can also prepare a built-in for lets-code on a git branch. Files only, so it works everywhere. |
 | 🏭 **Developer and reviewers** (experts) | The software factory's stages, usable on their own: `developer` implements a ticket from its acceptance criteria and an approved plan, with its tests, confined to its working folder and never committing (or returns only a plan); `expert-reviewer` hunts bugs and edge cases in a diff against its criteria; `design-reviewer` judges its design against the codebase's own conventions. Each answers in a fixed format a program can parse (`STATUS:` / `VERDICT:` lines, one line per finding with its severity). Files only, so they work everywhere. |
+| ✳️ **Claude** | No server? `lets-code --claude` runs pi on Claude (Haiku, Sonnet, Opus, Fable) through Claude Code, on your Claude subscription, with pi's own tools. The Claude models are in `/model` next to your server's on every launch, and Ctrl+S on one makes it the default. Setup offers it as the second choice. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -93,6 +94,7 @@ lets-code                         # interactive session
 lets-code -p "fix the failing test"   # one-shot; unknown args go to pi
 lets-code --model other-id        # pin something for one launch
 lets-code --openrouter            # a saved preset (see Presets below)
+lets-code --claude                # Claude through Claude Code (see Claude below)
 lets-code update                  # latest release from npm (--snapshot: latest main)
 lets-code --thinking-level low    # quieter model
 lets-code --no-git-guard          # you know what you're doing
@@ -101,6 +103,7 @@ lets-code --no-git-guard          # you know what you're doing
 | Flag | Meaning |
 |---|---|
 | `--<preset>` / `--preset <name>` | Launch against a saved preset |
+| `--claude` | Claude through Claude Code instead of a server (Haiku; `--model claude-sonnet`, `claude-opus`, `claude-fable`) |
 | `--url <base>` | Endpoint for this launch (scheme and `/v1` optional) |
 | `--model <id>` | Model for this launch (default: discovered) |
 | `--context <tok>` | Context window (default: discovered, else 128000) |
@@ -149,6 +152,50 @@ other's backend. Names can't shadow a lets-code or pi option.
 </details>
 
 <details>
+<summary><b>Claude (Claude Code subscription)</b></summary>
+
+```bash
+lets-code --claude                       # Claude Haiku
+lets-code --claude --model claude-opus   # or claude-sonnet, claude-fable
+```
+
+Needs [Claude Code](https://claude.com/claude-code) installed and signed in
+(`claude auth login`); a Claude subscription covers it, with no API key.
+`lets-code setup` offers it as the second choice, and a config with
+`BACKEND=claude` starts every launch on it.
+
+**Picking a model in pi.** Wherever Claude Code is installed, every launch
+registers the Claude models with pi as the provider `lets-code-claude`, so
+`/model` lists them next to your server's model and switches to one mid-session.
+Ctrl+S on a Claude model there saves it as pi's default, and later launches
+without a preset or `--url` start on it (Ctrl+S on your server's model goes
+back). `CLAUDE_MODELS` in the config sets the list: Claude Code's aliases
+(`haiku sonnet opus fable`, the default, listed as `claude-<alias>`) or full
+model names such as `claude-opus-5-5`. A saved preset named `claude` adds to
+the built-in one, e.g. `MODEL="claude-sonnet"`.
+
+**How it works.** A small proxy in the `claude` module (a vLLM-style
+OpenAI-compatible server on `127.0.0.1:8795`, `LETS_CODE_CLAUDE_PORT`) runs
+each conversation in one `claude -p` process with Claude Code's own tools
+off. pi's tools reach Claude through MCP, so Claude calls them natively: a
+call goes to pi as a tool call, pi runs it, and its result goes back into the
+same process. Follow-up turns go to the same process too, so Claude's prompt
+cache keeps working. Your claude.ai connectors, skills, hooks and CLAUDE.md
+stay out of it. The module starts the proxy when a session begins on Claude
+(and again if it stops), one per user, shared by sessions and subagents; its
+log is `~/.pi/agent/lets-code-claude/proxy.log`.
+
+**Thinking and switching.** pi's thinking level is Claude Code's effort:
+`low`, `medium` (the default), `high`, `xhigh`, `max`; `off` is Claude Code's
+thinking off (the model may still think a little), and there is no `minimal`.
+`/thinking` and `/model` change the running conversation in place, the way
+`/effort` and `/model` do in Claude Code; only switching to `off` or `max`, or
+away from `off`, restarts it (with the conversation replayed). Thinking shows
+as Claude's thinking summaries.
+
+</details>
+
+<details>
 <summary><b>Updating</b></summary>
 
 ```bash
@@ -174,6 +221,8 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 
 | Key | Meaning |
 |---|---|
+| `BACKEND` | Empty: the server at `ENDPOINTS`. `claude`: Claude through Claude Code (see [Claude](#claude-claude-code-subscription)). |
+| `CLAUDE_MODELS` | The Claude models in `/model`: Claude Code aliases or full model names (default `haiku sonnet opus fable`). |
 | `ENDPOINTS` | Space-separated base URLs, most preferred first. IPs, `localhost`, bare hostnames and `*.local` get `http://`, other domains `https://`. |
 | `TOKEN` | API key. Any value works for a server without auth. |
 | `CA_PATH` | Root CA for an https endpoint with a private CA (exported as `NODE_EXTRA_CA_CERTS`). |

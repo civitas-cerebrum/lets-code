@@ -62,7 +62,7 @@ t "--claude: module files" "$(cd "${h}/.pi/agent/extensions/lets-code/claude" 2>
 t "--claude: Claude Code's thinking levels" "$(python3 -c 'import json, sys
 m = json.load(open(sys.argv[1]))["providers"]["Anthropic"]["models"][0]
 print(json.dumps(m["thinkingLevelMap"], sort_keys=True), m["reasoning"], m["contextWindow"], m["maxTokens"])' "${h}/.pi/agent/models.json")" \
-    '{"high": "high", "low": "low", "max": "max", "medium": "medium", "minimal": null, "off": "none", "xhigh": "xhigh"} True 200000 32000'
+    '{"high": "high", "low": "low", "max": "max", "medium": "medium", "minimal": null, "off": "none", "xhigh": "xhigh"} True 1000000 32000'
 t "--claude: API rates for pi's cost (Haiku tiered above 100K)" "$(python3 -c 'import json, sys
 ms = {m["id"]: m.get("cost") for m in json.load(open(sys.argv[1]))["providers"]["Anthropic"]["models"]}
 h, o = ms["claude-haiku"], ms["claude-opus"]

@@ -596,6 +596,61 @@ third put one sentence before `VERDICT:`, and finding lines come wrapped
 in backticks, so the engine looks for the first `^STATUS:` / `^VERDICT:`
 line and strips backticks rather than trusting the first line.
 
+**Software factory (the engine and its expert).** One ticket goes through
+stages that each get a fresh context and a brief built from artifacts, so
+no stage sees another's transcript and the main session sees one line per
+stage. The engine (`factory.ts`) is a state machine over a ledger on disk
+(`~/.pi/agent/lets-code-factory/<id>/ledger.json`, written atomically after
+every step): intake, plan, build, expert-review, design-review, test,
+judge, regression, done, plus `waiting` for one of five checkpoints
+(criteria, plan, result, a stuck fix loop, a blocked stage). Briefs are a
+pure function of the ledger (`briefFor`), which is what keeps the
+conversation out; a test shows every word of every brief across a run
+comes from the ledger or the engine's own template text. Replies are
+parsed by line, not position: the first `STATUS:` / `VERDICT:` line
+anywhere with backticks and bold stripped, finding lines by their id
+prefix, the judge's `C<n>: FAIL|UNVERIFIABLE`, and a reply without its
+STATUS line by its `## Plan` / `## Changes` heading (the live runs had
+both a status line placed last and none at all). Fix rounds send only
+blocker and major findings, rerun the stage that failed, and stop at five
+or at a finding id the developer was already sent, since a fix that did
+not stick will not stick the sixth time either: the user decides. The
+regression is the engine running the suite itself and comparing with the
+baseline from intake, so a suite that was already red is reported, not
+blamed on the change. Each run has its own worktree and branch from the
+user's HEAD; the branch is `pi/factory-<id>` because the git guard in the
+children refuses edits off `pi/*` branches, and the guard's checkpoints
+(`refs/pi-checkpoints`) leave HEAD alone, so the diff is always taken
+against the base commit and the approved result becomes one commit from
+the base (`write-tree`, `commit-tree`), whatever the children did to the
+branch. Without a UI every checkpoint pauses the run; `resumeRun` asks it
+again, and a run killed mid-stage reruns that stage.
+
+An expert is a child process, and a child cannot start children, so the
+factory cannot be an ordinary expert. The agent file says `runner:
+factory`: it keeps the routing entry, the job, the brief and the enable
+dialog of every expert, and the experts module, instead of spawning a
+child, calls the factory module's `runExpert` in the main session inside
+the same `detachable` wrapper, so switching sessions mid-run behaves as for
+any expert call. Its body documents the pipeline and is never a prompt; an
+unknown runner rejects the file. The stage experts are enabled with one
+dialog the first time. The `/factory` command (start, resume, list,
+status) costs no context: commands are not in the model's prompt.
+
+Measured while the Qwen server was down, against the Claude proxy
+(claude-haiku, thinking low), main and this branch on the same backend:
+route-check gave software-factory recall 5/6 and 5/6 with no false trigger
+in 18 near-miss and neighbour runs (the miss, "have the developer, both
+reviewers and the judge do it", went to developer by name); the existing
+experts routed the same within a prompt or two of main, and none of their
+prompts went to the factory. Its entry costs 29 tokens of the prompt
+(4701 to 4730 on one trivial request, the proxy's usage, Claude's
+tokenizer). A live run on a toy signup ticket went through one fix round
+(a major expert-review finding: C3 untested through invalid then valid
+input), the tester's Playwright tests in Chromium,
+the judge and the suite, while the user switched into the running stages
+in place and back.
+
 **Claude Code adapter.** Automatic: the launcher switches it on only where
 the project's `.claude` (up to the git root) has hooks or workflow scripts,
 the parts that need the adapter to work at all; skills and commands alone

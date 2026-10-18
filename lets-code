@@ -1459,9 +1459,11 @@ export default function (pi: ExtensionAPI) {
 		const name = ui?.sessionManager?.getSessionName?.();
 		if (name) where += ` • ${name}`;
 		const m = ui?.model;
-		let model = m?.id ?? "no model";
+		// Claude through Claude Code (the claude module) reads as Anthropic's: (anthropic) haiku
+		const claude = !!m?.provider && m.provider === (process.env.LETS_CODE_CLAUDE_PROVIDER || "lets-code-claude");
+		let model = m?.id ? (claude ? m.id.replace(/^claude-/, "") : m.id) : "no model";
 		if (m?.reasoning) { const lvl = pi.getThinkingLevel?.() ?? "off"; model += lvl === "off" ? " • thinking off" : ` • ${lvl}`; }
-		if ((data.getAvailableProviderCount?.() ?? 1) > 1 && m?.provider) model = `(${m.provider}) ${model}`;
+		if ((data.getAvailableProviderCount?.() ?? 1) > 1 && m?.provider) model = `(${claude ? "anthropic" : m.provider}) ${model}`;
 		return spread(color("dim", where), color("dim", model), w);
 	};
 	// lines other lets-code modules put in the footer, above the numbers (the

@@ -29,7 +29,7 @@ const step = () => timers.forEach((h) => h.fn());
 
 const HOME = homedir();
 let loads = 0;
-async function load(env, { hasUI = true, theme, providers = 1, branch = "main", level = "medium" } = {}) {
+async function load(env, { hasUI = true, theme, providers = 1, branch = "main", level = "medium", model } = {}) {
 	timers = [];
 	delete process.env.LETS_CODE_METRICS_ON; delete process.env.LETS_CODE_METRICS_LOG; delete process.env.LETS_CODE_SUBAGENT_DEPTH; delete process.env.LETS_CODE_METRICS_SAVE;
 	Object.assign(process.env, env);
@@ -49,7 +49,7 @@ async function load(env, { hasUI = true, theme, providers = 1, branch = "main", 
 		},
 		sessionManager: { getEntries: () => st.entries, getCwd: () => join(HOME, "github", "app"), getSessionName: () => undefined },
 		getContextUsage: () => st.context,
-		model: { id: "qwen3.8-27b", provider: "lets-code", reasoning: true, contextWindow: 262144 },
+		model: model ?? { id: "qwen3.8-27b", provider: "lets-code", reasoning: true, contextWindow: 262144 },
 	};
 	const cmd = (args) => commands.metrics.handler(args, ctx);
 	const ev = (name, e = {}) => handlers[name]?.(e, ctx);
@@ -141,6 +141,12 @@ try {
 	t("full from the start: three lines, speed placeholder", [x.foot().length, x.foot()[2]], [3, "– tok/s"]);
 	t("full: no branch on the left", x.foot()[0].startsWith("~/github/app "), true);
 	t("full: provider with several, thinking off, on the right", x.foot()[0].endsWith(" (lets-code) qwen3.8-27b • thinking off") && x.mod.width(x.foot()[0]) === 200, true);
+	{
+		// Claude through Claude Code: Anthropic's name and the bare model, not lets-code-claude / claude-haiku
+		const c = await load({ LETS_CODE_METRICS_ON: "1" }, { providers: 2, model: { id: "claude-haiku", provider: "lets-code-claude", reasoning: true, contextWindow: 200000 } });
+		c.ev("session_start");
+		t("full: Claude reads (anthropic) haiku", c.foot()[0].endsWith(" (anthropic) haiku • medium"), true);
+	}
 	x.respond({ at: 0, ttft: 100, gen: 1000, output: 0, text: "x".repeat(160) });
 	t("full: cost; output estimated (~)", x.foot().slice(1), ["↑500 ↓300 · 22.0%/262k (auto) · $0.012", "40.0 tok/s · TTFT 0.1s · ~40 out"]);
 	clock = 5000; x.ev("before_provider_request");

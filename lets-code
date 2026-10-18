@@ -1853,6 +1853,16 @@ const IDLE_MS = +(env.IDLE_TTL_S || 600) * 1000;
 const TOOL_WAIT_MS = Math.max(IDLE_MS, 3600 * 1000);
 const STATE_DIR = env.STATE_DIR || path.join(os.homedir(), ".pi", "agent", "lets-code-claude");
 const DEBUG = !!env.DEBUG;
+// appended to the system prompt pi sends: Claude models explain at length by
+// default; in a terminal the user wants the answer, not an essay
+const STYLE = [
+  "Output style (lets-code):",
+  "- Be brief and direct. Lead with the answer or the result; use as few words as the task needs.",
+  "- No preamble, no restating the request, no closing summaries or offers of further help.",
+  "- Explain only what the user needs to know: the outcome, a decision they must make, a problem you hit. Skip narration of routine steps.",
+  "- Prefer short sentences and plain prose over headers and long lists. Give more detail only when asked.",
+  "- This is about your messages to the user; code, commands and tool calls stay as complete as the task requires.",
+].join("\n");
 const BRIDGE = new URL("./bridge.mjs", import.meta.url).pathname;
 // index.ts compares this with its copy of the file and restarts an older daemon
 const VERSION = createHash("sha256").update(fs.readFileSync(new URL(import.meta.url))).digest("hex").slice(0, 16);
@@ -2028,7 +2038,7 @@ class Session {
     fs.mkdirSync(dir, { recursive: true });
     this.dir = dir;
     const sysFile = path.join(dir, "system.md");
-    fs.writeFileSync(sysFile, system || "You are a helpful assistant.");
+    fs.writeFileSync(sysFile, `${system || "You are a helpful assistant."}\n\n${STYLE}`);
     const mcpFile = path.join(dir, "mcp.json");
     fs.writeFileSync(
       mcpFile,

@@ -32,7 +32,7 @@ const fs = require("fs"); const cp = require("child_process"); const rl = requir
 const argv = process.argv.slice(2); const arg = (k) => { const i = argv.indexOf(k); return i < 0 ? null : argv[i + 1]; };
 let model = arg("--model"); const effort = arg("--effort");
 const rec = (o) => fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ pid: process.pid, ...o }) + "\\n");
-rec({ event: "start", model, effort, thinkingOff: process.env.CLAUDE_CODE_DISABLE_THINKING === "1", display: arg("--thinking-display"), token: process.env.CLAUDE_CODE_OAUTH_TOKEN || null,
+rec({ event: "start", model, effort, thinkingOff: process.env.CLAUDE_CODE_DISABLE_THINKING === "1", display: arg("--thinking-display"), system: fs.readFileSync(arg("--system-prompt-file"), "utf8"), token: process.env.CLAUDE_CODE_OAUTH_TOKEN || null,
   apiKey: process.env.ANTHROPIC_API_KEY || null, lcToken: process.env.LETS_CODE_TOKEN || null });
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const ev = (e) => out({ type: "stream_event", event: e });
@@ -126,6 +126,7 @@ try {
 	t("usage: cache reads and writes reported apart (pi prices them)", [r.usage?.prompt_tokens, r.usage?.prompt_tokens_details], [350, { cached_tokens: 300, cache_write_tokens: 40 }]);
 	let starts = records().filter((x) => x.event === "start");
 	t("first turn: claude launched with Haiku, effort low, summaries", starts.map((s) => [s.model, s.effort, s.thinkingOff, s.display]), [["haiku", "low", false, "summarized"]]);
+	t("system prompt: pi's, then the brevity rules", [starts[0].system.startsWith("sys A\n\nOutput style (lets-code):"), /Be brief and direct/.test(starts[0].system), /code, commands and tool calls stay as complete/.test(starts[0].system)], [true, true, true]);
 	const first = r;
 	conv.push({ role: "assistant", content: r.content }, { role: "user", content: "again" });
 	r = await chat({ model: "claude-sonnet", reasoning_effort: "high", messages: conv });

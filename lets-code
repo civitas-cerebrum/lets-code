@@ -1803,7 +1803,11 @@ const DEBUG = !!env.DEBUG;
 const BRIDGE = new URL("./bridge.mjs", import.meta.url).pathname;
 // index.ts compares this with its copy of the file and restarts an older daemon
 const VERSION = createHash("sha256").update(fs.readFileSync(new URL(import.meta.url))).digest("hex").slice(0, 16);
-const SOCK = path.join(STATE_DIR, "bridge.sock");
+// a unix socket path has room for about 107 bytes: a deep STATE_DIR gets its
+// socket in the temp dir instead, named after it
+const SOCK = path.join(STATE_DIR, "bridge.sock").length < 100
+  ? path.join(STATE_DIR, "bridge.sock")
+  : path.join(os.tmpdir(), `lets-code-claude-${createHash("sha256").update(STATE_DIR).digest("hex").slice(0, 12)}.sock`);
 const WORK_DIR = path.join(STATE_DIR, "empty"); // cwd for claude: no CLAUDE.md to discover
 
 // OpenAI model id -> claude --model: claude-<alias> for each CLI alias in

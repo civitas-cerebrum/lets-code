@@ -132,6 +132,24 @@ const blocked = (r) => r?.block === true;
 	t("readonly: cannot dispatch", blocked(await h.call(d, "subagent", { agent: "worker", task: "x" })), true);
 }
 
+// --- researcher: the reviewer's role, and the browser only through its helper
+{
+	const tmpWas = process.env.TMPDIR; const scratch = join(work, "research-tmp"); mkdirSync(scratch); process.env.TMPDIR = scratch;
+	const h = await load({ LETS_CODE_ROLE: "researcher", LETS_CODE_SUBAGENT_DEPTH: "1" }); const d = repo(); await h.start(d);
+	const rt = join(agentDir, "researcher", "runtime");
+	for (const cmd of ["playwright-cli -s=researcher click e5", "npx playwright-cli open https://example.com", "npx -y @playwright/cli@0.1.22 goto https://example.com",
+		`${rt}/node_modules/.bin/playwright-cli -s=researcher fill e2 x`, `node ${rt}/node_modules/@playwright/cli/playwright-cli.js cookie-list`,
+		"npx playwright open https://example.com", "cd /tmp && playwright-cli list", `python3 -c "import subprocess; subprocess.run(['playwright-cli','click','e1'])"`,
+		`cat ${join(agentDir, "researcher", "browser-profile", "Default", "Cookies")}`, `ls ~/.cache/ms-playwright`])
+		t(`researcher: blocked: ${cmd.slice(0, 50)}`, blocked(await h.call(d, "bash", { command: cmd })), true);
+	for (const cmd of [`python3 ${join(agentDir, "researcher", "bin", "web")} fetch https://example.com`, `python3 ${join(agentDir, "researcher", "bin", "web")} search "playwright cli docs"`,
+		`grep -i licence ${join(scratch, "S1.txt")}`, `cat > ${join(scratch, "plan.md")} <<'EOF'\nplan\nEOF`])
+		t(`researcher: passes: ${cmd.slice(0, 50)}`, await h.call(d, "bash", { command: cmd }), undefined);
+	t("researcher: still no edit tool", blocked(await h.call(d, "edit", { path: join(d, "src", "a.txt") })), true);
+	t("researcher: still no git writes", blocked(await h.call(d, "bash", { command: "git commit -am x" })), true);
+	if (tmpWas === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = tmpWas;
+}
+
 // --- reviewer: reviewers' and judges' role: runs tests, writes only under the temp dir,
 // leaves the work's git state and dependencies alone
 {

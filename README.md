@@ -77,7 +77,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | ⚖️ **Acceptance judge** (expert) | "Is it done?" answered by trying to break it: the `acceptance-judge` expert takes the acceptance criteria and the work (a diff, branch, commit or PR), runs the checks itself with negative controls, and returns PASS / FAIL / UNVERIFIABLE per criterion with the evidence, then ACCEPT or REJECT. It never edits the work. The method is distilled from achilles' review roles; nothing to install, so it works everywhere, the phone included. |
 | 🏗️ **Expert builder** (expert) | Ask for a new expert ("make me an expert that converts and validates config files") and the `expert-builder` expert designs it, distills its sources (docs, a repo, a method, your scripts) into instructions and references, writes the files as your own, lints them and measures how well the model routes to it. It can also prepare a built-in for lets-code on a git branch. Files only, so it works everywhere. |
 | 🏭 **Developer and reviewers** (experts) | The software factory's stages, usable on their own: `developer` implements a ticket from its acceptance criteria and an approved plan, with its tests, confined to its working folder and never committing (or returns only a plan); `expert-reviewer` hunts bugs and edge cases in a diff against its criteria; `design-reviewer` judges its design against the codebase's own conventions. Each answers in a fixed format a program can parse (`STATUS:` / `VERDICT:` lines, one line per finding with its severity). Files only, so they work everywhere. |
-| ✳️ **Claude** | No server? `lets-code --claude` runs pi on Claude (Haiku, Sonnet, Opus, Fable) through Claude Code, on your Claude subscription, with pi's own tools. The Claude models are in `/model` next to your server's on every launch, and Ctrl+S on one makes it the default. Setup offers it as the second choice. |
+| ✳️ **Claude** | No server? `lets-code --claude` runs pi on Claude (Haiku, Sonnet, Opus, Fable) through Claude Code, on your Claude subscription, with pi's own tools. The Claude models are in `/model` next to your server's on every launch, and Ctrl+S on one makes it the default. In setup, enter a Claude proxy as the endpoint and paste your Claude Code token as the token. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -161,8 +161,11 @@ lets-code --claude --model claude-opus   # or claude-sonnet, claude-fable
 
 Needs [Claude Code](https://claude.com/claude-code) installed and signed in
 (`claude auth login`); a Claude subscription covers it, with no API key.
-`lets-code setup` offers it as the second choice, and a config with
-`BACKEND=claude` starts every launch on it.
+A config with `BACKEND=claude` starts every launch on it. In `lets-code
+setup`, enter a lets-code Claude proxy as the endpoint (`lets-code
+claude-remote` on its machine) and paste your Claude Code token at the token
+prompt: a token that starts with `sk-ant-oat` makes the endpoint a Claude
+proxy, so the same config then launches Claude.
 
 **Picking a model in pi.** Wherever Claude Code is installed, every launch
 registers the Claude models with pi as the provider `lets-code-claude`, so
@@ -191,7 +194,7 @@ shares it. A machine where Claude Code is slow or missing (a phone) can use
 another machine's proxy instead. On the serving machine, `lets-code
 claude-remote` starts the proxy and says what to set; on the other machine,
 in its config (with `BACKEND="claude"` to make it the default) or in
-`presets/claude`:
+`presets/claude` (or through setup, as above):
 
 ```bash
 CLAUDE_URL="https://claude.example.net"   # a reverse proxy in front of 127.0.0.1:8795
@@ -205,8 +208,7 @@ on. The proxy listens on 127.0.0.1 only; a request that comes through a
 reverse proxy (one that sets `X-Forwarded-For`, as nginx does with
 `proxy_set_header X-Forwarded-For`) is refused without a token. Give the
 reverse proxy `proxy_buffering off` and a long `proxy_read_timeout`, and keep
-it to your own network or VPN. `setup` asks for the address and token when
-you choose Claude through another machine.
+it to your own network or VPN.
 
 **Getting the token.** On any machine where Claude Code is signed in with
 your Claude subscription (the phone itself works too):

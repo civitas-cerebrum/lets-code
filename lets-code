@@ -13854,24 +13854,6 @@ JSON
 # when it thinks) and image input (asks when the probe cannot tell). Results
 # in SD_THINKING, SD_REASONING, SD_CAP, SD_VISION_REG, SD_VISION_PIN; pins it
 # mentions are saved to ${SETUP_FILE} (the config, or the preset being set up).
-# Claude Code installed and signed in (the Claude backend's prerequisites);
-# offers the sign-in when it is missing
-claude_setup_check() {
-    if ! command -v claude >/dev/null 2>&1; then
-        log_error "Claude needs Claude Code (the claude command). Install it (https://claude.com/claude-code), sign in with 'claude auth login', then re-run setup."
-        return 1
-    fi
-    if claude auth status 2>/dev/null | grep -q '"loggedIn": *true'; then
-        log "Claude Code: signed in"
-        return 0
-    fi
-    printf "Claude Code is not signed in. Sign in now (claude auth login)? [Y/n] "
-    read -r reply
-    case "${reply}" in n|N) log_error "sign in with 'claude auth login', then re-run setup."; return 1 ;; esac
-    claude auth login || return 1
-    claude auth status 2>/dev/null | grep -q '"loggedIn": *true' || { log_error "still not signed in."; return 1; }
-}
-
 setup_detect() {  # setup_detect <base> <model> <context>
     local found="$1" reg_id="$2" reg_len="$3" suggested thinking_level reasoning_reg reg_cap vision_reg vision_pin reply
     # probe thinking support (launch re-detects; this informs onboarding)
@@ -13955,43 +13937,7 @@ run_setup() {  # run_setup [full|granular]
     ensure_pi || exit 1
     ensure_pi_tools
 
-    # 3. backend: a server of your own, or Claude through Claude Code
-    local backend="" endpoints="" token="" ca="" claude_url="" claude_token=""
-    echo ""
-    echo "Which models should pi use?"
-    echo "  1) your own LLM server (vLLM, SGLang, Ollama, LM Studio, OpenRouter, ...)  [default]"
-    echo "  2) Claude (Haiku, Sonnet, Opus, Fable) through Claude Code, on your Claude subscription"
-    printf "Choice [1]: "
-    read -r reply
-    case "${reply:-1}" in
-        1) ;;
-        2) backend="claude"
-           echo ""
-           echo "Where does Claude run?"
-           echo "  1) here, through this machine's Claude Code  [default]"
-           echo "  2) through another machine's lets-code ('lets-code claude-remote' there), with your Claude Code token"
-           printf "Choice [1]: "
-           read -r reply
-           case "${reply:-1}" in
-               1) claude_setup_check || exit 1 ;;
-               2) printf "Its address (the reverse proxy in front of it, e.g. https://claude.example.net): "
-                  read -r claude_url; [ -z "${claude_url}" ] || claude_url="$(normalize_endpoint "${claude_url}")"
-                  echo "Your Claude Code token: run 'claude setup-token' on any machine signed in to Claude Code"
-                  echo "with your subscription and paste the sk-ant-oat01-... token it prints (requests use that subscription)."
-                  printf "Token: "
-                  read -r claude_token
-                  case "$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Authorization: Bearer ${claude_token}" "${claude_url}/health" 2>/dev/null)" in
-                      200) log "the Claude proxy at ${claude_url} answered" ;;
-                      401) log_error "that does not look like a Claude Code token (claude setup-token prints sk-ant-oat01-...) — saving anyway; fix CLAUDE_TOKEN in ${CONFIG_FILE}." ;;
-                      *)   log_error "the Claude proxy at ${claude_url} did not answer (is it running? 'lets-code claude-remote' there) — saving anyway; fix CLAUDE_URL in ${CONFIG_FILE}." ;;
-                  esac ;;
-               *) log_error "choose 1 or 2"; exit 1 ;;
-           esac ;;
-        *) log_error "choose 1 or 2"; exit 1 ;;
-    esac
-
-    if [ "${backend}" != claude ]; then
-    # 3a. endpoints
+    # 3. endpoints
     echo ""
     echo "Enter your server base URL(s), most-preferred first (no /v1 suffix)."
     echo "No scheme? IPs, localhost and *.local get http://, domains get https://."
@@ -13999,6 +13945,7 @@ run_setup() {  # run_setup [full|granular]
     echo "You can list several separated by spaces — the first reachable one wins"
     echo "(useful if the same server has a localhost, LAN, and VPN address)."
     printf "Endpoints [http://localhost:8000]: "
+    local endpoints
     read -r endpoints
     endpoints="$(normalize_endpoints "${endpoints:-http://localhost:8000}")"
     echo "Using: ${endpoints}"
@@ -14007,10 +13954,12 @@ run_setup() {  # run_setup [full|granular]
     echo ""
     echo "API token. vLLM without --api-key accepts anything; a placeholder is fine."
     printf "Token [dummy-key]: "
+    local token
     read -r token
     token="${token:-dummy-key}"
 
     # 5. CA for private TLS
+    local ca=""
     case " ${endpoints}" in *" https://"*|" https://"*)
         echo ""
         echo "You listed an https endpoint. If it uses a private CA (e.g. mkcert),"
@@ -14021,7 +13970,6 @@ run_setup() {  # run_setup [full|granular]
             log_error "no file at ${ca} — saving anyway; fix it in ${CONFIG_FILE} later."
         fi ;;
     esac
-    fi
 
     # 5b. optional features: off in the default setup, all on with 'full',
     #     one question each with 'granular'
@@ -14049,19 +13997,6 @@ run_setup() {  # run_setup [full|granular]
     setup_emit_config() {  # setup_emit_config <thinking-level> [vision-pin]
         {
             echo "# lets-code configuration (shell syntax). Re-run 'lets-code setup' to regenerate."
-            echo ""
-            echo "# Backend: empty = the server(s) at ENDPOINTS; claude = Claude through"
-            echo "# Claude Code on your Claude subscription (also: lets-code --claude)."
-            echo "BACKEND=\"${backend}\""
-            echo "# The Claude models in pi's /model (pick one there; Ctrl+S makes it the"
-            echo "# default): Claude Code aliases, or full model names (claude-...)."
-            echo "CLAUDE_MODELS=\"haiku sonnet opus fable\""
-            echo "# Another machine's Claude proxy ('lets-code claude-remote' there), and"
-            echo "# your Claude Code token for it ('claude setup-token' prints one; its"
-            echo "# requests use your subscription); empty: Claude runs here."
-            echo "CLAUDE_URL=\"${claude_url}\""
-            echo "CLAUDE_TOKEN=\"${claude_token}\""
-            echo ""
             echo "ENDPOINTS=\"${endpoints}\""
             echo "TOKEN=\"${token}\""
             echo "CA_PATH=\"${ca}\""
@@ -14189,29 +14124,7 @@ run_setup() {  # run_setup [full|granular]
         log "command will be available in a fresh shell."
     fi
 
-    # 8. live test (Claude: one short request, then Claude's models registered with pi)
-    if [ "${backend}" = claude ]; then
-        echo ""
-        [ -n "${claude_url}" ] && reply=n || { printf "Try Claude now (one short request to Haiku)? [Y/n] "; read -r reply; }
-        case "${reply}" in
-            n|N) ;;
-            *) if claude -p --model haiku --tools "" --no-session-persistence "Reply with the single word: ready" </dev/null 2>/dev/null | grep -qi ready; then
-                   log "Claude answered."
-               else
-                   log_error "Claude did not answer; check 'claude auth status' — config saved."
-               fi ;;
-        esac
-        PROVIDER_ID="lets-code-claude"; CLAUDE_URL="${claude_url}"
-        pi_write_configs "${claude_url:-http://127.0.0.1:${LETS_CODE_CLAUDE_PORT:-8795}}/v1" "${DEFAULT_API}" "claude-haiku" "${CLAUDE_CONTEXT}" "${CLAUDE_OUTPUT_CAP}" true true "${DEFAULT_THINKING}" ""
-        log "registered with pi: Claude Haiku, Sonnet, Opus and Fable (provider lets-code-claude); /model switches between them, Ctrl+S there makes one the default"
-        [ "${feat_subagents}" = "true" ] && write_default_agents
-        [ "${feat_mcp}" = "yes" ] && mcp_import yes
-        echo ""
-        echo "All set. Run:  lets-code          (Claude Haiku; --model claude-sonnet etc.)"
-        echo "          or:  lets-code -p \"hi\"  (one-shot print mode)"
-        offer_fresh_shell
-        exit 0
-    fi
+    # 8. live test
     echo ""
     printf "Probe the server now? [Y/n] "
     read -r reply
@@ -14223,6 +14136,25 @@ run_setup() {  # run_setup [full|granular]
             ;;
     esac
     TOKEN="${token}"; CA_FOUND=""; [ -f "${ca}" ] && CA_FOUND="${ca}"
+    # a Claude Code token at the Token prompt: the endpoint is a lets-code
+    # Claude proxy (see CLAUDE_TOKEN), so Claude's models are registered
+    # instead of probing a server
+    case "${token}" in sk-ant-oat[0-9]*-*)
+        local proxy; proxy="$(normalize_endpoint "${endpoints%% *}")"
+        case "$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Authorization: Bearer ${token}" "${proxy}/health" 2>/dev/null)" in
+            200) log "Claude proxy: ${proxy} (Claude runs on your token)" ;;
+            *)   log_error "no lets-code Claude proxy answered at ${proxy} — config saved; check the address ('lets-code claude-remote' on that machine)." ;;
+        esac
+        PROVIDER_ID="lets-code-claude"; CLAUDE_URL="${proxy}"; CLAUDE_TOKEN="${token}"
+        pi_write_configs "${proxy}/v1" "${DEFAULT_API}" "claude-haiku" "${CLAUDE_CONTEXT}" "${CLAUDE_OUTPUT_CAP}" true true "${DEFAULT_THINKING}" ""
+        log "registered with pi: Claude Haiku, Sonnet, Opus and Fable; /model switches, Ctrl+S makes one the default"
+        [ "${feat_subagents}" = "true" ] && write_default_agents
+        [ "${feat_mcp}" = "yes" ] && mcp_import yes
+        echo ""
+        echo "All set. Run:  lets-code"
+        offer_fresh_shell
+        exit 0 ;;
+    esac
     local found=""
     for cand in ${endpoints}; do
         if probe "${cand%/}" > "${PROBE_OUT}"; then found="${cand%/}"; MODELS_JSON="$(cat "${PROBE_OUT}")"; break; fi
@@ -14730,7 +14662,7 @@ done
 set -- ${ARGS[@]+"${ARGS[@]}"}
 
 # load config (defaults, then file, then preset, then env overrides)
-BACKEND=""            # claude: Claude through Claude Code (setup's second choice, or --claude); empty: the server at ENDPOINTS
+BACKEND=""            # claude: Claude through Claude Code (or --claude, or a Claude Code token as TOKEN); empty: the server at ENDPOINTS
 CLAUDE_MODELS="haiku sonnet opus fable"   # the Claude models in /model: CLI aliases (claude-<alias>) or full model names
 CLAUDE_URL=""         # another machine's Claude proxy (lets-code claude-remote there); empty: the proxy runs here
 CLAUDE_TOKEN=""       # your Claude Code token (claude setup-token): Claude runs on it, here or on CLAUDE_URL; empty: this machine's Claude Code sign-in
@@ -14868,12 +14800,21 @@ harness_gate "${HARNESS}"
 
 # Claude backend: Claude models through the Claude Code CLI, on the user's
 # own Claude subscription (see pi_write_claude_extension). Chosen by --claude,
-# by BACKEND=claude in the config (setup's second choice), or by a Claude
+# by BACKEND=claude in the config, by a Claude Code token as TOKEN, or by a Claude
 # model saved as pi's default (Ctrl+S in /model) when no preset or --url
 # picks something else. Nothing is probed: the proxy is local and its facts
 # are known, and the claude module starts it when the session begins.
 CLAUDE_PROVIDER_ID="lets-code-claude"
 CLAUDE_PORT="${LETS_CODE_CLAUDE_PORT:-8795}"
+# a Claude Code token as the server token (setup's Token prompt): the
+# endpoint is a lets-code Claude proxy and Claude runs on that token
+case "${TOKEN}" in sk-ant-oat[0-9]*-*)
+    if [ -z "${BACKEND}" ] && [ -z "${URL_OVERRIDE}" ]; then
+        BACKEND=claude
+        [ -n "${CLAUDE_URL}" ] || CLAUDE_URL="$(normalize_endpoint "${ENDPOINTS%% *}")"
+        CLAUDE_TOKEN="${CLAUDE_TOKEN:-${TOKEN}}"
+    fi ;;
+esac
 if [ "${BACKEND}" != claude ] && [ -z "${PRESET}" ] && [ -z "${URL_OVERRIDE}" ] \
     && [ "$(pi_saved_default provider)" = "${CLAUDE_PROVIDER_ID}" ]; then
     BACKEND=claude; MODEL=""; CONTEXT=""; OUTPUT_CAP=""

@@ -138,6 +138,17 @@ printf 'BACKEND="claude"\nCLAUDE_URL="%s"\nCLAUDE_TOKEN="%s"\n' "${rurl}" "${tok
 LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
 t "CLAUDE_URL, nothing there: refused" "$(cat "${h}/rc")|$(grep -c 'not reachable' "${h}/out")" "1|1"
 
+# what setup writes with a Claude Code token at its Token prompt: ENDPOINTS
+# is the Claude proxy, TOKEN the token
+python3 "${work}/remote.py" > "${work}/rport2" & rsrv=$!
+for _ in $(seq 50); do [ -s "${work}/rport2" ] && break; sleep 0.1; done
+rurl="http://127.0.0.1:$(cat "${work}/rport2")"
+h="${work}/h12"; mkdir -p "${h}/.config/lets-code"
+printf 'ENDPOINTS="%s"\nTOKEN="%s"\n' "${rurl#http://}" "${tok}" > "${h}/.config/lets-code/config"
+LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
+t "Claude Code token as TOKEN: the endpoint is a Claude proxy" "$(cat "${h}/rc")|$(args "${h}")|$(sed -n 3p "${h}/pi-args")" "0|--provider lets-code-claude --model claude-haiku -p hi|claude-url=${rurl} token=${tok}"
+kill "${rsrv}" 2>/dev/null
+
 # CLAUDE_TOKEN on the local proxy: sent with every request; one that is not
 # a Claude Code token is refused at launch
 h="${work}/h11"; mkdir -p "${h}/.config/lets-code"

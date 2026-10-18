@@ -33,7 +33,9 @@ ln -s "$(command -v python3)" "${noclaude}/python3"; ln -s "$(command -v curl)" 
 launch() {
     local h="$1"; shift
     mkdir -p "${h}"
-    ( cd "${work}/proj" && HOME="${h}" PATH="${LC_PATH:-${work}/bin:${PATH}}" LC_TEST_OUT="${h}/pi-args" PI_OFFLINE=1 \
+    # config and agent dir pinned under the scratch HOME (a CI runner sets XDG_CONFIG_HOME)
+    ( cd "${work}/proj" && HOME="${h}" XDG_CONFIG_HOME="${h}/.config" PI_CODING_AGENT_DIR="${h}/.pi/agent" \
+        PATH="${LC_PATH:-${work}/bin:${PATH}}" LC_TEST_OUT="${h}/pi-args" PI_OFFLINE=1 \
         LETS_CODE_MEM_GUARD=false LETS_CODE_GIT_GUARD=false LETS_CODE_SUBAGENTS=false NO_COLOR=1 \
         bash "${lc}" "$@" -p hi > "${h}/out" 2>&1 < /dev/null; echo $? > "${h}/rc" )
 }
@@ -179,7 +181,7 @@ t "CLAUDE_TOKEN cut off when copied: refused with its length" "$(cat "${h}/rc")|
 # through a reverse proxy need a Claude Code token
 h="${work}/h10"; mkdir -p "${h}"
 port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-( cd "${work}/proj" && HOME="${h}" PATH="${work}/bin:${PATH}" LETS_CODE_CLAUDE_PORT="${port}" bash "${lc}" claude-remote > "${h}/out" 2>&1 < /dev/null; echo $? > "${h}/rc" )
+( cd "${work}/proj" && HOME="${h}" XDG_CONFIG_HOME="${h}/.config" PI_CODING_AGENT_DIR="${h}/.pi/agent" PATH="${work}/bin:${PATH}" LETS_CODE_CLAUDE_PORT="${port}" bash "${lc}" claude-remote > "${h}/out" 2>&1 < /dev/null; echo $? > "${h}/rc" )
 t "claude-remote: exit status" "$(cat "${h}/rc")" 0
 rpid="$(curl -s "http://127.0.0.1:${port}/health" | python3 -c 'import json, sys; print(json.load(sys.stdin)["pid"])' 2>/dev/null)"
 t "claude-remote: says how to get the token" "$(grep -c "claude setup-token" "${h}/out")|$(grep -c 'CLAUDE_URL=' "${h}/out")" "1|1"

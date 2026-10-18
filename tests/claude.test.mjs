@@ -166,7 +166,9 @@ try {
 	r = await chat({ model: "claude-haiku", messages: rconv }, fwd(T2));
 	const tokStarts = records().filter((x) => x.event === "start").map((x) => x.token);
 	t("remote turns run on the caller's token, one process each", tokStarts.slice(-2), [T1, T2]);
-	t("local sessions run on this machine's login", tokStarts.slice(0, -2).every((x) => x === null), true);
+	t("local sessions without a token run on this machine's login", tokStarts.slice(0, -2).every((x) => x === null), true);
+	r = await chat({ model: "claude-haiku", messages: [{ role: "system", content: "sys L" }, { role: "user", content: "local with a token" }] }, { Authorization: `Bearer ${T1}` });
+	t("a local request with a token runs on it", [r.content, records().filter((x) => x.event === "start").slice(-1)[0].token], ["echo[haiku]: local with a token", T1]);
 	t("checkRemote: a proxy that answers", await mod.checkRemote({ LETS_CODE_CLAUDE_URL: base + "/", LETS_CODE_CLAUDE_TOKEN: T1 }), "");
 	t("checkRemote: nothing there", (await mod.checkRemote({ LETS_CODE_CLAUDE_URL: `http://127.0.0.1:${await freePort()}` })).includes("not reachable"), true);
 

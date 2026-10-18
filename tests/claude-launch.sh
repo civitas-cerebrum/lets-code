@@ -123,19 +123,30 @@ python3 "${work}/remote.py" > "${work}/rport" & rsrv=$!
 for _ in $(seq 50); do [ -s "${work}/rport" ] && break; sleep 0.1; done
 rurl="http://127.0.0.1:$(cat "${work}/rport")"
 h="${work}/h9"; mkdir -p "${h}/.config/lets-code"
-printf 'BACKEND="claude"\nCLAUDE_URL="%s/"\nCLAUDE_TOKEN="%s"\n' "${rurl}" "${tok}" > "${h}/.config/lets-code/config"
+# the address without its scheme, as typed in setup: http:// added for an IP
+printf 'BACKEND="claude"\nCLAUDE_URL="%s/"\nCLAUDE_TOKEN="%s"\n' "${rurl#http://}" "${tok}" > "${h}/.config/lets-code/config"
 LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
 t "CLAUDE_URL: launches Claude without Claude Code here" "$(cat "${h}/rc")|$(args "${h}")" "0|--provider lets-code-claude --model claude-haiku -p hi"
 t "CLAUDE_URL: provider points there, key from the environment" "$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1]))["providers"]["lets-code-claude"]; print(p["baseUrl"], p["apiKey"])' "${h}/.pi/agent/models.json")" "${rurl}/v1 \$LETS_CODE_CLAUDE_TOKEN"
 t "CLAUDE_URL: the module gets URL and token" "$(sed -n 3p "${h}/pi-args")" "claude-url=${rurl} token=${tok}"
 t "CLAUDE_URL: banner" "$(grep -o "claude-haiku @ Claude Code via 127.0.0.1:[0-9]*" "${h}/out" | sed 's/:[0-9]*$//')" "claude-haiku @ Claude Code via 127.0.0.1"
-printf 'BACKEND="claude"\nCLAUDE_URL="%s"\nCLAUDE_TOKEN="wrong"\n' "${rurl}" > "${h}/.config/lets-code/config"
+printf 'BACKEND="claude"\nCLAUDE_URL="%s"\nCLAUDE_TOKEN="sk-ant-oat01-notthetokenitwantsatall"\n' "${rurl}" > "${h}/.config/lets-code/config"
 LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
 t "CLAUDE_URL, wrong token: refused, pointing at claude setup-token" "$(cat "${h}/rc")|$(grep -c "run 'claude setup-token'" "${h}/out")" "1|1"
 kill "${rsrv}" 2>/dev/null
 printf 'BACKEND="claude"\nCLAUDE_URL="%s"\nCLAUDE_TOKEN="%s"\n' "${rurl}" "${tok}" > "${h}/.config/lets-code/config"
 LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
 t "CLAUDE_URL, nothing there: refused" "$(cat "${h}/rc")|$(grep -c 'not reachable' "${h}/out")" "1|1"
+
+# CLAUDE_TOKEN on the local proxy: sent with every request; one that is not
+# a Claude Code token is refused at launch
+h="${work}/h11"; mkdir -p "${h}/.config/lets-code"
+printf 'BACKEND="claude"\nCLAUDE_TOKEN="%s"\n' "${tok}" > "${h}/.config/lets-code/config"
+launch "${h}"
+t "local + CLAUDE_TOKEN: the token goes with each request" "$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1]))["providers"]["lets-code-claude"]; print(p["baseUrl"], p["apiKey"])' "${h}/.pi/agent/models.json")|$(sed -n 3p "${h}/pi-args")" "http://127.0.0.1:8795/v1 \$LETS_CODE_CLAUDE_TOKEN|claude-url= token=${tok}"
+printf 'BACKEND="claude"\nCLAUDE_TOKEN="sk-ant-api03-xyz"\n' > "${h}/.config/lets-code/config"
+launch "${h}"
+t "CLAUDE_TOKEN that is not a Claude Code token: refused" "$(cat "${h}/rc")|$(grep -c 'not a Claude Code token' "${h}/out")" "1|1"
 
 # lets-code claude-remote: proxy started, what to set printed; requests
 # through a reverse proxy need a Claude Code token

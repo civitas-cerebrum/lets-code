@@ -560,10 +560,14 @@ pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-
     # Claude models go in too wherever Claude Code is installed (see pi_write_claude_extension)
     local claude_base="" claude_key="claude"
     if [ -n "${CLAUDE_URL:-}" ]; then
-        claude_base="${CLAUDE_URL%/}/v1"; claude_key='$LETS_CODE_CLAUDE_TOKEN'   # resolved by pi from the environment
+        claude_base="${CLAUDE_URL%/}/v1"
     elif command -v claude >/dev/null 2>&1; then
         claude_base="http://127.0.0.1:${LETS_CODE_CLAUDE_PORT:-8795}/v1"
     fi
+    # CLAUDE_TOKEN (claude setup-token) goes with every request and the
+    # proxy runs the conversation on it; without it a local proxy uses this
+    # machine's Claude Code sign-in. pi resolves it from the environment.
+    [ -z "${CLAUDE_TOKEN:-}" ] || claude_key='$LETS_CODE_CLAUDE_TOKEN'
     LC_CLAUDE_BASE="${claude_base}" LC_CLAUDE_KEY="${claude_key}" LC_CLAUDE_MODELS="${CLAUDE_MODELS:-}" LC_CLAUDE_CONTEXT="${CLAUDE_CONTEXT:-200000}" LC_CLAUDE_CAP="${CLAUDE_OUTPUT_CAP:-32000}" \
     PI_AGENT_DIR="${PI_AGENT_DIR}" LC_PROVIDER="${PROVIDER_ID:-lets-code}" LC_XHIGH_BUDGET="${XHIGH_THINKING_BUDGET:-}" LC_XHIGH_ROOM="${XHIGH_ANSWER_ROOM:-}" LC_XHIGH_CAP="${XHIGH_LEVEL_CAP:-}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
 import json, os, sys, tempfile
@@ -627,7 +631,8 @@ def claude_doc():
     return {
         "baseUrl": os.environ["LC_CLAUDE_BASE"],
         "api": "openai-completions",
-        # a local proxy takes no key (pi wants one); a remote one its token
+        # the Claude Code token, or a placeholder (pi wants a key) for a local
+        # proxy on this machine's sign-in
         "apiKey": os.environ["LC_CLAUDE_KEY"],
         "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": True},
         "models": [{
@@ -2428,17 +2433,16 @@ const server = http.createServer(async (req, res) => {
   try {
     if (API_KEY && req.headers.authorization !== `Bearer ${API_KEY}`)
       return sendJson(res, 401, { error: { message: "bad api key" } });
-    // through a reverse proxy (nginx sets X-Forwarded-For): another machine's
-    // lets-code (CLAUDE_URL). It sends its user's own Claude Code token
-    // (`claude setup-token`), and its conversations run on that token, so
-    // they use that user's subscription, never this machine's login.
-    // Sessions on this machine connect directly and use its own login.
-    let token = null;
-    if (req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || req.headers.forwarded) {
-      token = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "").trim();
-      if (!CLAUDE_TOKEN_RE.test(token))
-        return sendJson(res, 401, { error: { message: "send your Claude Code token (from `claude setup-token`) as the API key (CLAUDE_TOKEN in lets-code)" } });
-    }
+    // A Claude Code token sent as the API key (CLAUDE_TOKEN in lets-code,
+    // from `claude setup-token`) is what the conversation runs on, so it uses
+    // that token's subscription. Without one a session runs on this
+    // machine's own Claude Code sign-in, which only sessions on this machine
+    // get: a request through a reverse proxy (nginx sets X-Forwarded-For)
+    // comes from another machine and must bring its token.
+    const bearer = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "").trim();
+    const token = CLAUDE_TOKEN_RE.test(bearer) ? bearer : null;
+    if (!token && (req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || req.headers.forwarded))
+      return sendJson(res, 401, { error: { message: "send your Claude Code token (from `claude setup-token`) as the API key (CLAUDE_TOKEN in lets-code)" } });
     const url = new URL(req.url, "http://x");
     if (req.method === "GET" && url.pathname === "/v1/models")
       return sendJson(res, 200, {
@@ -13964,7 +13968,7 @@ run_setup() {  # run_setup [full|granular]
            case "${reply:-1}" in
                1) claude_setup_check || exit 1 ;;
                2) printf "Its address (the reverse proxy in front of it, e.g. https://claude.example.net): "
-                  read -r claude_url; claude_url="${claude_url%/}"
+                  read -r claude_url; [ -z "${claude_url}" ] || claude_url="$(normalize_endpoint "${claude_url}")"
                   echo "Your Claude Code token: run 'claude setup-token' on any machine signed in to Claude Code"
                   echo "with your subscription and paste the sk-ant-oat01-... token it prints (requests use that subscription)."
                   printf "Token: "
@@ -14141,7 +14145,7 @@ run_setup() {  # run_setup [full|granular]
     else
         target="${HOME}/.local/bin/lets-code"
         mkdir -p "${HOME}/.local/bin"
-        [ "${self}" = "${target}" ] || cp "${self}" "${target}"
+        [ "${self}" -ef "${target}" ] || cp "${self}" "${target}"
         chmod +x "${target}"
         log "installed ${target}"
         # ensure ~/.local/bin is on PATH — offer to persist it in the shell profile
@@ -14722,7 +14726,7 @@ set -- ${ARGS[@]+"${ARGS[@]}"}
 BACKEND=""            # claude: Claude through Claude Code (setup's second choice, or --claude); empty: the server at ENDPOINTS
 CLAUDE_MODELS="haiku sonnet opus fable"   # the Claude models in /model: CLI aliases (claude-<alias>) or full model names
 CLAUDE_URL=""         # another machine's Claude proxy (lets-code claude-remote there); empty: the proxy runs here
-CLAUDE_TOKEN=""       # your Claude Code token for it (claude setup-token); its requests use your subscription
+CLAUDE_TOKEN=""       # your Claude Code token (claude setup-token): Claude runs on it, here or on CLAUDE_URL; empty: this machine's Claude Code sign-in
 ENDPOINTS=""
 TOKEN="dummy-key"
 CA_PATH=""
@@ -14759,7 +14763,8 @@ if [ -n "${PRESET}" ]; then
     PROVIDER_ID="lets-code-${PRESET}"
 fi
 CLAUDE_MODELS="${LETS_CODE_CLAUDE_MODELS:-${CLAUDE_MODELS}}"
-CLAUDE_URL="${LETS_CODE_CLAUDE_URL:-${CLAUDE_URL}}"; CLAUDE_URL="${CLAUDE_URL%/}"
+CLAUDE_URL="${LETS_CODE_CLAUDE_URL:-${CLAUDE_URL}}"
+[ -z "${CLAUDE_URL}" ] || CLAUDE_URL="$(normalize_endpoint "${CLAUDE_URL}")"   # a missing scheme filled in, as for ENDPOINTS
 CLAUDE_TOKEN="${LETS_CODE_CLAUDE_TOKEN:-${CLAUDE_TOKEN}}"
 ENDPOINTS="${LETS_CODE_ENDPOINTS:-${ENDPOINTS}}"
 TOKEN="${LETS_CODE_TOKEN:-${TOKEN}}"
@@ -14869,6 +14874,10 @@ if [ "${BACKEND}" != claude ] && [ -z "${PRESET}" ] && [ -z "${URL_OVERRIDE}" ] 
 fi
 if [ "${BACKEND}" = claude ]; then
     [ -z "${URL_OVERRIDE}" ] || { log_error "--url picks a server and does not combine with the Claude backend."; exit 1; }
+    case "${CLAUDE_TOKEN}" in
+        ""|sk-ant-oat[0-9]*-*) ;;
+        *) log_error "CLAUDE_TOKEN is not a Claude Code token (those start with sk-ant-oat01-; 'claude setup-token' prints one)."; exit 1 ;;
+    esac
     if [ -n "${CLAUDE_URL}" ]; then
         # another machine's proxy: checked now, so a problem is one clear line
         # instead of a failed first request
@@ -15154,7 +15163,8 @@ unset LETS_CODE_CLAUDE_PROVIDER LETS_CODE_CLAUDE_URL LETS_CODE_CLAUDE_TOKEN
 if [ -n "${CLAUDE_URL}" ] || command -v claude >/dev/null 2>&1; then
     pi_write_claude_extension
     export LETS_CODE_CLAUDE_PROVIDER="${CLAUDE_PROVIDER_ID}" LETS_CODE_CLAUDE_PORT="${CLAUDE_PORT}" LETS_CODE_CLAUDE_MODELS="${CLAUDE_MODELS}"
-    [ -z "${CLAUDE_URL}" ] || export LETS_CODE_CLAUDE_URL="${CLAUDE_URL}" LETS_CODE_CLAUDE_TOKEN="${CLAUDE_TOKEN}"
+    [ -z "${CLAUDE_URL}" ] || export LETS_CODE_CLAUDE_URL="${CLAUDE_URL}"
+    [ -z "${CLAUDE_TOKEN}" ] || export LETS_CODE_CLAUDE_TOKEN="${CLAUDE_TOKEN}"
 fi
 export PI_SKIP_VERSION_CHECK=1
 case "${BASE_URL}" in

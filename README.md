@@ -217,7 +217,10 @@ claude setup-token
 
 It opens a sign-in page in the browser (or prints its address to open
 elsewhere), and after you approve it prints a long-lived token that starts
-with `sk-ant-oat01-`. Copy it into `CLAUDE_TOKEN`. Treat it like a password:
+with `sk-ant-oat01-`. Copy it into `CLAUDE_TOKEN`. It works on its own
+machine too: with `CLAUDE_TOKEN` set, the local proxy runs your sessions on
+the token, so Claude Code there need not be signed in; without it, a local
+proxy uses that machine's Claude Code sign-in. Treat it like a password:
 it works for your subscription wherever it is used. If the token is wrong, the launch says so (`401`), and a token Anthropic
 rejects shows up as "OAuth access token is invalid" on the first request.
 
@@ -259,7 +262,8 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 |---|---|
 | `BACKEND` | Empty: the server at `ENDPOINTS`. `claude`: Claude through Claude Code (see [Claude](#claude-claude-code-subscription)). |
 | `CLAUDE_MODELS` | The Claude models in `/model`: Claude Code aliases or full model names (default `haiku sonnet opus fable`). |
-| `CLAUDE_URL` / `CLAUDE_TOKEN` | Another machine's Claude proxy, and your Claude Code token for it (`claude setup-token`; see [Claude](#claude-claude-code-subscription)); empty: the proxy runs here. |
+| `CLAUDE_URL` | Another machine's Claude proxy (`https://` is added when missing); empty: the proxy runs here. |
+| `CLAUDE_TOKEN` | Your Claude Code token (`claude setup-token`; see [Claude](#claude-claude-code-subscription)): Claude runs on it, here or on `CLAUDE_URL`. Empty: this machine's Claude Code sign-in (local proxy only). |
 | `ENDPOINTS` | Space-separated base URLs, most preferred first. IPs, `localhost`, bare hostnames and `*.local` get `http://`, other domains `https://`. |
 | `TOKEN` | API key. Any value works for a server without auth. |
 | `CA_PATH` | Root CA for an https endpoint with a private CA (exported as `NODE_EXTRA_CA_CERTS`). |

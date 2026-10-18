@@ -152,6 +152,16 @@ try {
 	t("thinking off: a new claude with thinking off at effort low", starts.slice(-1).map((s) => [s.model, s.effort, s.thinkingOff]), [["sonnet", "low", true]]);
 	t("thinking off: earlier turns replayed", records().filter((x) => x.event === "user").slice(-1)[0].text.includes("<conversation>"), true);
 
+	// other machines (CLAUDE_URL) come through a reverse proxy: they need the
+	// key in the state dir; without one remote use is off
+	const via = (key) => fetch(`${base}/health`, { headers: { "X-Forwarded-For": "10.6.0.2", ...(key ? { Authorization: `Bearer ${key}` } : {}) } }).then((r) => r.status);
+	t("through a reverse proxy, no key file: refused (remote use off)", await via("x"), 403);
+	writeFileSync(join(work, "state", "remote.key"), "k3y\n");
+	t("through a reverse proxy: wrong key refused, right key let in", [await via("nope"), await via(""), await via("k3y")], [401, 401, 200]);
+	t("directly (this machine): no key needed", (await fetch(`${base}/health`)).status, 200);
+	t("checkRemote: a proxy that answers", await mod.checkRemote({ LETS_CODE_CLAUDE_URL: base + "/", LETS_CODE_CLAUDE_TOKEN: "k3y" }), "");
+	t("checkRemote: nothing there", (await mod.checkRemote({ LETS_CODE_CLAUDE_URL: `http://127.0.0.1:${await freePort()}` })).includes("not reachable"), true);
+
 	// a newer server.mjs (lets-code updated): the old daemon is replaced
 	const dir2 = join(work, "v2"); mkdirSync(dir2);
 	const server2 = join(dir2, "server.mjs");

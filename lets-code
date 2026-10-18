@@ -19,6 +19,9 @@
 #                                the Claude models are in /model on every launch
 #                                where Claude Code is installed, and Ctrl+S on one
 #                                there makes later launches start on it
+#   lets-code claude-remote      let other machines (a phone) use this machine's
+#                                Claude: starts the proxy, prints CLAUDE_URL and
+#                                CLAUDE_TOKEN for their config (--new-key: a new key)
 #   lets-code update             replace this lets-code with the latest
 #                                release published to npm
 #   lets-code update --snapshot  ... with the latest commit on main instead
@@ -133,7 +136,11 @@
 #      /model and /thinking switch the running conversation in place, the way
 #      /model and /effort do in Claude Code. Your claude.ai connectors,
 #      skills, hooks and CLAUDE.md stay out of it. CLAUDE_MODELS picks the
-#      models listed; LETS_CODE_CLAUDE_PORT (8795) the proxy's port.
+#      models listed; LETS_CODE_CLAUDE_PORT (8795) the proxy's port. The
+#      first session on Claude starts the proxy on its own machine and every
+#      later session there shares it; CLAUDE_URL (+ CLAUDE_TOKEN) points a
+#      machine at another one's proxy instead (see claude-remote), so it
+#      needs no Claude Code of its own and starts nothing.
 #  10. Claude Code adapter (on by default): a project or user set up for
 #      Claude Code works as it is, read at each start: CLAUDE.md files and
 #      their @imports, .claude/skills, .claude/commands (/name), agents
@@ -145,7 +152,8 @@
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
 # Presets: ~/.config/lets-code/presets/<name>   (`lets-code setup --preset <name>`)
 #          same keys as the config, applied on top of it; `--<name>` picks one
-# Env overrides: LETS_CODE_CLAUDE_MODELS, LETS_CODE_CLAUDE_PORT,
+# Env overrides: LETS_CODE_CLAUDE_MODELS, LETS_CODE_CLAUDE_PORT, LETS_CODE_CLAUDE_URL,
+#                LETS_CODE_CLAUDE_TOKEN,
 #                LETS_CODE_ENDPOINTS (space-separated), LETS_CODE_TOKEN,
 #                LETS_CODE_CA, LETS_CODE_MODEL, LETS_CODE_CONTEXT,
 #                LETS_CODE_OUTPUT_CAP, LETS_CODE_API, LETS_CODE_VISION,
@@ -548,9 +556,13 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 # every other key in the files is preserved, and a corrupt file fails loudly.
 pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-cap> <vision> <reasoning> <thinking> [<effort-map-json>]
     # Claude models go in too wherever Claude Code is installed (see pi_write_claude_extension)
-    local claude_port=""
-    command -v claude >/dev/null 2>&1 && claude_port="${LETS_CODE_CLAUDE_PORT:-8795}"
-    LC_CLAUDE_PORT="${claude_port}" LC_CLAUDE_MODELS="${CLAUDE_MODELS:-}" LC_CLAUDE_CONTEXT="${CLAUDE_CONTEXT:-200000}" LC_CLAUDE_CAP="${CLAUDE_OUTPUT_CAP:-32000}" \
+    local claude_base="" claude_key="claude"
+    if [ -n "${CLAUDE_URL:-}" ]; then
+        claude_base="${CLAUDE_URL%/}/v1"; claude_key='$LETS_CODE_CLAUDE_TOKEN'   # resolved by pi from the environment
+    elif command -v claude >/dev/null 2>&1; then
+        claude_base="http://127.0.0.1:${LETS_CODE_CLAUDE_PORT:-8795}/v1"
+    fi
+    LC_CLAUDE_BASE="${claude_base}" LC_CLAUDE_KEY="${claude_key}" LC_CLAUDE_MODELS="${CLAUDE_MODELS:-}" LC_CLAUDE_CONTEXT="${CLAUDE_CONTEXT:-200000}" LC_CLAUDE_CAP="${CLAUDE_OUTPUT_CAP:-32000}" \
     PI_AGENT_DIR="${PI_AGENT_DIR}" LC_PROVIDER="${PROVIDER_ID:-lets-code}" LC_XHIGH_BUDGET="${XHIGH_THINKING_BUDGET:-}" LC_XHIGH_ROOM="${XHIGH_ANSWER_ROOM:-}" LC_XHIGH_CAP="${XHIGH_LEVEL_CAP:-}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
 import json, os, sys, tempfile
 
@@ -611,9 +623,10 @@ def claude_doc():
         alias = i[len("claude-"):]
         return ("Claude " + alias.capitalize() if re.fullmatch(r"[a-z]+", alias) else i) + " (Claude Code)"
     return {
-        "baseUrl": "http://127.0.0.1:%s/v1" % os.environ["LC_CLAUDE_PORT"],
+        "baseUrl": os.environ["LC_CLAUDE_BASE"],
         "api": "openai-completions",
-        "apiKey": "claude",   # pi wants one; the proxy takes no key
+        # a local proxy takes no key (pi wants one); a remote one its token
+        "apiKey": os.environ["LC_CLAUDE_KEY"],
         "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": True},
         "models": [{
             "id": i, "name": name(i),
@@ -628,7 +641,7 @@ def to_models(doc):
     providers = doc.get("providers")
     if not isinstance(providers, dict):
         providers = {}
-    if os.environ.get("LC_CLAUDE_PORT"):
+    if os.environ.get("LC_CLAUDE_BASE"):
         providers[CLAUDE_PROVIDER] = claude_doc()
     if provider == CLAUDE_PROVIDER:
         doc["providers"] = providers
@@ -2287,6 +2300,14 @@ function openaiUsage(u = {}) {
   };
 }
 
+function remoteKey() {
+  try {
+    return fs.readFileSync(path.join(STATE_DIR, "remote.key"), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
 function sendJson(res, status, body) {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
@@ -2407,6 +2428,15 @@ const server = http.createServer(async (req, res) => {
   try {
     if (API_KEY && req.headers.authorization !== `Bearer ${API_KEY}`)
       return sendJson(res, 401, { error: { message: "bad api key" } });
+    // through a reverse proxy (nginx sets X-Forwarded-For): another machine's
+    // lets-code (CLAUDE_URL), which must send the key in STATE_DIR/remote.key
+    // (`lets-code claude-remote` makes it); none there: remote use is off.
+    // Sessions on this machine connect directly and need no key.
+    if (req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || req.headers.forwarded) {
+      const key = remoteKey();
+      if (!key) return sendJson(res, 403, { error: { message: "remote use is off; run `lets-code claude-remote` on the proxy's machine" } });
+      if (req.headers.authorization !== `Bearer ${key}`) return sendJson(res, 401, { error: { message: "bad key for the Claude proxy" } });
+    }
     const url = new URL(req.url, "http://x");
     if (req.method === "GET" && url.pathname === "/v1/models")
       return sendJson(res, 200, {
@@ -2528,7 +2558,9 @@ BRIDGE
 // This module keeps that proxy running: one daemon per user and port, shared
 // by every session and subagent, started when a session begins on a Claude
 // model and before any request to one if it is not answering, or answers
-// with older code than this file's server.mjs.
+// with older code than this file's server.mjs. With LETS_CODE_CLAUDE_URL
+// (CLAUDE_URL: another machine's proxy, e.g. for a phone) nothing is started
+// here; the module only checks that proxy and says what is wrong with it.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -2591,15 +2623,31 @@ export async function ensureProxy(env: Record<string, string | undefined> = proc
 	return `the Claude proxy did not start; see ${join(state, "proxy.log")}`;
 }
 
+// The remote proxy answers with this key: resolves to an error message, or ""
+export async function checkRemote(env: Record<string, string | undefined> = process.env): Promise<string> {
+	const url = (env.LETS_CODE_CLAUDE_URL ?? "").replace(/\/+$/, "");
+	try {
+		const r = await fetch(`${url}/health`, { headers: { Authorization: `Bearer ${env.LETS_CODE_CLAUDE_TOKEN ?? ""}` }, signal: AbortSignal.timeout(8000) });
+		if (r.ok) return "";
+		const msg = ((await r.json().catch(() => ({}))) as any)?.error?.message;
+		return `the Claude proxy at ${url} answered ${r.status}${msg ? `: ${msg}` : ""}`;
+	} catch (e) {
+		return `the Claude proxy at ${url} is not reachable (${e instanceof Error ? e.message : String(e)})`;
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	const provider = process.env.LETS_CODE_CLAUDE_PROVIDER ?? "";
 	if (!provider) return;
 	const onClaude = (ctx: any) => ctx?.model?.provider === provider;
 	let pending: Promise<string> | null = null;
+	let okUntil = 0;   // a proxy that just answered is trusted for a minute (the remote one is a round trip away)
 	const ensure = async (ctx: any) => {
-		pending ??= ensureProxy().finally(() => { pending = null; });
+		if (Date.now() < okUntil) return;
+		pending ??= (process.env.LETS_CODE_CLAUDE_URL ? checkRemote() : ensureProxy()).finally(() => { pending = null; });
 		const err = await pending;
 		if (err) ctx?.ui?.notify?.(`Claude: ${err}`, "error");
+		else okUntil = Date.now() + 60_000;
 	};
 	pi.on("session_start", async (_event: any, ctx: any) => { if (onClaude(ctx)) await ensure(ctx); });
 	pi.on("model_select", async (event: any, ctx: any) => { if (event?.model?.provider === provider) await ensure(ctx); });
@@ -13895,7 +13943,7 @@ run_setup() {  # run_setup [full|granular]
     ensure_pi_tools
 
     # 3. backend: a server of your own, or Claude through Claude Code
-    local backend="" endpoints="" token="" ca=""
+    local backend="" endpoints="" token="" ca="" claude_url="" claude_token=""
     echo ""
     echo "Which models should pi use?"
     echo "  1) your own LLM server (vLLM, SGLang, Ollama, LM Studio, OpenRouter, ...)  [default]"
@@ -13904,7 +13952,25 @@ run_setup() {  # run_setup [full|granular]
     read -r reply
     case "${reply:-1}" in
         1) ;;
-        2) backend="claude"; claude_setup_check || exit 1 ;;
+        2) backend="claude"
+           echo ""
+           echo "Where does Claude run?"
+           echo "  1) here, through this machine's Claude Code  [default]"
+           echo "  2) through another machine's lets-code (run 'lets-code claude-remote' there first)"
+           printf "Choice [1]: "
+           read -r reply
+           case "${reply:-1}" in
+               1) claude_setup_check || exit 1 ;;
+               2) printf "Its address (the reverse proxy in front of it, e.g. https://claude.example.net): "
+                  read -r claude_url; claude_url="${claude_url%/}"
+                  printf "Its key (CLAUDE_TOKEN, as 'lets-code claude-remote' printed it): "
+                  read -r claude_token
+                  case "$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Authorization: Bearer ${claude_token}" "${claude_url}/health" 2>/dev/null)" in
+                      200) log "the Claude proxy at ${claude_url} answered" ;;
+                      *)   log_error "the Claude proxy at ${claude_url} did not accept the key (or is not running) — saving anyway; fix CLAUDE_URL / CLAUDE_TOKEN in ${CONFIG_FILE}." ;;
+                  esac ;;
+               *) log_error "choose 1 or 2"; exit 1 ;;
+           esac ;;
         *) log_error "choose 1 or 2"; exit 1 ;;
     esac
 
@@ -13974,6 +14040,10 @@ run_setup() {  # run_setup [full|granular]
             echo "# The Claude models in pi's /model (pick one there; Ctrl+S makes it the"
             echo "# default): Claude Code aliases, or full model names (claude-...)."
             echo "CLAUDE_MODELS=\"haiku sonnet opus fable\""
+            echo "# Another machine's Claude proxy ('lets-code claude-remote' there prints"
+            echo "# both); empty: Claude runs here, through this machine's Claude Code."
+            echo "CLAUDE_URL=\"${claude_url}\""
+            echo "CLAUDE_TOKEN=\"${claude_token}\""
             echo ""
             echo "ENDPOINTS=\"${endpoints}\""
             echo "TOKEN=\"${token}\""
@@ -14105,8 +14175,7 @@ run_setup() {  # run_setup [full|granular]
     # 8. live test (Claude: one short request, then Claude's models registered with pi)
     if [ "${backend}" = claude ]; then
         echo ""
-        printf "Try Claude now (one short request to Haiku)? [Y/n] "
-        read -r reply
+        [ -n "${claude_url}" ] && reply=n || { printf "Try Claude now (one short request to Haiku)? [Y/n] "; read -r reply; }
         case "${reply}" in
             n|N) ;;
             *) if claude -p --model haiku --tools "" --no-session-persistence "Reply with the single word: ready" </dev/null 2>/dev/null | grep -qi ready; then
@@ -14115,8 +14184,8 @@ run_setup() {  # run_setup [full|granular]
                    log_error "Claude did not answer; check 'claude auth status' — config saved."
                fi ;;
         esac
-        PROVIDER_ID="lets-code-claude"
-        pi_write_configs "http://127.0.0.1:${LETS_CODE_CLAUDE_PORT:-8795}/v1" "${DEFAULT_API}" "claude-haiku" "${CLAUDE_CONTEXT}" "${CLAUDE_OUTPUT_CAP}" true true "${DEFAULT_THINKING}" ""
+        PROVIDER_ID="lets-code-claude"; CLAUDE_URL="${claude_url}"
+        pi_write_configs "${claude_url:-http://127.0.0.1:${LETS_CODE_CLAUDE_PORT:-8795}}/v1" "${DEFAULT_API}" "claude-haiku" "${CLAUDE_CONTEXT}" "${CLAUDE_OUTPUT_CAP}" true true "${DEFAULT_THINKING}" ""
         log "registered with pi: Claude Haiku, Sonnet, Opus and Fable (provider lets-code-claude); /model switches between them, Ctrl+S there makes one the default"
         [ "${feat_subagents}" = "true" ] && write_default_agents
         [ "${feat_mcp}" = "yes" ] && mcp_import yes
@@ -14257,6 +14326,40 @@ claude_models_json() {  # claude_models_json [<model>]
 ids = [m if m.startswith("claude-") else "claude-" + m for m in re.split(r"[\s,]+", os.environ["LC_MODELS"] or "haiku sonnet opus fable") if m]
 if sys.argv[1] and sys.argv[1] not in ids: ids.append(sys.argv[1])
 print(json.dumps({"data": [{"id": i, "owned_by": "anthropic", "max_model_len": int(os.environ["LC_CONTEXT"])} for i in ids]}))' "${1:-}"
+}
+
+# lets-code claude-remote [--new-key]: lets other machines (a phone, say) use
+# this machine's Claude proxy: makes the key (kept in the proxy's state dir,
+# mode 600), starts the proxy if it is not running, and prints the two config
+# lines for the other machine. The proxy listens on 127.0.0.1 only; another
+# machine reaches it through a reverse proxy that sets X-Forwarded-For, and
+# such requests need the key (sessions here never do).
+claude_remote() {
+    local state key port="${LETS_CODE_CLAUDE_PORT:-8795}" err
+    command -v claude >/dev/null 2>&1 || { log_error "this machine needs Claude Code (the claude command), signed in, to serve Claude."; exit 1; }
+    command -v node >/dev/null 2>&1 || { log_error "node not found."; exit 1; }
+    state="${LETS_CODE_CLAUDE_STATE:-${PI_AGENT_DIR}/lets-code-claude}"; key="${state}/remote.key"
+    mkdir -p "${state}"
+    if [ "${1:-}" = --new-key ] || [ ! -s "${key}" ]; then
+        ( umask 077; od -An -N24 -tx1 /dev/urandom | tr -d ' \n' > "${key}.tmp" && mv "${key}.tmp" "${key}" )
+        log "new key in ${key} (other machines with the old one are refused now)"
+    fi
+    pi_write_claude_extension
+    if ! err="$(PI_CODING_AGENT_DIR="${PI_AGENT_DIR}" LETS_CODE_CLAUDE_PORT="${port}" node -e '
+        import(process.argv[1]).then((m) => m.ensureProxy()).then((e) => { if (e) { console.log(e); process.exit(1); } })' \
+        "${LC_EXT_ROOT}/claude/index.ts" 2>&1)"; then
+        log_error "${err}"; exit 1
+    fi
+    log "the Claude proxy is running on 127.0.0.1:${port} (log: ${state}/proxy.log); it keeps running until this machine restarts"
+    echo ""
+    echo "Other machines reach it through a reverse proxy in front of 127.0.0.1:${port} that sets"
+    echo "X-Forwarded-For (nginx: proxy_pass, proxy_set_header X-Forwarded-For, proxy_buffering off,"
+    echo "proxy_read_timeout 3600s). On the other machine, in ~/.config/lets-code/config (BACKEND=\"claude\""
+    echo "there makes it the default) or in ~/.config/lets-code/presets/claude (for --claude):"
+    echo ""
+    echo "  CLAUDE_URL=\"https://<the reverse proxy's address>\""
+    echo "  CLAUDE_TOKEN=\"$(cat "${key}")\""
+    exit 0
 }
 
 # ------------------------------------------------------------------ presets
@@ -14571,6 +14674,7 @@ if [ "${1:-}" = "setup" ]; then
     run_setup "${2:-}"
 fi
 [ "${1:-}" = "presets" ] && list_presets
+[ "${1:-}" = "claude-remote" ] && claude_remote "${2:-}"
 [ "${1:-}" = "update" ] && run_update "${2:-}"
 case "${1:-}" in --version|-V) echo "lets-code ${LETS_CODE_VERSION}"; exit 0 ;; esac
 [ "${1:-}" = "mandate" ] && { [ "${2:-}" = "init" ] || { log_error "usage: lets-code mandate init [--global]"; exit 1; }; mandate_init "${3:-}"; }
@@ -14609,6 +14713,8 @@ set -- ${ARGS[@]+"${ARGS[@]}"}
 # load config (defaults, then file, then preset, then env overrides)
 BACKEND=""            # claude: Claude through Claude Code (setup's second choice, or --claude); empty: the server at ENDPOINTS
 CLAUDE_MODELS="haiku sonnet opus fable"   # the Claude models in /model: CLI aliases (claude-<alias>) or full model names
+CLAUDE_URL=""         # another machine's Claude proxy (lets-code claude-remote there); empty: the proxy runs here
+CLAUDE_TOKEN=""       # its key
 ENDPOINTS=""
 TOKEN="dummy-key"
 CA_PATH=""
@@ -14645,6 +14751,8 @@ if [ -n "${PRESET}" ]; then
     PROVIDER_ID="lets-code-${PRESET}"
 fi
 CLAUDE_MODELS="${LETS_CODE_CLAUDE_MODELS:-${CLAUDE_MODELS}}"
+CLAUDE_URL="${LETS_CODE_CLAUDE_URL:-${CLAUDE_URL}}"; CLAUDE_URL="${CLAUDE_URL%/}"
+CLAUDE_TOKEN="${LETS_CODE_CLAUDE_TOKEN:-${CLAUDE_TOKEN}}"
 ENDPOINTS="${LETS_CODE_ENDPOINTS:-${ENDPOINTS}}"
 TOKEN="${LETS_CODE_TOKEN:-${TOKEN}}"
 CA_PATH="${LETS_CODE_CA:-${CA_PATH}}"
@@ -14752,13 +14860,26 @@ if [ "${BACKEND}" != claude ] && [ -z "${PRESET}" ] && [ -z "${URL_OVERRIDE}" ] 
     log_verbose "backend: Claude (a Claude model is saved as pi's default; Ctrl+S on another model in /model changes it)"
 fi
 if [ "${BACKEND}" = claude ]; then
-    if ! command -v claude >/dev/null 2>&1; then
-        log_error "the Claude backend needs Claude Code (the claude command): install it (https://claude.com/claude-code), then run: claude auth login"
-        exit 1
-    fi
     [ -z "${URL_OVERRIDE}" ] || { log_error "--url picks a server and does not combine with the Claude backend."; exit 1; }
+    if [ -n "${CLAUDE_URL}" ]; then
+        # another machine's proxy: checked now, so a problem is one clear line
+        # instead of a failed first request
+        case "$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Authorization: Bearer ${CLAUDE_TOKEN}" "${CLAUDE_URL}/health" 2>/dev/null)" in
+            200) ;;
+            401) log_error "the Claude proxy at ${CLAUDE_URL} refused CLAUDE_TOKEN; 'lets-code claude-remote' on that machine prints the current one."; exit 1 ;;
+            403) log_error "the Claude proxy at ${CLAUDE_URL} has remote use off; run 'lets-code claude-remote' on that machine."; exit 1 ;;
+            502|503|504) log_error "no Claude proxy is running behind ${CLAUDE_URL}; start one there with 'lets-code claude-remote' (or any 'lets-code --claude' session)."; exit 1 ;;
+            000) log_error "the Claude proxy at ${CLAUDE_URL} is not reachable from here."; exit 1 ;;
+            *) log_error "${CLAUDE_URL} does not answer like a lets-code Claude proxy."; exit 1 ;;
+        esac
+        ENDPOINTS="${CLAUDE_URL}"
+    elif ! command -v claude >/dev/null 2>&1; then
+        log_error "the Claude backend needs Claude Code (the claude command): install it (https://claude.com/claude-code) and run 'claude auth login', or set CLAUDE_URL to another machine's Claude proxy."
+        exit 1
+    else
+        ENDPOINTS="http://127.0.0.1:${CLAUDE_PORT}"
+    fi
     PROVIDER_ID="${CLAUDE_PROVIDER_ID}"
-    ENDPOINTS="http://127.0.0.1:${CLAUDE_PORT}"
     # the model: --model, a preset's MODEL, the one saved as pi's default, Haiku
     if [ -z "${MODEL}" ] && [ "$(pi_saved_default provider)" = "${CLAUDE_PROVIDER_ID}" ]; then MODEL="$(pi_saved_default model)"; fi
     MODEL="${MODEL:-claude-haiku}"
@@ -15021,10 +15142,11 @@ export LETS_CODE_BACKEND
 pi_write_backend_extension
 # Claude models in /model, and the backend of --claude: wherever Claude Code
 # is installed, the claude module keeps their proxy running
-unset LETS_CODE_CLAUDE_PROVIDER
-if command -v claude >/dev/null 2>&1; then
+unset LETS_CODE_CLAUDE_PROVIDER LETS_CODE_CLAUDE_URL LETS_CODE_CLAUDE_TOKEN
+if [ -n "${CLAUDE_URL}" ] || command -v claude >/dev/null 2>&1; then
     pi_write_claude_extension
     export LETS_CODE_CLAUDE_PROVIDER="${CLAUDE_PROVIDER_ID}" LETS_CODE_CLAUDE_PORT="${CLAUDE_PORT}" LETS_CODE_CLAUDE_MODELS="${CLAUDE_MODELS}"
+    [ -z "${CLAUDE_URL}" ] || export LETS_CODE_CLAUDE_URL="${CLAUDE_URL}" LETS_CODE_CLAUDE_TOKEN="${CLAUDE_TOKEN}"
 fi
 export PI_SKIP_VERSION_CHECK=1
 case "${BASE_URL}" in
@@ -15262,7 +15384,7 @@ banner() {
     [ "${REASONING_SUPPORTED}" = true ] || think="no thinking"
     case "${THINKING_DESC}" in adaptive*) think="thinking adaptive" ;; auto*) think="thinking auto" ;; esac
     host="${BASE_URL#*://}"
-    [ "${BACKEND}" = claude ] && host="Claude Code"
+    [ "${BACKEND}" = claude ] && host="Claude Code${CLAUDE_URL:+ via ${CLAUDE_URL#*://}}"
     # counts only; --verbose names them
     [ "${MG_MODE}" = off ] || guards=$((guards + 1))
     case "${AG_DESC}" in *" on"*) guards=$((guards + 1)) ;; esac

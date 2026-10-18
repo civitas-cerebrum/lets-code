@@ -185,6 +185,26 @@ stay out of it. The module starts the proxy when a session begins on Claude
 (and again if it stops), one per user, shared by sessions and subagents; its
 log is `~/.pi/agent/lets-code-claude/proxy.log`.
 
+**One proxy per machine, or another machine's.** The first session on
+Claude starts the proxy on its own machine, and every later session there
+shares it. A machine where Claude Code is slow or missing (a phone) can use
+another machine's proxy instead: run `lets-code claude-remote` there, which
+starts the proxy, makes a key and prints two lines for the other machine's
+config:
+
+```bash
+CLAUDE_URL="https://claude.example.net"   # a reverse proxy in front of 127.0.0.1:8795
+CLAUDE_TOKEN="..."
+```
+
+The proxy listens on 127.0.0.1 only. Requests that come through a reverse
+proxy (one that sets `X-Forwarded-For`, as nginx does with `proxy_set_header
+X-Forwarded-For`) need the key; without a key file remote use is off. Give
+the reverse proxy `proxy_buffering off` and a long `proxy_read_timeout`, and
+keep it to your own network or VPN. pi's tools still run on the machine pi
+runs on. `setup` asks for the address and key when you choose Claude
+through another machine.
+
 **Thinking and switching.** pi's thinking level is Claude Code's effort:
 `low`, `medium` (the default), `high`, `xhigh`, `max`; `off` is Claude Code's
 thinking off (the model may still think a little), and there is no `minimal`.
@@ -223,6 +243,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 |---|---|
 | `BACKEND` | Empty: the server at `ENDPOINTS`. `claude`: Claude through Claude Code (see [Claude](#claude-claude-code-subscription)). |
 | `CLAUDE_MODELS` | The Claude models in `/model`: Claude Code aliases or full model names (default `haiku sonnet opus fable`). |
+| `CLAUDE_URL` / `CLAUDE_TOKEN` | Another machine's Claude proxy and its key (`lets-code claude-remote` there prints both); empty: the proxy runs here. |
 | `ENDPOINTS` | Space-separated base URLs, most preferred first. IPs, `localhost`, bare hostnames and `*.local` get `http://`, other domains `https://`. |
 | `TOKEN` | API key. Any value works for a server without auth. |
 | `CA_PATH` | Root CA for an https endpoint with a private CA (exported as `NODE_EXTRA_CA_CERTS`). |

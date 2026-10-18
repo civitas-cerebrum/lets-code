@@ -16,7 +16,7 @@ mkdir -p "${work}/bin" "${work}/proj"
 cat > "${work}/bin/pi" <<'EOF'
 #!/usr/bin/env bash
 [ "${1:-}" = --version ] && { echo 1.0.0; exit 0; }
-{ printf '%s\n' "$*"; printf 'claude-provider=%s\n' "${LETS_CODE_CLAUDE_PROVIDER:-}"; } > "${LC_TEST_OUT}"
+{ printf '%s\n' "$*"; printf 'claude-provider=%s\n' "${LETS_CODE_CLAUDE_PROVIDER:-}"; printf 'claude-url=%s token=%s\n' "${LETS_CODE_CLAUDE_URL:-}" "${LETS_CODE_CLAUDE_TOKEN:-}"; } > "${LC_TEST_OUT}"
 EOF
 cat > "${work}/bin/claude" <<'EOF'
 #!/usr/bin/env bash
@@ -105,5 +105,49 @@ t "server launch without Claude Code: no Claude models" "$(models "${h}" lets-co
 # --claude without Claude Code
 LC_PATH="${noclaude}:/usr/bin:/bin" launch "${work}/h8" --claude
 t "--claude without Claude Code: refused" "$(cat "${work}/h8/rc")|$(grep -c 'needs Claude Code' "${work}/h8/out")" "1|1"
+
+# CLAUDE_URL: another machine's proxy (a stand-in that wants "Bearer tok"),
+# from a machine without Claude Code
+cat > "${work}/remote.py" <<'EOF'
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        ok = self.headers.get("Authorization") == "Bearer tok"
+        self.send_response(200 if ok else 401); self.send_header("content-type", "application/json"); self.end_headers()
+        self.wfile.write(b'{"ok":true}' if ok else b'{"error":{"message":"bad key"}}')
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(("127.0.0.1", 0), H); print(s.server_port, flush=True); s.serve_forever()
+EOF
+python3 "${work}/remote.py" > "${work}/rport" & rsrv=$!
+for _ in $(seq 50); do [ -s "${work}/rport" ] && break; sleep 0.1; done
+rurl="http://127.0.0.1:$(cat "${work}/rport")"
+h="${work}/h9"; mkdir -p "${h}/.config/lets-code"
+printf 'BACKEND="claude"\nCLAUDE_URL="%s/"\nCLAUDE_TOKEN="tok"\n' "${rurl}" > "${h}/.config/lets-code/config"
+LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
+t "CLAUDE_URL: launches Claude without Claude Code here" "$(cat "${h}/rc")|$(args "${h}")" "0|--provider lets-code-claude --model claude-haiku -p hi"
+t "CLAUDE_URL: provider points there, key from the environment" "$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1]))["providers"]["lets-code-claude"]; print(p["baseUrl"], p["apiKey"])' "${h}/.pi/agent/models.json")" "${rurl}/v1 \$LETS_CODE_CLAUDE_TOKEN"
+t "CLAUDE_URL: the module gets URL and token" "$(sed -n 3p "${h}/pi-args")" "claude-url=${rurl} token=tok"
+t "CLAUDE_URL: banner" "$(grep -o "claude-haiku @ Claude Code via 127.0.0.1:[0-9]*" "${h}/out" | sed 's/:[0-9]*$//')" "claude-haiku @ Claude Code via 127.0.0.1"
+printf 'BACKEND="claude"\nCLAUDE_URL="%s"\nCLAUDE_TOKEN="wrong"\n' "${rurl}" > "${h}/.config/lets-code/config"
+LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
+t "CLAUDE_URL, wrong token: refused with a hint" "$(cat "${h}/rc")|$(grep -c 'refused CLAUDE_TOKEN' "${h}/out")" "1|1"
+kill "${rsrv}" 2>/dev/null
+printf 'BACKEND="claude"\nCLAUDE_URL="%s"\nCLAUDE_TOKEN="tok"\n' "${rurl}" > "${h}/.config/lets-code/config"
+LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
+t "CLAUDE_URL, nothing there: refused" "$(cat "${h}/rc")|$(grep -c 'not reachable' "${h}/out")" "1|1"
+
+# lets-code claude-remote: key (mode 600), proxy started, config lines printed
+h="${work}/h10"; mkdir -p "${h}"
+port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+( cd "${work}/proj" && HOME="${h}" PATH="${work}/bin:${PATH}" LETS_CODE_CLAUDE_PORT="${port}" bash "${lc}" claude-remote > "${h}/out" 2>&1 < /dev/null; echo $? > "${h}/rc" )
+key="$(cat "${h}/.pi/agent/lets-code-claude/remote.key" 2>/dev/null)"
+t "claude-remote: exit status" "$(cat "${h}/rc")" 0
+t "claude-remote: key file, mode 600" "$(stat -c %a "${h}/.pi/agent/lets-code-claude/remote.key" 2>/dev/null)|${#key}" "600|48"
+t "claude-remote: prints the token" "$(grep -c "CLAUDE_TOKEN=\"${key}\"" "${h}/out")" 1
+via() { curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: 10.6.0.2" ${1:+-H "Authorization: Bearer $1"} "http://127.0.0.1:${port}/health"; }
+t "claude-remote: proxy up, key needed through a reverse proxy" "$(via "${key}")|$(via nope)" "200|401"
+( cd "${work}/proj" && HOME="${h}" PATH="${work}/bin:${PATH}" LETS_CODE_CLAUDE_PORT="${port}" bash "${lc}" claude-remote --new-key > "${h}/out2" 2>&1 < /dev/null )
+t "claude-remote --new-key: the old key is refused" "$(via "${key}")|$(via "$(cat "${h}/.pi/agent/lets-code-claude/remote.key")")" "401|200"
+kill "$(curl -s "http://127.0.0.1:${port}/health" | python3 -c 'import json, sys; print(json.load(sys.stdin)["pid"])')" 2>/dev/null
 
 exit "${fail}"

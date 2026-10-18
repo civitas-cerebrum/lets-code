@@ -188,22 +188,38 @@ log is `~/.pi/agent/lets-code-claude/proxy.log`.
 **One proxy per machine, or another machine's.** The first session on
 Claude starts the proxy on its own machine, and every later session there
 shares it. A machine where Claude Code is slow or missing (a phone) can use
-another machine's proxy instead: run `lets-code claude-remote` there, which
-starts the proxy, makes a key and prints two lines for the other machine's
-config:
+another machine's proxy instead. On the serving machine, `lets-code
+claude-remote` starts the proxy and says what to set; on the other machine,
+in its config (with `BACKEND="claude"` to make it the default) or in
+`presets/claude`:
 
 ```bash
 CLAUDE_URL="https://claude.example.net"   # a reverse proxy in front of 127.0.0.1:8795
-CLAUDE_TOKEN="..."
+CLAUDE_TOKEN="sk-ant-oat01-..."           # your Claude Code token, see below
 ```
 
-The proxy listens on 127.0.0.1 only. Requests that come through a reverse
-proxy (one that sets `X-Forwarded-For`, as nginx does with `proxy_set_header
-X-Forwarded-For`) need the key; without a key file remote use is off. Give
-the reverse proxy `proxy_buffering off` and a long `proxy_read_timeout`, and
-keep it to your own network or VPN. pi's tools still run on the machine pi
-runs on. `setup` asks for the address and key when you choose Claude
-through another machine.
+The proxy runs that machine's conversations on the token, so they use the
+token owner's subscription, never the serving machine's own login, and two
+tokens never share a process. pi's tools still run on the machine pi runs
+on. The proxy listens on 127.0.0.1 only; a request that comes through a
+reverse proxy (one that sets `X-Forwarded-For`, as nginx does with
+`proxy_set_header X-Forwarded-For`) is refused without a token. Give the
+reverse proxy `proxy_buffering off` and a long `proxy_read_timeout`, and keep
+it to your own network or VPN. `setup` asks for the address and token when
+you choose Claude through another machine.
+
+**Getting the token.** On any machine where Claude Code is signed in with
+your Claude subscription (the phone itself works too):
+
+```bash
+claude setup-token
+```
+
+It opens a sign-in page in the browser (or prints its address to open
+elsewhere), and after you approve it prints a long-lived token that starts
+with `sk-ant-oat01-`. Copy it into `CLAUDE_TOKEN`. Treat it like a password:
+it works for your subscription wherever it is used. If the token is wrong, the launch says so (`401`), and a token Anthropic
+rejects shows up as "OAuth access token is invalid" on the first request.
 
 **Thinking and switching.** pi's thinking level is Claude Code's effort:
 `low`, `medium` (the default), `high`, `xhigh`, `max`; `off` is Claude Code's
@@ -243,7 +259,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 |---|---|
 | `BACKEND` | Empty: the server at `ENDPOINTS`. `claude`: Claude through Claude Code (see [Claude](#claude-claude-code-subscription)). |
 | `CLAUDE_MODELS` | The Claude models in `/model`: Claude Code aliases or full model names (default `haiku sonnet opus fable`). |
-| `CLAUDE_URL` / `CLAUDE_TOKEN` | Another machine's Claude proxy and its key (`lets-code claude-remote` there prints both); empty: the proxy runs here. |
+| `CLAUDE_URL` / `CLAUDE_TOKEN` | Another machine's Claude proxy, and your Claude Code token for it (`claude setup-token`; see [Claude](#claude-claude-code-subscription)); empty: the proxy runs here. |
 | `ENDPOINTS` | Space-separated base URLs, most preferred first. IPs, `localhost`, bare hostnames and `*.local` get `http://`, other domains `https://`. |
 | `TOKEN` | API key. Any value works for a server without auth. |
 | `CA_PATH` | Root CA for an https endpoint with a private CA (exported as `NODE_EXTRA_CA_CERTS`). |

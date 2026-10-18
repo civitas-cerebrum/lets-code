@@ -20,8 +20,9 @@
 #                                where Claude Code is installed, and Ctrl+S on one
 #                                there makes later launches start on it
 #   lets-code claude-remote      let other machines (a phone) use this machine's
-#                                Claude: starts the proxy, prints CLAUDE_URL and
-#                                CLAUDE_TOKEN for their config (--new-key: a new key)
+#                                Claude proxy: starts it and says what to set
+#                                there (CLAUDE_URL, and CLAUDE_TOKEN: your Claude
+#                                Code token from `claude setup-token`)
 #   lets-code update             replace this lets-code with the latest
 #                                release published to npm
 #   lets-code update --snapshot  ... with the latest commit on main instead
@@ -138,9 +139,10 @@
 #      skills, hooks and CLAUDE.md stay out of it. CLAUDE_MODELS picks the
 #      models listed; LETS_CODE_CLAUDE_PORT (8795) the proxy's port. The
 #      first session on Claude starts the proxy on its own machine and every
-#      later session there shares it; CLAUDE_URL (+ CLAUDE_TOKEN) points a
-#      machine at another one's proxy instead (see claude-remote), so it
-#      needs no Claude Code of its own and starts nothing.
+#      later session there shares it; CLAUDE_URL (+ CLAUDE_TOKEN, your Claude
+#      Code token from `claude setup-token`) points a machine at another
+#      one's proxy instead (see claude-remote), so it needs no Claude Code of
+#      its own and starts nothing; its requests run on that token.
 #  10. Claude Code adapter (on by default): a project or user set up for
 #      Claude Code works as it is, read at each start: CLAUDE.md files and
 #      their @imports, .claude/skills, .claude/commands (/name), agents
@@ -1940,7 +1942,7 @@ function thinkingFor(level) {
 const sessions = new Map();
 
 class Session {
-  constructor({ model, thinking, system, tools, compat }) {
+  constructor({ model, thinking, system, tools, compat, token = null }) {
     this.id = randomUUID();
     this.model = model; // switched live with setModel, like Claude Code's /model
     this.compat = compat;
@@ -1999,6 +2001,8 @@ class Session {
         MCP_TIMEOUT: "30000",
         CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+        // a remote caller's own Claude Code token; local sessions use this machine's login
+        ...(token && { CLAUDE_CODE_OAUTH_TOKEN: token }),
         ...(this.thinkingOff && { CLAUDE_CODE_DISABLE_THINKING: "1" }),
       },
     });
@@ -2300,13 +2304,8 @@ function openaiUsage(u = {}) {
   };
 }
 
-function remoteKey() {
-  try {
-    return fs.readFileSync(path.join(STATE_DIR, "remote.key"), "utf8").trim();
-  } catch {
-    return "";
-  }
-}
+// a Claude Code OAuth token, as `claude setup-token` prints it
+const CLAUDE_TOKEN_RE = /^sk-ant-oat\d+-[A-Za-z0-9_-]{20,}$/;
 
 function sendJson(res, status, body) {
   res.writeHead(status, { "content-type": "application/json" });
@@ -2315,7 +2314,7 @@ function sendJson(res, status, body) {
 
 // ---------- chat completions ----------
 
-async function chat(req, res, body) {
+async function chat(req, res, body, token = null) {
   const modelId = body.model || "claude-haiku";
   const model = MODELS[modelId] ?? modelId;
   const thinking = thinkingFor(body.reasoning_effort);
@@ -2326,7 +2325,8 @@ async function chat(req, res, body) {
     .join("\n\n");
   const conv = all.filter((m) => m.role !== "system" && m.role !== "developer");
   const tools = (body.tools ?? []).filter((t) => t.type === "function").map((t) => t.function);
-  const compat = sha(JSON.stringify([system, tools]));
+  // a conversation only continues in a process of the same token
+  const compat = sha(JSON.stringify([system, tools, token ? sha(token) : null]));
   if (!conv.length) return sendJson(res, 400, { error: { message: "no messages" } });
 
   // tail = what is new since the previous request: tool results and/or user turns
@@ -2386,7 +2386,7 @@ async function chat(req, res, body) {
     }
   } else {
     evict();
-    session = new Session({ model, thinking, system, tools, compat });
+    session = new Session({ model, thinking, system, tools, compat, token });
     session.sink = sink;
     session.convLen = conv.length;
     session.convFp = fingerprint(conv);
@@ -2429,13 +2429,15 @@ const server = http.createServer(async (req, res) => {
     if (API_KEY && req.headers.authorization !== `Bearer ${API_KEY}`)
       return sendJson(res, 401, { error: { message: "bad api key" } });
     // through a reverse proxy (nginx sets X-Forwarded-For): another machine's
-    // lets-code (CLAUDE_URL), which must send the key in STATE_DIR/remote.key
-    // (`lets-code claude-remote` makes it); none there: remote use is off.
-    // Sessions on this machine connect directly and need no key.
+    // lets-code (CLAUDE_URL). It sends its user's own Claude Code token
+    // (`claude setup-token`), and its conversations run on that token, so
+    // they use that user's subscription, never this machine's login.
+    // Sessions on this machine connect directly and use its own login.
+    let token = null;
     if (req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || req.headers.forwarded) {
-      const key = remoteKey();
-      if (!key) return sendJson(res, 403, { error: { message: "remote use is off; run `lets-code claude-remote` on the proxy's machine" } });
-      if (req.headers.authorization !== `Bearer ${key}`) return sendJson(res, 401, { error: { message: "bad key for the Claude proxy" } });
+      token = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "").trim();
+      if (!CLAUDE_TOKEN_RE.test(token))
+        return sendJson(res, 401, { error: { message: "send your Claude Code token (from `claude setup-token`) as the API key (CLAUDE_TOKEN in lets-code)" } });
     }
     const url = new URL(req.url, "http://x");
     if (req.method === "GET" && url.pathname === "/v1/models")
@@ -2462,7 +2464,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
       let raw = "";
       for await (const c of req) raw += c;
-      return await chat(req, res, JSON.parse(raw));
+      return await chat(req, res, JSON.parse(raw), token);
     }
     sendJson(res, 404, { error: { message: "not found" } });
   } catch (e) {
@@ -13956,18 +13958,21 @@ run_setup() {  # run_setup [full|granular]
            echo ""
            echo "Where does Claude run?"
            echo "  1) here, through this machine's Claude Code  [default]"
-           echo "  2) through another machine's lets-code (run 'lets-code claude-remote' there first)"
+           echo "  2) through another machine's lets-code ('lets-code claude-remote' there), with your Claude Code token"
            printf "Choice [1]: "
            read -r reply
            case "${reply:-1}" in
                1) claude_setup_check || exit 1 ;;
                2) printf "Its address (the reverse proxy in front of it, e.g. https://claude.example.net): "
                   read -r claude_url; claude_url="${claude_url%/}"
-                  printf "Its key (CLAUDE_TOKEN, as 'lets-code claude-remote' printed it): "
+                  echo "Your Claude Code token: run 'claude setup-token' on any machine signed in to Claude Code"
+                  echo "with your subscription and paste the sk-ant-oat01-... token it prints (requests use that subscription)."
+                  printf "Token: "
                   read -r claude_token
                   case "$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Authorization: Bearer ${claude_token}" "${claude_url}/health" 2>/dev/null)" in
                       200) log "the Claude proxy at ${claude_url} answered" ;;
-                      *)   log_error "the Claude proxy at ${claude_url} did not accept the key (or is not running) — saving anyway; fix CLAUDE_URL / CLAUDE_TOKEN in ${CONFIG_FILE}." ;;
+                      401) log_error "that does not look like a Claude Code token (claude setup-token prints sk-ant-oat01-...) — saving anyway; fix CLAUDE_TOKEN in ${CONFIG_FILE}." ;;
+                      *)   log_error "the Claude proxy at ${claude_url} did not answer (is it running? 'lets-code claude-remote' there) — saving anyway; fix CLAUDE_URL in ${CONFIG_FILE}." ;;
                   esac ;;
                *) log_error "choose 1 or 2"; exit 1 ;;
            esac ;;
@@ -14040,8 +14045,9 @@ run_setup() {  # run_setup [full|granular]
             echo "# The Claude models in pi's /model (pick one there; Ctrl+S makes it the"
             echo "# default): Claude Code aliases, or full model names (claude-...)."
             echo "CLAUDE_MODELS=\"haiku sonnet opus fable\""
-            echo "# Another machine's Claude proxy ('lets-code claude-remote' there prints"
-            echo "# both); empty: Claude runs here, through this machine's Claude Code."
+            echo "# Another machine's Claude proxy ('lets-code claude-remote' there), and"
+            echo "# your Claude Code token for it ('claude setup-token' prints one; its"
+            echo "# requests use your subscription); empty: Claude runs here."
             echo "CLAUDE_URL=\"${claude_url}\""
             echo "CLAUDE_TOKEN=\"${claude_token}\""
             echo ""
@@ -14328,22 +14334,18 @@ if sys.argv[1] and sys.argv[1] not in ids: ids.append(sys.argv[1])
 print(json.dumps({"data": [{"id": i, "owned_by": "anthropic", "max_model_len": int(os.environ["LC_CONTEXT"])} for i in ids]}))' "${1:-}"
 }
 
-# lets-code claude-remote [--new-key]: lets other machines (a phone, say) use
-# this machine's Claude proxy: makes the key (kept in the proxy's state dir,
-# mode 600), starts the proxy if it is not running, and prints the two config
-# lines for the other machine. The proxy listens on 127.0.0.1 only; another
-# machine reaches it through a reverse proxy that sets X-Forwarded-For, and
-# such requests need the key (sessions here never do).
+# lets-code claude-remote: lets other machines (a phone, say) use this
+# machine's Claude proxy: starts it if it is not running and prints what the
+# other machine needs. The proxy listens on 127.0.0.1 only; another machine
+# reaches it through a reverse proxy that sets X-Forwarded-For, and such a
+# request must carry its user's own Claude Code token (claude setup-token):
+# its conversations run on that token, so they use that user's subscription
+# and never this machine's login. Sessions here need no token.
 claude_remote() {
-    local state key port="${LETS_CODE_CLAUDE_PORT:-8795}" err
-    command -v claude >/dev/null 2>&1 || { log_error "this machine needs Claude Code (the claude command), signed in, to serve Claude."; exit 1; }
+    local state port="${LETS_CODE_CLAUDE_PORT:-8795}" err
+    command -v claude >/dev/null 2>&1 || { log_error "this machine needs Claude Code (the claude command) to serve Claude."; exit 1; }
     command -v node >/dev/null 2>&1 || { log_error "node not found."; exit 1; }
-    state="${LETS_CODE_CLAUDE_STATE:-${PI_AGENT_DIR}/lets-code-claude}"; key="${state}/remote.key"
-    mkdir -p "${state}"
-    if [ "${1:-}" = --new-key ] || [ ! -s "${key}" ]; then
-        ( umask 077; od -An -N24 -tx1 /dev/urandom | tr -d ' \n' > "${key}.tmp" && mv "${key}.tmp" "${key}" )
-        log "new key in ${key} (other machines with the old one are refused now)"
-    fi
+    state="${LETS_CODE_CLAUDE_STATE:-${PI_AGENT_DIR}/lets-code-claude}"
     pi_write_claude_extension
     if ! err="$(PI_CODING_AGENT_DIR="${PI_AGENT_DIR}" LETS_CODE_CLAUDE_PORT="${port}" node -e '
         import(process.argv[1]).then((m) => m.ensureProxy()).then((e) => { if (e) { console.log(e); process.exit(1); } })' \
@@ -14354,11 +14356,17 @@ claude_remote() {
     echo ""
     echo "Other machines reach it through a reverse proxy in front of 127.0.0.1:${port} that sets"
     echo "X-Forwarded-For (nginx: proxy_pass, proxy_set_header X-Forwarded-For, proxy_buffering off,"
-    echo "proxy_read_timeout 3600s). On the other machine, in ~/.config/lets-code/config (BACKEND=\"claude\""
-    echo "there makes it the default) or in ~/.config/lets-code/presets/claude (for --claude):"
+    echo "proxy_read_timeout 3600s); keep it to your own network or VPN."
+    echo ""
+    echo "On the other machine, in ~/.config/lets-code/config (BACKEND=\"claude\" there makes it the"
+    echo "default) or in ~/.config/lets-code/presets/claude (for --claude):"
     echo ""
     echo "  CLAUDE_URL=\"https://<the reverse proxy's address>\""
-    echo "  CLAUDE_TOKEN=\"$(cat "${key}")\""
+    echo "  CLAUDE_TOKEN=\"<your Claude Code token>\""
+    echo ""
+    echo "The token: run 'claude setup-token' on any machine signed in to Claude Code with your"
+    echo "subscription. It opens a sign-in page (or prints its address) and then prints a long-lived"
+    echo "token, sk-ant-oat01-...; treat it like a password. Requests with it use that subscription."
     exit 0
 }
 
@@ -14714,7 +14722,7 @@ set -- ${ARGS[@]+"${ARGS[@]}"}
 BACKEND=""            # claude: Claude through Claude Code (setup's second choice, or --claude); empty: the server at ENDPOINTS
 CLAUDE_MODELS="haiku sonnet opus fable"   # the Claude models in /model: CLI aliases (claude-<alias>) or full model names
 CLAUDE_URL=""         # another machine's Claude proxy (lets-code claude-remote there); empty: the proxy runs here
-CLAUDE_TOKEN=""       # its key
+CLAUDE_TOKEN=""       # your Claude Code token for it (claude setup-token); its requests use your subscription
 ENDPOINTS=""
 TOKEN="dummy-key"
 CA_PATH=""
@@ -14866,15 +14874,14 @@ if [ "${BACKEND}" = claude ]; then
         # instead of a failed first request
         case "$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Authorization: Bearer ${CLAUDE_TOKEN}" "${CLAUDE_URL}/health" 2>/dev/null)" in
             200) ;;
-            401) log_error "the Claude proxy at ${CLAUDE_URL} refused CLAUDE_TOKEN; 'lets-code claude-remote' on that machine prints the current one."; exit 1 ;;
-            403) log_error "the Claude proxy at ${CLAUDE_URL} has remote use off; run 'lets-code claude-remote' on that machine."; exit 1 ;;
+            401) log_error "the Claude proxy at ${CLAUDE_URL} wants your Claude Code token in CLAUDE_TOKEN: run 'claude setup-token' (on any machine signed in to Claude Code) and put the sk-ant-oat... token it prints there."; exit 1 ;;
             502|503|504) log_error "no Claude proxy is running behind ${CLAUDE_URL}; start one there with 'lets-code claude-remote' (or any 'lets-code --claude' session)."; exit 1 ;;
             000) log_error "the Claude proxy at ${CLAUDE_URL} is not reachable from here (or its certificate is not trusted)."; exit 1 ;;
             *) log_error "${CLAUDE_URL} does not answer like a lets-code Claude proxy."; exit 1 ;;
         esac
         ENDPOINTS="${CLAUDE_URL}"
     elif ! command -v claude >/dev/null 2>&1; then
-        log_error "the Claude backend needs Claude Code (the claude command): install it (https://claude.com/claude-code) and run 'claude auth login', or set CLAUDE_URL to another machine's Claude proxy."
+        log_error "the Claude backend needs Claude Code (the claude command): install it (https://claude.com/claude-code) and run 'claude auth login', or set CLAUDE_URL (and CLAUDE_TOKEN) to use another machine's Claude proxy."
         exit 1
     else
         ENDPOINTS="http://127.0.0.1:${CLAUDE_PORT}"

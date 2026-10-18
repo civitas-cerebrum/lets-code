@@ -32,7 +32,7 @@ const fs = require("fs"); const cp = require("child_process"); const rl = requir
 const argv = process.argv.slice(2); const arg = (k) => { const i = argv.indexOf(k); return i < 0 ? null : argv[i + 1]; };
 let model = arg("--model"); const effort = arg("--effort");
 const rec = (o) => fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ pid: process.pid, ...o }) + "\\n");
-rec({ event: "start", model, effort, thinkingOff: process.env.CLAUDE_CODE_DISABLE_THINKING === "1", display: arg("--thinking-display") });
+rec({ event: "start", model, effort, thinkingOff: process.env.CLAUDE_CODE_DISABLE_THINKING === "1", display: arg("--thinking-display"), token: process.env.CLAUDE_CODE_OAUTH_TOKEN || null });
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const ev = (e) => out({ type: "stream_event", event: e });
 const srv = JSON.parse(fs.readFileSync(arg("--mcp-config"), "utf8")).mcpServers.pi;
@@ -88,8 +88,8 @@ const base = `http://127.0.0.1:${port}`;
 const pids = new Set();
 
 // a chat request; returns { content, reasoning, toolCalls, finish }
-async function chat(body) {
-	const r = await fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ stream: true, ...body }) });
+async function chat(body, headers = {}) {
+	const r = await fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ stream: true, ...body }) });
 	const res = { content: "", reasoning: "", toolCalls: [], finish: null };
 	for (const line of (await r.text()).split("\n")) {
 		if (!line.startsWith("data: {")) continue;
@@ -152,14 +152,22 @@ try {
 	t("thinking off: a new claude with thinking off at effort low", starts.slice(-1).map((s) => [s.model, s.effort, s.thinkingOff]), [["sonnet", "low", true]]);
 	t("thinking off: earlier turns replayed", records().filter((x) => x.event === "user").slice(-1)[0].text.includes("<conversation>"), true);
 
-	// other machines (CLAUDE_URL) come through a reverse proxy: they need the
-	// key in the state dir; without one remote use is off
-	const via = (key) => fetch(`${base}/health`, { headers: { "X-Forwarded-For": "10.6.0.2", ...(key ? { Authorization: `Bearer ${key}` } : {}) } }).then((r) => r.status);
-	t("through a reverse proxy, no key file: refused (remote use off)", await via("x"), 403);
-	writeFileSync(join(work, "state", "remote.key"), "k3y\n");
-	t("through a reverse proxy: wrong key refused, right key let in", [await via("nope"), await via(""), await via("k3y")], [401, 401, 200]);
-	t("directly (this machine): no key needed", (await fetch(`${base}/health`)).status, 200);
-	t("checkRemote: a proxy that answers", await mod.checkRemote({ LETS_CODE_CLAUDE_URL: base + "/", LETS_CODE_CLAUDE_TOKEN: "k3y" }), "");
+	// other machines (CLAUDE_URL) come through a reverse proxy and send their
+	// user's Claude Code token; their conversations run on it, one process per token
+	const T1 = "sk-ant-oat01-" + "a".repeat(40), T2 = "sk-ant-oat01-" + "b".repeat(40);
+	const fwd = (tok) => ({ "X-Forwarded-For": "10.6.0.2", ...(tok ? { Authorization: `Bearer ${tok}` } : {}) });
+	const via = (tok) => fetch(`${base}/health`, { headers: fwd(tok) }).then((r) => r.status);
+	t("through a reverse proxy: no token, junk or an API key refused; a Claude Code token let in",
+		[await via(""), await via("nope"), await via("sk-ant-api03-" + "x".repeat(40)), await via(T1)], [401, 401, 401, 200]);
+	t("directly (this machine): no token needed", (await fetch(`${base}/health`)).status, 200);
+	const rconv = [{ role: "system", content: "sys R" }, { role: "user", content: "hi from afar" }];
+	r = await chat({ model: "claude-haiku", messages: rconv }, fwd(T1));
+	t("remote turn: answered", r.content, "echo[haiku]: hi from afar");
+	r = await chat({ model: "claude-haiku", messages: rconv }, fwd(T2));
+	const tokStarts = records().filter((x) => x.event === "start").map((x) => x.token);
+	t("remote turns run on the caller's token, one process each", tokStarts.slice(-2), [T1, T2]);
+	t("local sessions run on this machine's login", tokStarts.slice(0, -2).every((x) => x === null), true);
+	t("checkRemote: a proxy that answers", await mod.checkRemote({ LETS_CODE_CLAUDE_URL: base + "/", LETS_CODE_CLAUDE_TOKEN: T1 }), "");
 	t("checkRemote: nothing there", (await mod.checkRemote({ LETS_CODE_CLAUDE_URL: `http://127.0.0.1:${await freePort()}` })).includes("not reachable"), true);
 
 	// a newer server.mjs (lets-code updated): the old daemon is replaced

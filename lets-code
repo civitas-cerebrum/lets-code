@@ -2471,7 +2471,7 @@ const server = http.createServer(async (req, res) => {
     else res.end();
   }
 });
-server.listen(PORT, HOST, () => log(`claude-sub-proxy on http://${HOST}:${PORT}/v1`));
+server.listen(PORT, HOST, () => log(`lets-code Claude proxy on http://${HOST}:${PORT}/v1 (version ${VERSION})`));
 
 const shutdown = () => {
   for (const s of sessions.values()) s.die("shutdown");
@@ -14869,7 +14869,7 @@ if [ "${BACKEND}" = claude ]; then
             401) log_error "the Claude proxy at ${CLAUDE_URL} refused CLAUDE_TOKEN; 'lets-code claude-remote' on that machine prints the current one."; exit 1 ;;
             403) log_error "the Claude proxy at ${CLAUDE_URL} has remote use off; run 'lets-code claude-remote' on that machine."; exit 1 ;;
             502|503|504) log_error "no Claude proxy is running behind ${CLAUDE_URL}; start one there with 'lets-code claude-remote' (or any 'lets-code --claude' session)."; exit 1 ;;
-            000) log_error "the Claude proxy at ${CLAUDE_URL} is not reachable from here."; exit 1 ;;
+            000) log_error "the Claude proxy at ${CLAUDE_URL} is not reachable from here (or its certificate is not trusted)."; exit 1 ;;
             *) log_error "${CLAUDE_URL} does not answer like a lets-code Claude proxy."; exit 1 ;;
         esac
         ENDPOINTS="${CLAUDE_URL}"
@@ -14929,7 +14929,8 @@ else
     fi
 fi
 
-case "${BASE_URL}" in
+# (the Claude backend's remote check above already made a TLS request with its key)
+[ "${BACKEND}" = claude ] || case "${BASE_URL}" in
     https://*)
         if [ -z "${CA_FOUND}" ] && [ "${INSECURE}" != true ]; then
             # only refuse if the cert actually fails system trust

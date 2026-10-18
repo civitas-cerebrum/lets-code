@@ -1645,7 +1645,9 @@ pi_write_grounding_extension() {
 // Written by lets-code (grounding guard); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the grounding guard on
 // (LETS_CODE_GROUNDING_ON=1). Two parts:
-//   * a short system-prompt section: facts about the project and machine
+//   * a short system-prompt section: today's local date and time zone
+//     (local models guess dates badly and write them into docs); facts
+//     about the project and machine
 //     (file contents, paths, names, versions, config, command output) are
 //     looked up with tools, not guessed; nothing is invented; what could
 //     not be checked is said; an empty grep is not absence (the phone
@@ -1672,6 +1674,11 @@ export const SECTION = [
 	"- rc=0 is not success: to claim the system accepted an action, also run a control that must fail (a nonexistent target) and show that it answers differently.",
 	"- Report results as they are: if a command failed or a test is red, say so with the relevant output; if you skipped a step, say that.",
 ].join("\n");
+
+// the date line, built per prompt so a session that runs past midnight follows
+export function dateLine(now = new Date()): string {
+	return `- Today is ${now.toLocaleDateString("sv-SE")} (local time, ${Intl.DateTimeFormat().resolvedOptions().timeZone}). Use this date; do not guess one.`;
+}
 
 export function blockText(path: string): string {
 	return `[lets-code] ${path} already exists and has not been read in this session. ` +
@@ -1701,7 +1708,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event: any) => {
 		const sections = event?.systemPromptOptions?.sections;
-		if (sections && typeof sections === "object") sections.lets_code_grounding = SECTION;
+		if (sections && typeof sections === "object") sections.lets_code_grounding = `${SECTION}\n${dateLine()}`;
 		return undefined;
 	});
 
@@ -3794,6 +3801,18 @@ async function snapshot(repo: Repo, git: Runner): Promise<void> {
 	const total = untracked.reduce((s, u) => s + (u.size > CP_MAX_FILE ? 0 : u.size), 0);
 	const exclude = total > CP_MAX_UNTRACKED ? untracked.map((u) => `:(exclude)${u.f}`) : untracked.filter((u) => u.size > CP_MAX_FILE).map((u) => `:(exclude)${u.f}`);
 	if (total > CP_MAX_UNTRACKED) cpLog(repo, `untracked files total ${(total / 2 ** 20).toFixed(0)} MB > cap: only tracked files snapshotted`);
+	// tracked files that a .gitignore rule matches: add -A never brings them
+	// into the private index, so the tree would drop them. Sync that set from
+	// the real index (update-index ignores .gitignore); once in, add -A keeps
+	// them current. read-tree HEAD would do it too but throws away the stat
+	// cache that keeps snapshots fast.
+	const ignoredTracked = async (env: Env) => new Set((await git(["ls-files", "-z", "-c", "-i", "--exclude-standard"], top, env)).split("\0").filter(Boolean));
+	try {
+		const want = await ignoredTracked({}), have = await ignoredTracked(idx);
+		const stale = [...have].filter((f) => !want.has(f)), missing = [...want].filter((f) => !have.has(f));
+		for (let i = 0; i < stale.length; i += 500) await git(["update-index", "--force-remove", "--", ...stale.slice(i, i + 500)], top, idx);
+		for (let i = 0; i < missing.length; i += 500) await git(["update-index", "--add", "--remove", "--", ...missing.slice(i, i + 500)], top, idx);
+	} catch (e) { cpLog(repo, e); }
 	try { await git(["add", "-A", "--ignore-errors", "--", ".", ...exclude], top, idx); } catch (e) { cpLog(repo, e); }  // unreadable files: what could be added was; exit status non-zero
 	const tree = (await git(["write-tree"], top, idx)).trim();
 	let head: string | null = null, headTree: string | null = null;

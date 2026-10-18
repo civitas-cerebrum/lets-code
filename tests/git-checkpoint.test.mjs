@@ -151,6 +151,31 @@ let br = refs(bg);
 t("small file captured", git(bg, "show", `${br[0]}:small.txt`), "s\n");
 t("30 MB untracked file left out", (() => { try { git(bg, "show", `${br[0]}:big.bin`); return "captured"; } catch { return "absent"; } })(), "absent");
 
+// tracked files that a .gitignore rule matches stay in the checkpoint (issue #59)
+const ti = repo("pi/tracked-ignored");
+execFileSync("mkdir", [join(ti, "d")]);
+writeFileSync(join(ti, "d/keep.md"), "keep\n"); writeFileSync(join(ti, "d/gone.md"), "gone\n"); writeFileSync(join(ti, "d/edit.md"), "e1\n");
+git(ti, "add", "-A"); git(ti, "commit", "-q", "-m", "d");
+writeFileSync(join(ti, "d/.gitignore"), "*\n");                 // untracked; ignores everything in d/, tracked files too
+writeFileSync(join(ti, "d/edit.md"), "e2\n"); rmSync(join(ti, "d/gone.md")); writeFileSync(join(ti, "d/new.md"), "n\n");
+await tc("bash", { command: "ls" }, ti);
+let tr = refs(ti);
+const has = (ref, f) => { try { git(ti, "cat-file", "-e", `${ref}:${f}`); return true; } catch { return false; } };
+t("tracked+ignored: unchanged file kept", git(ti, "show", `${tr[0]}:d/keep.md`), "keep\n");
+t("tracked+ignored: change captured", git(ti, "show", `${tr[0]}:d/edit.md`), "e2\n");
+t("tracked+ignored: deletion captured", has(tr[0], "d/gone.md"), false);
+t("ignored untracked file still left out", has(tr[0], "d/new.md"), false);
+t("only the deletion and the edit differ from HEAD", git(ti, "diff", "--name-status", "HEAD", tr[0]).trim().split("\n").sort(), ["D\td/gone.md", "M\td/edit.md"]);
+writeFileSync(join(ti, "d/edit.md"), "e3\n");                   // already in the private index: kept current by add -A
+await tc("bash", { command: "ls" }, ti);
+tr = refs(ti);
+t("tracked+ignored: later change captured", git(ti, "show", `${tr[tr.length - 1]}:d/edit.md`), "e3\n");
+t("tracked+ignored: still kept", git(ti, "show", `${tr[tr.length - 1]}:d/keep.md`), "keep\n");
+git(ti, "rm", "-q", "--cached", "d/keep.md");                     // untracked now, and ignored: no longer belongs in a checkpoint
+await tc("bash", { command: "ls" }, ti);
+tr = refs(ti);
+t("untracked again: dropped from the next checkpoint", has(tr[tr.length - 1], "d/keep.md"), false);
+
 console.log(`\n${n} checks, ${fail ? "FAILURES" : "all passed"}`);
 rmSync(work, { recursive: true, force: true });
 process.exit(fail);

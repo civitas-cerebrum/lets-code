@@ -55,46 +55,61 @@ print(" ".join(m["id"] for m in d.get("models", [])))' "$1" "$2" 2>/dev/null; }
 # --claude, nothing configured
 h="${work}/h1"; launch "${h}" --claude
 t "--claude: exit status" "$(cat "${h}/rc")" 0
-t "--claude: pi gets the Claude provider and Haiku" "$(args "${h}")" "--provider lets-code-claude --model claude-haiku -p hi"
-t "--claude: models in /model" "$(models "${h}" lets-code-claude)" "claude-haiku claude-sonnet claude-opus claude-fable"
-t "--claude: the module is on" "$(sed -n 2p "${h}/pi-args")" "claude-provider=lets-code-claude"
+t "--claude: pi gets the Claude provider and Haiku" "$(args "${h}")" "--provider Anthropic --model claude-haiku -p hi"
+t "--claude: models in /model" "$(models "${h}" Anthropic)" "claude-haiku claude-sonnet claude-opus claude-fable"
+t "--claude: the module is on" "$(sed -n 2p "${h}/pi-args")" "claude-provider=Anthropic"
 t "--claude: module files" "$(cd "${h}/.pi/agent/extensions/lets-code/claude" 2>/dev/null && ls | tr '\n' ' ')" "bridge.mjs index.ts server.mjs "
 t "--claude: Claude Code's thinking levels" "$(python3 -c 'import json, sys
-m = json.load(open(sys.argv[1]))["providers"]["lets-code-claude"]["models"][0]
+m = json.load(open(sys.argv[1]))["providers"]["Anthropic"]["models"][0]
 print(json.dumps(m["thinkingLevelMap"], sort_keys=True), m["reasoning"], m["contextWindow"], m["maxTokens"])' "${h}/.pi/agent/models.json")" \
     '{"high": "high", "low": "low", "max": "max", "medium": "medium", "minimal": null, "off": "none", "xhigh": "xhigh"} True 200000 32000'
 t "--claude: API rates for pi's cost (Haiku tiered above 100K)" "$(python3 -c 'import json, sys
-ms = {m["id"]: m.get("cost") for m in json.load(open(sys.argv[1]))["providers"]["lets-code-claude"]["models"]}
+ms = {m["id"]: m.get("cost") for m in json.load(open(sys.argv[1]))["providers"]["Anthropic"]["models"]}
 h, o = ms["claude-haiku"], ms["claude-opus"]
 print(h["input"], h["output"], h["cacheRead"], h["cacheWrite"], h["tiers"][0]["inputTokensAbove"], h["tiers"][0]["input"], o["input"], o["cacheWrite"], "tiers" in o)' "${h}/.pi/agent/models.json")" "0.1 0.5 0.01 0.2 100000 0.5 4.0 8.0 False"
-t "--claude: proxy endpoint" "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["providers"]["lets-code-claude"]["baseUrl"])' "${h}/.pi/agent/models.json")" "http://127.0.0.1:8795/v1"
+t "--claude: names read (Anthropic) Claude <alias>" "$(python3 -c 'import json, sys; print([m["name"] for m in json.load(open(sys.argv[1]))["providers"]["Anthropic"]["models"]])' "${h}/.pi/agent/models.json")" \
+    "['(Anthropic) Claude Haiku', '(Anthropic) Claude Sonnet', '(Anthropic) Claude Opus', '(Anthropic) Claude Fable']"
+t "--claude: proxy endpoint" "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["providers"]["Anthropic"]["baseUrl"])' "${h}/.pi/agent/models.json")" "http://127.0.0.1:8795/v1"
 t "--claude: banner" "$(grep -o 'claude-haiku @ Claude Code  (preset claude)' "${h}/out")" "claude-haiku @ Claude Code  (preset claude)"
 
 # --claude --model, and a saved claude preset adding a model
 h="${work}/h2"; launch "${h}" --claude --model claude-opus
-t "--claude --model claude-opus" "$(args "${h}")" "--provider lets-code-claude --model claude-opus -p hi"
+t "--claude --model claude-opus" "$(args "${h}")" "--provider Anthropic --model claude-opus -p hi"
 h="${work}/h3"; mkdir -p "${h}/.config/lets-code/presets"; echo 'MODEL="claude-sonnet"' > "${h}/.config/lets-code/presets/claude"
 launch "${h}" --claude
-t "saved claude preset: its model" "$(args "${h}")" "--provider lets-code-claude --model claude-sonnet -p hi"
+t "saved claude preset: its model" "$(args "${h}")" "--provider Anthropic --model claude-sonnet -p hi"
 
 # BACKEND=claude in the config (setup's second choice), with CLAUDE_MODELS
 h="${work}/h4"; mkdir -p "${h}/.config/lets-code"
 printf 'BACKEND="claude"\nCLAUDE_MODELS="haiku claude-opus-5-5"\nENDPOINTS=""\n' > "${h}/.config/lets-code/config"
 launch "${h}"
-t "BACKEND=claude: launches Claude" "$(args "${h}")" "--provider lets-code-claude --model claude-haiku -p hi"
-t "CLAUDE_MODELS: aliases and full names" "$(models "${h}" lets-code-claude)" "claude-haiku claude-opus-5-5"
+t "BACKEND=claude: launches Claude" "$(args "${h}")" "--provider Anthropic --model claude-haiku -p hi"
+t "CLAUDE_MODELS: aliases and full names" "$(models "${h}" Anthropic)" "claude-haiku claude-opus-5-5"
 
 # Claude saved as pi's default (Ctrl+S in /model) beats a configured server,
 # which is never probed (nothing listens on it)
 h="${work}/h5"; mkdir -p "${h}/.config/lets-code" "${h}/.pi/agent"
 printf 'ENDPOINTS="http://127.0.0.1:9"\n' > "${h}/.config/lets-code/config"
-printf '{"defaultProvider": "lets-code-claude", "defaultModel": "claude-fable"}\n' > "${h}/.pi/agent/settings.json"
+printf '{"defaultProvider": "Anthropic", "defaultModel": "claude-fable"}\n' > "${h}/.pi/agent/settings.json"
 launch "${h}"
-t "pi default on Claude: launches it" "$(args "${h}")" "--provider lets-code-claude --model claude-fable -p hi"
+t "pi default on Claude: launches it" "$(args "${h}")" "--provider Anthropic --model claude-fable -p hi"
 launch "${h}" --model claude-sonnet
-t "pi default on Claude, --model wins" "$(args "${h}")" "--provider lets-code-claude --model claude-sonnet -p hi"
+t "pi default on Claude, --model wins" "$(args "${h}")" "--provider Anthropic --model claude-sonnet -p hi"
 launch "${h}" --url http://127.0.0.1:9
 t "pi default on Claude, --url picks the server" "$(grep -c 'not reachable' "${h}/out")" 1
+
+# the provider was lets-code-claude before: what pi saved under that name follows the rename
+h="${work}/h5b"; mkdir -p "${h}/.config/lets-code" "${h}/.pi/agent"
+printf 'ENDPOINTS="http://127.0.0.1:9"\n' > "${h}/.config/lets-code/config"
+printf '{"defaultProvider": "lets-code-claude", "defaultModel": "claude-opus", "enabledModels": ["lets-code-claude/claude-opus", "lets-code/x"], "modelThinkingLevels": {"lets-code-claude/claude-sonnet": "high"}}\n' > "${h}/.pi/agent/settings.json"
+printf '{"providers": {"lets-code-claude": {"baseUrl": "http://old", "models": []}}}\n' > "${h}/.pi/agent/models.json"
+printf '{"thinkingLevels": {"lets-code-claude/claude-opus": "xhigh"}}\n' > "${h}/.pi/agent/lets-code-state.json"
+launch "${h}"
+t "old name saved as pi default: launches Claude" "$(args "${h}")" "--provider Anthropic --model claude-opus -p hi"
+t "old name: settings renamed" "$(python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); print(d["defaultProvider"], d["enabledModels"], sorted(d["modelThinkingLevels"]))' "${h}/.pi/agent/settings.json")" \
+    "Anthropic ['Anthropic/claude-opus', 'lets-code/x'] ['Anthropic/claude-opus', 'Anthropic/claude-sonnet']"
+t "old name: dropped from models.json" "$(python3 -c 'import json, sys; print(sorted(json.load(open(sys.argv[1]))["providers"]))' "${h}/.pi/agent/models.json")" "['Anthropic']"
+t "old name: saved thinking level still used" "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["modelThinkingLevels"]["Anthropic/claude-opus"])' "${h}/.pi/agent/settings.json")" "xhigh"
 
 # a server launch registers the Claude models too (Claude Code installed)
 cat > "${work}/srv.py" <<'EOF'
@@ -111,16 +126,16 @@ h="${work}/h6"; mkdir -p "${h}/.config/lets-code"
 printf 'ENDPOINTS="http://127.0.0.1:%s"\nREASONING="false"\nVISION="false"\n' "$(cat "${work}/port")" > "${h}/.config/lets-code/config"
 launch "${h}"
 t "server launch: pi gets the server" "$(args "${h}")" "--provider lets-code --model srv-model -p hi"
-t "server launch: Claude models in /model too" "$(models "${h}" lets-code-claude)" "claude-haiku claude-sonnet claude-opus claude-fable"
-t "server launch: the module is on" "$(sed -n 2p "${h}/pi-args")" "claude-provider=lets-code-claude"
+t "server launch: Claude models in /model too" "$(models "${h}" Anthropic)" "claude-haiku claude-sonnet claude-opus claude-fable"
+t "server launch: the module is on" "$(sed -n 2p "${h}/pi-args")" "claude-provider=Anthropic"
 h="${work}/h7"; mkdir -p "${h}/.config/lets-code"; cp "${work}/h6/.config/lets-code/config" "${h}/.config/lets-code/config"
 LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
-t "server launch without Claude Code: no Claude models" "$(models "${h}" lets-code-claude)|$(sed -n 2p "${h}/pi-args")" "|claude-provider="
+t "server launch without Claude Code: no Claude models" "$(models "${h}" Anthropic)|$(sed -n 2p "${h}/pi-args")" "|claude-provider="
 LC_PATH="${noclaude}:/usr/bin:/bin" launch "${work}/h6"
-t "Claude Code gone: the Claude models leave /model" "$(models "${work}/h6" lets-code-claude)" ""
+t "Claude Code gone: the Claude models leave /model" "$(models "${work}/h6" Anthropic)" ""
 # Claude saved as pi's default, but nothing to run it with: the configured
 # server, so pi still opens (and Ctrl+S there can change the default)
-printf '{"defaultProvider": "lets-code-claude", "defaultModel": "claude-opus"}\n' > "${work}/h7/.pi/agent/settings.json"
+printf '{"defaultProvider": "Anthropic", "defaultModel": "claude-opus"}\n' > "${work}/h7/.pi/agent/settings.json"
 LC_PATH="${noclaude}:/usr/bin:/bin" launch "${work}/h7"
 t "pi default on Claude without Claude Code: the server" "$(cat "${work}/h7/rc")|$(args "${work}/h7")" "0|--provider lets-code --model srv-model -p hi"
 
@@ -147,8 +162,8 @@ h="${work}/h9"; mkdir -p "${h}/.config/lets-code"
 # the address without its scheme, as typed in setup: http:// added for an IP
 printf 'BACKEND="claude"\nCLAUDE_URL="%s/"\nCLAUDE_TOKEN="%s"\n' "${rurl#http://}" "${tok}" > "${h}/.config/lets-code/config"
 LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
-t "CLAUDE_URL: launches Claude without Claude Code here" "$(cat "${h}/rc")|$(args "${h}")" "0|--provider lets-code-claude --model claude-haiku -p hi"
-t "CLAUDE_URL: provider points there, key from the environment" "$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1]))["providers"]["lets-code-claude"]; print(p["baseUrl"], p["apiKey"])' "${h}/.pi/agent/models.json")" "${rurl}/v1 \$LETS_CODE_CLAUDE_TOKEN"
+t "CLAUDE_URL: launches Claude without Claude Code here" "$(cat "${h}/rc")|$(args "${h}")" "0|--provider Anthropic --model claude-haiku -p hi"
+t "CLAUDE_URL: provider points there, key from the environment" "$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1]))["providers"]["Anthropic"]; print(p["baseUrl"], p["apiKey"])' "${h}/.pi/agent/models.json")" "${rurl}/v1 \$LETS_CODE_CLAUDE_TOKEN"
 t "CLAUDE_URL: the module gets URL and token" "$(sed -n 3p "${h}/pi-args")" "claude-url=${rurl} token=${tok}"
 t "CLAUDE_URL: banner" "$(grep -o "claude-haiku @ Claude Code via 127.0.0.1:[0-9]*" "${h}/out" | sed 's/:[0-9]*$//')" "claude-haiku @ Claude Code via 127.0.0.1"
 printf 'BACKEND="claude"\nCLAUDE_URL="%s"\nCLAUDE_TOKEN="sk-ant-oat01-notthetokenitwantsatall"\n' "${rurl}" > "${h}/.config/lets-code/config"
@@ -166,7 +181,7 @@ rurl="http://127.0.0.1:$(cat "${work}/rport2")"
 h="${work}/h12"; mkdir -p "${h}/.config/lets-code"
 printf 'ENDPOINTS="%s"\nTOKEN="%s"\n' "${rurl#http://}" "${tok}" > "${h}/.config/lets-code/config"
 LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
-t "Claude Code token as TOKEN: the endpoint is a Claude proxy" "$(cat "${h}/rc")|$(args "${h}")|$(sed -n 3p "${h}/pi-args")" "0|--provider lets-code-claude --model claude-haiku -p hi|claude-url=${rurl} token=${tok}"
+t "Claude Code token as TOKEN: the endpoint is a Claude proxy" "$(cat "${h}/rc")|$(args "${h}")|$(sed -n 3p "${h}/pi-args")" "0|--provider Anthropic --model claude-haiku -p hi|claude-url=${rurl} token=${tok}"
 kill "${rsrv}" 2>/dev/null
 
 # CLAUDE_TOKEN on the local proxy: sent with every request; one that is not
@@ -174,7 +189,7 @@ kill "${rsrv}" 2>/dev/null
 h="${work}/h11"; mkdir -p "${h}/.config/lets-code"
 printf 'BACKEND="claude"\nCLAUDE_TOKEN="%s"\n' "${tok}" > "${h}/.config/lets-code/config"
 launch "${h}"
-t "local + CLAUDE_TOKEN: the token goes with each request" "$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1]))["providers"]["lets-code-claude"]; print(p["baseUrl"], p["apiKey"])' "${h}/.pi/agent/models.json")|$(sed -n 3p "${h}/pi-args")" "http://127.0.0.1:8795/v1 \$LETS_CODE_CLAUDE_TOKEN|claude-url= token=${tok}"
+t "local + CLAUDE_TOKEN: the token goes with each request" "$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1]))["providers"]["Anthropic"]; print(p["baseUrl"], p["apiKey"])' "${h}/.pi/agent/models.json")|$(sed -n 3p "${h}/pi-args")" "http://127.0.0.1:8795/v1 \$LETS_CODE_CLAUDE_TOKEN|claude-url= token=${tok}"
 printf 'BACKEND="claude"\nCLAUDE_TOKEN="sk-ant-api03-xyz"\n' > "${h}/.config/lets-code/config"
 launch "${h}"
 t "CLAUDE_TOKEN that is not a Claude Code token: refused" "$(cat "${h}/rc")|$(grep -c 'not a whole Claude Code token' "${h}/out")" "1|1"

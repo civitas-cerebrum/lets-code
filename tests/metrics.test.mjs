@@ -142,8 +142,8 @@ try {
 	t("full: no branch on the left", x.foot()[0].startsWith("~/github/app "), true);
 	t("full: provider with several, thinking off, on the right", x.foot()[0].endsWith(" (lets-code) qwen3.8-27b • thinking off") && x.mod.width(x.foot()[0]) === 200, true);
 	{
-		// Claude through Claude Code: Anthropic's name and the bare model, not lets-code-claude / claude-haiku
-		const c = await load({ LETS_CODE_METRICS_ON: "1" }, { providers: 2, model: { id: "claude-haiku", provider: "lets-code-claude", reasoning: true, contextWindow: 200000 } });
+		// Claude through Claude Code: Anthropic's name and the bare model: (anthropic) haiku, not Anthropic / claude-haiku
+		const c = await load({ LETS_CODE_METRICS_ON: "1" }, { providers: 2, model: { id: "claude-haiku", provider: "Anthropic", reasoning: true, contextWindow: 200000 } });
 		c.ev("session_start");
 		t("full: Claude reads (anthropic) haiku", c.foot()[0].endsWith(" (anthropic) haiku • medium"), true);
 	}

@@ -917,7 +917,7 @@ add your own (see [Build your own expert](#build-your-own-expert)). They sit beh
 context names each expert usable here with a few words on what it is for:
 
 ```text
-expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); design-reviewer (clean-code and design review of a change: patterns, maintainability); expert-builder (making or fixing an expert: from docs, a runbook or scripts; its knowledge, brief and routing); expert-reviewer (bug review of a diff or PR: what breaks, edge cases, severity); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
+expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); design-reviewer (clean-code and design review of a change: patterns, maintainability); expert-builder (making or fixing an expert: from docs, a runbook or scripts; its knowledge, brief and routing); expert-reviewer (bug review of a diff or PR: what breaks, edge cases, severity); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); software-factory (the software factory: a ticket taken end to end through its pipeline of experts); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
 ```
 
 (On Linux and macOS `tester (anything on a web app that needs a browser:

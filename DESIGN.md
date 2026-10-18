@@ -637,6 +637,20 @@ unknown runner rejects the file. The stage experts are enabled with one
 dialog the first time. The `/factory` command (start, resume, list,
 status) costs no context: commands are not in the model's prompt.
 
+Measured while the Qwen server was down, against the Claude proxy
+(claude-haiku, thinking low), main and this branch on the same backend:
+route-check gave software-factory recall 5/6 and 5/6 with no false trigger
+in 18 near-miss and neighbour runs (the miss, "have the developer, both
+reviewers and the judge do it", went to developer by name); the existing
+experts routed the same within a prompt or two of main, and none of their
+prompts went to the factory. Its entry costs 29 tokens of the prompt
+(4701 to 4730 on one trivial request, the proxy's usage, Claude's
+tokenizer). A live run on a toy signup ticket went through one fix round
+(a major expert-review finding: C3 untested through invalid then valid
+input), the tester's Playwright tests in Chromium,
+the judge and the suite, while the user switched into the running stages
+in place and back.
+
 **Claude Code adapter.** Automatic: the launcher switches it on only where
 the project's `.claude` (up to the git root) has hooks or workflow scripts,
 the parts that need the adapter to work at all; skills and commands alone

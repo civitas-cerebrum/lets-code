@@ -40,6 +40,14 @@ launch() {
         bash "${lc}" "$@" -p hi > "${h}/out" 2>&1 < /dev/null; echo $? > "${h}/rc" )
 }
 args() { head -n 1 "$1/pi-args" 2>/dev/null; }
+# stub <script> <port-file>: start a stand-in server in the background and
+# wait (up to 30 s: a busy CI runner starts python slowly) for its port; the
+# pid lands in STUB_PID
+stub() {
+    python3 "$1" > "$2" & STUB_PID=$!
+    for _ in $(seq 300); do [ -s "$2" ] && return 0; sleep 0.1; done
+    echo "FAIL  stand-in server $(basename "$1") did not start"; exit 1
+}
 models() { python3 -c 'import json, sys
 d = json.load(open(sys.argv[1] + "/.pi/agent/models.json"))["providers"].get(sys.argv[2]) or {}
 print(" ".join(m["id"] for m in d.get("models", [])))' "$1" "$2" 2>/dev/null; }
@@ -98,8 +106,7 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 s = http.server.HTTPServer(("127.0.0.1", 0), H); print(s.server_port, flush=True); s.serve_forever()
 EOF
-python3 "${work}/srv.py" > "${work}/port" & srv=$!
-for _ in $(seq 50); do [ -s "${work}/port" ] && break; sleep 0.1; done
+stub "${work}/srv.py" "${work}/port"; srv="${STUB_PID}"
 h="${work}/h6"; mkdir -p "${h}/.config/lets-code"
 printf 'ENDPOINTS="http://127.0.0.1:%s"\nREASONING="false"\nVISION="false"\n' "$(cat "${work}/port")" > "${h}/.config/lets-code/config"
 launch "${h}"
@@ -134,8 +141,7 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 s = http.server.HTTPServer(("127.0.0.1", 0), H); print(s.server_port, flush=True); s.serve_forever()
 EOF
-python3 "${work}/remote.py" > "${work}/rport" & rsrv=$!
-for _ in $(seq 50); do [ -s "${work}/rport" ] && break; sleep 0.1; done
+stub "${work}/remote.py" "${work}/rport"; rsrv="${STUB_PID}"
 rurl="http://127.0.0.1:$(cat "${work}/rport")"
 h="${work}/h9"; mkdir -p "${h}/.config/lets-code"
 # the address without its scheme, as typed in setup: http:// added for an IP
@@ -155,8 +161,7 @@ t "CLAUDE_URL, nothing there: refused" "$(cat "${h}/rc")|$(grep -c 'not reachabl
 
 # what setup writes with a Claude Code token at its Token prompt: ENDPOINTS
 # is the Claude proxy, TOKEN the token
-python3 "${work}/remote.py" > "${work}/rport2" & rsrv=$!
-for _ in $(seq 50); do [ -s "${work}/rport2" ] && break; sleep 0.1; done
+stub "${work}/remote.py" "${work}/rport2"; rsrv="${STUB_PID}"
 rurl="http://127.0.0.1:$(cat "${work}/rport2")"
 h="${work}/h12"; mkdir -p "${h}/.config/lets-code"
 printf 'ENDPOINTS="%s"\nTOKEN="%s"\n' "${rurl#http://}" "${tok}" > "${h}/.config/lets-code/config"

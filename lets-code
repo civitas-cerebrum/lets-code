@@ -7345,7 +7345,7 @@ const short = (s: string, n = 140) => { const t = (s || "").replace(/\s+/g, " ")
 // ------------------------------------------------------------------ ledger
 export function newId(now = Date.now()): string {
 	const d = new Date(now); const p = (n: number) => String(n).padStart(2, "0");
-	return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${Math.random().toString(16).slice(2, 6)}`;
+	return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${Math.floor(Math.random() * 0x10000).toString(16).padStart(4, "0")}`;
 }
 export function saveLedger(L: Ledger, now = Date.now()): void {
 	L.updated = now; mkdirSync(L.dir, { recursive: true });
@@ -7546,11 +7546,14 @@ export async function advance(L: Ledger, deps: Deps): Promise<Ledger> {
 export interface StartOpts { ticket: string; repo: string; howToRun?: string; start?: string; constraints?: string; conventions?: string; tester?: "auto" | "on" | "off"; criteria?: string[]; root?: string; id?: string }
 // a new run: its dir, its worktree and branch from the repo's HEAD, its ledger
 export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
-	const now = (deps.now ?? Date.now)(); const id = o.id ?? newId(now); const dir = join(o.root ?? factoryRoot(), id);
+	const now = (deps.now ?? Date.now)(); const root = o.root ?? factoryRoot();
 	const top = await deps.exec(`git rev-parse --show-toplevel`, resolve(o.repo));
 	if (top.code !== 0) throw new Error(`${o.repo} is not a git repository`);
 	const repo = top.out.trim(); const base = (await deps.exec(`git rev-parse HEAD`, repo)).out.trim();
-	const branch = `pi/factory-${id}`; const work = join(dir, "work");
+	// an id no run dir and no branch of this repo has yet (runs started in the same second)
+	let id = o.id ?? newId(now);
+	for (let i = 0; !o.id && i < 20 && (existsSync(join(root, id)) || (await deps.exec(`git rev-parse -q --verify refs/heads/pi/factory-${id}`, repo)).code === 0); i++) id = newId(now);
+	const dir = join(root, id); const branch = `pi/factory-${id}`; const work = join(dir, "work");
 	mkdirSync(dir, { recursive: true });
 	const add = await deps.exec(`git worktree add -q -b ${branch} ${JSON.stringify(work)} ${base}`, repo);
 	if (add.code !== 0) throw new Error(`git worktree add failed: ${short(add.out, 300)}`);

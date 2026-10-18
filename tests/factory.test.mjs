@@ -355,6 +355,20 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 	const stopUi = { ...ui, select: async (title, options) => (title.includes("plan") ? "Stop" : options[0]) };
 	const r6 = await fm.runExpert({ ticket: "TICKET.md" }, { ...ctx, ui: stopUi });
 	t("expert: stopped by the user is reported as such", [r6.isError, /stopped: the user stopped it at the plan checkpoint/.test(r6.text), /\/factory resume/.test(r6.text)], [true, true, true]);
+	if (!/stopped: the user stopped it at the plan checkpoint/.test(r6.text)) console.log(`  (its report: ${r6.text.slice(0, 600)})`);
+}
+
+// ------------------------------------------------------------------ ids: never one a run or a branch already has
+{
+	const repo = makeRepo("ids"); const realRandom = Math.random; const t0 = Date.UTC(2026, 0, 2, 3, 4, 5);
+	const same = { ...fakeDeps(OK, { decisions: { criteria: { action: "stop" } } }), now: () => t0 };
+	Math.random = () => 0.5;   // every candidate id the same, until the third
+	let calls = 0; Math.random = () => (++calls <= 2 ? 0.5 : 0.25);
+	const a = await F.startRun(opts(repo), same);
+	calls = 0; const b = await F.startRun(opts(repo), same);
+	Math.random = realRandom;
+	t("ids: a second run in the same second gets another id and branch", [a.id !== b.id, a.branch !== b.branch, /^\d{8}-\d{6}-[0-9a-f]{4}$/.test(b.id)], [true, true, true]);
+	t("ids: both worktrees exist", [existsSync(a.work), existsSync(b.work)], [true, true]);
 }
 
 // ------------------------------------------------------------------ the tester gets how to start the app

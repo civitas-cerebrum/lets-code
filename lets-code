@@ -625,6 +625,27 @@ def claude_doc():
     if provider == CLAUDE_PROVIDER and model not in ids:
         ids.append(model)
     own = provider == CLAUDE_PROVIDER   # this launch's pins (context, cap) apply
+    # API rates per million tokens, for pi's cost figures: on a subscription
+    # nothing is paid per token, so they read as what the same use would cost
+    # on the API. cacheWrite is the 1-hour rate (2x input), the TTL Claude
+    # Code writes with. Haiku 5.5 costs more above 100K tokens of input (a pi
+    # cost tier). Rates as of 2026-10; a model not listed here gets no cost
+    # (pi shows none).
+    rates = {
+        "haiku": (0.10, 0.50, 0.01, 0.20), "claude-haiku-5-5": (0.10, 0.50, 0.01, 0.20),
+        "sonnet": (2.0, 10.0, 0.20, 4.0), "claude-sonnet-5-5": (2.0, 10.0, 0.20, 4.0),
+        "opus": (4.0, 20.0, 0.20, 8.0), "claude-opus-5-5": (4.0, 20.0, 0.20, 8.0),
+        "fable": (10.0, 50.0, 0.25, 20.0), "claude-fable-5-1": (10.0, 50.0, 0.25, 20.0),
+    }
+    fields = ("input", "output", "cacheRead", "cacheWrite")
+    def cost(i):
+        r = rates.get(i) or rates.get(i[len("claude-"):])
+        if not r:
+            return {}
+        c = dict(zip(fields, r))
+        if "haiku" in i:
+            c["tiers"] = [{"inputTokensAbove": 100000, **dict(zip(fields, (0.50, 2.50, 0.05, 1.00)))}]
+        return {"cost": c}
     def name(i):
         alias = i[len("claude-"):]
         return ("Claude " + alias.capitalize() if re.fullmatch(r"[a-z]+", alias) else i) + " (Claude Code)"
@@ -640,7 +661,7 @@ def claude_doc():
             "contextWindow": ctx if own else int(os.environ["LC_CLAUDE_CONTEXT"]),
             "maxTokens": cap if own else int(os.environ["LC_CLAUDE_CAP"]),
             "input": ["text", "image"] if vision == "true" or not own else ["text"],
-            "reasoning": True, "thinkingLevelMap": levels,
+            "reasoning": True, "thinkingLevelMap": levels, **cost(i),
         } for i in ids],
     }
 
@@ -2314,7 +2335,8 @@ function openaiUsage(u = {}) {
     prompt_tokens: prompt,
     completion_tokens: completion,
     total_tokens: prompt + completion,
-    prompt_tokens_details: { cached_tokens: cached },
+    // pi prices cache writes apart from fresh input (Claude Code writes 1-hour entries)
+    prompt_tokens_details: { cached_tokens: cached, cache_write_tokens: u.cache_creation_input_tokens ?? 0 },
   };
 }
 

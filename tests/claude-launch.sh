@@ -51,6 +51,10 @@ t "--claude: Claude Code's thinking levels" "$(python3 -c 'import json, sys
 m = json.load(open(sys.argv[1]))["providers"]["lets-code-claude"]["models"][0]
 print(json.dumps(m["thinkingLevelMap"], sort_keys=True), m["reasoning"], m["contextWindow"], m["maxTokens"])' "${h}/.pi/agent/models.json")" \
     '{"high": "high", "low": "low", "max": "max", "medium": "medium", "minimal": null, "off": "none", "xhigh": "xhigh"} True 200000 32000'
+t "--claude: API rates for pi's cost (Haiku tiered above 100K)" "$(python3 -c 'import json, sys
+ms = {m["id"]: m.get("cost") for m in json.load(open(sys.argv[1]))["providers"]["lets-code-claude"]["models"]}
+h, o = ms["claude-haiku"], ms["claude-opus"]
+print(h["input"], h["output"], h["cacheRead"], h["cacheWrite"], h["tiers"][0]["inputTokensAbove"], h["tiers"][0]["input"], o["input"], o["cacheWrite"], "tiers" in o)' "${h}/.pi/agent/models.json")" "0.1 0.5 0.01 0.2 100000 0.5 4.0 8.0 False"
 t "--claude: proxy endpoint" "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["providers"]["lets-code-claude"]["baseUrl"])' "${h}/.pi/agent/models.json")" "http://127.0.0.1:8795/v1"
 t "--claude: banner" "$(grep -o 'claude-haiku @ Claude Code  (preset claude)' "${h}/out")" "claude-haiku @ Claude Code  (preset claude)"
 

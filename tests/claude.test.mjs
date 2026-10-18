@@ -54,7 +54,7 @@ async function handle(m) {
   const said = m.message.content.filter((b) => b.type === "text").map((b) => b.text).join(" ");
   rec({ event: "user", text: said, model });
   const { tools } = await ready;
-  ev({ type: "message_start", message: { usage: { input_tokens: 10 } } });
+  ev({ type: "message_start", message: { usage: { input_tokens: 10, cache_read_input_tokens: 300, cache_creation_input_tokens: 40 } } });
   if (said.includes("use tool") && tools.length) {
     const id = "toolu_" + Date.now();
     ev({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id, name: "mcp__pi__" + tools[0].name, input: {} } });
@@ -90,10 +90,12 @@ const pids = new Set();
 // a chat request; returns { content, reasoning, toolCalls, finish }
 async function chat(body, headers = {}) {
 	const r = await fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ stream: true, ...body }) });
-	const res = { content: "", reasoning: "", toolCalls: [], finish: null };
+	const res = { content: "", reasoning: "", toolCalls: [], finish: null, usage: null };
 	for (const line of (await r.text()).split("\n")) {
 		if (!line.startsWith("data: {")) continue;
-		const c = JSON.parse(line.slice(6)).choices?.[0];
+		const chunk = JSON.parse(line.slice(6));
+		if (chunk.usage) res.usage = chunk.usage;
+		const c = chunk.choices?.[0];
 		if (!c) continue;
 		res.content += c.delta?.content ?? "";
 		res.reasoning += c.delta?.reasoning_content ?? "";
@@ -115,6 +117,7 @@ try {
 	const conv = [{ role: "system", content: "sys A" }, { role: "user", content: "hello" }];
 	let r = await chat({ model: "claude-haiku", reasoning_effort: "low", messages: conv });
 	t("first turn: answer", [r.content, r.reasoning, r.finish], ["echo[haiku]: hello", "hmm", "stop"]);
+	t("usage: cache reads and writes reported apart (pi prices them)", [r.usage?.prompt_tokens, r.usage?.prompt_tokens_details], [350, { cached_tokens: 300, cache_write_tokens: 40 }]);
 	let starts = records().filter((x) => x.event === "start");
 	t("first turn: claude launched with Haiku, effort low, summaries", starts.map((s) => [s.model, s.effort, s.thinkingOff, s.display]), [["haiku", "low", false, "summarized"]]);
 	const first = r;

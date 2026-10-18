@@ -570,7 +570,7 @@ pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-
     # proxy runs the conversation on it; without it a local proxy uses this
     # machine's Claude Code sign-in. pi resolves it from the environment.
     [ -z "${CLAUDE_TOKEN:-}" ] || claude_key='$LETS_CODE_CLAUDE_TOKEN'
-    LC_CLAUDE_BASE="${claude_base}" LC_CLAUDE_KEY="${claude_key}" LC_CLAUDE_MODELS="${CLAUDE_MODELS:-${CLAUDE_DEFAULT_MODELS:-haiku sonnet opus fable}}" LC_CLAUDE_CONTEXT="${CLAUDE_CONTEXT:-200000}" LC_CLAUDE_CAP="${CLAUDE_OUTPUT_CAP:-32000}" \
+    LC_CLAUDE_BASE="${claude_base}" LC_CLAUDE_KEY="${claude_key}" LC_CLAUDE_MODELS="${CLAUDE_MODELS:-${CLAUDE_DEFAULT_MODELS:-haiku sonnet opus fable}}" LC_CLAUDE_CONTEXT="${CLAUDE_CONTEXT:-1000000}" LC_CLAUDE_CAP="${CLAUDE_OUTPUT_CAP:-32000}" \
     PI_AGENT_DIR="${PI_AGENT_DIR}" LC_PROVIDER="${PROVIDER_ID:-lets-code}" LC_XHIGH_BUDGET="${XHIGH_THINKING_BUDGET:-}" LC_XHIGH_ROOM="${XHIGH_ANSWER_ROOM:-}" LC_XHIGH_CAP="${XHIGH_LEVEL_CAP:-}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
 import json, os, sys, tempfile
 
@@ -2571,7 +2571,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/v1/models")
       return sendJson(res, 200, {
         object: "list",
-        data: Object.keys(MODELS).map((id) => ({ id, object: "model", owned_by: "anthropic", max_model_len: 200000 })),
+        data: Object.keys(MODELS).map((id) => ({ id, object: "model", owned_by: "anthropic", max_model_len: 1000000 })),
       });
     if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/status"))
       return sendJson(res, 200, {
@@ -14419,7 +14419,10 @@ print("%s|%s|%s" % (d.get("id", ""), d.get("max_model_len") or d.get("context_le
 
 # ------------------------------------------------------------------ claude
 # The Claude backend's models and facts (see pi_write_claude_extension).
-CLAUDE_CONTEXT=200000
+# Haiku 5.5, Sonnet 5.5, Opus 5.5 and Fable 5.1 all run with a 1M-token
+# window in Claude Code (its modelUsage reports contextWindow 1000000 for the
+# bare aliases; no [1m] suffix needed)
+CLAUDE_CONTEXT=1000000
 CLAUDE_OUTPUT_CAP=32000
 CLAUDE_DEFAULT_MODELS="haiku sonnet opus fable"   # CLAUDE_MODELS when not set (server.mjs lists the same)
 CLAUDE_DEFAULT_PORT=8795                          # LETS_CODE_CLAUDE_PORT when not set (index.ts, server.mjs too)

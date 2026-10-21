@@ -166,6 +166,11 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 		let err = ""; try { await F.startRun({ ticket, repo: full, root }, fakeDeps(OK)); } catch (e) { err = e.message; }
 		let err2 = ""; try { await F.startRun({ ticket, repo: join(work, "chess (empty; becomes a repo)"), root }, fakeDeps(OK)); } catch (e) { err2 = e.message; }
 		t("new: no folder is made from a path with a remark in it", [/a remark in the path/.test(err2), existsSync(join(work, "chess (empty; becomes a repo)"))], [true, false]);
+		const L4 = await F.startRun({ ticket, repo: join(work, "remark"), root, howToRun: "python3 -m unittest discover -s . -p 'chess_tests.py' -v (tests in chess_tests.py at repo root; game started with python3 -m chess)" }, fakeDeps(OK, { decisions: { criteria: { action: "stop" } } }));
+		t("new: a remark after the test command is dropped", L4.howToRun, "python3 -m unittest discover -s . -p 'chess_tests.py' -v");
+		let err3 = ""; try { await F.startRun({ ticket, repo: join(work, "broken"), root, howToRun: "make test ((" }, fakeDeps(OK)); } catch (e) { err3 = e.message; }
+		t("new: a test command that does not parse stops the start", /test command \(how_to_run\) is not a shell command that parses/.test(err3), true);
+		t("new: a subshell is a command, not a remark", (await F.shellCommand("(cd src && make test)", "x", fakeDeps(OK), work)), "(cd src && make test)");
 		t("new: a folder with files that is not a repo is refused, untouched", [/not a git repository, and has files/.test(err), existsSync(join(full, ".git"))], [true, false]);
 	} finally { for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); }
 }

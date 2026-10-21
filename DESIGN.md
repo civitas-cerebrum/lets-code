@@ -195,6 +195,22 @@ finds no identity, and change no config. The prompt now says never to ask
 the user to run a command, and that setup outside the run's repo goes to a
 subagent first.
 
+A replay of that session on borealis (same messages, git without an
+identity) then ran end to end in 15 minutes: a new repo, 7 criteria, plan,
+build, both reviews with one design fix round, the judge's ACCEPT, and a
+commit by "lets-code factory"; 29 tests pass and the game mates. Getting
+there found more: Haiku names brief fields its own way (acceptance_criteria,
+test_command), so they are read too; it writes remarks into paths and
+commands ("/x/chess (empty; becomes a repo)", "make test (the unit
+tests)"), so a trailing remark is dropped from the repo path and from a
+command that does not parse (`bash -n`), and one that still does not parse
+stops the start instead of failing "as before" at regression; the developer
+was not told its worktree is the repo the ticket names, and stopped; Claude
+Code's own environment lines (the proxy's folder and machine) misled the
+model about where it works; and the mandate read heredoc bodies and quoted
+text with `>` as redirections (a judge's script comment "-> still" was a
+write to `still`) and missed `git -C dir commit` as a git write.
+
 **Subagents.** One `subagent` tool (single / parallel / chain), modelled on
 pi's example but with a short schema (the community packages measured 6k
 to 8k tokens per turn). Agent files: Markdown + YAML frontmatter in

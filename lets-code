@@ -5067,7 +5067,8 @@ export function classify(cmd: string, role: Role): { decision: Decision; group: 
 	const dflt: Decision = policy["*"] ?? "allow";
 	let worst: { decision: Decision; group: string; command: string } = { decision: "allow", group: "", command: "" };
 	for (const raw of splitCommands(cmd)) {
-		const c = stripPrefixes(raw);
+		// git's global options before the subcommand: "git -C dir commit" is a commit
+		const c = stripPrefixes(raw).replace(/^git\s+(?:(?:-C|-c|--git-dir|--work-tree|--namespace)\s+\S+\s+|--(?:git-dir|work-tree|namespace)=\S+\s+|--no-pager\s+|--bare\s+)+/, "git ");
 		if (!c) continue;
 		const sudo = /^(sudo|doas)\s/.test(raw.trim());
 		let d: Decision | null = null; let g = "";
@@ -5087,9 +5088,12 @@ export function classify(cmd: string, role: Role): { decision: Decision; group: 
 	}
 	return worst;
 }
-export function redirectTargets(cmd: string): string[] {
+export function redirectTargets(line: string): string[] {
 	const out: string[] = [];
-	for (const m of cmd.matchAll(/(?:^|[^<>])(?:\d?>>?|&>|>\|)\s*([^\s;&|)]+)/g)) if (!/^&\d/.test(m[1]) && m[1] !== "/dev/null") out.push(m[1].replace(/^['"]|['"]$/g, ""));
+	// heredoc bodies are data, and so is quoted text with a ">" in it
+	// ("score > 100", a script's "# a -> b"): only the command lines count
+	const cmd = splitCommands(line).map((c) => c.replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, (q) => (q.includes(">") ? "''" : q))).join("; ");
+	for (const m of cmd.matchAll(/(?:^|[^<>])(?:\d?>>?|&>|>\|)\s*("[^"]*"|'[^']*'|[^\s;&|)]+)/g)) if (!/^&\d/.test(m[1]) && m[1] !== "/dev/null") out.push(m[1].replace(/^['"]|['"]$/g, ""));
 	// only where a command starts (line start, after ; & | ( or sudo/env/command):
 	// "npm install left-pad" is a package install, not install(1) writing "left-pad"
 	for (const m of cmd.matchAll(/(?:^|[;&|(]|\b(?:sudo|env|command|exec|time|nice)\s)\s*(?:tee|touch|mkdir|cp|mv|install|ln|rsync)\s+(?:-[a-zA-Z]+\s+)*(.*?)(?=$|[;&|])/g)) for (const a of m[1].split(/\s+/)) if (a && !a.startsWith("-")) out.push(a.replace(/^['"]|['"]$/g, ""));
@@ -7664,6 +7668,17 @@ export async function prepareRepo(target: string, deps: Deps): Promise<string[]>
 	}
 	return did;
 }
+// A command with a remark after it ("make test (the unit tests)") does not
+// parse, and a suite that cannot run fails before and after alike: the
+// remark is dropped; a command that still does not parse stops the start.
+const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+export async function shellCommand(cmd: string, what: string, deps: Deps, cwd: string): Promise<string> {
+	const parses = async (c: string) => (await deps.exec(`bash -n -c ${sq(c)}`, cwd)).code === 0;
+	if (!cmd.trim() || (await parses(cmd))) return cmd.trim();
+	const bare = cmd.replace(/\s+\([^()]*\)\s*$/, "").trim();
+	if (bare !== cmd.trim() && (await parses(bare))) return bare;
+	throw new Error(`the ${what} is not a shell command that parses: ${short(cmd, 200)}`);
+}
 export interface StartOpts { ticket: string; repo: string; howToRun?: string; start?: string; constraints?: string; conventions?: string; tester?: "auto" | "on" | "off"; criteria?: string[]; root?: string; id?: string }
 // a new run: its dir, its worktree and branch from the repo's HEAD, its ledger
 export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
@@ -7672,6 +7687,8 @@ export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 	const top = await deps.exec(`git rev-parse --show-toplevel`, resolve(o.repo));
 	if (top.code !== 0) throw new Error(`${o.repo} is not a git repository, and has files: the factory starts a new project only in a new or empty folder`);
 	const repo = top.out.trim(); const base = (await deps.exec(`git rev-parse HEAD`, repo)).out.trim();
+	const howToRun = await shellCommand(o.howToRun ?? "", "test command (how_to_run)", deps, repo);
+	const startCmd = await shellCommand(o.start ?? "", "start command", deps, repo);
 	// an id no run dir and no branch of this repo has yet (runs started in the same second)
 	let id = o.id ?? newId(now);
 	for (let i = 0; !o.id && i < 20 && (existsSync(join(root, id)) || (await deps.exec(`git rev-parse -q --verify refs/heads/pi/factory-${id}`, repo)).code === 0); i++) id = newId(now);
@@ -7679,7 +7696,7 @@ export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 	mkdirSync(dir, { recursive: true });
 	const add = await deps.exec(`git worktree add -q -b ${branch} ${JSON.stringify(work)} ${base}`, repo);
 	if (add.code !== 0) throw new Error(`git worktree add failed: ${short(add.out, 300)}`);
-	const L: Ledger = { v: 1, id, created: now, updated: now, repo, base, branch, work, dir, ticket: o.ticket.trim(), howToRun: o.howToRun ?? "", start: o.start ?? "", constraints: o.constraints ?? "", conventions: o.conventions ?? "",
+	const L: Ledger = { v: 1, id, created: now, updated: now, repo, base, branch, work, dir, ticket: o.ticket.trim(), howToRun, start: startCmd, constraints: o.constraints ?? "", conventions: o.conventions ?? "",
 		tester: o.tester ?? "auto", status: "running", waiting: null, note: "", stage: "intake", rounds: 0, criteria: o.criteria ?? [], plan: "", claim: "", findings: {}, sent: {}, fixing: null, pending: null, baseline: null, commit: "", entries: [] };
 	writeFileSync(join(dir, "ticket.md"), L.ticket + "\n", { mode: 0o600 });
 	if (prepared.length) L.entries.push({ stage: "intake", round: 0, verdict: "new project", summary: `${repo}: ${prepared.join(", ")}`, input: 0, output_tokens: 0, seconds: 0, started: now, ended: now });

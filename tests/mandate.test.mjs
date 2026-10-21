@@ -73,6 +73,12 @@ const blocked = (r) => r?.block === true;
 	// readonly commands that write or run something are not read-only
 	for (const c of ["sed -i s/a/b/ f.txt", "sed --in-place -e s/a/b/ f.txt", "find . -name '*.js' -exec perl -pi -e s/a/b/ {} +", "find . -name x -delete", "fd -e ts -x touch", "awk 'BEGIN{system(\"touch x\")}'", "awk '{print | \"sh\"}' f", "sort -o out.txt in.txt", "git diff --output=p.patch", "uniq in.txt out.txt"])
 		t(`plan denies ${c}`, classify(c, plan).decision, "deny");
+	t("git -C dir commit is a git write", classify("git -C /x/repo commit -m y", { bash: { "*": "allow", "git-write": "deny" } }).decision, "deny");
+	t("git --no-pager -C dir reset --hard is destructive", classify("git --no-pager -C . reset --hard", ask).group, "destructive");
+	t("plan allows git -C dir log", classify("git -C /x/repo log --oneline | head; git -c core.pager=cat -C . status", plan).decision, "allow");
+	t("a heredoc body is data, not a redirection", redirectTargets("cat > /tmp/j/edge.py <<'EOF'\n# 1 queenside: b1 attacked -> still legal\nprint(x > 100)\nEOF\npython3 /tmp/j/edge.py"), ["/tmp/j/edge.py"]);
+	t("quoted text with > in it is data", redirectTargets(`echo "score > 100" && grep -c '->' log.txt > /tmp/n`), ["/tmp/n"]);
+	t("a quoted redirection target still counts", redirectTargets(`echo x > "out file.txt"; cp a "b c"`).includes("out file.txt"), true);
 	t("plan allows cd into a folder to read it", classify("cd /home/x && find chess -maxdepth 2 | head; pushd src; popd", plan).decision, "allow");
 	t("plan still denies what follows a cd", classify("cd /home/x && rm -rf chess", plan).decision, "deny");
 	for (const c of ["sed -n 1,5p f.txt", "find . -name '*.ts' -type f", "fd -e ts", "awk '{print $1}' f", "sort -u f.txt", "uniq -c f.txt", "git diff --stat", "find . -xdev -name x"])

@@ -1905,6 +1905,10 @@ const STYLE = [
   "- Prefer short sentences and plain prose over headers and long lists. Give more detail only when asked.",
   "- This is about your messages to the user; code, commands and tool calls stay as complete as the task requires.",
 ].join("\n");
+// Claude Code adds its own environment (working directory, platform, OS
+// version) to every conversation: the proxy's empty folder, and on another
+// machine's proxy (the phone's) another machine. pi's tools run elsewhere.
+const WHERE = "Environment (lets-code): the working directory, platform and OS version Claude Code adds to this conversation are the relaying proxy's, not where your tools run. Take the working directory and platform from the prompt above, or check with a tool; never work in the proxy's folder.";
 const BRIDGE = new URL("./bridge.mjs", import.meta.url).pathname;
 // index.ts compares this with its copy of the file and restarts an older daemon
 const VERSION = createHash("sha256").update(fs.readFileSync(new URL(import.meta.url))).digest("hex").slice(0, 16);
@@ -2080,7 +2084,7 @@ class Session {
     fs.mkdirSync(dir, { recursive: true });
     this.dir = dir;
     const sysFile = path.join(dir, "system.md");
-    fs.writeFileSync(sysFile, `${system || "You are a helpful assistant."}\n\n${STYLE}`);
+    fs.writeFileSync(sysFile, `${system || "You are a helpful assistant."}\n\n${STYLE}\n\n${WHERE}`);
     const mcpFile = path.join(dir, "mcp.json");
     fs.writeFileSync(
       mcpFile,
@@ -4840,7 +4844,7 @@ const PROTECTED = [".git/", ".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed
 // "*" (plan): those run read-only commands and nothing else.
 const GROUPS: Record<string, RegExp[]> = {
 	readonly: [
-		/^(cat|head|tail|less|more|wc|stat|file|du|df|echo|printf|true|pwd|ls|tree|grep|rg|egrep|fgrep|find|fd|which|type|env|printenv|uname|whoami|id|date|uptime|realpath|readlink|dirname|basename|sort|uniq|cut|tr|awk|sed|diff|cmp|md5sum|sha256sum|jq|yq|column|nl|xxd|hexdump|strings|test|\[)(\s|$)/,
+		/^(cd|pushd|popd|cat|head|tail|less|more|wc|stat|file|du|df|echo|printf|true|pwd|ls|tree|grep|rg|egrep|fgrep|find|fd|which|type|env|printenv|uname|whoami|id|date|uptime|realpath|readlink|dirname|basename|sort|uniq|cut|tr|awk|sed|diff|cmp|md5sum|sha256sum|jq|yq|column|nl|xxd|hexdump|strings|test|\[)(\s|$)/,
 		/^git\s+(status|log|diff|show|branch(\s+(-a|-r|-v|--list|--show-current))?|blame|ls-files|rev-parse|remote(\s+-v)?|stash\s+list|describe|tag(\s+-l)?|cat-file|shortlog|reflog)(\s|$)/,
 		/^(npm|pnpm|yarn)\s+(ls|list|view|info|outdated|why|explain)(\s|$)/,
 		/^(pip|pip3)\s+(list|show|freeze)(\s|$)/,
@@ -4882,7 +4886,7 @@ const BUILTIN: Manifest = {
 		orchestrator: {
 			label: "orchestrator", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "subagent", "expert", "list_mcp_resources", "read_mcp_resource"],
 			write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: ["*"], network: "on",
-			prompt: "Orchestrator mode (software factory): you plan and orchestrate; experts do the work. You never change a file yourself: edit and write are off, bash runs read-only commands only, and asking a subagent to make a change you designed line by line is the same thing. Read the code and agree with the user on the ticket: the goal, numbered acceptance criteria, the test command, constraints. Hand each part to the expert for it: a ticket to software-factory (developer, reviewers, tester, acceptance judge, in its own worktree, with the user's approvals), an open question to researcher, a review of an existing change to expert-reviewer or design-reviewer. Split large work into tickets and run them one at a time. When a run is blocked or stuck, read its ledger and artifacts (lets-code-factory/<id>/ in the agent dir), then sharpen the ticket and start a new run, or ask the user to /factory resume <id>; never patch its worktree. Report stage summaries, findings and what the user must decide.",
+			prompt: "Orchestrator mode (software factory): you plan and orchestrate; experts and subagents do the work. You change no file yourself: edit and write are off and bash runs read-only commands. Never ask the user to run a command for you: hand it to a subagent (general) or an expert. Read the code and agree with the user on the ticket: the goal, numbered acceptance criteria, the test command, constraints. Hand each part to the one for it: a ticket to software-factory (developer, reviewers, tester, acceptance judge, with the user's approvals; it works inside one git repo, and a new or empty folder becomes one), setup outside that repo (moving or backing up old files) to a subagent first, an open question to researcher, a review of an existing change to expert-reviewer or design-reviewer. Split large work into tickets and run them one at a time. When a run is blocked or stuck, read its ledger and artifacts (lets-code-factory/<id>/ in the agent dir), then sharpen the ticket and start a new run, or ask the user to /factory resume <id>; never patch its worktree. Report stage summaries, findings and what the user must decide.",
 		},
 		// read-only without the planning instructions: for scouts and reviewers
 		readonly: { label: "readonly", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "list_mcp_resources", "read_mcp_resource"], write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: [], network: "off" },
@@ -7447,13 +7451,15 @@ function artifact(L: Ledger, name: string, text: string): string {
 export function diffPath(L: Ledger): string { return join(L.dir, "artifacts", "change.patch"); }
 export function briefFor(stage: Stage, L: Ledger): Record<string, string> {
 	const criteria = numbered(L.criteria);
-	const where = `${L.work} (its own git worktree on ${L.branch}). The change is the work tree against commit ${L.base}: \`git -C ${L.work} diff ${L.base}\` (new files are staged, so they show), also saved as ${diffPath(L)}.`;
+	const where = `${L.work} (its own git worktree of ${L.repo} on ${L.branch}; where the ticket names ${L.repo}, it means this worktree). The change is the work tree against commit ${L.base}: \`git -C ${L.work} diff ${L.base}\` (new files are staged, so they show), also saved as ${diffPath(L)}.`;
+	// the ticket names the user's repo; the stages work in the run's worktree of it
+	const workspace = `The current folder, ${L.work}: this run's own git worktree of ${L.repo} (branch ${L.branch}), made for this ticket. Where the ticket or the plan names ${L.repo} or a path in it, it means the same path here: work here, not there.`;
 	const prev = (s: Stage) => (L.findings[s]?.length ? formatFindings(L.findings[s]!) : "");
 	const context = `Ticket:\n${L.ticket}${L.plan ? `\n\nApproved plan:\n${L.plan}` : ""}`;
 	const keep = [L.constraints, "Do not commit, push or open anything: the user approves the result first."].filter(Boolean).join("\n");
 	const b: Record<string, string> = {};
 	if (stage === "plan" || stage === "build") {
-		Object.assign(b, { task: L.ticket, criteria, mode: stage === "plan" ? "plan" : "build", how_to_run: L.howToRun, constraints: keep });
+		Object.assign(b, { task: L.ticket, criteria, mode: stage === "plan" ? "plan" : "build", how_to_run: L.howToRun, constraints: keep, workspace });
 		if (stage === "build") { b.plan = L.plan; if (L.fixing) b.findings = `Fix these findings of the ${L.fixing.stage} stage, by id:\n${formatFindings(L.fixing.findings)}`; }
 	} else if (stage === "expert-review") {
 		Object.assign(b, { diff: where, criteria, context, previous_findings: prev(stage), how_to_run: L.howToRun, constraints: L.constraints });
@@ -7594,9 +7600,9 @@ async function applyDecision(L: Ledger, d: Decision, deps: Deps): Promise<void> 
 			artifact(L, "commit-message.txt", msg);
 			// one commit on the run's branch from the base, whatever the children's checkpoints did to HEAD
 			const tree = (await deps.exec(`git write-tree`, L.work)).out.trim();
-			const c = await deps.exec(`git commit-tree ${tree} -p ${L.base} -F ${join(L.dir, "artifacts", "commit-message.txt")}`, L.work);
+			const c = await deps.exec(`git${await ident(L.work, deps)} commit-tree ${tree} -p ${L.base} -F ${join(L.dir, "artifacts", "commit-message.txt")}`, L.work);
 			const sha = c.out.trim();
-			if (c.code === 0 && /^[0-9a-f]{40}$/.test(sha)) { await deps.exec(`git update-ref refs/heads/${L.branch} ${sha}`, L.work); await deps.exec(`git symbolic-ref HEAD refs/heads/${L.branch}`, L.work); L.commit = sha; }
+			if (c.code === 0 && /^[0-9a-f]{40,64}$/.test(sha)) { await deps.exec(`git update-ref refs/heads/${L.branch} ${sha}`, L.work); await deps.exec(`git symbolic-ref HEAD refs/heads/${L.branch}`, L.work); L.commit = sha; }
 			else { L.waiting = "result"; L.note = `commit failed: ${short(c.out, 200)}`; return; }
 		}
 		L.status = "done";
@@ -7619,12 +7625,52 @@ export async function advance(L: Ledger, deps: Deps): Promise<Ledger> {
 	return L;
 }
 
+// git's -c flags for an identity where git has none (a fresh phone, a CI box):
+// the factory's own commits then need no setup and change no config
+export const FACTORY_IDENT = ` -c user.name="lets-code factory" -c user.email=factory@lets-code.invalid`;
+export async function ident(repo: string, deps: Deps): Promise<string> {
+	const a = await deps.exec(`git var GIT_AUTHOR_IDENT`, repo); const c = await deps.exec(`git var GIT_COMMITTER_IDENT`, repo);
+	return a.code === 0 && c.code === 0 ? "" : FACTORY_IDENT;
+}
+// A new project: a folder that does not exist yet, or is empty, becomes a git
+// repo; a repo without a commit gets an empty first one (on its own, from the
+// empty tree: the index and the files are not touched) for the run to branch
+// from. Returns what it did, for the run's log; a folder with files that is
+// not a repo is left alone (startRun then says so).
+export async function prepareRepo(target: string, deps: Deps): Promise<string[]> {
+	const did: string[] = [];
+	let empty = false;
+	if (!existsSync(target)) {
+		if (/[()\n]/.test(target)) throw new Error(`${target} does not exist, and is not a folder name to create (a remark in the path?)`);
+		mkdirSync(target, { recursive: true }); did.push(`created ${target}`); empty = true;
+	}
+	else { try { empty = statSync(target).isDirectory() && readdirSync(target).length === 0; } catch { /* not ours to judge */ } }
+	if (empty) {
+		const i = await deps.exec(`git init -q`, target);
+		if (i.code !== 0) throw new Error(`git init in ${target} failed: ${short(i.out, 300)}`);
+		did.push("made it a git repo");
+	}
+	const top = await deps.exec(`git rev-parse --show-toplevel`, target);
+	if (top.code !== 0) return did;
+	const repo = top.out.trim();
+	if ((await deps.exec(`git rev-parse -q --verify HEAD`, repo)).code !== 0) {
+		const tree = (await deps.exec(`git hash-object -t tree /dev/null`, repo)).out.trim();
+		const c = await deps.exec(`git${await ident(repo, deps)} commit-tree ${tree} -m "start: an empty first commit for the software factory"`, repo);
+		const sha = c.out.trim();
+		if (c.code !== 0 || !/^[0-9a-f]{40,64}$/.test(sha)) throw new Error(`the first commit in ${repo} failed: ${short(c.out, 300)}`);
+		const u = await deps.exec(`git update-ref HEAD ${sha}`, repo);
+		if (u.code !== 0) throw new Error(`the first commit in ${repo} failed: ${short(u.out, 300)}`);
+		did.push("added an empty first commit");
+	}
+	return did;
+}
 export interface StartOpts { ticket: string; repo: string; howToRun?: string; start?: string; constraints?: string; conventions?: string; tester?: "auto" | "on" | "off"; criteria?: string[]; root?: string; id?: string }
 // a new run: its dir, its worktree and branch from the repo's HEAD, its ledger
 export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 	const now = (deps.now ?? Date.now)(); const root = o.root ?? factoryRoot();
+	const prepared = await prepareRepo(resolve(o.repo), deps);
 	const top = await deps.exec(`git rev-parse --show-toplevel`, resolve(o.repo));
-	if (top.code !== 0) throw new Error(`${o.repo} is not a git repository`);
+	if (top.code !== 0) throw new Error(`${o.repo} is not a git repository, and has files: the factory starts a new project only in a new or empty folder`);
 	const repo = top.out.trim(); const base = (await deps.exec(`git rev-parse HEAD`, repo)).out.trim();
 	// an id no run dir and no branch of this repo has yet (runs started in the same second)
 	let id = o.id ?? newId(now);
@@ -7636,6 +7682,7 @@ export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 	const L: Ledger = { v: 1, id, created: now, updated: now, repo, base, branch, work, dir, ticket: o.ticket.trim(), howToRun: o.howToRun ?? "", start: o.start ?? "", constraints: o.constraints ?? "", conventions: o.conventions ?? "",
 		tester: o.tester ?? "auto", status: "running", waiting: null, note: "", stage: "intake", rounds: 0, criteria: o.criteria ?? [], plan: "", claim: "", findings: {}, sent: {}, fixing: null, pending: null, baseline: null, commit: "", entries: [] };
 	writeFileSync(join(dir, "ticket.md"), L.ticket + "\n", { mode: 0o600 });
+	if (prepared.length) L.entries.push({ stage: "intake", round: 0, verdict: "new project", summary: `${repo}: ${prepared.join(", ")}`, input: 0, output_tokens: 0, seconds: 0, started: now, ended: now });
 	saveLedger(L, now);
 	return advance(L, deps);
 }
@@ -7732,19 +7779,38 @@ export function report(L: Ledger): string {
 	return [summary(L), next].filter(Boolean).join("\n");
 }
 // the software-factory expert's run, in the main session: the brief's ticket
-// (its text, or a file holding it), repo, how_to_run, start, constraints
-export async function runExpert(brief: Record<string, unknown>, ctx: any, signal?: AbortSignal, progress?: (l: string) => void, callId?: string): Promise<{ text: string; isError: boolean }> {
-	const v = (k: string) => { const x = brief?.[k]; return (typeof x === "string" ? x : x === undefined || x === null ? "" : JSON.stringify(x)).trim(); };
-	const cwd = ctx?.cwd || process.cwd();
+// (its text, or a file holding it), criteria, repo, how_to_run, start,
+// constraints. Models name fields their own way (acceptance_criteria,
+// test_command, goal) and send lists: those are read too, and any other
+// field goes into the ticket, so nothing the caller agreed with the user is lost.
+const FIELDS: Record<string, string[]> = { criteria: ["criteria", "acceptance_criteria", "acceptance"], how_to_run: ["how_to_run", "test_command", "tests", "test"], goal: ["goal", "summary"] };
+const SEEN = new Set(["ticket", "repo", "start", "constraints", ...Object.values(FIELDS).flat()]);
+const asText = (x: unknown): string => (Array.isArray(x) ? x.map(asText).filter(Boolean).join("\n") : typeof x === "string" ? x : x === undefined || x === null ? "" : typeof x === "object" ? JSON.stringify(x) : String(x)).trim();
+export function ticketFrom(brief: Record<string, unknown>, cwd: string): { ticket: string; howToRun: string; constraints: string } {
+	const v = (k: string) => asText(brief?.[k]);
+	const pick = (name: string) => FIELDS[name].map(v).find(Boolean) ?? "";
 	let ticket = v("ticket");
 	if (ticket && !ticket.includes("\n") && ticket.length < 500) { const f = resolve(cwd, ticket); try { if (statSync(f).isFile()) ticket = readFileSync(f, "utf8"); } catch { /* the text itself */ } }
+	const goal = pick("goal"); const criteria = pick("criteria");
+	if (goal && !ticket.includes(goal)) ticket = ticket ? `${ticket}\n\nGoal: ${goal}` : goal;
+	if (criteria && !parseCriteria(ticket).length) ticket = `${ticket}\n\n## Acceptance criteria\n${criteriaFromText(criteria).map((c, i) => `${i + 1}. ${c}`).join("\n")}`.trim();
+	const rest = Object.keys(brief ?? {}).filter((k) => !SEEN.has(k) && v(k)).map((k) => `- ${k}: ${v(k)}`);
+	if (rest.length && ticket) ticket = `${ticket}\n\n## Notes\n${rest.join("\n")}`;
+	return { ticket: ticket.trim(), howToRun: pick("how_to_run"), constraints: v("constraints") };
+}
+export async function runExpert(brief: Record<string, unknown>, ctx: any, signal?: AbortSignal, progress?: (l: string) => void, callId?: string): Promise<{ text: string; isError: boolean }> {
+	const v = (k: string) => asText(brief?.[k]);
+	const cwd = ctx?.cwd || process.cwd();
+	const { ticket, howToRun, constraints } = ticketFrom(brief, cwd);
 	if (!ticket.trim()) return { text: "Nothing ran: the brief needs the ticket (its text, or the path of a file holding it).", isError: true };
 	const why = await ensureExperts(ctx); if (why) return { text: why, isError: true };
 	// the mode's prompt reaches the model on its next turn; this tells it now
 	const now = orchestrate(ctx, "software factory run") ? `\n${ORCHESTRATING}` : "";
 	try {
 		const deps = await sessionDeps(ctx, signal, progress, callId);
-		const L = await startRun({ ticket, repo: resolve(cwd, v("repo") || "."), howToRun: v("how_to_run"), start: v("start"), constraints: v("constraints") }, deps);
+		// a path with the model's remark after it: "/x/chess (empty; becomes a repo)"
+		const repo = v("repo").split("\n")[0].replace(/\s+\([^()]*\)\s*$/, "").trim();
+		const L = await startRun({ ticket, repo: resolve(cwd, repo || "."), howToRun, start: v("start"), constraints }, deps);
 		return { text: report(L) + now, isError: L.status === "stopped" };
 	} catch (e) { return { text: `The software factory could not run: ${e instanceof Error ? e.message : String(e)}`, isError: true }; }
 }
@@ -14146,7 +14212,8 @@ keywords: software factory
 job: Runs a ticket through the software factory in its own worktree: developer (plan, then build), expert and design review, tester, acceptance judge, the full suite, up to 5 fix rounds; the user approves the criteria, plan and result; stage summaries back; minutes to hours
 brief:
   - ticket (required): the ticket verbatim, or the path of a file holding it, with its acceptance criteria
-  - repo: the git repo to work on (default: the current folder); the user's checkout is never touched
+  - criteria: the numbered acceptance criteria agreed with the user, when the ticket does not list them
+  - repo: the git repo to work on (default: the current folder); a new or empty folder becomes a new project's repo; the user's checkout is never touched
   - how_to_run: the command that runs the test suite
   - start: how to start the app, for the tester's browser checks
   - constraints: what must not be touched, style rules, limits

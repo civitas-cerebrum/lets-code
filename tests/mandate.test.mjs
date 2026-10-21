@@ -73,6 +73,8 @@ const blocked = (r) => r?.block === true;
 	// readonly commands that write or run something are not read-only
 	for (const c of ["sed -i s/a/b/ f.txt", "sed --in-place -e s/a/b/ f.txt", "find . -name '*.js' -exec perl -pi -e s/a/b/ {} +", "find . -name x -delete", "fd -e ts -x touch", "awk 'BEGIN{system(\"touch x\")}'", "awk '{print | \"sh\"}' f", "sort -o out.txt in.txt", "git diff --output=p.patch", "uniq in.txt out.txt"])
 		t(`plan denies ${c}`, classify(c, plan).decision, "deny");
+	t("plan allows cd into a folder to read it", classify("cd /home/x && find chess -maxdepth 2 | head; pushd src; popd", plan).decision, "allow");
+	t("plan still denies what follows a cd", classify("cd /home/x && rm -rf chess", plan).decision, "deny");
 	for (const c of ["sed -n 1,5p f.txt", "find . -name '*.ts' -type f", "fd -e ts", "awk '{print $1}' f", "sort -u f.txt", "uniq -c f.txt", "git diff --stat", "find . -xdev -name x"])
 		t(`plan allows ${c}`, classify(c, plan).decision, "allow");
 	t("env prefix stripped", classify("FOO=1 env sudo ls", ask).group, "privileged");

@@ -178,7 +178,22 @@ goes dormant again when the user leaves it. `--no-mandate` turns that off
 as well. Read-only bash had holes that matter once nothing else may write:
 `sed -i`, `find -exec`/`-delete`, `fd -x`, `awk` with `system()` or a pipe,
 `sort -o`, `git ... --output`, `uniq in out`, `xxd -r`, `tree -o` now count as
-writes under every deny-by-default role (plan too).
+writes under every deny-by-default role (plan too); `cd`, `pushd` and
+`popd` count as read-only (what follows them is judged on its own).
+
+The first live use (Haiku on the phone, "a simple chess game, start fresh")
+never reached a stage: `cd` was denied, the factory refused a folder that
+was not a repo, the model asked the user to `git init` (the prompt's "a
+change you designed line by line is the same thing" read as forbidding
+delegated setup), and the subagent's first commit failed because git on the
+phone has no identity. So a run now starts a new project itself: a folder
+that does not exist or is empty is made a repo, and a repo without a commit
+gets an empty first one from the empty tree (index and files untouched); a
+folder with files that is not a repo is still refused. The factory's commits
+add `-c user.name/user.email` ("lets-code factory") only where `git var`
+finds no identity, and change no config. The prompt now says never to ask
+the user to run a command, and that setup outside the run's repo goes to a
+subagent first.
 
 **Subagents.** One `subagent` tool (single / parallel / chain), modelled on
 pi's example but with a short schema (the community packages measured 6k

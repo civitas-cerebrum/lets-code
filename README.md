@@ -118,7 +118,8 @@ lets-code --no-git-guard          # you know what you're doing
 | `--no-session-tag` | Send no session tag with model requests |
 | `--metrics` / `--no-metrics` | Start this launch with the full / minimal footer (`/metrics` switches inside pi, and the size picked there is where later sessions start) |
 | `--metrics-log <file>` | Append the footer's numbers to `<file>` as JSON lines, also without a UI (see [Metrics log](#metrics-log)) |
-| `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `yolo` or a role of yours |
+| `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `orchestrator`, `yolo` or a role of yours (`--no-mandate` also turns off the orchestrator mode a factory run switches to) |
+| `--orchestrator` | Start in orchestrator mode (`--mandate orchestrator`): the session plans and hands the work to experts, and changes no file itself |
 | `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
 | `--experts` / `--no-experts` | The `expert` tool (on by default, needs subagents; see [Experts](#experts)) |
 | `--claude-code` / `--no-claude-code` | The Claude Code adapter with your `~/.claude` too (`CLAUDE_CODE=all`) / off; by default it switches on by itself where needed (see [Claude Code projects](#claude-code-projects)) |
@@ -557,17 +558,25 @@ the harness live outside this repo.
 
 With `MANDATE=true` every session runs under a **role**: a scope that says
 which tools, paths, kinds of bash command, MCP servers and agents are
-allowed, asked about or denied. The four built-in roles are the modes (three
-more, `readonly`, `reviewer` and `developer`, are for subagents):
+allowed, asked about or denied. The five built-in roles are the modes (more,
+such as `readonly`, `reviewer` and `developer`, are for subagents):
 
 | Mode | What changes |
 |---|---|
 | `auto` | Nothing. Guards as always, no prompts. The default. |
 | `ask` | `sudo`, recursive deletes, package installs, `curl \| sh` and writes outside the project are confirmed first: allow once, allow for the session, or deny. |
 | `plan` | Edit and write are off, bash is read-only, and the model is told to end with a numbered `Plan:`. Leaving plan mode offers to execute it. |
+| `orchestrator` | The software factory's mode. The session plans with you and orchestrates: it reads the code, agrees the ticket and its acceptance criteria with you, and hands every change to experts (`software-factory` for a ticket, `developer`, the reviewers, `researcher`). Edit and write are off, bash is read-only (tests are the experts' job too) and MCP is denied. A run that is blocked or stuck is fixed by sharpening the ticket and starting a new run, never by patching the run's worktree. |
 | `yolo` | The mandate steps aside (the git and memory guards stay unless launched without them). |
 
-Switch with `/mode <name>`, `/plan`, `alt+m` (cycle) or `ctrl+alt+p`. A denied
+Switch with `/mode <name>`, `/plan`, `/orchestrator`, `alt+m` (cycle) or `ctrl+alt+p`.
+Starting or resuming a software factory run (`/factory`, or the
+`software-factory` expert) switches the session into `orchestrator` and keeps
+it there until you leave it with `/orchestrator` (back to the mode you came
+from) or `/mode`. That works with `MANDATE=false` too: wherever the experts
+are on, the orchestrator mode is there, dormant until a run or
+`/orchestrator` starts it (`--no-mandate` turns it off). A subagent never
+inherits it: a child that would gets the default mode. A denied
 call costs the model one line under 200 characters; allowed calls cost
 nothing. Denials are logged to `~/.pi/agent/lets-code-mandate.log`.
 

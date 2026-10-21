@@ -61,8 +61,14 @@
 #   lets-code --metrics-log <file>   append per-request and per-prompt metrics
 #                                to <file> as JSON lines (also without a UI)
 #   lets-code --mandate [<m>]    mandate on, optionally in mode plan | auto |
-#                                ask | yolo | <role> (pi's own --mode is untouched)
-#   lets-code --no-mandate       launch without the mandate (modes) extension
+#                                ask | orchestrator | yolo | <role> (pi's own
+#                                --mode is untouched)
+#   lets-code --orchestrator     start in orchestrator mode (--mandate
+#                                orchestrator): the session plans and dispatches
+#                                experts and changes no file itself; a software
+#                                factory run switches into it on its own
+#   lets-code --no-mandate       launch without the mandate (modes) extension,
+#                                and without the orchestrator mode
 #   lets-code --subagents | --no-subagents   the subagent tool on/off (default on)
 #   lets-code --experts | --no-experts   the expert tool on/off (default on, needs subagents);
 #                                each expert is enabled in a session (/experts)
@@ -4807,6 +4813,10 @@ interface Role {
 interface Manifest { default?: string; cycle?: string[]; roles: Record<string, Role> }
 
 const ACTIVE = process.env.LETS_CODE_MANDATE_ON === "1";
+// With the mandate off, the orchestrator role alone (LETS_CODE_ORCHESTRATOR_ON,
+// set where the software factory is): dormant, enforcing nothing, until a
+// factory run or /orchestrator engages it in the main session.
+const ORCHESTRATOR = !ACTIVE && process.env.LETS_CODE_ORCHESTRATOR_ON === "1";
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const LOG = process.env.LETS_CODE_MANDATE_LOG || join(AGENT_DIR, "lets-code-mandate.log");
 const PROTECTED = [".git/", ".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519"];
@@ -4830,12 +4840,18 @@ const GROUPS: Record<string, RegExp[]> = {
 	destructive: [/^rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\s|$)/, /^(rm|rmdir|shred|unlink)\s+.*(\s|^)(\/|~|\.\.|\*|\.git)(\s|$)/, /^(dd|mkfs|fdisk|parted|wipefs)(\s|$)/, /^git\s+(push\s+.*(-f|--force|--delete|--mirror)|branch\s+-D|reset\s+--hard|clean\s+-[a-zA-Z]*[fxd]|stash\s+(drop|clear))(\s|$)/, /^(truncate|:>|>\s*\/dev\/sd)/, /^(find|fd)\s+.*(-delete|-exec\s+rm)/, /^(chmod|chown)\s+(-R\s+)?(777|000)\s/],
 	"network-exec": [/^(curl|wget|fetch)\b.*\|\s*(sh|bash|zsh|python3?|node|perl)(\s|$)/, /^(sh|bash|zsh)\s+<\(\s*(curl|wget)/, /^(nc|ncat|netcat|telnet|nmap|masscan|socat)(\s|$)/, /^ssh\s/, /^scp\s/, /^rsync\s.*:/],
 };
+// readonly commands with an option or script that writes or runs something:
+// not read-only, so a deny-by-default role (plan, orchestrator) denies them
+const READONLY_WRITES: RegExp[] = [
+	/^(sed|perl)\s+(.*\s)?(-[a-zA-Z]*i|--in-place)/, /^(find|fd)\s.*\s(-exec|-execdir|-ok|-okdir|-delete|-fprint\S*|-fls|-x|--exec|--exec-batch)(\s|$)/,
+	/^awk\s.*(system\s*\(|\|\s*["']|-i\s*inplace)/, /^sort\s(.*\s)?(-o|--output)/, /^git\s.*--output/, /^(xxd\s.*\s-r|tree\s.*\s-o|uniq\s+(-\S+\s+)*[^-\s]\S*\s+[^-\s])/,
+];
 const ORDER: Decision[] = ["allow", "ask", "deny"];
 const stricter = (a: Decision, b: Decision) => (ORDER.indexOf(a) >= ORDER.indexOf(b) ? a : b);
 
 const BUILTIN: Manifest = {
 	default: "auto",
-	cycle: ["auto", "ask", "plan", "yolo"],
+	cycle: ["auto", "ask", "plan", "orchestrator", "yolo"],
 	roles: {
 		auto: { label: "auto", external: "allow", bash: { "*": "allow" }, mcp: "allow", dispatch: ["*"], network: "on" },
 		ask: {
@@ -4846,6 +4862,14 @@ const BUILTIN: Manifest = {
 			label: "plan", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "codemode", "subagent", "expert", "list_mcp_resources", "read_mcp_resource"],
 			write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: ["*"], network: "off",
 			prompt: "Plan mode: explore the code and run read-only commands only; edits, writes and installs are refused. Finish with a numbered list under the heading \"Plan:\" that another agent could follow, then stop. The user decides when to execute it.",
+		},
+		// the software factory's main session: it plans with the user and
+		// hands every change to experts; it reads and dispatches, never writes.
+		// The main session's only: a child that would inherit it gets the default
+		orchestrator: {
+			label: "orchestrator", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "subagent", "expert", "list_mcp_resources", "read_mcp_resource"],
+			write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: ["*"], network: "on",
+			prompt: "Orchestrator mode (software factory): you plan and orchestrate; experts do the work. You never change a file yourself: edit and write are off, bash runs read-only commands only, and asking a subagent to make a change you designed line by line is the same thing. Read the code and agree with the user on the ticket: the goal, numbered acceptance criteria, the test command, constraints. Hand each part to the expert for it: a ticket to software-factory (developer, reviewers, tester, acceptance judge, in its own worktree, with the user's approvals), an open question to researcher, a review of an existing change to expert-reviewer or design-reviewer. Split large work into tickets and run them one at a time. When a run is blocked or stuck, read its ledger and artifacts (lets-code-factory/<id>/ in the agent dir), then sharpen the ticket and start a new run, or ask the user to /factory resume <id>; never patch its worktree. Report stage summaries, findings and what the user must decide.",
 		},
 		// read-only without the planning instructions: for scouts and reviewers
 		readonly: { label: "readonly", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "list_mcp_resources", "read_mcp_resource"], write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: [], network: "off" },
@@ -5038,7 +5062,7 @@ export function classify(cmd: string, role: Role): { decision: Decision; group: 
 		if (d === null) { // no group matched: readonly commands are allowed under a deny-by-default role
 			// a redirection makes a read-only command a write, except to /dev/null or into another descriptor (2>&1)
 			const noWrite = !/[>]/.test(c.replace(/\d?>>?\s*\/dev\/null/g, "").replace(/\d?>&\d/g, ""));
-			if (dflt === "deny" && groups.readonly.some((r) => r.test(c)) && noWrite) { d = policy.readonly ?? "allow"; g = "readonly"; }
+			if (dflt === "deny" && groups.readonly.some((r) => r.test(c)) && noWrite && !READONLY_WRITES.some((r) => r.test(c))) { d = policy.readonly ?? "allow"; g = "readonly"; }
 			else { d = dflt; g = "*"; }
 		}
 		if (stricter(d, worst.decision) === d && d !== worst.decision) worst = { decision: d, group: g, command: c };
@@ -5068,8 +5092,11 @@ export function mayDispatch(role: Role, agent: string): boolean { return !role.d
 const short = (s: string, n = 190) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 export default function (pi: ExtensionAPI) {
-	if (!ACTIVE) return;
+	if (!ACTIVE && !ORCHESTRATOR) return;
 	const subagentDepth = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
+	if (!ACTIVE && subagentDepth > 0) return;
+	let on = ACTIVE;   // false: dormant (orchestrator only, not engaged)
+	let before = "";   // the mode the orchestrator was entered from, to go back to
 	let manifest: Manifest = BUILTIN;
 	let roleName = process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "auto";
 	let role: Role = BUILTIN.roles.auto;
@@ -5083,6 +5110,8 @@ export default function (pi: ExtensionAPI) {
 	const warn = (ctx: ExtensionContext | undefined, m: string) => { if (ctx?.hasUI) ctx.ui.notify(m, "warning"); log("warn", { m }); };
 
 	function apply(ctx: ExtensionContext | undefined, name: string, announce = true) {
+		// the orchestrator is the main session's: a child that would inherit it gets the default
+		if (name === "orchestrator" && subagentDepth > 0) name = manifest.default && manifest.default !== name ? manifest.default : "auto";
 		if (!manifest.roles[name]) { warn(ctx, `mandate: unknown role '${name}', using '${manifest.default}'`); name = manifest.default ?? "auto"; }
 		const prev = roleName; roleName = name; role = roleFor(manifest, name);
 		// plan-like roles: drop tools outside the allowlist from the active set; restore on exit
@@ -5099,14 +5128,29 @@ export default function (pi: ExtensionAPI) {
 		catch (e) { // a broken manifest fails closed: built-in roles only, and the strictest mode that still works
 			warn(ctx, `mandate: ${(e as Error).message} — using built-in roles`); manifest = BUILTIN;
 		}
+		if (!ACTIVE) { if (on) apply(ctx, "orchestrator", false); return; }
 		apply(ctx, process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || manifest.default || "auto");
 	}
+	// into the orchestrator (a factory run, /orchestrator, /mode), and back out
+	function orchestrate(ctx: ExtensionContext | undefined, reason = ""): boolean {
+		if (on && roleName === "orchestrator") return false;
+		before = on ? roleName : ""; on = true; apply(ctx, "orchestrator");
+		log("orchestrate", { reason, from: before || "off" });
+		if (reason && ctx?.hasUI) ctx.ui.notify(`mode: orchestrator (${reason}): experts make the changes; /orchestrator leaves it`, "info");
+		return true;
+	}
+	function leave(ctx: ExtensionContext | undefined): void {
+		const back = before && before !== "orchestrator" && manifest.roles[before] ? before : manifest.default && manifest.default !== "orchestrator" ? manifest.default : "auto";
+		apply(ctx, back); before = "";
+		if (!ACTIVE) { on = false; if (ctx?.hasUI) ctx.ui.setStatus("mandate", undefined); }
+	}
+	const why = () => (roleName === "orchestrator" ? " The orchestrator delegates: hand it to an expert." : " Switch with /mode, or ask the user.");
 
 	// ok: the Claude Code adapter already allowed this call (an allow rule, a
 	// hook, or the user's answer to its ask): no second question; deny stays deny
 	async function decide(ctx: ExtensionContext, d: Decision, key: string, what: string, ok = false): Promise<{ block: true; reason: string } | undefined> {
 		if (d === "allow") return undefined;
-		if (d === "deny") { log("deny", { key, what }); return { block: true, reason: short(`mandate(${roleName}): ${what} is not allowed in this mode. Switch with /mode, or ask the user.`) }; }
+		if (d === "deny") { log("deny", { key, what }); return { block: true, reason: short(`mandate(${roleName}): ${what} is not allowed in this mode.${why()}`) }; }
 		if (ok || allowedForSession.has(key)) return undefined;
 		if (!ctx.hasUI) { log("deny", { key, what, why: "no-ui" }); return { block: true, reason: short(`mandate(${roleName}): ${what} needs approval and no one can be asked in this mode.`) }; }
 		const choice = await ctx.ui.select(`mandate (${roleName}): ${what}\n\nAllow?`, ["Allow once", "Allow for this session", "Deny"]);
@@ -5121,15 +5165,15 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event: any) => {
 		const sections = event?.systemPromptOptions?.sections;
-		if (sections && typeof sections === "object") { if (role.prompt && !role.bypass) sections.lets_code_mandate = role.prompt; else delete sections.lets_code_mandate; }
+		if (sections && typeof sections === "object") { if (on && role.prompt && !role.bypass) sections.lets_code_mandate = role.prompt; else delete sections.lets_code_mandate; }
 		return undefined;
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		if (role.bypass) return undefined;
+		if (!on || role.bypass) return undefined;
 		const name = event.toolName; const input: any = event.input ?? {};
 		const ok = (globalThis as any).__letsCodeClaudeApproved?.has?.(event.toolCallId) === true;
-		if (role.tools && !role.tools.includes(name) && !name.startsWith("mcp__")) return { block: true, reason: short(`mandate(${roleName}): tool '${name}' is not available in this mode (${role.tools.join(", ")}).`) };
+		if (role.tools && !role.tools.includes(name) && !name.startsWith("mcp__")) return { block: true, reason: short(`mandate(${roleName}): tool '${name}' is not available in this mode${roleName === "orchestrator" ? `.${why()}` : ` (${role.tools.join(", ")}).`}`) };
 		if (name.startsWith("mcp__")) return decide(ctx, mcpDecision(role, name), `mcp:${name.split("__")[1]}`, `MCP call ${name}`, ok);
 		if (name === "edit" || name === "write") {
 			const p = String(input.path ?? "");
@@ -5163,9 +5207,19 @@ export default function (pi: ExtensionAPI) {
 
 	// --- commands and shortcuts (main session only; a subagent keeps its role)
 	if (subagentDepth > 0 || process.env.LETS_CODE_ROLE) return;
+	// the factory module engages the orchestrator when a run starts or resumes
+	(globalThis as any).__letsCodeOrchestrate = (ctx: ExtensionContext | undefined, reason?: string) => orchestrate(ctx, reason);
+	pi.registerCommand("orchestrator", {
+		description: "Toggle orchestrator mode: plan and dispatch experts, change no file yourself",
+		handler: async (_args, ctx) => {
+			if (on && roleName === "orchestrator") { leave(ctx); ctx.ui.notify(on ? `mode: ${roleName}` : "orchestrator mode off", "info"); return; }
+			orchestrate(ctx); ctx.ui.notify("mode: orchestrator", "info");
+		},
+	});
+	if (!ACTIVE) return;
 	const names = () => Object.keys(manifest.roles);
 	pi.registerCommand("mode", {
-		description: "Show or switch the mandate mode: /mode [plan|auto|ask|yolo|<role>]",
+		description: "Show or switch the mandate mode: /mode [plan|auto|ask|orchestrator|yolo|<role>]",
 		handler: async (args, ctx) => {
 			const want = (args ?? "").trim();
 			if (!want) { ctx.ui.notify(`mode: ${roleName}  (available: ${names().join(", ")})\nlog: ${LOG}`, "info"); return; }
@@ -7650,6 +7704,13 @@ export async function ensureExperts(ctx: any, names = ["developer", "expert-revi
 	return null;
 }
 
+// the main session orchestrates from a run's start on (the mandate's
+// orchestrator role: it reads and dispatches experts, changes no file), until
+// the user leaves it with /orchestrator or /mode; nothing without the mandate
+export const ORCHESTRATING = "This session is now in orchestrator mode: you plan and dispatch experts, and change no file yourself.";
+export function orchestrate(ctx: any, why: string): boolean {
+	try { return (globalThis as any).__letsCodeOrchestrate?.(ctx, why) === true; } catch { return false; }
+}
 // what the caller is told: the stage lines and what happens next
 export function report(L: Ledger): string {
 	const next = L.status === "waiting" ? `The run waits for the user (${L.waiting}): /factory resume ${L.id} asks it.`
@@ -7666,10 +7727,12 @@ export async function runExpert(brief: Record<string, unknown>, ctx: any, signal
 	if (ticket && !ticket.includes("\n") && ticket.length < 500) { const f = resolve(cwd, ticket); try { if (statSync(f).isFile()) ticket = readFileSync(f, "utf8"); } catch { /* the text itself */ } }
 	if (!ticket.trim()) return { text: "Nothing ran: the brief needs the ticket (its text, or the path of a file holding it).", isError: true };
 	const why = await ensureExperts(ctx); if (why) return { text: why, isError: true };
+	// the mode's prompt reaches the model on its next turn; this tells it now
+	const now = orchestrate(ctx, "software factory run") ? `\n${ORCHESTRATING}` : "";
 	try {
 		const deps = await sessionDeps(ctx, signal, progress, callId);
 		const L = await startRun({ ticket, repo: resolve(cwd, v("repo") || "."), howToRun: v("how_to_run"), start: v("start"), constraints: v("constraints") }, deps);
-		return { text: report(L), isError: L.status === "stopped" };
+		return { text: report(L) + now, isError: L.status === "stopped" };
 	} catch (e) { return { text: `The software factory could not run: ${e instanceof Error ? e.message : String(e)}`, isError: true }; }
 }
 // the subagents view's state (the switching view of #56), if that module is here
@@ -7705,6 +7768,7 @@ export default function (pi: ExtensionAPI) {
 				const file = resolve(ctx.cwd, arg);
 				if (verb !== "resume" && !existsSync(file)) return say(`No ticket file ${arg}.`, "warning");
 				const why = await ensureExperts(ctx); if (why) return say(why, "warning");
+				orchestrate(ctx, verb === "resume" ? "factory run resumed" : "factory run");
 				const deps = await sessionDeps(ctx, ctx.signal, progress);
 				// the session counts as working while the run goes on, so switching
 				// into a stage shows it in place instead of tearing this session down
@@ -10237,7 +10301,7 @@ const WORKER = "You are one step of a scripted workflow. Do exactly the task bel
 
 // ----------------------------------------------------------- the extension
 const BUILTIN = new Set(["settings", "model", "tree", "thinking", "scoped-models", "export", "import", "share", "bug", "copy", "name", "session", "changelog", "hotkeys", "fork", "clone", "trust", "login", "logout", "new", "compact", "resume", "reload", "quit", "mode", "plan", "workflow", "skill"]);
-const PERMISSION_MODE: Record<string, string> = { plan: "plan", readonly: "plan", ask: "default", auto: "auto", yolo: "bypassPermissions" };
+const PERMISSION_MODE: Record<string, string> = { plan: "plan", readonly: "plan", orchestrator: "plan", ask: "default", auto: "auto", yolo: "bypassPermissions" };
 
 export default function (pi: ExtensionAPI) {
 	if (!ACTIVE) return;
@@ -14091,6 +14155,10 @@ stage's brief, verdict, findings, tokens and time), its artifacts and its
 worktree. Stages show in /subagents. A run waiting for the user, or one
 that was interrupted, goes on with /factory resume <id>; /factory list and
 /factory status show where each one stands.
+
+A run puts the main session in orchestrator mode (/orchestrator leaves it):
+it plans with the user and hands every change to experts, and changes no
+file itself.
 LC_EOF
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
@@ -15343,7 +15411,7 @@ mandate_init() {
         cat > "${target}" <<'JSON'
 {
   "default": "auto",
-  "cycle": ["auto", "ask", "plan", "yolo"],
+  "cycle": ["auto", "ask", "plan", "orchestrator", "yolo"],
   "roles": {
     "ask": { "bash": { "privileged": "deny" } },
     "ci":  { "tools": ["read", "grep", "find", "ls", "bash"],
@@ -15501,10 +15569,10 @@ run_setup() {  # run_setup [full|granular]
         granular)
             echo ""
             echo "Optional features (each can be changed later in ${CONFIG_FILE}):"
-            printf "  Mandate modes — plan / auto / ask / yolo per session, roles per subagent? [y/N] "
+            printf "  Mandate modes — plan / auto / ask / orchestrator / yolo per session, roles per subagent? [y/N] "
             read -r reply; case "${reply}" in y|Y) feat_mandate="true"
-                printf "  Start mode [auto] (plan|auto|ask|yolo): "; read -r feat_mode
-                case "${feat_mode}" in ""|auto) feat_mode="" ;; plan|ask|yolo) ;; *) log_error "mode must be plan|auto|ask|yolo"; exit 1 ;; esac ;; esac
+                printf "  Start mode [auto] (plan|auto|ask|orchestrator|yolo): "; read -r feat_mode
+                case "${feat_mode}" in ""|auto) feat_mode="" ;; plan|ask|orchestrator|yolo) ;; *) log_error "mode must be plan|auto|ask|orchestrator|yolo"; exit 1 ;; esac ;; esac
             printf "  Subagents — a 'subagent' tool that delegates to agent files? [Y/n] "
             read -r reply; case "${reply}" in n|N) feat_subagents="false" ;; esac
             printf "  Sandbox — bash confined with bubblewrap/Seatbelt via sandbox-runtime? [y/N] "
@@ -16280,6 +16348,7 @@ API_OVERRIDE=""
 VISION_OVERRIDE=""
 THINKING_OVERRIDE=""
 INSECURE=false
+NO_MANDATE=false   # --no-mandate: no orchestrator either
 PASSTHROUGH=()
 while [ $# -gt 0 ]; do
     case $1 in
@@ -16315,7 +16384,8 @@ while [ $# -gt 0 ]; do
         --metrics-log=*) METRICS_LOG="${1#--metrics-log=}"; shift ;;
         --mandate)  MANDATE=true
                     case "${2:-}" in ""|-*) shift ;; *) MODE="$2"; shift 2 ;; esac ;;
-        --no-mandate) MANDATE=false; shift ;;
+        --orchestrator) MANDATE=true; MODE=orchestrator; shift ;;
+        --no-mandate) MANDATE=false; NO_MANDATE=true; shift ;;
         --subagents) SUBAGENTS=true; shift ;;
         --no-subagents) SUBAGENTS=false; shift ;;
         --experts) EXPERTS=true; shift ;;
@@ -16739,7 +16809,7 @@ case "$(printf '%s' "${SESSION_TAG}" | tr '[:upper:]' '[:lower:]')" in
 esac
 
 # optional features: mandate (modes/roles), subagents, sandbox, REA, metrics
-unset LETS_CODE_MANDATE_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL LETS_CODE_REA_AGENT LETS_CODE_METRICS_ON
+unset LETS_CODE_MANDATE_ON LETS_CODE_ORCHESTRATOR_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL LETS_CODE_REA_AGENT LETS_CODE_METRICS_ON
 FEAT_DESC=""
 # footer: minimal by default; METRICS=true starts with the full one. The
 # size last picked with /metrics is where the next launch starts, ahead of
@@ -16772,7 +16842,7 @@ fi
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 case "$(lc "${MANDATE}")" in
     true|yes|1|on)
-        case "${MODE}" in ""|[A-Za-z0-9_.-]*) ;; *) log_error "MODE must be a role name (plan|auto|ask|yolo|<role>), got: ${MODE}"; exit 1 ;; esac
+        case "${MODE}" in ""|[A-Za-z0-9_.-]*) ;; *) log_error "MODE must be a role name (plan|auto|ask|orchestrator|yolo|<role>), got: ${MODE}"; exit 1 ;; esac
         pi_write_mandate_extension
         export LETS_CODE_MANDATE_ON=1
         if [ -n "${MODE}" ]; then export LETS_CODE_MODE="${MODE}"; else unset LETS_CODE_MODE; fi
@@ -16862,6 +16932,12 @@ case "$(lc "${EXPERTS}")" in
                 fi
             fi
             FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }experts: on"
+            # without the mandate, its orchestrator role alone: dormant until a
+            # software factory run (or /orchestrator) engages it
+            if [ "${LETS_CODE_MANDATE_ON:-}" != 1 ] && [ "${NO_MANDATE}" != true ]; then
+                pi_write_mandate_extension
+                export LETS_CODE_ORCHESTRATOR_ON=1
+            fi
         fi ;;
 esac
 # Claude Code adapter: the module, and what it finds here for the launch line

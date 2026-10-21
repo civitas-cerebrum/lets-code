@@ -158,6 +158,28 @@ deny, never bypass; read once the project is trusted). A broken manifest
 fails closed to the built-in roles. Mode changes are announced on
 `pi.events` (`lets-code:mode`) for the sandbox.
 
+**Orchestrator mode.** The software factory's main session plans and
+dispatches; experts change the code. That is the `orchestrator` role: plan's
+read-only scope (no edit or write, bash read-only, MCP denied) with
+dispatch to every agent and a prompt section that says to agree the ticket
+with the user, hand each part to the expert for it and fix a blocked run by
+sharpening the ticket, never by patching its worktree. Running the tests is
+denied too: that is the tester's and the engine's. The factory module
+switches the session into it when a run starts or resumes, through a hook
+the mandate leaves on `globalThis` (the two modules are loaded separately);
+the mode's prompt reaches the model on its next turn, so the run's result
+says it as well. It is the main session's role only: a child that would
+inherit it (`LETS_CODE_MODE` travels in the environment) gets the default.
+The mandate is off by default, so where the experts are on and the mandate
+is not, the launcher still writes the module with
+`LETS_CODE_ORCHESTRATOR_ON=1`: it enforces nothing and registers only
+`/orchestrator` until a run or that command engages the orchestrator, and
+goes dormant again when the user leaves it. `--no-mandate` turns that off
+as well. Read-only bash had holes that matter once nothing else may write:
+`sed -i`, `find -exec`/`-delete`, `fd -x`, `awk` with `system()` or a pipe,
+`sort -o`, `git ... --output`, `uniq in out`, `xxd -r`, `tree -o` now count as
+writes under every deny-by-default role (plan too).
+
 **Subagents.** One `subagent` tool (single / parallel / chain), modelled on
 pi's example but with a short schema (the community packages measured 6k
 to 8k tokens per turn). Agent files: Markdown + YAML frontmatter in

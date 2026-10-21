@@ -312,7 +312,10 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 		select: async (title, options) => { selects.push(title.split("\n")[0]); return options[0]; } };
 	writeFileSync(join(repo, "notes.md"), SECRET);
 	const ctx = { cwd: repo, hasUI: true, ui, sessionManager: { getEntries: () => [{ type: "message", message: { role: "user", content: SECRET } }], getBranch: () => [] }, signal: undefined };
+	// the mandate's hook: a run puts the main session in orchestrator mode
+	const engaged = []; globalThis.__letsCodeOrchestrate = (c, why) => { engaged.push([c === ctx, why]); return true; };
 	await cmds.factory.handler("start TICKET.md grep -q ok src/a.txt", ctx);
+	t("session: /factory start engages the orchestrator", engaged, [[true, "factory run"]]);
 	const sub = await import(pathToFileURL(join(ext, "subagents.ts")).href);
 	t("session: stages through the subagents runner", sub.runs.map((r) => r.agent), ["developer", "developer", "expert-reviewer", "design-reviewer", "acceptance-judge"]);
 	t("session: runs tagged for /subagents", [...new Set(sub.runs.map((r) => r.meta.tool))], ["factory"]);
@@ -329,6 +332,8 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 	t("session: /factory status of an unknown run", await said("status nope"), "No factory run nope.");
 	t("session: /factory with a bad verb: usage", (await said("frobnicate")).startsWith("Usage: /factory start"), true);
 	t("session: /factory start without a file", await said("start missing.md"), "No ticket file missing.md.");
+	engaged.length = 0; await said("resume nope");
+	t("session: /factory resume engages it too", engaged.map((e) => e[1]), ["factory run resumed"]);
 	t("session: resume completions offer waiting runs", Array.isArray(cmds.factory.getArgumentCompletions("resume ")), true);
 	// without a UI: the run waits at the criteria and says how to go on
 	const out = []; const log = console.log; console.log = (m) => out.push(m);
@@ -339,6 +344,7 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 	// the expert's entry: runExpert, as the experts module calls it for runner: factory
 	sub.runs.length = 0; selects.length = 0;
 	const r1 = await fm.runExpert({ ticket: "TICKET.md", how_to_run: "grep -q ok src/a.txt", start: "python3 -m http.server 8123", constraints: "leave README.md alone" }, ctx, undefined, () => {}, "call-77");
+	t("expert: the run engages the orchestrator, and the model is told", [engaged.at(-1)?.[1], r1.text.endsWith(F.ORCHESTRATING)], ["software factory run", true]);
 	t("expert: a ticket given as a path is read", [r1.isError, /done, committed/.test(r1.text), sub.runs[0].task.includes("isFreeShipping") || sub.runs[0].task.includes("feature.txt exists")], [false, true, true]);
 	t("expert: its stage runs carry the tool call's id (for /subagents and detaching)", [...new Set(sub.runs.map((r) => r.meta.callId))], ["call-77"]);
 	t("expert: constraints reach the stages", sub.runs.every((r) => r.task.includes("leave README.md alone")), true);
@@ -346,6 +352,11 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 	sub.runs.length = 0;
 	const r2 = await fm.runExpert({ ticket: "# T-9: a thing\n## Acceptance criteria\n1. feature.txt exists" }, ctx, undefined, () => {}, "call-78");
 	t("expert: a ticket given as text", [r2.isError, sub.runs[0].task.includes("T-9: a thing")], [false, true]);
+	t("expert: each run that engages it says so", r2.text.includes(F.ORCHESTRATING), true);
+	globalThis.__letsCodeOrchestrate = () => false;
+	const r2b = await fm.runExpert({ ticket: "# T-10\n## Acceptance criteria\n1. feature.txt exists" }, ctx, undefined, () => {}, "call-79");
+	t("expert: already orchestrating: no line", r2b.text.includes(F.ORCHESTRATING), false);
+	delete globalThis.__letsCodeOrchestrate;
 	const r3 = await fm.runExpert({ ticket: "  " }, ctx);
 	t("expert: no ticket, nothing runs", [r3.isError, r3.text.startsWith("Nothing ran")], [true, true]);
 	const r4 = await fm.runExpert({ ticket: "TICKET.md" }, { cwd: repo, hasUI: false });

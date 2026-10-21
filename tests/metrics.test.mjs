@@ -198,7 +198,12 @@ try {
 	x.st.context = { percent: null, contextWindow: 262144 };
 	t("unknown after compaction", x.foot()[0], "<dim>?/262k (auto)</dim>");
 	x.status.set("mandate", "mode: plan");
-	t("other statuses on their own line", x.foot()[1], "mode: plan");
+	t("the mode: dim, at the right of the numbers line", [x.foot().length, x.foot()[0].startsWith("<dim>?/262k (auto)</dim> "), x.foot()[0].endsWith(" <dim>mode: plan</dim>")], [1, true, true]);
+	t("the mode: right-aligned to the width", x.mod.width(x.foot(80)[0]), 80);
+	t("the mode: its own line, right-aligned, where it does not fit", [x.foot(40).length, x.foot(40)[1], x.mod.width(x.foot(40)[1])], [2, `${" ".repeat(40 - 21)}<dim>mode: plan</dim>`, 40]);
+	x.status.set("factory", "- intake: 1 criteria"); x.status.set("sandbox", "\x1b[33msandbox: off\x1b[0m");
+	t("other statuses: their own line, dim unless colored", x.foot()[1], "<dim>- intake: 1 criteria</dim> \x1b[33msandbox: off\x1b[0m");
+	x.status.delete("factory"); x.status.delete("sandbox");
 	t("cut to width", x.foot(5).every((l) => x.mod.width(l) <= 5), true);
 
 	// the prompt's clock: agent_start to agent_settled, live once a second (full size only)

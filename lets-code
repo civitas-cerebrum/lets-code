@@ -1530,8 +1530,21 @@ export default function (pi: ExtensionAPI) {
 					try { for (const l of block(w, color)) lines.push(cut(l, w)); } catch { /* a block's problem, not the footer's */ }
 				}
 				if (full) lines.push(topLine(data, w, color));
-				for (const l of statsLines(stats(), full, color, w)) lines.push(cut(l, w));
-				const others = [...data.getExtensionStatuses()].sort(([a], [b]) => a.localeCompare(b)).map(([, v]) => v.replace(/\s+/g, " ").trim());
+				const numbers = statsLines(stats(), full, color, w).map((l) => cut(l, w));
+				// the mandate's mode at the right of the last numbers line (its own line
+				// when it does not fit there); every status dim like the rest, unless
+				// it brings its own colors
+				const tone = (v: string) => (/\x1b\[/.test(v) ? v : color("dim", v));
+				const all = [...data.getExtensionStatuses()].sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, v.replace(/\s+/g, " ").trim()] as const).filter(([, v]) => v);
+				const mode = all.find(([k]) => k === "mandate")?.[1];
+				const others = all.filter(([k]) => k !== "mandate").map(([, v]) => tone(v));
+				if (mode) {
+					const last = numbers.length ? numbers[numbers.length - 1] : "";
+					const right = tone(mode);
+					if (last && width(last) + 2 + width(right) <= w) numbers[numbers.length - 1] = spread(last, right, w);
+					else numbers.push(width(right) < w ? " ".repeat(w - width(right)) + right : cut(right, w));
+				}
+				lines.push(...numbers);
 				if (others.length) lines.push(cut(others.join(" "), w));
 				return lines;
 			},

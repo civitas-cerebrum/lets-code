@@ -24,8 +24,8 @@ t "in the always-on line"   "$(grep -c '^route:' "${af}")" 0
 t "everywhere, no setup"    "$(grep -cE '^(platform|setup|setup_note|requires|agent_dir|append_prompt|tools|role):' "${af}" || true)" 0
 t "use_for fits the line"   "$([ "$(sed -n 's/^use_for: //p' "${af}" | wc -c)" -le 101 ] && echo yes)" yes
 t "job under 300"           "$([ "$(sed -n 's/^job: //p' "${af}" | wc -c)" -le 301 ] && echo yes)" yes
-t "brief template"          "$(sed -n 's/^  - \([a-z_]*\).*/\1/p' "${af}" | tr '\n' ' ')" "ticket criteria repo how_to_run start constraints "
-t "one required field"      "$(grep -c '^  - [a-z_]* (required):' "${af}")" 1
+t "brief template"          "$(sed -n 's/^  - \([a-z_]*\).*/\1/p' "${af}" | tr '\n' ' ')" "ticket criteria repo how_to_run start constraints resume decision text "
+t "no required field (a ticket, or resume)" "$(grep -c '^  - [a-z_]* (required):' "${af}")" 0
 t "body: runs in the main session" "$(grep -c '^it in the main session (runner: factory), because each of its stages is an$' "${af}")" 1
 t "body: nothing pushed"    "$(grep -c 'Nothing is pushed.' "${af}")" 1
 before="$(cat "${af}")"; pi_write_software_factory

@@ -4885,8 +4885,8 @@ const BUILTIN: Manifest = {
 		// The main session's only: a child that would inherit it gets the default
 		orchestrator: {
 			label: "orchestrator", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "subagent", "expert", "list_mcp_resources", "read_mcp_resource"],
-			write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: ["*"], network: "on",
-			prompt: "Orchestrator mode (software factory): you plan and orchestrate; experts and subagents do the work. You change no file yourself: edit and write are off and bash runs read-only commands. Never ask the user to run a command for you: hand it to a subagent (general) or an expert. Read the code and agree with the user on the ticket: the goal, numbered acceptance criteria, the test command, constraints. Hand each part to the one for it: a ticket to software-factory (developer, reviewers, tester, acceptance judge, with the user's approvals; it works inside one git repo, and a new or empty folder becomes one), setup outside that repo (moving or backing up old files) to a subagent first, an open question to researcher, a review of an existing change to expert-reviewer or design-reviewer. Split large work into tickets and run them one at a time. When a run is blocked or stuck, read its ledger and artifacts (lets-code-factory/<id>/ in the agent dir), then sharpen the ticket and start a new run, or ask the user to /factory resume <id>; never patch its worktree. Report stage summaries, findings and what the user must decide.",
+			write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: ["*", "!worker"], network: "on",
+			prompt: "Orchestrator mode (software factory): you plan and orchestrate; experts and subagents do the work. You change no file yourself: edit and write are off and bash runs read-only commands. Never ask the user to run a command for you: hand it to a subagent (general) or an expert. Code is written only through software-factory, however small the change: never hand writing code to a subagent; general is for setup chores (moving or backing up files) and for checks. Read the code and agree with the user on the ticket: the goal, numbered acceptance criteria, the test command, constraints. Hand each part to the one for it: a ticket to software-factory (developer, reviewers, tester, acceptance judge, with the user's approvals; it works inside one git repo, and a new or empty folder becomes one), setup outside that repo (moving or backing up old files) to a subagent first, an open question to researcher, a review of an existing change to expert-reviewer or design-reviewer. Split large work into tickets and run them one at a time. A run you start pauses at its checkpoints and hands them to you: decide them yourself and go on with resume and decision (the developer's plan against the criteria: approve, or edit it; a further fix round; the commit on the run's branch). Ask the user first only for a significant design decision: a new dependency or service, an architecture or data-model choice the ticket left open, a change of scope, anything destructive or hard to undo. When a run is blocked, read its ledger and artifacts (lets-code-factory/<id>/ in the agent dir), then retry, or sharpen the ticket and start a new run; never patch its worktree. Merging or pushing a run's branch is the user's. Report stage summaries, findings and what the user must decide.",
 		},
 		// read-only without the planning instructions: for scouts and reviewers
 		readonly: { label: "readonly", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "list_mcp_resources", "read_mcp_resource"], write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: [], network: "off" },
@@ -4935,7 +4935,7 @@ function tightenRole(global: Role, project: Role, warn: (m: string) => void, nam
 	const out: Role = { ...global };
 	const inter = (a: string[] | undefined, b: string[] | undefined) => (a ? a.filter((x) => b!.includes(x) || b!.includes("*")) : b);
 	if (project.tools) out.tools = inter(global.tools, project.tools);
-	if (project.dispatch) out.dispatch = global.dispatch?.includes("*") ? project.dispatch : inter(global.dispatch, project.dispatch);
+	if (project.dispatch) out.dispatch = [...new Set([...(global.dispatch?.includes("*") ? project.dispatch : inter(global.dispatch, project.dispatch) ?? []), ...(global.dispatch ?? []).filter((d) => d.startsWith("!"))])];   // an exclusion stays
 	if (project.write) out.write = project.write.filter((w) => !global.write || global.write.some((g) => w === g || w.startsWith(g.replace(/\/?$/, "/"))) );
 	if (project.read) out.read = project.read;
 	if (project.external) out.external = stricter(global.external ?? "allow", project.external);
@@ -5109,7 +5109,8 @@ export function mcpDecision(role: Role, tool: string): Decision {
 	if (typeof role.mcp === "string") return role.mcp;
 	return role.mcp.includes(server) || role.mcp.includes("*") ? "allow" : "deny";
 }
-export function mayDispatch(role: Role, agent: string): boolean { return !role.dispatch || role.dispatch.includes("*") || role.dispatch.includes(agent); }
+// "!name" in the list excludes that agent, even with "*"
+export function mayDispatch(role: Role, agent: string): boolean { return !role.dispatch || (!role.dispatch.includes(`!${agent}`) && (role.dispatch.includes("*") || role.dispatch.includes(agent))); }
 const short = (s: string, n = 190) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 export default function (pi: ExtensionAPI) {
@@ -5221,7 +5222,7 @@ export default function (pi: ExtensionAPI) {
 			const agents = (name === "expert" ? [input.name, ...(Array.isArray(input.runs) ? input.runs : []).map((r: any) => r?.name)]
 				: [input.agent, ...(input.tasks ?? []).map((t: any) => t?.agent), ...(input.chain ?? []).map((t: any) => t?.agent)]).filter(Boolean) as string[];
 			const bad = agents.find((a) => !mayDispatch(role, a));
-			if (bad) { log("deny", { key: "dispatch", what: bad }); return { block: true, reason: short(`mandate(${roleName}): this role may not start the '${bad}' agent (allowed: ${(role.dispatch ?? ["*"]).join(", ")}).`) }; }
+			if (bad) { log("deny", { key: "dispatch", what: bad }); return { block: true, reason: short(roleName === "orchestrator" ? `mandate(orchestrator): not the '${bad}' agent: code goes through software-factory (a subagent only for setup and checks).` : `mandate(${roleName}): this role may not start the '${bad}' agent (allowed: ${(role.dispatch ?? ["*"]).join(", ")}).`) }; }
 		}
 		return undefined;
 	});
@@ -7338,6 +7339,7 @@ export interface Ledger {
 	ticket: string; howToRun: string; start?: string; constraints: string; conventions: string; tester: "auto" | "on" | "off";
 	status: "running" | "waiting" | "done" | "stopped";
 	waiting: Waiting | null; note: string;
+	stoppedAt?: Waiting | null;                    // the checkpoint a stop came from: a resume asks it again
 	stage: Stage; rounds: number;
 	criteria: string[]; plan: string; claim: string;
 	findings: Partial<Record<Stage, Finding[]>>;   // each review stage's open findings, from its last verdict
@@ -7349,7 +7351,7 @@ export interface Ledger {
 	entries: Entry[];
 }
 export interface Dispatched { text: string; exitCode: number; input: number; output: number; seconds: number }
-export interface Decision { action: "approve" | "edit" | "stop" | "more" | "final" | "retry" | "commit" | "keep"; text?: string }
+export interface Decision { action: "approve" | "edit" | "stop" | "more" | "final" | "retry" | "commit" | "keep"; text?: string; by?: string }
 export interface Deps {
 	dispatch(expert: string, brief: Record<string, string>, cwd: string, meta: { stage: Stage; round: number; runId: string }): Promise<Dispatched>;
 	exec(cmd: string, cwd: string, timeoutMs?: number): Promise<{ code: number; out: string }>;
@@ -7587,7 +7589,7 @@ async function step(L: Ledger, deps: Deps): Promise<boolean> {
 
 async function applyDecision(L: Ledger, d: Decision, deps: Deps): Promise<void> {
 	const kind = L.waiting!; L.waiting = null; L.note = "";
-	if (d.action === "stop") { L.status = "stopped"; L.note = `the user stopped it at the ${kind} checkpoint`; return; }
+	if (d.action === "stop") { L.status = "stopped"; L.stoppedAt = kind; L.note = `${d.by ?? "the user"} stopped it at the ${kind} checkpoint`; return; }
 	if (kind === "criteria") { if (d.text !== undefined) L.criteria = criteriaFromText(d.text); if (!L.criteria.length) { L.waiting = "criteria"; L.note = "no criteria: write at least one"; } return; }
 	if (kind === "plan") { if (d.text !== undefined && d.text.trim()) L.plan = d.text.trim(); return; }
 	if (kind === "blocked") return;   // retry: the stage runs again
@@ -7705,6 +7707,9 @@ export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 }
 export async function resumeRun(id: string, deps: Deps, root = factoryRoot()): Promise<Ledger> {
 	const L = loadLedger(id, root); if (!L) throw new Error(`no factory run ${id}`);
+	// stopped at a checkpoint: that checkpoint is asked again
+	if (L.status === "stopped" && L.stoppedAt === undefined) L.stoppedAt = (/stopped it at the (criteria|plan|result|stuck|blocked) checkpoint/.exec(L.note)?.[1] as Waiting) ?? null;   // a ledger from before stoppedAt
+	if (L.status === "stopped" && L.stoppedAt) { L.status = "waiting"; L.waiting = L.stoppedAt; L.stoppedAt = null; L.note = ""; }
 	if (L.status === "done" || L.status === "stopped") return L;
 	if (L.status !== "waiting") L.status = "running";   // interrupted mid-stage: that stage runs again
 	return advance(L, deps);
@@ -7752,6 +7757,27 @@ export function dialogs(ui: any | undefined): Deps["checkpoint"] {
 		return { action: c === "Retry the stage" ? "retry" : "stop" };
 	};
 }
+// A run the orchestrator started: each checkpoint pauses the run and goes
+// back to it (the main session's model) with what to decide; it goes on with a
+// resume and its decision, and asks the user only what needs the user. The
+// criteria it wrote into the ticket are confirmed for it.
+export const DECISIONS: Record<Waiting, Decision["action"][]> = { criteria: ["approve", "edit", "stop"], plan: ["approve", "edit", "stop"], result: ["commit", "keep", "stop"], stuck: ["more", "final", "stop"], blocked: ["retry", "stop"] };
+// "approve" reads as the checkpoint's go-ahead wherever it has another name
+const GO: Partial<Record<Waiting, Decision["action"]>> = { result: "commit", stuck: "more", blocked: "retry" };
+export function decisionFor(kind: Waiting, said: string, text?: string): Decision | string {
+	const a = said.trim().toLowerCase(); const action = (a === "approve" && GO[kind] ? GO[kind] : a) as Decision["action"];
+	if (!DECISIONS[kind].includes(action)) return `the run waits at its ${kind} checkpoint: decision is one of ${DECISIONS[kind].join(", ")}`;
+	if (action === "edit" && !(text ?? "").trim()) return `decision edit needs text: the ${kind === "plan" ? "plan" : "criteria"} to use`;
+	return { action, text: action === "edit" ? text : undefined, by: "the orchestrator" };
+}
+export function orchestrated(decision?: Decision): Deps["checkpoint"] {
+	let given = decision;
+	return async (kind, L) => {
+		if (given) { const d = given; given = undefined; return d; }
+		if (kind === "criteria" && L.criteria.length) return { action: "approve", by: "the orchestrator" };
+		return null;
+	};
+}
 // the real stages: the experts module's brief rendering, the subagents runner
 export async function sessionDeps(ctx: any, signal?: AbortSignal, progress?: (l: string) => void, callId?: string): Promise<Deps> {
 	const sub = await import(pathToFileURL(join(HERE, "subagents.ts")).href);
@@ -7789,10 +7815,22 @@ export function orchestrate(ctx: any, why: string): boolean {
 	try { return (globalThis as any).__letsCodeOrchestrate?.(ctx, why) === true; } catch { return false; }
 }
 // what the caller is told: the stage lines and what happens next
-export function report(L: Ledger): string {
-	const next = L.status === "waiting" ? `The run waits for the user (${L.waiting}): /factory resume ${L.id} asks it.`
-		: L.status === "done" ? (L.commit ? `The change is committed on ${L.branch} (worktree ${L.work}); pushing or a PR is up to the user.` : `The change is left uncommitted in ${L.work} on ${L.branch}.`)
-		: L.status === "stopped" ? `Stopped. /factory resume ${L.id} goes on from the ledger; the worktree stays.` : "";
+// for the orchestrator (forModel): a waiting run's checkpoint, with what to
+// decide and the call that decides it; for the user: the /factory command
+export function report(L: Ledger, forModel = false): string {
+	const call = (kind: Waiting) => `expert({action: "run", name: "software-factory", brief: {resume: "${L.id}", decision: "${DECISIONS[kind].join(" | ")}"${DECISIONS[kind].includes("edit") ? `, text: "the edited ${kind === "plan" ? "plan" : "criteria"}, with edit"` : ""}}})`;
+	const what = (kind: Waiting) => kind === "criteria" ? `Acceptance criteria:\n${L.criteria.length ? numbered(L.criteria) : "(none found in the ticket)"}`
+		: kind === "plan" ? `The developer's plan:\n${L.plan}`
+		: kind === "result" ? `The result: the change is in ${L.work}; diff: ${diffPath(L)}. commit makes one commit on ${L.branch} (nothing is pushed or merged); keep leaves it uncommitted.`
+		: kind === "stuck" ? `${L.note}\n${formatFindings(L.pending?.findings ?? [])}` : L.note;
+	let next = "";
+	if (L.status === "waiting" && L.waiting) next = forModel
+		? `The run waits at its ${L.waiting} checkpoint, for you to decide.\n\n${what(L.waiting)}\n\nDecide it yourself and go on with ${call(L.waiting)}. Ask the user first only for a significant design decision.`
+		: `The run waits for the user (${L.waiting}): /factory resume ${L.id} asks it.`;
+	else if (L.status === "done") next = L.commit ? `The change is committed on ${L.branch} (worktree ${L.work}); pushing, merging or a PR is up to the user.` : `The change is left uncommitted in ${L.work} on ${L.branch}.`;
+	else if (L.status === "stopped") next = L.stoppedAt
+		? (forModel ? `Stopped. To go on, ${call(L.stoppedAt)}; the worktree stays.` : `Stopped. /factory resume ${L.id} asks the ${L.stoppedAt} checkpoint again; the worktree stays.`)
+		: "Stopped; the worktree stays.";
 	return [summary(L), next].filter(Boolean).join("\n");
 }
 // the software-factory expert's run, in the main session: the brief's ticket
@@ -7801,7 +7839,7 @@ export function report(L: Ledger): string {
 // test_command, goal) and send lists: those are read too, and any other
 // field goes into the ticket, so nothing the caller agreed with the user is lost.
 const FIELDS: Record<string, string[]> = { criteria: ["criteria", "acceptance_criteria", "acceptance"], how_to_run: ["how_to_run", "test_command", "tests", "test"], goal: ["goal", "summary"] };
-const SEEN = new Set(["ticket", "repo", "start", "constraints", ...Object.values(FIELDS).flat()]);
+const SEEN = new Set(["ticket", "repo", "start", "constraints", "resume", "decision", "text", ...Object.values(FIELDS).flat()]);
 const asText = (x: unknown): string => (Array.isArray(x) ? x.map(asText).filter(Boolean).join("\n") : typeof x === "string" ? x : x === undefined || x === null ? "" : typeof x === "object" ? JSON.stringify(x) : String(x)).trim();
 export function ticketFrom(brief: Record<string, unknown>, cwd: string): { ticket: string; howToRun: string; constraints: string } {
 	const v = (k: string) => asText(brief?.[k]);
@@ -7818,17 +7856,34 @@ export function ticketFrom(brief: Record<string, unknown>, cwd: string): { ticke
 export async function runExpert(brief: Record<string, unknown>, ctx: any, signal?: AbortSignal, progress?: (l: string) => void, callId?: string): Promise<{ text: string; isError: boolean }> {
 	const v = (k: string) => asText(brief?.[k]);
 	const cwd = ctx?.cwd || process.cwd();
+	// going on with a run: its checkpoint decided by the caller
+	const id = v("resume");
+	let decision: Decision | undefined;
+	if (id) {
+		const L0 = loadLedger(id); if (!L0) return { text: `Nothing ran: no factory run ${id}.`, isError: true };
+		const kind = L0.waiting ?? L0.stoppedAt ?? (L0.status === "stopped" ? (/stopped it at the (criteria|plan|result|stuck|blocked) checkpoint/.exec(L0.note)?.[1] as Waiting | undefined) : undefined);
+		if (L0.status === "done" || (L0.status === "stopped" && !kind)) return { text: report(L0, true), isError: false };
+		if (kind) {
+			const d = decisionFor(kind, v("decision") || "approve", v("text"));
+			if (typeof d === "string") return { text: `Nothing ran: ${d}.\n\n${report(L0, true)}`, isError: true };
+			decision = d;
+		}
+	}
 	const { ticket, howToRun, constraints } = ticketFrom(brief, cwd);
-	if (!ticket.trim()) return { text: "Nothing ran: the brief needs the ticket (its text, or the path of a file holding it).", isError: true };
+	if (!id && !ticket.trim()) return { text: "Nothing ran: the brief needs the ticket (its text, or the path of a file holding it), or resume with a run's id.", isError: true };
 	const why = await ensureExperts(ctx); if (why) return { text: why, isError: true };
 	// the mode's prompt reaches the model on its next turn; this tells it now
 	const now = orchestrate(ctx, "software factory run") ? `\n${ORCHESTRATING}` : "";
 	try {
-		const deps = await sessionDeps(ctx, signal, progress, callId);
-		// a path with the model's remark after it: "/x/chess (empty; becomes a repo)"
-		const repo = v("repo").split("\n")[0].replace(/\s+\([^()]*\)\s*$/, "").trim();
-		const L = await startRun({ ticket, repo: resolve(cwd, repo || "."), howToRun, start: v("start"), constraints }, deps);
-		return { text: report(L) + now, isError: L.status === "stopped" };
+		const deps = { ...(await sessionDeps(ctx, signal, progress, callId)), checkpoint: orchestrated(decision) };
+		let L: Ledger;
+		if (id) L = await resumeRun(id, deps);
+		else {
+			// a path with the model's remark after it: "/x/chess (empty; becomes a repo)"
+			const repo = v("repo").split("\n")[0].replace(/\s+\([^()]*\)\s*$/, "").trim();
+			L = await startRun({ ticket, repo: resolve(cwd, repo || "."), howToRun, start: v("start"), constraints }, deps);
+		}
+		return { text: report(L, true) + now, isError: false };
 	} catch (e) { return { text: `The software factory could not run: ${e instanceof Error ? e.message : String(e)}`, isError: true }; }
 }
 // the subagents view's state (the switching view of #56), if that module is here
@@ -14208,7 +14263,7 @@ LC_EOF
 # agent file is the routing entry, the job and the brief; its body documents
 # the pipeline and is never a child's prompt. Written with the
 # expert-builder's method (draft, expert-lint, route-check, expert-new pack).
-# software-factory expert: Runs a ticket through the software factory in its own worktree: developer (plan, then build), expert and design review, tester, acceptance judge, the full suite, up to 5 fix rounds; the user approves the criteria, plan and result; stage summaries back; minutes to hours
+# software-factory expert: Runs a ticket through the software factory in its own worktree: developer (plan, then build), expert and design review, tester, acceptance judge, the full suite, up to 5 fix rounds; checkpoints come back to the caller to decide (resume); stage summaries back; minutes to hours
 # Written on every launch with experts on; dormant until the user enables it.
 pi_write_software_factory() {
     local d="${PI_AGENT_DIR}/software-factory" af="${PI_AGENT_DIR}/agents/software-factory.md" tmp f
@@ -14226,14 +14281,17 @@ runner: factory
 expert: true
 use_for: the software factory: a ticket taken end to end through its pipeline of experts
 keywords: software factory
-job: Runs a ticket through the software factory in its own worktree: developer (plan, then build), expert and design review, tester, acceptance judge, the full suite, up to 5 fix rounds; the user approves the criteria, plan and result; stage summaries back; minutes to hours
+job: Runs a ticket through the software factory in its own worktree: developer (plan, then build), expert and design review, tester, acceptance judge, the full suite, up to 5 fix rounds; checkpoints come back to the caller to decide (resume); stage summaries back; minutes to hours
 brief:
-  - ticket (required): the ticket verbatim, or the path of a file holding it, with its acceptance criteria
+  - ticket: a new run's ticket verbatim, or the path of a file holding it, with its acceptance criteria
   - criteria: the numbered acceptance criteria agreed with the user, when the ticket does not list them
   - repo: the git repo to work on (default: the current folder); a new or empty folder becomes a new project's repo; the user's checkout is never touched
   - how_to_run: the command that runs the test suite
   - start: how to start the app, for the tester's browser checks
   - constraints: what must not be touched, style rules, limits
+  - resume: a run's id, to go on with a run that waits at a checkpoint (instead of a ticket)
+  - decision: for resume, the checkpoint's decision: approve, edit or stop (criteria, plan); commit, keep or stop (result); more, final or stop (fix rounds); retry or stop (blocked)
+  - text: for decision edit, the edited plan or criteria
 ---
 The software factory is not a child agent: lets-code's factory module runs
 it in the main session (runner: factory), because each of its stages is an
@@ -14242,16 +14300,22 @@ artifacts (the ticket, the confirmed criteria, the approved plan, the diff,
 earlier findings), never the conversation.
 
 Pipeline: intake (criteria from the ticket, the suite's baseline), the
-user confirms the criteria; developer (plan), the user approves the plan;
-developer (build), expert-reviewer, design-reviewer, tester, acceptance-judge,
-the full suite; the user approves the result, and only then is it
-committed, as one commit on the run's branch. Nothing is pushed.
+criteria confirmed; developer (plan), the plan approved; developer (build),
+expert-reviewer, design-reviewer, tester, acceptance-judge, the full suite;
+the result approved, and only then is it committed, as one commit on the
+run's branch. Nothing is pushed or merged.
+
+Who approves: a run started through this expert pauses at each checkpoint
+and returns it to the caller (the orchestrator), which decides and goes on
+with resume and decision, and asks the user only for a significant design
+decision; the criteria it wrote into the ticket are confirmed for it. A run
+the user starts with /factory asks the user in dialogs.
 
 A run lives in lets-code-factory/<id>/ in the agent dir: its ledger (each
 stage's brief, verdict, findings, tokens and time), its artifacts and its
-worktree. Stages show in /subagents. A run waiting for the user, or one
-that was interrupted, goes on with /factory resume <id>; /factory list and
-/factory status show where each one stands.
+worktree. Stages show in /subagents. A waiting, stopped or interrupted run
+goes on with resume (or /factory resume <id>); /factory list and /factory
+status show where each one stands.
 
 A run puts the main session in orchestrator mode (/orchestrator leaves it):
 it plans with the user and hands every change to experts, and changes no

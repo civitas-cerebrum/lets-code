@@ -104,7 +104,7 @@ it, not a Claude Code clone. Where it stands:
 | 🧭 **Modes** (optional) | `plan` explores read-only and ends in a numbered plan, `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
 | 🤝 **Claude Code projects** (automatic) | A project whose `.claude/` has hooks or workflow scripts works as it is: its hooks, workflows, skills, `/commands`, agents, permission rules, MCP servers and CLAUDE.md, read live at each start. Your own `~/.claude` stays out unless `CLAUDE_CODE=all`. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
-| 🗂 **Core memory** (on by default) | A long-term memory per project and one across projects, kept out of context: the agent searches it with a `memory` tool when it needs to and adds what is worth keeping (decisions, non-obvious facts, where things live, what was done, and "remember that ..." in your words); lets-code itself adds a pointer when a factory run, a subagent run or a session ends, so the next session can open the ledger, the run record or the transcript instead of carrying it. Always on: one line saying the memory exists and how many entries it holds, plus the three newest headlines; a file the agent reads that an entry points at gets one line saying so. `/memory` shows, edits, forgets and archives. |
+| 🗂 **Core memory** (on by default) | A long-term memory per project and one across projects, kept out of context: the agent searches it with a `memory` tool when it needs to and adds what is worth keeping (decisions, non-obvious facts, where things live, what was done, and "remember that ..." in your words); lets-code itself adds a pointer when a factory run, a subagent run or a session ends, so the next session can open the ledger, the run record or the transcript instead of carrying it. Always on: one line saying the memory exists and how many entries it holds, plus the three newest headlines; a file the agent reads that an entry points at gets one line saying so. `/memories` lists them, a row each that opens into its pointers and actions; it edits, forgets and archives too. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
 | 🧑‍🔬 **Experts** (on by default) | Subagents with their own knowledge behind one `expert` tool that costs one line of context: the model sees each expert's name and what it is for, asks for a job and a brief template when it needs one, and runs it with a filled-in brief. Every expert is dormant until you say yes (a dialog the first time, remembered); one that needs an install gets it then. |
@@ -887,15 +887,23 @@ file, a run's record, a factory run it resumes), the tool result ends with
 Measured on Claude (the usage counts of a one-shot session with and
 without the feature): the line and the tool together 490 input tokens,
 three headlines 126 more; the 3.6-characters-a-token estimate that
-`/memory` shows says ~60 for the line and ~275 for the tool, since it
+`/memories` shows says ~60 for the line and ~275 for the tool, since it
 undercounts a JSON schema.
 
-`/memory` shows the counts, the files and the cost with the newest entries
-(`/memory show <query>` searches, `/memory global` the global store);
-`/memory edit [global]` opens the rendered file in pi's editor and reads it
-back (a changed line updates its entry, a removed one forgets it, a line
-without an `#id` is a new entry of yours); `/memory forget <id>`;
-`/memory archive [days]` moves work and pointer entries untouched for that
+`/memories` lists the entries in pi's selector: a row each (date, kind,
+the gist, a summary of the pointers such as `2 files · run`), newest first,
+the project's then the global ones, fifteen a page with "N more" rows that
+move the window, and above them the counts, the files and the cost.
+`/memories <words>` filters as the tool's search does; `/memories global`
+lists the global store alone. Enter on a row opens the entry: the gist in
+full, who wrote it, every pointer on its own line, and the actions: open a
+pointer (a file around its line, a run's record, a factory run's report, a
+session's first message and last reply), edit the gist in the editor,
+forget (asked first); esc goes back one level. `/memories edit [global]`
+opens the whole rendered file in pi's editor and reads it back (a changed
+line updates its entry, a removed one forgets it, a line without an `#id`
+is a new entry of yours); `/memories forget <id>`; `/memories archive
+[days]` moves work and pointer entries untouched for that
 long (120 by default, done at every start too) to `archive.jsonl` next to
 the store, which `memory search` reaches with `archive: true`. The store is
 `memory.jsonl` (one JSON object a line, written atomically, mode 600); the

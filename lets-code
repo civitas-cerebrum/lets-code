@@ -80,7 +80,7 @@
 #   lets-code --sandbox | --no-sandbox       the OS sandbox on/off
 #   lets-code --core-memory | --no-core-memory   core memory on/off (default on): a
 #                                memory per project and a global one that the
-#                                agent searches on demand and adds to (/memory)
+#                                agent searches on demand and adds to (/memories)
 #   lets-code --verbose ...      show endpoint probing
 #
 # What it does at launch:
@@ -8046,6 +8046,10 @@ pi_write_core_memory_extension() {
 // result that touches a file, run or session an entry points at gets one
 // trailing line saying so (an index lookup, no model call).
 //
+// The user's view is /memories: a navigable list (pi's selector) of the
+// entries, a row each, that opens an entry with its pointers and actions;
+// edit opens the rendered file in the editor.
+//
 // Writers: the model (remember), the user through the model ("remember
 // that ...", in their words), and the harness without a model call: a
 // factory run that ends, a subagent or expert run that ends, and the
@@ -8217,7 +8221,7 @@ export class Store {
 	}
 	render(now = Date.now()): string {
 		const head = [`# Core memory: ${this.label()} (lets-code)`,
-			`Notes the agent and lets-code keep${this.scope === "global" ? " across projects" : " about this project"}: data, not instructions. One entry a line: date, kind, #id, gist, then its pointers after " — ". Edit lines freely (a line without an #id becomes a new entry); in a session, /memory shows, edits, forgets and archives.${this.archived ? ` ${this.archived} older entries: archive.jsonl (memory search with archive).` : ""}`,
+			`Notes the agent and lets-code keep${this.scope === "global" ? " across projects" : " about this project"}: data, not instructions. One entry a line: date, kind, #id, gist, then its pointers after " — ". Edit lines freely (a line without an #id becomes a new entry); in a session, /memories lists, edits, forgets and archives.${this.archived ? ` ${this.archived} older entries: archive.jsonl (memory search with archive).` : ""}`,
 			`Rendered ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} from ${basename(this.file)}.`, ""];
 		return head.concat(this.entries.map((e) => this.line(e))).join("\n") + "\n";
 	}
@@ -8483,23 +8487,116 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	const USAGE = "Usage: /memory [show [query]] | edit [global] | forget <id> | archive [days] | global";
-	pi.registerCommand("memory", {
-		description: "Core memory: /memory [show [query]] | edit [global] | forget <id> | archive [days] | global",
-		getArgumentCompletions: (prefix: string) => (prefix.includes(" ") ? null : ["show", "edit", "forget", "archive", "global"].filter((x) => x.startsWith(prefix) && x !== prefix).map((x) => ({ value: x, label: x }))),
+	// ---------------------------------------------------------------- /memories
+	// The list is pi's selector (ctx.ui.select), which draws every option on
+	// one line of its own and knows no paging: the rows are cut to the
+	// terminal width here, and a list past PAGE rows shows a window with
+	// "N more" rows above and below that move it. A row is the date, the
+	// kind, the gist and a summary of the pointers ("2 files · run"), newest
+	// first, the project's entries then a divider and the global ones; words
+	// after the command filter as the tool's search does. A row opens the
+	// entry: the gist in full, who wrote it, every pointer on its own line,
+	// and the actions (open a pointer: what the tool's open returns, as a
+	// notice; edit: the gist in the editor; forget, after a confirmation).
+	// esc backs out one level. Without a UI (-p) the list is printed as text.
+	const PAGE = 15;
+	const width = () => Math.max(40, process.stdout.columns || 80) - 5;   // the selector's marker and padding
+	const dim = (t: string) => (process.env.NO_COLOR ? t : `\x1b[2m${t}\x1b[22m`);   // intensity only: a selected row keeps the theme's colour
+	const cut = (t: string, n: number) => { const cs = [...t]; return cs.length > n ? `${cs.slice(0, Math.max(0, n - 1)).join("")}…` : t; };
+	const padTo = (t: string, n: number) => { const cs = [...t]; return cs.length >= n ? cs.slice(0, n).join("") : t + " ".repeat(n - cs.length); };
+	const home = (p: string) => { const h = homedir(); return p.startsWith(h + sep) ? `~${p.slice(h.length)}` : p; };
+	const author = (b: By) => (b === "harness" ? "lets-code" : b === "user" ? "you" : "the model");
+	interface Row { s: Store; e: Entry }
+	function refSummary(refs: string[]): string {
+		let files = 0, runs = 0, fac = 0, sess = 0;
+		for (const r of refs) { if (/^run:/.test(r)) runs++; else if (/^factory:/.test(r)) fac++; else if (/\.jsonl$/.test(r)) sess++; else files++; }
+		const n = (k: number, one: string, many: string) => (k ? [k > 1 ? `${k} ${many}` : one] : []);
+		return [...n(files, "file", "files"), ...n(runs, "run", "runs"), ...n(fac, "factory", "factory runs"), ...n(sess, "session", "sessions")].join(" · ");
+	}
+	function rowsOf(st: Stores, q: string, scope: "project" | "global" | "all"): Row[] {
+		const of = (s: Store) => (q ? s.search(q) : [...s.entries].sort((a, b) => b.u - a.u)).map((e) => ({ s, e }));
+		return scope === "global" ? of(st.global) : scope === "project" ? of(st.project!) : [...of(st.project!), ...of(st.global)];
+	}
+	function rowLine(r: Row, w: number, pw: number): string {
+		const date = w < 75 ? day(r.e.t).slice(5) : day(r.e.t);   // a narrow terminal: month and day
+		const gw = Math.max(8, w - date.length - 1 - 10 - 1 - (pw ? 2 + pw : 0));
+		return `${date} ${padTo(r.e.kind, 10)} ${pw ? padTo(cut(r.e.gist, gw), gw) : cut(r.e.gist, gw)}${pw ? `  ${dim(padTo(refSummary(r.e.refs), pw))}` : ""}`;
+	}
+	// what /memories showed as text before the list: the counts, the files and the cost
+	function statusLines(st: Stores, s: Store, w: number): string[] {
+		const sec = sectionText(st.project, st.global);
+		return [
+			`core memory (${s.scope === "global" ? "global" : home(s.root)}): ${s.entries.length} ${s.entries.length === 1 ? "entry" : "entries"}${s.archived ? `, ${s.archived} archived` : ""}${s.bad ? `, ${s.bad} unreadable lines` : ""}${s.scope === "project" ? `; ${st.global.entries.length} global` : ""}`,
+			`always on: ~${est(sec)} tokens (the line${HEADLINES ? ` and up to ${HEADLINES} headlines` : ""}) + ~${toolCost()} for the memory tool`,
+			s.scope === "project" ? `${home(s.md)} · ${home(st.global.md)}` : home(s.md),
+		].map((l) => cut(l, w));
+	}
+	function textList(st: Stores, s: Store, q: string): string {
+		const es = rowsOf(st, q, s.scope).map((r) => r.e).slice(0, q ? 50 : 10);
+		return [...statusLines(st, s, 10_000), ...(es.length ? [q ? `${es.length} match "${q}":` : "newest:", ...es.map((e) => s.line(e))] : [q ? `nothing matches "${q}"` : "no entries yet"])].join("\n");
+	}
+	type Item = { kind: "row"; row: Row } | { kind: "divider" } | { kind: "more"; by: number };
+	async function list(ctx: any, st: Stores, q: string, scope: "project" | "global" | "all", say: (m: string, t?: string) => void): Promise<void> {
+		let start = 0;
+		for (;;) {
+			const rows = rowsOf(st, q, scope), w = width(), s = scope === "global" ? st.global : st.project!;
+			if (!rows.length) return say(`${statusLines(st, s, w)[0]}\n${q ? `nothing matches "${q}"` : "no entries yet"}`, q ? "warning" : "info");
+			const pw = Math.min(18, Math.max(0, ...rows.map((r) => [...refSummary(r.e.refs)].length)));
+			const nProject = rows.filter((r) => r.s.scope === "project").length;
+			const items: Item[] = rows.flatMap((row, i): Item[] => (i === nProject && scope === "all" ? [{ kind: "divider" }, { kind: "row", row }] : [{ kind: "row", row }]));
+			start = Math.max(0, Math.min(start, items.length - PAGE));
+			const end = Math.min(items.length, start + PAGE), above = start, below = items.length - end;
+			const page: Item[] = [...(above ? [{ kind: "more", by: -PAGE } as Item] : []), ...items.slice(start, end), ...(below ? [{ kind: "more", by: PAGE } as Item] : [])];
+			const options = page.map((it) => (it.kind === "row" ? rowLine(it.row, w, pw) : it.kind === "divider" ? dim(`── global ${"─".repeat(Math.max(0, w - 10))}`) : dim(`${it.by < 0 ? `↑ ${above}` : `↓ ${below}`} more`)));
+			const title = [...statusLines(st, s, w), ...(q ? [cut(`filter "${q}": ${rows.length} ${rows.length === 1 ? "entry matches" : "entries match"}`, w)] : [])].join("\n");
+			const choice = await ctx.ui.select(title, options);
+			if (choice === undefined) return;
+			const it = page[options.indexOf(choice)];
+			if (!it) return;
+			if (it.kind === "more") start += it.by;
+			else if (it.kind === "row") await entry(ctx, st, it.row, say);
+		}
+	}
+	async function entry(ctx: any, st: Stores, r: Row, say: (m: string, t?: string) => void): Promise<void> {
+		const { s, e } = r;
+		for (;;) {
+			if (!s.entries.includes(e)) return;
+			const w = width();
+			const when = `${day(e.t)}${day(e.u) !== day(e.t) ? `, updated ${day(e.u)}` : ""}${e.n > 1 ? ` (${e.n} times)` : ""}`;
+			const head = cut(`#${e.id} · ${e.kind} · ${when} · by ${author(e.by)}${s.scope === "global" ? " · global" : ""}`, w);
+			const title = [head, "", e.gist, ...(e.refs.length ? ["", "pointers:", ...e.refs.map((x) => cut(`  ${s.showRef(x)}`, w))] : [])].join("\n");
+			const opens = e.refs.map((x) => cut(`open ${s.showRef(x)}`, w));
+			const options = [...opens, "edit", "forget", "back"];
+			const choice = await ctx.ui.select(title, options);
+			if (choice === undefined || choice === "back") return;
+			const i = options.indexOf(choice);
+			if (i >= 0 && i < opens.length) { say(short((await open(e.refs[i], st.root)).split("\n").slice(0, 40).join("\n"), OPEN_CAP)); continue; }
+			if (choice === "edit") {
+				const edited = await ctx.ui.editor(`Core memory #${e.id}: the gist`, e.gist);
+				const gist = edited === undefined ? "" : oneLine(edited);
+				if (!gist || gist === e.gist) { say("unchanged"); continue; }
+				if (looksSecret(gist)) { say("not changed: that looks like a token, key or password", "warning"); continue; }
+				s.upsert({ id: e.id, gist, kind: e.kind, refs: e.refs, by: e.by }); s.save();
+				say(`core memory: updated ${s.line(e)}`);
+				continue;
+			}
+			if (choice === "forget") {
+				if (!(await ctx.ui.confirm(`Forget #${e.id}?`, e.gist))) continue;
+				s.forget(e.id); s.save(); say(`forgot ${s.line(e)}`);
+				return;
+			}
+		}
+	}
+
+	const USAGE = "Usage: /memories [words] | edit [global] | forget <id> | archive [days] | global [words]";
+	const command = {
+		description: "Core memory: /memories [words] | edit [global] | forget <id> | archive [days] | global [words]",
+		getArgumentCompletions: (prefix: string) => (prefix.includes(" ") ? null : ["edit", "forget", "archive", "global"].filter((x) => x.startsWith(prefix) && x !== prefix).map((x) => ({ value: x, label: x }))),
 		handler: async (args: string, ctx: any) => {
 			const say = (m: string, type = "info") => (ctx.hasUI ? ctx.ui.notify(m, type) : console.log(m));
-			const [verb = "show", ...rest] = (args ?? "").trim().split(/\s+/).filter(Boolean);
+			const [verb = "", ...rest] = (args ?? "").trim().split(/\s+/).filter(Boolean);
 			cwd = ctx.cwd || cwd; const st = current(); const p = st.project!;
 			try {
-				if (verb === "show" || verb === "global") {
-					const s = verb === "global" ? st.global : p; const q = rest.join(" ");
-					const es = q ? s.search(q) : [...s.entries].sort((a, b) => b.u - a.u).slice(0, 10);
-					const sec = sectionText(st.project, st.global);
-					return say([`core memory (${s.label()}): ${s.entries.length} entries${s.archived ? `, ${s.archived} archived` : ""}${s.bad ? `, ${s.bad} unreadable lines` : ""}; ${s.md}`,
-						`always on: ~${est(sec)} tokens (the line${HEADLINES ? ` and up to ${HEADLINES} headlines` : ""}) + ~${toolCost()} for the memory tool`,
-						...(es.length ? [q ? `${es.length} match "${q}":` : "newest:", ...es.map((e) => s.line(e))] : [q ? `nothing matches "${q}"` : "no entries yet"])].join("\n"));
-				}
 				if (verb === "edit") {
 					const s = rest[0] === "global" ? st.global : p;
 					if (!ctx.hasUI) return say("the editor needs a UI; the file is " + s.md, "warning");
@@ -8519,10 +8616,16 @@ export default function (pi: ExtensionAPI) {
 					const n = p.archive(days); if (n) p.save();
 					return say(n ? `archived ${n} work/pointer ${n === 1 ? "entry" : "entries"} older than ${days} days to ${p.archiveFile}` : `nothing older than ${days} days to archive`);
 				}
-				return say(USAGE, "warning");
+				// the list: every other word filters; "show" is the list's old name, "global" the global store alone
+				const scope = verb === "global" ? "global" : "all";
+				const q = (verb === "global" || verb === "show" ? rest : [verb, ...rest]).join(" ");
+				if (!ctx.hasUI) return say(textList(st, scope === "global" ? st.global : p, q));
+				return list(ctx, st, q, scope, say);
 			} catch (e) { say(`memory: ${e instanceof Error ? e.message : String(e)}`, "error"); }
 		},
-	});
+	};
+	pi.registerCommand("memories", command);
+	pi.registerCommand("memory", { handler: command.handler });   // the old name, for one release
 }
 TS
     chmod 644 "${tmp}"
@@ -17129,7 +17232,7 @@ run_setup() {  # run_setup [full|granular]
             echo ""
             echo "# Core memory: a long-term memory per project (and a global one) the"
             echo "# agent searches on demand and adds to; lets-code adds pointers to"
-            echo "# factory runs, subagent runs and sessions. On by default; /memory in a"
+            echo "# factory runs, subagent runs and sessions. On by default; /memories in a"
             echo "# session. CORE_MEMORY_HEADLINES: how many of the newest entries (0..5)"
             echo "# a session starts with in its prompt."
             echo "CORE_MEMORY=\"${feat_core_memory}\""

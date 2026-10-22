@@ -796,7 +796,14 @@ the `memory` tool: `search` matches every term against the gist, the
 pointers, the kind, a date prefix or the id (no scoring to tune; the store
 is hundreds of lines, not thousands); `open` follows a pointer (a file
 around its line, `report()` of a factory ledger, a run record's reply, a
-session's first message and last reply). The one automatic path is a
+session's first message and last reply). The user's view is `/memories`,
+a list in pi's selector, the dialog every other feature uses: it draws one
+option a line and knows no paging or truncation, so the module cuts each
+row (date, kind, gist, a pointer summary) to the terminal width and pages
+by fifteen with "N more" rows that move the window; a row opens the entry
+with its pointers and the actions (open a pointer, edit the gist, forget),
+and esc backs out one level, so the whole thing is two loops over
+`ctx.ui.select` and no key handling of its own. The one automatic path is a
 lookup in the index after `read`, `edit`, `write`, `grep`, `find`, `ls`
 (their `path`) and an `expert` call that resumes a factory run: a hit adds
 one trailing line to the tool result naming the count, not the entries.

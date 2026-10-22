@@ -6,7 +6,7 @@
 #
 #   lets-code setup              interactive onboarding (start here)
 #   lets-code setup full         onboarding with every optional feature on
-#                                (mandate modes, subagents, sandbox, MCP import)
+#                                (mandate modes, sandbox, MCP import, full footer)
 #   lets-code setup granular     onboarding that asks about each feature
 #   lets-code setup preset [<name>]  onboarding for another backend (server,
 #                                token, model) saved as a named preset (asks
@@ -72,9 +72,11 @@
 #   lets-code --subagents | --no-subagents   the subagent tool on/off (default on)
 #   lets-code --experts | --no-experts   the expert tool on/off (default on, needs subagents);
 #                                each expert is enabled in a session (/experts)
-#   lets-code --claude-code | --no-claude-code   Claude Code adapter with ~/.claude too / off (default: automatic where a project needs it)
-#                                (default on): .claude/ commands, skills, agents,
-#                                hooks, permissions, MCP, workflows, CLAUDE.md
+#   lets-code --claude-code | --no-claude-code   Claude Code adapter with your
+#                                ~/.claude too / off (default: on by itself where
+#                                a project's .claude has hooks or workflows):
+#                                commands, skills, agents, hooks, permissions,
+#                                MCP, workflows, CLAUDE.md
 #   lets-code --sandbox | --no-sandbox       the OS sandbox on/off
 #   lets-code --verbose ...      show endpoint probing
 #
@@ -112,31 +114,30 @@
 #      tests after several untested edits, requires executed checks (not
 #      reasoning) as verification, tells pi once to finish after its own
 #      tests have passed for a while, and runs the auto thinking level. Zero tokens unless a rule acts.
+#   8. optional features: mandate (off unless setup full/granular or
+#      MANDATE=true) — a role per session or subagent that says which tools,
+#      paths, command kinds, MCP servers and agents are allowed, asked about
+#      or denied (modes plan/auto/ask/orchestrator/yolo, zero tokens on
+#      allowed calls); subagents (on by default) — a `subagent` tool that
+#      delegates to agent files in ~/.pi/agent/agents (single / parallel /
+#      chain, each child a pi process through the same provider and guards);
+#      experts (on by default, with subagents) — an `expert` tool for
+#      subagents with their own knowledge (a tester and its team, two
+#      reviewers, an acceptance judge, a developer, the software factory, a
+#      researcher, a reverse engineer, an expert builder, a phone expert on
+#      Termux), each dormant until the user enables it (a dialog or /experts
+#      enable, remembered); sandbox (off unless setup full/granular or
+#      SANDBOX=true) — bash confined with @anthropic-ai/sandbox-runtime
+#      (bubblewrap on Linux, Seatbelt on macOS); MCP — setup full/granular
+#      imports an existing .mcp.json or another client's config into pi's
+#      built-in MCP support.
 #   9. session tag: every model request carries X-Lets-Code-Session:
 #      <host>:<project>:<random> (subagents add /sub<depth>.<pid>), also
 #      appended to the User-Agent, so a proxy's access log can tell
 #      sessions apart without reading any request content.
-#
-# Harness: pi is the default (and only v1) harness; --harness deepseek|codex
-# are roadmap items, not yet available.
-#
-#   8. optional features (off unless setup full/granular or the config
-#      enables them): mandate — a role per session or subagent that says
-#      which tools, paths, command kinds, MCP servers and agents are
-#      allowed, asked about or denied (modes plan/auto/ask/yolo, zero tokens
-#      on allowed calls); subagents — a `subagent` tool that delegates to
-#      agent files in ~/.pi/agent/agents (single / parallel / chain, each
-#      child a pi process through the same provider and guards); sandbox —
-#      bash confined with @anthropic-ai/sandbox-runtime (bubblewrap on
-#      Linux, Seatbelt on macOS); MCP — setup imports an existing .mcp.json
-#      or another client's config into pi's built-in MCP support;
-#      experts (on by default, with subagents) — an `expert` tool for
-#      subagents with their own knowledge, each dormant until the user
-#      enables it (a dialog or /experts enable, remembered): termux-device
-#      (phone tasks, on Termux) and reverse-engineer (REA's MCP server in a
-#      separate pi, so its tools never enter this session).
-#  10. Claude Code adapter (on by default): a project or user set up for
-#      Claude Code works as it is, read at each start: CLAUDE.md files and
+#  10. Claude Code adapter (automatic: on where a project's .claude has
+#      hooks or workflows; CLAUDE_CODE=all adds your ~/.claude): a project set
+#      up for Claude Code works as it is, read at each start: CLAUDE.md files and
 #      their @imports, .claude/skills, .claude/commands (/name), agents
 #      (as subagents), hooks (Claude's events, stdin JSON and exit codes on
 #      pi's), permission rules, MCP servers, workflow scripts and settings
@@ -157,11 +158,14 @@
 #      one's proxy instead (see claude-remote), so it needs no Claude Code of
 #      its own and starts nothing; its requests run on that token.
 #
+# Harness: pi is the default (and only v1) harness; --harness deepseek|codex
+# are roadmap items, not yet available.
+#
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
-# Presets: ~/.config/lets-code/presets/<name>   (`lets-code setup --preset <name>`)
+# Presets: ~/.config/lets-code/presets/<name>   (`lets-code setup preset <name>`)
 #          same keys as the config, applied on top of it; `--<name>` picks one
 # Env overrides: LETS_CODE_CLAUDE_MODELS, LETS_CODE_CLAUDE_PORT, LETS_CODE_CLAUDE_URL,
-#                LETS_CODE_CLAUDE_TOKEN,
+#                LETS_CODE_CLAUDE_TOKEN, LETS_CODE_CLAUDE_STATE (the proxy's state dir),
 #                LETS_CODE_ENDPOINTS (space-separated), LETS_CODE_TOKEN,
 #                LETS_CODE_CA, LETS_CODE_MODEL, LETS_CODE_CONTEXT,
 #                LETS_CODE_OUTPUT_CAP, LETS_CODE_API, LETS_CODE_VISION,
@@ -16593,15 +16597,15 @@ run_setup() {  # run_setup [full|granular]
             echo "CLAUDE_CODE=\"auto\""
             echo ""
             echo "# Optional features (off by default; 'lets-code setup full' turns them on)."
-            echo "# MANDATE=true: modes plan/auto/ask/yolo and roles for subagents (MODE sets"
+            echo "# MANDATE=true: modes plan/auto/ask/orchestrator/yolo and roles for subagents (MODE sets"
             echo "# the start mode, empty = auto)."
             echo "# SANDBOX=true: bash confined with sandbox-runtime."
             echo "MANDATE=\"${feat_mandate}\""
             echo "MODE=\"${feat_mode}\""
             echo "SANDBOX=\"${feat_sandbox}\""
             echo ""
-            echo "# Experts: subagents with their own knowledge (termux-device on"
-            echo "# Termux, reverse-engineer) behind one 'expert' tool. Each is dormant"
+            echo "# Experts: subagents with their own knowledge (tester, reviewers, judge,"
+            echo "# researcher, software factory, ...) behind one 'expert' tool. Each is dormant"
             echo "# until you enable it in a session (a dialog, or /experts enable;"
             echo "# remembered). On by default (with subagents); EXPERTS=false turns"
             echo "# the tool off."
@@ -16905,7 +16909,7 @@ preset_names() {  # space-separated names of the saved presets
 list_presets() {
     local n
     if [ -z "$(preset_names)" ]; then
-        echo "No presets yet. Add one with:  lets-code setup --preset <name>"
+        echo "No presets yet. Add one with:  lets-code setup preset <name>"
         exit 0
     fi
     echo "Presets (${PRESET_DIR}):"
@@ -16925,7 +16929,7 @@ run_preset_setup() {  # run_preset_setup [<name>]
     command -v curl    >/dev/null || { log_error "curl not found."; exit 1; }
     command -v python3 >/dev/null || { log_error "python3 not found."; exit 1; }
     echo ""
-    echo "lets-code setup --preset — save another backend (server, token, model)"
+    echo "lets-code setup preset — save another backend (server, token, model)"
     echo "under a name, launched with  lets-code --<name>. Guards and optional"
     echo "features still come from ${CONFIG_FILE}."
     # the name: from the command line, else asked (again until usable)
@@ -16991,7 +16995,7 @@ run_preset_setup() {  # run_preset_setup [<name>]
         {
             echo "# lets-code preset '${name}' (shell syntax): launch with  lets-code --${name}"
             echo "# Applied on top of ${CONFIG_FILE}; any config key may be set here."
-            echo "# Re-run 'lets-code setup --preset ${name}' to regenerate."
+            echo "# Re-run 'lets-code setup preset ${name}' to regenerate."
             echo "ENDPOINTS=\"${endpoints}\""
             echo "TOKEN=\"${token}\""
             echo "CA_PATH=\"${ca}\""
@@ -17215,7 +17219,7 @@ while [ $# -gt 0 ]; do
     esac
     [ -n "${want}" ] || continue
     if [ "${want}" != claude ] && { ! preset_name_ok "${want}" || [ ! -f "${PRESET_DIR}/${want}" ]; }; then
-        log_error "no preset named '${want}' (saved: $(preset_names | sed 's/^$/none/'); built in: claude) — add it with: lets-code setup --preset ${want}"
+        log_error "no preset named '${want}' (saved: $(preset_names | sed 's/^$/none/'); built in: claude) — add it with: lets-code setup preset ${want}"
         exit 1
     fi
     if [ -n "${PRESET}" ] && [ "${PRESET}" != "${want}" ]; then
@@ -17423,7 +17427,7 @@ if [ "${BACKEND}" = claude ]; then
 fi
 
 if [ -z "${ENDPOINTS}" ] && [ -z "${URL_OVERRIDE}" ]; then
-    log_error "no configuration found. Run:  lets-code setup"
+    log_error "no configuration found. Run:  lets-code setup   (Claude subscriber, no server? lets-code --claude needs no setup)"
     exit 1
 fi
 

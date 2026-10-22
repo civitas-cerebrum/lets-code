@@ -1314,7 +1314,11 @@ export function runText(s: Stats): string {
 // wide for the terminal loses detail in order: the session line shortens
 // the cache to its hit rate, then drops the cost, then the cache; the speed
 // line drops the output, then TTFT. Token counts, context and speed stay.
-export function statsLines(s: Stats, full: boolean, color: Color = plain, w = Infinity): string[] {
+// the full size on one line from this width on: its shortest form (tokens,
+// context, speed, the prompt's clock) fits at their widest; the width alone
+// decides, so the footer never changes height as the numbers grow
+export const ONE_LINE_MIN = 78;
+export function statsLines(s: Stats, full: boolean, color: Color = plain, w = Infinity, one = false): string[] {
 	const pct = s.percent === null || s.percent === undefined ? "?" : `${s.percent.toFixed(1)}%`;
 	const ctxText = `${pct}/${compact(s.window)}${s.auto ? " (auto)" : ""}`;
 	const v = s.percent ?? 0;
@@ -1343,6 +1347,11 @@ export function statsLines(s: Stats, full: boolean, color: Color = plain, w = In
 	const ttft = s.firstMs !== undefined ? [d(`TTFT ${(s.firstMs / 1000).toFixed(1)}s${s.waiting ? "…" : ""}`)] : [];
 	const out = s.out !== undefined ? [d(`${s.estimated ? "~" : ""}${compact(s.out)} out`)] : [];
 	const run = runText(s) ? [d(runText(s))] : [];
+	if (one) {   // session and moment on one line: detail drops first (cache size, output, cost, TTFT, cache)
+		const cache = cacheLong.length ? cacheLong : cacheShort;
+		return [fit([[...head, ...cache, ...cost, d(speed), ...ttft, ...out, ...run], [...head, ...cacheShort, ...cost, d(speed), ...ttft, ...out, ...run], [...head, ...cacheShort, ...cost, d(speed), ...ttft, ...run],
+			[...head, ...cacheShort, d(speed), ...ttft, ...run], [...head, ...cacheShort, d(speed), ...run], [...head, d(speed), ...run]])];
+	}
 	const rate = fit([[d(speed), ...ttft, ...out, ...run], [d(speed), ...ttft, ...run], [d(speed), ...run], [d(speed)]]);
 	return [session, rate];
 }
@@ -1502,7 +1511,9 @@ export default function (pi: ExtensionAPI) {
 		held = sentAt !== undefined ? { at: Date.now(), s } : undefined;
 		return s;
 	};
-	const topLine = (data: FooterData, w: number, color: Color) => {
+	// the directory left; the mode (when given) and the model right, the
+	// directory shortened for them; placed: false when the mode did not fit
+	const topLine = (data: FooterData, w: number, color: Color, mode = ""): { line: string; placed: boolean } => {
 		let where = tilde(ui?.sessionManager?.getCwd?.() ?? ui?.cwd ?? process.cwd());
 		const branch = data.getGitBranch?.();
 		if (branch) where += ` (${branch})`;
@@ -1514,7 +1525,10 @@ export default function (pi: ExtensionAPI) {
 		let model = m?.id ? (claude ? m.id.replace(/^claude-/, "") : m.id) : "no model";
 		if (m?.reasoning) { const lvl = pi.getThinkingLevel?.() ?? "off"; model += lvl === "off" ? " • thinking off" : ` • ${lvl}`; }
 		if ((data.getAvailableProviderCount?.() ?? 1) > 1 && m?.provider) model = `(${claude ? "anthropic" : m.provider}) ${model}`;
-		return spread(color("dim", where), color("dim", model), w);
+		const right = mode ? `${mode}${color("dim", " · ")}${color("dim", model)}` : color("dim", model);
+		const room = w - width(right) - 2;
+		if (mode && room >= 12) return { line: spread(color("dim", width(where) > room ? `${cut(where, room - 1)}…` : where), right, w), placed: true };
+		return { line: spread(color("dim", where), color("dim", model), w), placed: false };
 	};
 	// lines other lets-code modules put in the footer, above the numbers (the
 	// subagents list of /subagents toggle): globalThis, so a module loaded
@@ -1529,15 +1543,16 @@ export default function (pi: ExtensionAPI) {
 				for (const block of (host.blocks as Map<string, (w: number, c: Color) => string[]>).values()) {
 					try { for (const l of block(w, color)) lines.push(cut(l, w)); } catch { /* a block's problem, not the footer's */ }
 				}
-				if (full) lines.push(topLine(data, w, color));
-				const numbers = statsLines(stats(), full, color, w).map((l) => cut(l, w));
-				// the mandate's mode at the right of the last numbers line (its own line
-				// when it does not fit there); every status dim like the rest, unless
-				// it brings its own colors
+				// every status dim like the rest, unless it brings its own colors; the
+				// mandate's mode at the right: of the top line (full size), else of the
+				// last numbers line, else on its own line
 				const tone = (v: string) => (/\x1b\[/.test(v) ? v : color("dim", v));
 				const all = [...data.getExtensionStatuses()].sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, v.replace(/\s+/g, " ").trim()] as const).filter(([, v]) => v);
-				const mode = all.find(([k]) => k === "mandate")?.[1];
+				let mode = all.find(([k]) => k === "mandate")?.[1];
 				const others = all.filter(([k]) => k !== "mandate").map(([, v]) => tone(v));
+				// next to the model it is the mode's name alone, and the default (auto) is not shown
+				if (full) { const name = (mode ?? "").replace(/^mode:\s*/, ""); const top = topLine(data, w, color, name && name !== "auto" ? tone(name) : ""); lines.push(top.line); if (top.placed || name === "auto") mode = undefined; }
+				const numbers = statsLines(stats(), full, color, w, full && w >= ONE_LINE_MIN).map((l) => cut(l, w));
 				if (mode) {
 					const last = numbers.length ? numbers[numbers.length - 1] : "";
 					const right = tone(mode);
@@ -6195,6 +6210,7 @@ interface ViewState {
 	added?: WeakSet<object>; addedCount?: number;   // the run's events added to the chat since
 	resubmit?: string; resubmitKey?: string; passOnce?: boolean;   // a command (or key) to run again once the copy is caught up
 	nav?: boolean; sel?: number; confirm?: boolean;   // the footer navigator has the keys; its selected row
+	expanded?: boolean;                               // the navigator shows the whole list (from the short list's "more" row)
 	followUpNext?: boolean;               // the follow-up key was pressed: the next prompt is a follow-up
 	inplace?: { run: string; chat: any; pending: any; status: any };   // a child shown in place while the main session works
 	mainBusy?: boolean;                   // the main session's turn is running (agent_start .. agent_settled)
@@ -6308,7 +6324,7 @@ function setupSessions(pi: ExtensionAPI) {
 	// toggle put it there, or while alt+s (/subagents) navigates
 	const footerShown = () => !!view && (vs.footer || inChild() || !!vs.nav);
 	const footerBlock = (w: number, color?: (c: string, s: string) => string) => (footerShown()
-		? view.footerLines(reg.runs, { width: w, now: Date.now(), current: vs.viewing ?? "main", selected: vs.nav ? vs.sel ?? 0 : undefined, confirm: vs.confirm, key: keyOn() ? VIEW_KEY : "/subagents", theme: color ? { fg: color } : theme(), deps })
+		? view.footerLines(reg.runs, { width: w, now: Date.now(), current: vs.viewing ?? "main", selected: vs.nav ? vs.sel ?? 0 : undefined, confirm: vs.confirm, key: keyOn() ? VIEW_KEY : "/subagents", theme: color ? { fg: color } : theme(), deps, expanded: !!vs.expanded })
 		: []);
 	const applyFooter = () => {
 		const host = ((globalThis as any)[FOOTER] ??= { blocks: new Map() });
@@ -6337,7 +6353,7 @@ function setupSessions(pi: ExtensionAPI) {
 			return typeof ed.isOnLastVisualLine === "function" ? !!ed.isOnLastVisualLine() : false;
 		} catch { return false; }
 	};
-	const navRows = () => (view ? view.navRows(reg.runs) : [{ kind: "main" }]);
+	const navRows = () => (view ? view.navRows(reg.runs, !!vs.expanded) : [{ kind: "main" }]);
 	const openNav = (sel?: number) => {
 		if (!view) return;
 		if (!reg.runs.length) { notify("No subagent or expert runs in this session yet."); return; }
@@ -6346,7 +6362,7 @@ function setupSessions(pi: ExtensionAPI) {
 		vs.sel = sel ?? (inChild() ? 0 : Math.min(1, navRows().length - 1));
 		repaint();
 	};
-	const closeNav = () => { if (!vs.nav) return; vs.nav = false; vs.confirm = false; repaint(); };
+	const closeNav = () => { if (!vs.nav) return; vs.nav = false; vs.confirm = false; vs.expanded = false; repaint(); };
 	const navKey = (data: string): { consume: true } | undefined => {
 		const rows = navRows();
 		const k = (x: string) => keyIs(data, x);
@@ -6358,8 +6374,11 @@ function setupSessions(pi: ExtensionAPI) {
 			vs.sel = sel - 1; repaint(); return { consume: true };
 		}
 		if (k("down")) { vs.sel = Math.min(rows.length - 1, sel + 1); repaint(); return { consume: true }; }
+		// esc in the whole list: back to the short one, on its "more" row
+		if (k("escape") && vs.expanded && reg.runs.length > view.SHORT_RUNS) { vs.expanded = false; vs.sel = Math.min(sel, view.SHORT_RUNS); repaint(); return { consume: true }; }
 		if (k("escape") || (keyOn() && k(VIEW_KEY))) { closeNav(); return { consume: true }; }
 		if (data === "x" || data === "X") { if (run?.status === "running") { vs.confirm = true; repaint(); } return { consume: true }; }
+		if (k("enter") && row?.kind === "more") { vs.expanded = true; repaint(); return { consume: true }; }   // the same row is now the third run
 		if (k("enter")) {
 			closeNav();
 			if (row?.kind === "main") { if (inChild()) command("back"); }
@@ -7053,24 +7072,42 @@ const cutTo = (s: string, w: number, deps: Deps) => (w <= 0 ? "" : deps.visibleW
 // TASK_MIN_WIDTH the task goes, under NARROW_WIDTH one total for the
 // tokens), then one line of keys. The open session is marked ▸. With
 // `selected` the list is navigating: ❯ marks the selected row and the last
-// line has the keys. At most FOOTER_ROWS rows; with more, a window around
-// the selection (or the first rows), and the last line says how many more.
+// line has the keys. With more than SHORT_RUNS runs the short list has the
+// first SHORT_RUNS - 1 of them and a "N more" row, which (enter) opens the
+// whole list (expanded) as a menu; esc goes back to the short one. The whole
+// list has at most FOOTER_ROWS rows; with more, a window around the
+// selection (or the first rows), and the last line says how many more.
+export const SHORT_RUNS = 3;
 export const FOOTER_ROWS = 6;
 export const TASK_MIN_WIDTH = 100;
 export const NARROW_WIDTH = 72;
-export interface NavRow { kind: "main" | "run"; id?: string }
-export function navRows(runs: Run[]): NavRow[] { return [{ kind: "main" }, ...order(runs).map((r) => ({ kind: "run" as const, id: r.id }))]; }
-export function footerLines(runs: Run[], o: { width: number; now: number; current?: string; selected?: number; confirm?: boolean; key?: string; theme?: Theme; deps?: Deps }): string[] {
-	const rs = order(runs);
-	if (!rs.length) return [];
+export interface NavRow { kind: "main" | "run" | "more"; id?: string }
+// an expert's name without "expert-": the list says which agent, not what kind
+export const shownName = (agent: string) => String(agent ?? "").replace(/^expert-/, "");
+const isShort = (runs: Run[], expanded?: boolean) => !expanded && runs.length > SHORT_RUNS;
+export function navRows(runs: Run[], expanded = false): NavRow[] {
+	const rs = order(runs).map((r) => ({ kind: "run" as const, id: r.id }));
+	return [{ kind: "main" }, ...(isShort(runs, expanded) ? [...rs.slice(0, SHORT_RUNS - 1), { kind: "more" as const }] : rs)];
+}
+export function footerLines(runs: Run[], o: { width: number; now: number; current?: string; selected?: number; confirm?: boolean; key?: string; theme?: Theme; deps?: Deps; expanded?: boolean }): string[] {
+	const all = order(runs);
+	if (!all.length) return [];
+	const shortList = isShort(runs, o.expanded), hidden = shortList ? all.length - (SHORT_RUNS - 1) : 0;
+	const rs = shortList ? all.slice(0, SHORT_RUNS - 1) : all;
 	const th = o.theme ?? ident, deps = o.deps ?? plainDeps(), W = Math.max(20, o.width);
-	const nav = o.selected !== undefined, total = rs.length + 1, cur = o.current ?? "main";
+	const nav = o.selected !== undefined, total = rs.length + 1 + (shortList ? 1 : 0), cur = o.current ?? "main";
 	const sel = nav ? Math.max(0, Math.min(o.selected!, total - 1)) : -1;
 	const start = total <= FOOTER_ROWS ? 0 : nav ? Math.max(0, Math.min(sel - Math.floor(FOOTER_ROWS / 2), total - FOOTER_ROWS)) : 0;
 	const end = Math.min(total, start + FOOTER_ROWS);
-	const nw = Math.min(W < NARROW_WIDTH ? 12 : 16, Math.max(4, ...rs.map((r) => r.agent.length)));
+	const nw = Math.min(W < NARROW_WIDTH ? 12 : 16, Math.max(4, ...rs.map((r) => shownName(r.agent).length)));
 	const lines: string[] = [];
 	for (let i = start; i < end; i++) {
+		if (shortList && i === total - 1) {   // the "N more" row: enter opens the whole list
+			const selRow = i === sel, t = selRow ? ident : th;
+			const row = ` ${t.fg("muted", "…")} ${pad(`${hidden} more`, nw, deps)}${W < NARROW_WIDTH ? "" : `  ${t.fg("dim", nav ? "enter: all runs" : `${all.filter((r) => r.status === "running").length} running`)}`}`;
+			const line = cutTo(row, W, deps); lines.push(selRow ? th.fg("accent", line) : line);
+			continue;
+		}
 		const r = i === 0 ? undefined : rs[i - 1];
 		const here = r ? r.id === cur : cur === "main";
 		// the selected row: the whole line in the theme's accent (pi's SelectList colour,
@@ -7078,7 +7115,7 @@ export function footerLines(runs: Run[], o: { width: number; now: number; curren
 		const selRow = i === sel, t = selRow ? ident : th;
 		const lead = here ? t.fg("accent", "▸") : " ";
 		const mark = r ? t.fg(COLOR[r.status] ?? "dim", MARK[r.status] ?? "?") : t.fg("muted", "◂");
-		const nameS = pad(cutTo(r ? r.agent : "main", nw, deps), nw, deps);
+		const nameS = pad(cutTo(r ? shownName(r.agent) : "main", nw, deps), nw, deps);
 		// not focused: names dim, nothing looks selectable
 		const name = !nav ? th.fg("muted", nameS) : nameS;
 		const push = (row: string) => { const line = cutTo(row, W, deps); lines.push(selRow ? th.fg("accent", line) : line); };
@@ -7096,10 +7133,10 @@ export function footerLines(runs: Run[], o: { width: number; now: number; curren
 	}
 	const above = start, below = total - end;
 	const more = above || below ? `${above ? `↑${above} ` : ""}${below ? `↓${below} ` : ""}more · ` : "";
-	const selRun = sel > 0 ? rs[sel - 1] : undefined;
+	const selRun = sel > 0 && sel <= rs.length ? rs[sel - 1] : undefined;
 	let keys: string;
-	if (nav && o.confirm && selRun) keys = th.fg("warning", `Stop ${selRun.agent}? x again stops it`);
-	else if (nav) keys = th.fg("accent", `${more}↑↓ select · enter switch${selRun?.status === "running" ? " · x stop" : ""} · esc back`);
+	if (nav && o.confirm && selRun) keys = th.fg("warning", `Stop ${shownName(selRun.agent)}? x again stops it`);
+	else if (nav) keys = th.fg("accent", `${more}↑↓ select · enter ${shortList && sel === total - 1 ? "all runs" : "switch"}${selRun?.status === "running" ? " · x stop" : ""} · esc ${o.expanded && all.length > SHORT_RUNS ? "short list" : "back"}`);
 	else keys = th.fg("dim", `${more}↓ or ${o.key ?? "alt+s"}: switch session`);
 	lines.push(cutTo(keys, W, deps));
 	return lines;

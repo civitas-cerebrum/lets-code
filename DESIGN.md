@@ -158,6 +158,37 @@ deny, never bypass; read once the project is trusted). A broken manifest
 fails closed to the built-in roles. Mode changes are announced on
 `pi.events` (`lets-code:mode`) for the sandbox.
 
+**Who approves a run.** The agreed design had the user approve the
+criteria, the plan and the result. In use the orchestrator then sent the
+user to `/factory resume` (it could not resume a run itself), and the
+plan's dialog popped up in the middle of the user's conversation. Now a
+run the orchestrator starts through the expert pauses at every checkpoint
+and returns it as the tool result: the criteria, the full plan, the
+findings of a stuck round, or the result, with the call that goes on
+(`resume`, `decision`, `text` for an edit). The orchestrator decides and
+asks the user only for a significant design decision; the criteria it
+wrote into the ticket are confirmed for it. A run the user starts with
+`/factory` keeps the dialogs. A stop records its checkpoint (`stoppedAt`,
+or the note of an older ledger), and a resume asks that checkpoint again:
+before, `/factory resume` of a stopped run returned at once. The
+orchestrator role excludes the `worker` subagent (`"!worker"` in its
+dispatch list; a project manifest cannot drop the exclusion): in a live
+check it handed a small task to `worker`, which wrote the code into the
+user's folder with no review; code now goes through the factory.
+
+**The bricked run.** The next phone run (a computer opponent for a terminal
+chess game) used all five fix rounds on one design finding: `.pyc` files
+tracked in the change. The engine itself had staged them (`git add -A`
+before each review), the developer cannot unstage (no git writes), and a
+`.gitignore` does not unstage. The change is now staged afresh from the base
+each time (`git read-tree <base>`, then `git add -A` without bytecode,
+caches and `node_modules`). Running out of rounds no longer stops the run:
+it stays at the stuck checkpoint with final or stop (a stop there could not
+be resumed, and the orchestrator's resumes did nothing), and an older ledger
+stopped that way is resumed there. A `more` decision's text reaches that
+round's developer (the orchestrator had sent exact fix instructions that
+were dropped).
+
 **Orchestrator mode.** The software factory's main session plans and
 dispatches; experts change the code. That is the `orchestrator` role: plan's
 read-only scope (no edit or write, bash read-only, MCP denied) with

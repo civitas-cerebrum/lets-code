@@ -95,20 +95,20 @@ try {
 	await x.cmd("");
 	t("/metrics: still lets-code's footer", [typeof x.st.footer, x.st.setFooterCalls], ["object", 1]);
 	t("full: directory, branch, model, level", x.foot()[0], `~/github/app (main)${" ".repeat(200 - 19 - 20)}qwen3.8-27b • medium`);
-	t("full: session line", x.foot()[1], "↑222k ↓25k · 22.0%/262k (auto) · cache 198k (89%)");
-	t("full: moment line", x.foot()[2], "83.5 tok/s · TTFT 0.3s · 1.0k out");
+	t("full: two lines, the numbers on one", [x.foot().length, x.foot()[1]], [2, "↑222k ↓25k · 22.0%/262k (auto) · cache 198k (89%) · 83.5 tok/s · TTFT 0.3s · 1.0k out"]);
 	clock = 70000; x.ev("before_provider_request");
 	clock = 71200; step();
-	t("full: waiting", x.foot()[2], "⠙ 83.5 tok/s · TTFT 1.2s…");
+	t("full: waiting", x.foot()[1].endsWith(" · ⠙ 83.5 tok/s · TTFT 1.2s…"), true);
 	clock = 71300; x.delta("thinking_delta", "y".repeat(400));
 	clock = 72300; step();
-	t("full: streaming, live output", x.foot().slice(1), ["↑222k ↓25k · 22.0%/262k (auto) · cache 198k (89%)", "⠹ 84.2 tok/s · TTFT 1.3s · 100 out"]);
+	t("full: streaming, live output", x.foot().slice(1), ["↑222k ↓25k · 22.0%/262k (auto) · cache 198k (89%) · ⠹ 84.2 tok/s · TTFT 1.3s · 100 out"]);
 	x.ev("agent_end");
-	t("interrupt: spinner stopped, last finished response back", [timers.length, x.foot()[2]], [0, "83.5 tok/s · TTFT 0.3s · 1.0k out"]);
+	t("interrupt: spinner stopped, last finished response back", [timers.length, x.foot()[1].endsWith(" · 83.5 tok/s · TTFT 0.3s · 1.0k out")], [0, true]);
 	await x.cmd("");
 	t("/metrics again: minimal", x.foot(), ["↑222k ↓25k · 83.5 tok/s · 22.0%/262k (auto)"]);
 	await x.cmd("on");
-	t("/metrics on: full, three lines", x.foot().length, 3);
+	t("/metrics on: full, two lines", x.foot().length, 2);
+	t("full below the one-line width: three lines, as before", x.foot(x.mod.ONE_LINE_MIN - 1).length, 3);
 	await x.cmd("off");
 	t("/metrics off: minimal", x.foot().length, 1);
 	await x.cmd("loud");
@@ -138,7 +138,7 @@ try {
 	x = await load({ LETS_CODE_METRICS_ON: "1" }, { providers: 2, branch: null, level: "off" });
 	x.ev("session_start");
 	x.st.entries.push(usage(500, 0, 300, 0.0123));
-	t("full from the start: three lines, speed placeholder", [x.foot().length, x.foot()[2]], [3, "– tok/s"]);
+	t("full from the start: two lines, speed placeholder", [x.foot().length, x.foot()[1]], [2, "↑500 ↓300 · 22.0%/262k (auto) · $0.012 · – tok/s"]);
 	t("full: no branch on the left", x.foot()[0].startsWith("~/github/app "), true);
 	t("full: provider with several, thinking off, on the right", x.foot()[0].endsWith(" (lets-code) qwen3.8-27b • thinking off") && x.mod.width(x.foot()[0]) === 200, true);
 	{
@@ -148,10 +148,10 @@ try {
 		t("full: Claude reads (anthropic) haiku", c.foot()[0].endsWith(" (anthropic) haiku • medium"), true);
 	}
 	x.respond({ at: 0, ttft: 100, gen: 1000, output: 0, text: "x".repeat(160) });
-	t("full: cost; output estimated (~)", x.foot().slice(1), ["↑500 ↓300 · 22.0%/262k (auto) · $0.012", "40.0 tok/s · TTFT 0.1s · ~40 out"]);
+	t("full: cost; output estimated (~)", x.foot().slice(1), ["↑500 ↓300 · 22.0%/262k (auto) · $0.012 · 40.0 tok/s · TTFT 0.1s · ~40 out"]);
 	clock = 5000; x.ev("before_provider_request");
 	clock = 6000; x.ev("message_end", { message: { role: "assistant", usage: { output: 0 } } });
-	t("full: nothing streamed", x.foot()[2], "40.0 tok/s · TTFT 1.0s · ~0 out");
+	t("full: nothing streamed", x.foot()[1].endsWith(" · 40.0 tok/s · TTFT 1.0s · ~0 out"), true);
 
 	// learned characters per token: 90 tokens for 320 characters
 	x = await load({ LETS_CODE_METRICS_ON: "1" });
@@ -160,7 +160,7 @@ try {
 	clock = 10000; x.ev("before_provider_request");
 	clock = 10500; x.delta("text_delta", "y".repeat(320));
 	clock = 12500; step();
-	t("live estimate uses the learned ratio", x.foot().slice(1), ["↓90 · 22.0%/262k (auto)", "⠙ 45.0 tok/s · TTFT 0.5s · 90 out"]);
+	t("live estimate uses the learned ratio", x.foot().slice(1), ["↓90 · 22.0%/262k (auto) · ⠙ 45.0 tok/s · TTFT 0.5s · 90 out"]);
 	x.ev("agent_end");
 
 	// numbers held for a second while streaming, the glyph keeps moving
@@ -185,6 +185,13 @@ try {
 	t("then the cost drops", L(45), ["↑4.7M ↓65k · 41.0%/262k (auto) · cache 0%", "⠼ 53.0 tok/s · TTFT 43.2s · 5 out"]);
 	t("very narrow: cache and output drop", L(30), ["↑4.7M ↓65k · 41.0%/262k (auto)", "⠼ 53.0 tok/s · TTFT 43.2s"]);
 	t("narrowest: context and speed stay", L(20).join(" | "), "↑4.7M ↓65k · 41.0%/262k (auto) | ⠼ 53.0 tok/s");
+	const O = (w) => x.mod.statsLines({ ...S0, runMs: 85000, running: true }, true, undefined, w, true);
+	t("one line, wide: everything", O(200), ["↑4.7M ↓65k · 41.0%/262k (auto) · cache 3.7M (0%) · $1.500 · ⠼ 53.0 tok/s · TTFT 43.2s · 5 out · working 1m 25s"]);
+	t("one line, a phone's 82: detail drops, tokens, context, speed and clock stay", O(82), ["↑4.7M ↓65k · 41.0%/262k (auto) · cache 0% · ⠼ 53.0 tok/s · working 1m 25s"]);
+	t("one line, 100: the TTFT comes back first", O(100), ["↑4.7M ↓65k · 41.0%/262k (auto) · cache 0% · $1.500 · ⠼ 53.0 tok/s · TTFT 43.2s · working 1m 25s"]);
+	t("one line at its narrowest width: the shortest form fits", x.mod.width(O(x.mod.ONE_LINE_MIN)[0]) <= x.mod.ONE_LINE_MIN, true);
+	const worst = { sent: 999_000_000, received: 999_000_000, cached: 0, written: 0, cost: 0, tps: 9999.9, glyph: "⠼", percent: 100, window: 1_000_000, auto: true, runMs: 59 * 60000 + 59000, stopped: true };
+	t("the shortest form fits at its widest", x.mod.width(x.mod.statsLines(worst, true, undefined, x.mod.ONE_LINE_MIN, true)[0]) <= x.mod.ONE_LINE_MIN, true);
 	t("statsLine stays one line", x.mod.statsLine(S0, false), "↑4.7M ↓65k · ⠼ 53.0 tok/s · 41.0%/262k (auto)");
 
 	// colors: context warning/error, everything else dim; other statuses
@@ -201,6 +208,14 @@ try {
 	t("the mode: dim, at the right of the numbers line", [x.foot().length, x.foot()[0].startsWith("<dim>?/262k (auto)</dim> "), x.foot()[0].endsWith(" <dim>mode: plan</dim>")], [1, true, true]);
 	t("the mode: right-aligned to the width", x.mod.width(x.foot(80)[0]), 80);
 	t("the mode: its own line, right-aligned, where it does not fit", [x.foot(40).length, x.foot(40)[1], x.mod.width(x.foot(40)[1])], [2, `${" ".repeat(40 - 21)}<dim>mode: plan</dim>`, 40]);
+	{
+		const f = await load({ LETS_CODE_METRICS_ON: "1" }, { theme: th }); f.ev("session_start"); f.status.set("mandate", "mode: orchestrator");
+		t("full: the mode's name before the model, on the top line; two lines", [f.foot().length, f.foot()[0].endsWith("<dim>orchestrator</dim><dim> · </dim><dim>qwen3.8-27b • medium</dim>"), f.foot()[1].includes("orchestrator")], [2, true, false]);
+		f.status.set("mandate", "mode: auto");
+		t("full: the default mode is not shown", [f.foot().length, f.foot().join("\n").includes("auto</dim><dim> · ")], [2, false]);
+		const g = await load({ LETS_CODE_METRICS_ON: "1" }); g.ev("session_start"); g.status.set("mandate", "mode: orchestrator");
+		t("full, a phone's width: still two lines, the mode by the model", [g.foot(82).length, g.foot(82)[0].endsWith("orchestrator · qwen3.8-27b • medium"), g.mod.width(g.foot(82)[0])], [2, true, 82]);
+	}
 	x.status.set("factory", "- intake: 1 criteria"); x.status.set("sandbox", "\x1b[33msandbox: off\x1b[0m");
 	t("other statuses: their own line, dim unless colored", x.foot()[1], "<dim>- intake: 1 criteria</dim> \x1b[33msandbox: off\x1b[0m");
 	x.status.delete("factory"); x.status.delete("sandbox");
@@ -210,18 +225,18 @@ try {
 	x = await load({ LETS_CODE_METRICS_ON: "1" });
 	x.ev("session_start");
 	clock = 0; x.ev("agent_start");
-	t("run: counts while working", x.foot()[2].endsWith("working 0s"), true);
+	t("run: counts while working", x.foot()[1].endsWith("working 0s"), true);
 	clock = 42000; step();
-	t("run: live", x.foot()[2].endsWith("working 42s"), true);
+	t("run: live", x.foot()[1].endsWith("working 42s"), true);
 	x.respond({ at: 43000, ttft: 500, gen: 2000, output: 100 });
 	x.ev("agent_start");                                   // pi continuing on its own: same prompt
 	clock = 83000; x.ev("agent_settled");
-	t("run: done once pi settles", x.foot()[2].endsWith("done in 1m 23s"), true);
+	t("run: done once pi settles", x.foot()[1].endsWith("done in 1m 23s"), true);
 	t("run: interval cleared", timers.length, 0);
 	clock = 100000; x.ev("agent_start"); clock = 137000;
 	x.ev("message_end", { message: { role: "assistant", stopReason: "aborted", usage: { output: 0 } } });
 	x.ev("agent_settled");
-	t("run: interrupted", x.foot()[2].endsWith("stopped after 37s"), true);
+	t("run: interrupted", x.foot()[1].endsWith("stopped after 37s"), true);
 	await x.cmd("off");
 	t("run: not in the minimal footer", /working|done in|stopped after/.test(x.foot().join(" ")), false);
 	t("duration", [5000, 83000, 3720000].map(x.mod.duration), ["5s", "1m 23s", "1h 2m"]);

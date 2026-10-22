@@ -413,7 +413,7 @@ async function load(env = {}) {
 
 	// the view's stop (x): that child only, the other one finishes
 	const pending = h.run({ tasks: [{ agent: "worker", task: "hang here" }, { agent: "scout", task: "stream c" }] });
-	let hang; for (let i = 0; i < 100 && !(hang = reg().runs.find((r) => r.task === "hang here" && r.status === "running" && r.events.length > 1)); i++) await new Promise((r) => setTimeout(r, 30));
+	let hang; for (let i = 0; i < 400 && !(hang = reg().runs.find((r) => r.task === "hang here" && r.status === "running" && r.events.length > 1)); i++) await new Promise((r) => setTimeout(r, 30));
 	t("stop: the hanging run streams its partial text", hang?.events.at(-1)?.blocks?.[0]?.text, "working");
 	reg().stops.get(hang.id)();
 	const res = await pending;

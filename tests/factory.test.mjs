@@ -216,6 +216,36 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("limit: no more-rounds option left, final approval chosen", [L.status, fd.asked.at(-1)], ["done", "result"]);
 }
 
+// ------------------------------------------------------------------ the bricked chess run, replayed
+{
+	// tests leave bytecode; staged once, it used to come back every round (the developer cannot unstage)
+	const repo = makeRepo("pyc");
+	const withPyc = ({ cwd }) => { mkdirSync(join(cwd, "__pycache__"), { recursive: true }); writeFileSync(join(cwd, "__pycache__", "m.cpython-314.pyc"), "x"); mkdirSync(join(cwd, "node_modules", "z"), { recursive: true }); writeFileSync(join(cwd, "node_modules", "z", "i.js"), "x"); writeFileSync(join(cwd, "feature.txt"), "feature\n"); return { text: "STATUS: DONE\n## Changes\nfeature.txt", exitCode: 0, input: 1, output: 1, seconds: 0 }; };
+	const L = await F.startRun(opts(repo), fakeDeps({ ...OK, build: [withPyc] }));
+	t("bytecode and node_modules are never the change: not in the diff, not committed", [L.status, readFileSync(F.diffPath(L), "utf8").includes("pyc"), readFileSync(F.diffPath(L), "utf8").includes("node_modules"), git(L.work, "show", "--name-only", "--format=", "HEAD")], ["done", false, false, "feature.txt"]);
+	// the rounds used up: a further round is not offered, and asking for one keeps the checkpoint
+	const repo2 = makeRepo("rounds"); let k = 0;
+	const fresh = () => ({ text: `VERDICT: REVISE\nD${++k} | major | a | new problem ${k}`, exitCode: 0, input: 1, output: 1, seconds: 0 });
+	const R1 = "VERDICT: REVISE\nR1 | major | a.pyc | bytecode tracked";
+	const fdn = fakeDeps({ ...OK, build: [build(), build(), build()], "expert-review": [R1, R1, "VERDICT: APPROVE"] }, { decisions: { stuck: [{ action: "more", text: "unstage the bytecode first" }] } });
+	await F.startRun(opts(makeRepo("note")), fdn);
+	const notes = fdn.calls.filter((c) => c.meta.stage === "build").map((c) => c.brief.findings ?? "");
+	t("more with text: the note reaches that round's developer, and only that round", notes.map((f) => f.includes("unstage the bytecode first")), [false, false, true]);
+	let asks = 0;
+	const fd = fakeDeps({ ...OK, build: [build()], "design-review": [fresh] });
+	fd.checkpoint = (orig => async (kind, L) => (kind === "stuck" ? (asks++ === 0 ? { action: "more" } : null) : orig(kind, L)))(fd.checkpoint);
+	const L2 = await F.startRun({ ...opts(repo2), id: "rounds-1" }, fd);
+	t("the rounds used: the run waits at the stuck checkpoint, not stopped", [L2.status, L2.waiting, L2.rounds], ["waiting", "stuck", 5]);
+	t("then only final or stop", [F.decisionsAt("stuck", L2), F.decisionFor("stuck", "more", "", L2)], [["final", "stop"], "the run waits at its stuck checkpoint with its 5 fix rounds used: decision is one of final, stop"]);
+	t("approve there is not a further round", typeof F.decisionFor("stuck", "approve", "", L2), "string");
+	t("the call offered lists final and stop", F.report(L2, true).includes('decision: "final | stop"'), true);
+	// a ledger from before: stopped with "5 fix rounds used", nothing to resume from
+	const old = F.loadLedger("rounds-1", root); old.status = "stopped"; old.waiting = null; delete old.stoppedAt; old.pending = null; old.note = "5 fix rounds used"; F.saveLedger(old);
+	t("an older stop after the rounds is resumable at the stuck checkpoint", [F.stopKind(F.loadLedger("rounds-1", root)), /Stopped\. To go on, .*"final \| stop"/.test(F.report(F.loadLedger("rounds-1", root), true))], ["stuck", true]);
+	const L3 = await F.resumeRun("rounds-1", { ...fakeDeps(OK), checkpoint: F.orchestrated({ action: "final", by: "the orchestrator" }) }, root);
+	t("resumed with final: on to the result, waiting there for the caller", [L3.status, L3.waiting], ["waiting", "result"]);
+}
+
 // ------------------------------------------------------------------ the judge rejects, the suite fails
 {
 	const repo = makeRepo("judge");
@@ -395,12 +425,22 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 	t("session, no UI: waits at the criteria and says how to go on", [/waiting for the user: criteria/.test(out.join("\n")), /\/factory resume \S+ asks it/.test(out.join("\n"))], [true, true]);
 	// the expert's entry: runExpert, as the experts module calls it for runner: factory
 	sub.runs.length = 0; selects.length = 0;
+	// the orchestrator decides the checkpoints: the run comes back at each, with what to decide
+	const idOf = (r) => /resume: "([^"]+)"/.exec(r.text)?.[1];
 	const r1 = await fm.runExpert({ ticket: "TICKET.md", how_to_run: "grep -q ok src/a.txt", start: "python3 -m http.server 8123", constraints: "leave README.md alone" }, ctx, undefined, () => {}, "call-77");
 	t("expert: the run engages the orchestrator, and the model is told", [engaged.at(-1)?.[1], r1.text.endsWith(F.ORCHESTRATING)], ["software factory run", true]);
-	t("expert: a ticket given as a path is read", [r1.isError, /done, committed/.test(r1.text), sub.runs[0].task.includes("isFreeShipping") || sub.runs[0].task.includes("feature.txt exists")], [false, true, true]);
+	t("expert: the criteria it wrote are confirmed for it; the plan comes back to it, not to a dialog", [r1.isError, /waits at its plan checkpoint, for you to decide/.test(r1.text), r1.text.includes("## Plan") || r1.text.includes("1. "), selects.length], [false, true, true, 0]);
+	t("expert: with the call that goes on, and when to ask the user", [!!idOf(r1), r1.text.includes('decision: "approve | edit | stop"'), /only for a significant design decision/.test(r1.text)], [true, true, true]);
+	t("expert: a ticket given as a path is read", sub.runs[0].task.includes("feature.txt exists"), true);
+	const r1b = await fm.runExpert({ resume: idOf(r1), decision: "approve" }, ctx, undefined, () => {}, "call-77");
+	t("expert: resume with approve builds, reviews, judges, then hands back the result", [r1b.isError, /waits at its result checkpoint/.test(r1b.text), r1b.text.includes('decision: "commit | keep | stop"'), selects.length], [false, true, true, 0]);
+	const r1c = await fm.runExpert({ resume: idOf(r1), decision: "approve" }, ctx, undefined, () => {}, "call-77");
+	t("expert: approve at the result is the commit, on the run's branch only", [/done, committed/.test(r1c.text), /pushing, merging or a PR is up to the user/.test(r1c.text)], [true, true]);
 	t("expert: its stage runs carry the tool call's id (for /subagents and detaching)", [...new Set(sub.runs.map((r) => r.meta.callId))], ["call-77"]);
 	t("expert: constraints reach the stages", sub.runs.every((r) => r.task.includes("leave README.md alone")), true);
-	t("expert: the result is stage summaries, not stage output", [r1.text.includes("## Changes"), r1.text.split("\n").filter((l) => l.startsWith("- ")).length >= 7], [false, true]);
+	t("expert: the result is stage summaries, not stage output", [r1c.text.includes("## Changes"), r1c.text.split("\n").filter((l) => l.startsWith("- ")).length >= 7], [false, true]);
+	const r1d = await fm.runExpert({ resume: idOf(r1), decision: "approve" }, ctx);
+	t("expert: a done run is reported, nothing runs", [r1d.isError, /done, committed/.test(r1d.text)], [false, true]);
 	sub.runs.length = 0;
 	const r2 = await fm.runExpert({ ticket: "# T-9: a thing\n## Acceptance criteria\n1. feature.txt exists" }, ctx, undefined, () => {}, "call-78");
 	t("expert: a ticket given as text", [r2.isError, sub.runs[0].task.includes("T-9: a thing")], [false, true]);
@@ -412,16 +452,33 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 	const r3 = await fm.runExpert({ ticket: "  " }, ctx);
 	t("expert: no ticket, nothing runs", [r3.isError, r3.text.startsWith("Nothing ran")], [true, true]);
 	const r4 = await fm.runExpert({ ticket: "TICKET.md" }, { cwd: repo, hasUI: false });
-	t("expert, no UI: it waits and says how to go on", [r4.isError, /waiting for the user: criteria/.test(r4.text), /\/factory resume/.test(r4.text)], [false, true, true]);
+	t("expert, no UI: the same, it needs none", [r4.isError, /waits at its plan checkpoint/.test(r4.text)], [false, true]);
+	const id4 = idOf(r4);
+	const bad = await fm.runExpert({ resume: id4, decision: "commit" }, ctx);
+	t("expert: a decision the checkpoint does not take", [bad.isError, /decision is one of approve, edit, stop/.test(bad.text)], [true, true]);
+	const noText = await fm.runExpert({ resume: id4, decision: "edit" }, ctx);
+	t("expert: edit needs the text", [noText.isError, /edit needs text/.test(noText.text)], [true, true]);
+	t("expert: resume of a run that does not exist", (await fm.runExpert({ resume: "nope" }, ctx)).text, "Nothing ran: no factory run nope.");
+	const st = await fm.runExpert({ resume: id4, decision: "stop" }, ctx);
+	t("expert: stopped by the orchestrator, and how to go on", [/stopped: the orchestrator stopped it at the plan checkpoint/.test(st.text), st.text.includes(`resume: "${id4}"`)], [true, true]);
+	const again = await fm.runExpert({ resume: id4, decision: "edit", text: "## Plan\n1. add feature.txt with the word feature" }, ctx);
+	t("expert: a stopped run goes on from the checkpoint it stopped at, with the edited plan", [again.isError, /waits at its result checkpoint/.test(again.text), F.loadLedger(id4).plan], [false, true, "## Plan\n1. add feature.txt with the word feature"]);
 	mkdirSync(join(work, "not-a-repo"), { recursive: true }); writeFileSync(join(work, "not-a-repo", "x.txt"), "x");
 	const r5 = await fm.runExpert({ ticket: "TICKET.md", repo: join(work, "not-a-repo") }, ctx);
 	t("expert: a repo that is not one", [r5.isError, /could not run: .*not a git repository/.test(r5.text)], [true, true]);
+	const r7 = await fm.runExpert({ ticket: "TICKET.md", repo: `${repo} (the repo; already set up)` }, ctx);
+	t("expert: a remark after the repo path is dropped", [/waits at its plan checkpoint/.test(r7.text), existsSync(`${repo} (the repo; already set up)`)], [true, false]);
+	// the user's own /factory: a stop in a dialog, and /factory resume asks that checkpoint again
 	const stopUi = { ...ui, select: async (title, options) => (title.includes("plan") ? "Stop" : options[0]) };
-	const r7 = await fm.runExpert({ ticket: "TICKET.md", repo: `${repo} (the repo; already set up)` }, { ...ctx, ui: stopUi });
-	t("expert: a remark after the repo path is dropped", [/stopped/.test(r7.text), existsSync(`${repo} (the repo; already set up)`)], [true, false]);
-	const r6 = await fm.runExpert({ ticket: "TICKET.md" }, { ...ctx, ui: stopUi });
-	t("expert: stopped by the user is reported as such", [r6.isError, /stopped: the user stopped it at the plan checkpoint/.test(r6.text), /\/factory resume/.test(r6.text)], [true, true, true]);
-	if (!/stopped: the user stopped it at the plan checkpoint/.test(r6.text)) console.log(`  (its report: ${r6.text.slice(0, 600)})`);
+	const out6 = []; await cmds.factory.handler("start TICKET.md", { ...ctx, ui: { ...stopUi, notify: (m) => out6.push(m) } });
+	t("session: stopped by the user in a dialog is reported as such", [/stopped: the user stopped it at the plan checkpoint/.test(out6.join("\n")), /\/factory resume \S+ asks the plan checkpoint again/.test(out6.join("\n"))], [true, true]);
+	const id6 = /factory run (\S+):/.exec(out6.join("\n"))?.[1];
+	const out6b = []; await cmds.factory.handler(`resume ${id6}`, { ...ctx, ui: { ...ui, notify: (m) => out6b.push(m) } });
+	// a ledger from before stoppedAt: the stop is in its note only
+	{ const L = F.loadLedger(id4); L.status = "stopped"; L.waiting = null; delete L.stoppedAt; L.note = "the user stopped it at the result checkpoint"; F.saveLedger(L); }
+	const old = await fm.runExpert({ resume: id4, decision: "keep" }, ctx);
+	t("expert: an older ledger's stop is resumed from its note", [old.isError, /left uncommitted/.test(old.text)], [false, true]);
+	t("session: /factory resume of a stopped run goes on from there", /done, committed/.test(out6b.join("\n")), true);
 }
 
 // ------------------------------------------------------------------ ids: never one a run or a branch already has

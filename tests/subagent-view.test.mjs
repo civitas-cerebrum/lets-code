@@ -45,37 +45,47 @@ t("status labels", runs.map(v.statusLabel), ["done", "running", "running", "fail
 // --- the footer list, which is also the navigator
 {
 	t("footer: nothing without runs", v.footerLines([], { width: 120, now }), []);
-	t("nav rows: the main session, then the runs in order", v.navRows(runs).map((r) => r.id ?? r.kind), ["main", "c", "b", "e", "a", "d"]);
-	const wide = v.footerLines(runs, { width: 120, now, current: "b" }).map(strip);
+	// more than three runs: the short list, two runs and a "more" row that opens the whole list
+	const sh = v.footerLines(runs, { width: 90, now }).map(strip);
+	t("short list: main, two runs, then N more", [sh.length, sh.slice(1, 3).map((l) => l.slice(1, 3) + l.slice(3).trim().split(/\s+/)[0]), /^ … 3 more/.test(sh[3])], [5, ["● scout", "● reviewer"], true]);
+	t("short list: nav rows end in more", v.navRows(runs).map((r) => r.id ?? r.kind), ["main", "c", "b", "more"]);
+	const shSel = v.footerLines(runs, { width: 90, now, selected: 3 }).map(strip);
+	t("short list: on the more row, enter opens all runs", [/enter: all runs/.test(shSel[3]), /enter all runs · esc back$/.test(shSel.at(-1))], [true, true]);
+	const ex = v.footerLines(runs, { width: 90, now, selected: 3, expanded: true }).map(strip);
+	t("whole list: the runs, esc goes back to the short list", [ex.length, /esc short list$/.test(ex.at(-1))], [7, true]);
+	t("three runs or fewer: no more row", v.navRows(runs.slice(0, 3)).map((r) => r.kind), ["main", "run", "run", "run"]);
+	t("expert names without expert-", strip(v.footerLines([{ ...runs[0], agent: "expert-reviewer" }], { width: 90, now })[1]).includes(" reviewer "), true);
+	t("nav rows: the main session, then the runs in order", v.navRows(runs, true).map((r) => r.id ?? r.kind), ["main", "c", "b", "e", "a", "d"]);
+	const wide = v.footerLines(runs, { expanded: true, width: 120, now, current: "b" }).map(strip);
 	t("footer: the main session first, then the runs, running first, then a line of keys", [wide.length, wide[0].slice(1, 8), wide.slice(1, 5).map((l) => l.slice(1, 3) + l.slice(3).trim().split(/\s+/)[0]), /alt\+s: switch session$/.test(wide.at(-1))], [v.FOOTER_ROWS + 1, "◂ main ", ["● scout", "● reviewer", "■ worker", "✓ scout"], true]);
 	t("footer: at most FOOTER_ROWS rows; the keys line says how many more", /↓1 more · alt\+s: switch session/.test(wide.at(-1)), false);
-	t("footer: the open session is marked", [wide[2].startsWith("▸"), wide[0].startsWith(" "), v.footerLines(runs, { width: 120, now }).map(strip)[0].startsWith("▸")], [true, true, true]);
+	t("footer: the open session is marked", [wide[2].startsWith("▸"), wide[0].startsWith(" "), v.footerLines(runs, { expanded: true, width: 120, now }).map(strip)[0].startsWith("▸")], [true, true, true]);
 	t("footer wide: the task, the elapsed time and ↑in ↓out", [/Find where the CLI flags/.test(wide[1]), /25s/.test(wide[1]), /↑1\.2k ↓340/.test(wide[1])], [true, true, true]);
-	const mid = v.footerLines(runs, { width: 90, now }).map(strip);
+	const mid = v.footerLines(runs, { expanded: true, width: 90, now }).map(strip);
 	t("footer under 100 columns: no task, the clock and tokens stay", [/Find where/.test(mid[1]), /25s/.test(mid[1]), /↑1\.2k ↓340/.test(mid[1])], [false, true, true]);
-	const phone = v.footerLines(runs, { width: 70, now }).map(strip);
+	const phone = v.footerLines(runs, { expanded: true, width: 70, now }).map(strip);
 	t("footer at 70 columns: one total for the tokens", [/25s · 1\.5k$/.test(phone[1].trimEnd()), phone.every((l) => W(l) <= 70)], [true, true]);
-	t("footer: every line fits, at any width, navigating or not", [40, 70, 90, 120].every((w) => [undefined, 0, 3].every((sel) => v.footerLines(runs, { width: w, now, selected: sel }).every((l) => W(l) <= w))), true);
+	t("footer: every line fits, at any width, navigating or not", [40, 70, 90, 120].every((w) => [undefined, 0, 3].every((sel) => v.footerLines(runs, { expanded: true, width: w, now, selected: sel }).every((l) => W(l) <= w))), true);
 	const many = Array.from({ length: 14 }, (_, i) => run({ id: `m${i}`, agent: `w${i}`, task: `job ${i}`, status: "done", started: now - 1000 * i, ended: now - 500 * i }));
-	const still = v.footerLines(many, { width: 70, now }).map(strip);
+	const still = v.footerLines(many, { expanded: true, width: 70, now }).map(strip);
 	t("footer: more runs than rows: the first rows and how many more", [still.length, /↓9 more · ↓ or alt\+s: switch session/.test(still.at(-1))], [v.FOOTER_ROWS + 1, true]);
-	const nav = v.footerLines(many, { width: 70, now, selected: 10 }).map(strip);
-	t("navigating: a window around the selection, the same height, the keys", [nav.length, nav.length > 0 && !nav.some((l) => l.includes("→")), /^↑\d+ ↓\d+ more · ↑↓ select · enter switch · esc back$/.test(nav.at(-1))], [v.FOOTER_ROWS + 1, true, true]);
-	const nav0 = v.footerLines(runs, { width: 70, now, selected: 0, current: "b" }).map(strip);
-	t("navigating: the main row selectable; x only offered on a running run", [nav0[0].startsWith(" ◂ main"), /x stop/.test(nav0.at(-1)), /x stop/.test(v.footerLines(runs, { width: 70, now, selected: 1 }).map(strip).at(-1))], [true, false, true]);
-	t("navigating: the stop asks first", strip(v.footerLines(runs, { width: 70, now, selected: 1, confirm: true }).at(-1)), "Stop scout? x again stops it");
+	const nav = v.footerLines(many, { expanded: true, width: 70, now, selected: 10 }).map(strip);
+	t("navigating: a window around the selection, the same height, the keys", [nav.length, nav.length > 0 && !nav.some((l) => l.includes("→")), /^↑\d+ ↓\d+ more · ↑↓ select · enter switch · esc short list$/.test(nav.at(-1))], [v.FOOTER_ROWS + 1, true, true]);
+	const nav0 = v.footerLines(runs, { expanded: true, width: 70, now, selected: 0, current: "b" }).map(strip);
+	t("navigating: the main row selectable; x only offered on a running run", [nav0[0].startsWith(" ◂ main"), /x stop/.test(nav0.at(-1)), /x stop/.test(v.footerLines(runs, { expanded: true, width: 70, now, selected: 1 }).map(strip).at(-1))], [true, false, true]);
+	t("navigating: the stop asks first", strip(v.footerLines(runs, { expanded: true, width: 70, now, selected: 1, confirm: true }).at(-1)), "Stop scout? x again stops it");
 	const accent = { fg: (c, x) => `<${c}>${x}</${c}>` };
-	const focA = v.footerLines(runs, { width: 70, now, selected: 2, current: "c", theme: accent });
+	const focA = v.footerLines(runs, { expanded: true, width: 70, now, selected: 2, current: "c", theme: accent });
 	t("focused: the selected row in the accent only (pi's list colour), no marker of its own, no inversion, no other colour inside", [/^<accent> ● reviewer/.test(focA[2]), (focA[2].match(/<[a-z]+>/g) ?? []).join(), focA.some((l) => l.includes("\x1b[7m"))], [true, "<accent>", false]);
-	const both = v.footerLines(runs, { width: 70, now, selected: 2, current: "b" }).map(strip), bothW = v.footerLines(runs, { width: 120, now, selected: 2, current: "b" }).map(strip);
+	const both = v.footerLines(runs, { expanded: true, width: 70, now, selected: 2, current: "b" }).map(strip), bothW = v.footerLines(runs, { expanded: true, width: 120, now, selected: 2, current: "b" }).map(strip);
 	t("selected and open: ▸ stays, with every cue, with every cue (mark, name, elapsed, tokens)", [both[2].startsWith("▸● reviewer"), /20s · 1\.5k$/.test(both[2].trimEnd()), bothW[2].startsWith("▸● reviewer"), /Review the parser/.test(bothW[2]), /20s/.test(bothW[2]), /↑1\.2k ↓340/.test(bothW[2])], [true, true, true, true, true, true]);
-	t("selected, not open: the cues stay too", [v.footerLines(runs, { width: 70, now, selected: 3, current: "b" }).map(strip)[3].startsWith(" ■ worker"), /50s · 1\.5k$/.test(v.footerLines(runs, { width: 70, now, selected: 3, current: "b" }).map(strip)[3].trimEnd())], [true, true]);
-	t("the columns stay put as the selection moves: every row the same width up to the name", [0, 1, 2, 3].every((sel) => v.footerLines(runs, { width: 70, now, selected: sel, current: "b" }).slice(0, -1).map(strip).every((l) => /^[▸ ][●✓✗■◂] /.test(l) && !l.includes("→"))), true);
+	t("selected, not open: the cues stay too", [v.footerLines(runs, { expanded: true, width: 70, now, selected: 3, current: "b" }).map(strip)[3].startsWith(" ■ worker"), /50s · 1\.5k$/.test(v.footerLines(runs, { expanded: true, width: 70, now, selected: 3, current: "b" }).map(strip)[3].trimEnd())], [true, true]);
+	t("the columns stay put as the selection moves: every row the same width up to the name", [0, 1, 2, 3].every((sel) => v.footerLines(runs, { expanded: true, width: 70, now, selected: sel, current: "b" }).slice(0, -1).map(strip).every((l) => /^[▸ ][●✓✗■◂] /.test(l) && !l.includes("→"))), true);
 	t("focused: the other rows keep their colours; the open session keeps ▸", [/^<accent>▸<\/accent><accent>●<\/accent> scout/.test(focA[1]), /<success>✓<\/success>/.test(focA.join("\n"))], [true, true]);
-	const unf = v.footerLines(runs, { width: 70, now, theme: accent }), foc = v.footerLines(runs, { width: 70, now, selected: 1, theme: accent });
+	const unf = v.footerLines(runs, { expanded: true, width: 70, now, theme: accent }), foc = v.footerLines(runs, { expanded: true, width: 70, now, selected: 1, theme: accent });
 	t("not focused: dim names, no accent row; the keys line says ↓ or alt+s", [unf.slice(0, -1).every((l) => !/^<accent> |^<accent>▸.*<\/accent>$/.test(l)), /<muted>scout/.test(unf[1]), /↓ or alt\+s: switch session/.test(unf.at(-1))], [true, true, true]);
-	t("focused: the keys line in the accent", /^<accent>.*esc back<\/accent>$/.test(foc.at(-1)), true);
-	t("footer: the same height navigating or not (no jump when focus moves)", [v.footerLines(runs, { width: 70, now }).length, v.footerLines(runs, { width: 70, now, selected: 2 }).length], [v.FOOTER_ROWS + 1, v.FOOTER_ROWS + 1]);
+	t("focused: the keys line in the accent", /^<accent>.*esc short list<\/accent>$/.test(foc.at(-1)), true);
+	t("footer: the same height navigating or not (no jump when focus moves)", [v.footerLines(runs, { expanded: true, width: 70, now }).length, v.footerLines(runs, { expanded: true, width: 70, now, selected: 2 }).length], [v.FOOTER_ROWS + 1, v.FOOTER_ROWS + 1]);
 }
 
 // --- the part on its way: what the session file does not hold yet

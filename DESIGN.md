@@ -11,8 +11,9 @@ bash script; pi is the only harness today, `--harness` exists for others.
    `providers["lets-code"]` in `models.json` and the `lets-code/<model>`
    entries in `settings.json`. Both are re-upserted on every launch; every
    other key is preserved. Writes are tmp+rename; a corrupt file fails loudly.
-2. **The token never lands on disk.** `apiKey` is the literal
-   `$LETS_CODE_TOKEN`, which pi resolves from the environment at runtime.
+2. **The token never lands in pi's files.** `apiKey` is the literal
+   `$LETS_CODE_TOKEN`, which pi resolves from the environment at runtime;
+   the token itself lives only in lets-code's mode-600 config.
 3. **Overflow is impossible by construction.** `contextWindow` is the full
    discovered length and `compaction.modelOverrides[…].reserveTokens` is the
    output cap, so pi compacts before `input + max_tokens` can exceed the
@@ -118,12 +119,14 @@ A hard thinking budget was once a fixed `samplingParams` value (half the
 output cap) for every level; Qwen3's template ignores the soft hint, so
 low, medium and high were the same configuration. pi's per-level budget is
 sent instead, via `compat.supportsThinkingTokenBudget`.
+
 ## Optional features
 
-Off unless `lets-code setup full` / `granular` or the config turns them on,
-so the default setup behaves exactly as before. Each is a module of the
-lets-code pi extension written like the guards, inert without its
-`LETS_CODE_*_ON` variable.
+The mandate, the sandbox and the MCP import are off unless `lets-code setup
+full` / `granular` or the config turns them on; subagents, the experts and
+the Claude Code adapter (where a project's `.claude` needs it) are on by
+default. Each is a module of the lets-code pi extension written like the
+guards, inert without its `LETS_CODE_*_ON` variable.
 
 **One extension.** pi lists every extension it loads by path, so one
 directory per feature showed six to ten names. All modules now live in
@@ -845,7 +848,6 @@ queries), and a self-hosted Firecrawl did not fit the dev box (a Pi 5 with
 8 GB): about 3 GB idle for its API's ten Node workers, swap full, and
 memory limits not enforceable on a kernel booted with memory cgroups off.
 The Playwright CLI drives one Chromium for the whole machine instead.
-@@BROWSER@@
 The fetch order is site API or raw files, then a plain fetch, then the
 browser, which the helper picks itself (empty, refused, bot wall, login
 wall, a JavaScript shell under 200 characters with a script tag, or a

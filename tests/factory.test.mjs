@@ -216,6 +216,36 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("limit: no more-rounds option left, final approval chosen", [L.status, fd.asked.at(-1)], ["done", "result"]);
 }
 
+// ------------------------------------------------------------------ the bricked chess run, replayed
+{
+	// tests leave bytecode; staged once, it used to come back every round (the developer cannot unstage)
+	const repo = makeRepo("pyc");
+	const withPyc = ({ cwd }) => { mkdirSync(join(cwd, "__pycache__"), { recursive: true }); writeFileSync(join(cwd, "__pycache__", "m.cpython-314.pyc"), "x"); mkdirSync(join(cwd, "node_modules", "z"), { recursive: true }); writeFileSync(join(cwd, "node_modules", "z", "i.js"), "x"); writeFileSync(join(cwd, "feature.txt"), "feature\n"); return { text: "STATUS: DONE\n## Changes\nfeature.txt", exitCode: 0, input: 1, output: 1, seconds: 0 }; };
+	const L = await F.startRun(opts(repo), fakeDeps({ ...OK, build: [withPyc] }));
+	t("bytecode and node_modules are never the change: not in the diff, not committed", [L.status, readFileSync(F.diffPath(L), "utf8").includes("pyc"), readFileSync(F.diffPath(L), "utf8").includes("node_modules"), git(L.work, "show", "--name-only", "--format=", "HEAD")], ["done", false, false, "feature.txt"]);
+	// the rounds used up: a further round is not offered, and asking for one keeps the checkpoint
+	const repo2 = makeRepo("rounds"); let k = 0;
+	const fresh = () => ({ text: `VERDICT: REVISE\nD${++k} | major | a | new problem ${k}`, exitCode: 0, input: 1, output: 1, seconds: 0 });
+	const R1 = "VERDICT: REVISE\nR1 | major | a.pyc | bytecode tracked";
+	const fdn = fakeDeps({ ...OK, build: [build(), build(), build()], "expert-review": [R1, R1, "VERDICT: APPROVE"] }, { decisions: { stuck: [{ action: "more", text: "unstage the bytecode first" }] } });
+	await F.startRun(opts(makeRepo("note")), fdn);
+	const notes = fdn.calls.filter((c) => c.meta.stage === "build").map((c) => c.brief.findings ?? "");
+	t("more with text: the note reaches that round's developer, and only that round", notes.map((f) => f.includes("unstage the bytecode first")), [false, false, true]);
+	let asks = 0;
+	const fd = fakeDeps({ ...OK, build: [build()], "design-review": [fresh] });
+	fd.checkpoint = (orig => async (kind, L) => (kind === "stuck" ? (asks++ === 0 ? { action: "more" } : null) : orig(kind, L)))(fd.checkpoint);
+	const L2 = await F.startRun({ ...opts(repo2), id: "rounds-1" }, fd);
+	t("the rounds used: the run waits at the stuck checkpoint, not stopped", [L2.status, L2.waiting, L2.rounds], ["waiting", "stuck", 5]);
+	t("then only final or stop", [F.decisionsAt("stuck", L2), F.decisionFor("stuck", "more", "", L2)], [["final", "stop"], "the run waits at its stuck checkpoint with its 5 fix rounds used: decision is one of final, stop"]);
+	t("approve there is not a further round", typeof F.decisionFor("stuck", "approve", "", L2), "string");
+	t("the call offered lists final and stop", F.report(L2, true).includes('decision: "final | stop"'), true);
+	// a ledger from before: stopped with "5 fix rounds used", nothing to resume from
+	const old = F.loadLedger("rounds-1", root); old.status = "stopped"; old.waiting = null; delete old.stoppedAt; old.pending = null; old.note = "5 fix rounds used"; F.saveLedger(old);
+	t("an older stop after the rounds is resumable at the stuck checkpoint", [F.stopKind(F.loadLedger("rounds-1", root)), /Stopped\. To go on, .*"final \| stop"/.test(F.report(F.loadLedger("rounds-1", root), true))], ["stuck", true]);
+	const L3 = await F.resumeRun("rounds-1", { ...fakeDeps(OK), checkpoint: F.orchestrated({ action: "final", by: "the orchestrator" }) }, root);
+	t("resumed with final: on to the result, waiting there for the caller", [L3.status, L3.waiting], ["waiting", "result"]);
+}
+
 // ------------------------------------------------------------------ the judge rejects, the suite fails
 {
 	const repo = makeRepo("judge");

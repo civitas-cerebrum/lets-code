@@ -7382,6 +7382,7 @@ export interface Ledger {
 	findings: Partial<Record<Stage, Finding[]>>;   // each review stage's open findings, from its last verdict
 	sent: Record<string, string[]>;                // finding ids already sent to the developer, per stage
 	fixing: { stage: Stage; findings: Finding[] } | null;   // what the next build fixes, and where to go on
+	fixNote?: string;                              // the caller's note on that fix round (decision more with text)
 	pending: { stage: Stage; findings: Finding[] } | null;  // a fix round waiting for the user (stuck)
 	baseline: { code: number; tail: string } | null;
 	commit: string;
@@ -7503,7 +7504,7 @@ export function briefFor(stage: Stage, L: Ledger): Record<string, string> {
 	const b: Record<string, string> = {};
 	if (stage === "plan" || stage === "build") {
 		Object.assign(b, { task: L.ticket, criteria, mode: stage === "plan" ? "plan" : "build", how_to_run: L.howToRun, constraints: keep, workspace });
-		if (stage === "build") { b.plan = L.plan; if (L.fixing) b.findings = `Fix these findings of the ${L.fixing.stage} stage, by id:\n${formatFindings(L.fixing.findings)}`; }
+		if (stage === "build") { b.plan = L.plan; if (L.fixing) b.findings = `Fix these findings of the ${L.fixing.stage} stage, by id:\n${formatFindings(L.fixing.findings)}${L.fixNote ? `\n\nFrom the one running this pipeline, on this round:\n${L.fixNote}` : ""}`; }
 	} else if (stage === "expert-review") {
 		Object.assign(b, { diff: where, criteria, context, previous_findings: prev(stage), how_to_run: L.howToRun, constraints: L.constraints });
 	} else if (stage === "design-review") {
@@ -7538,9 +7539,18 @@ async function stageRun(L: Ledger, deps: Deps, stage: Stage): Promise<{ text: st
 	const entry: Entry = { stage, round: L.rounds, expert, brief: briefFile, output: out, verdict: "", summary: "", input: r.input, output_tokens: r.output, seconds: r.seconds, started, ended: now() };
 	return { text: r.text, ok: r.exitCode === 0, entry };
 }
+// The change, staged afresh from the base each time (new files staged so
+// `git diff <base>` shows them; the worktree is the engine's own): what
+// .gitignore leaves out stays out even after an earlier round staged it, and
+// build output never counts as the change. The developer cannot unstage
+// (no git writes), so a .pyc staged once used to come back every round.
+const NOISE = ["**/__pycache__/**", "**/*.pyc", "**/.pytest_cache/**", "**/node_modules/**", "**/.DS_Store"].map((g) => `':(exclude,glob)${g}'`).join(" ");
+export async function stageChange(L: Ledger, deps: Deps): Promise<void> {
+	await deps.exec(`git read-tree ${L.base}`, L.work);
+	await deps.exec(`git add -A -- . ${NOISE}`, L.work);
+}
 async function snapshot(L: Ledger, deps: Deps): Promise<string> {
-	// new files staged so `git diff <base>` shows them; the worktree is the engine's own
-	await deps.exec(`git add -A`, L.work);
+	await stageChange(L, deps);
 	const d = await deps.exec(`git diff ${L.base}`, L.work);
 	mkdirSync(join(L.dir, "artifacts"), { recursive: true }); writeFileSync(diffPath(L), d.out, { mode: 0o600 });
 	const stat = await deps.exec(`git diff --shortstat ${L.base}`, L.work);
@@ -7601,7 +7611,7 @@ async function step(L: Ledger, deps: Deps): Promise<boolean> {
 		if (stage === "build" && st === "DONE") {
 			L.claim = bodyOf(text, "STATUS"); const stat = await snapshot(L, deps); entry.summary = stat || "no change in the work tree";
 			if (!stat) { blocked(L, "the developer reported DONE but the work tree has no change"); return true; }
-			if (L.fixing) { L.stage = L.fixing.stage; L.fixing = null; } else L.stage = next(stage);
+			if (L.fixing) { L.stage = L.fixing.stage; L.fixing = null; L.fixNote = ""; } else L.stage = next(stage);
 			return true;
 		}
 		entry.summary = short(bodyOf(text, "STATUS") || text);
@@ -7633,12 +7643,14 @@ async function applyDecision(L: Ledger, d: Decision, deps: Deps): Promise<void> 
 	if (kind === "stuck") {
 		const p = L.pending; L.pending = null;
 		if (d.action === "final") { L.stage = "done"; return; }
-		if (p && L.rounds < MAX_FIX_ROUNDS) fixRound(L, p.stage, p.findings, true); else { L.status = "stopped"; L.note = `${MAX_FIX_ROUNDS} fix rounds used`; }
+		if (p && L.rounds < MAX_FIX_ROUNDS) { L.fixNote = (d.text ?? "").trim(); fixRound(L, p.stage, p.findings, true); return; }
+		// no round left: the checkpoint stays (the result as it is, or a stop), the run is not lost
+		L.pending = p; L.waiting = "stuck"; L.note = `${MAX_FIX_ROUNDS} fix rounds used${p ? `; ${p.stage} still fails` : ""}: the final approval as it is, or stop`;
 		return;
 	}
 	if (kind === "result") {
 		if (d.action === "commit") {
-			await deps.exec(`git add -A`, L.work);
+			await stageChange(L, deps);
 			const msg = `${(L.ticket.split("\n").find((l) => l.trim()) ?? "factory run").replace(/^#+\s*/, "").slice(0, 72)}\n\nsoftware factory run ${L.id}`;
 			artifact(L, "commit-message.txt", msg);
 			// one commit on the run's branch from the base, whatever the children's checkpoints did to HEAD
@@ -7724,7 +7736,7 @@ export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 	const now = (deps.now ?? Date.now)(); const root = o.root ?? factoryRoot();
 	const prepared = await prepareRepo(resolve(o.repo), deps);
 	const top = await deps.exec(`git rev-parse --show-toplevel`, resolve(o.repo));
-	if (top.code !== 0) throw new Error(`${o.repo} is not a git repository, and has files: the factory starts a new project only in a new or empty folder`);
+	if (top.code !== 0) throw new Error(`${o.repo} is not a git repository, and has files: make it one first (git init and a first commit of its files: a setup chore for a subagent), or give a new or empty folder for a new project`);
 	const repo = top.out.trim(); const base = (await deps.exec(`git rev-parse HEAD`, repo)).out.trim();
 	const howToRun = await shellCommand(o.howToRun ?? "", "test command (how_to_run)", deps, repo);
 	const startCmd = await shellCommand(o.start ?? "", "start command", deps, repo);
@@ -7742,10 +7754,18 @@ export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 	saveLedger(L, now);
 	return advance(L, deps);
 }
+// the checkpoint a stopped run stopped at; a ledger from before stoppedAt
+// says it in its note (a stop at a checkpoint, or the fix rounds used up)
+export function stopKind(L: Ledger): Waiting | null {
+	if (L.status !== "stopped") return null;
+	if (L.stoppedAt) return L.stoppedAt;
+	const m = /stopped it at the (criteria|plan|result|stuck|blocked) checkpoint/.exec(L.note);
+	return m ? (m[1] as Waiting) : /fix rounds used/.test(L.note) ? "stuck" : null;
+}
 export async function resumeRun(id: string, deps: Deps, root = factoryRoot()): Promise<Ledger> {
 	const L = loadLedger(id, root); if (!L) throw new Error(`no factory run ${id}`);
 	// stopped at a checkpoint: that checkpoint is asked again
-	if (L.status === "stopped" && L.stoppedAt === undefined) L.stoppedAt = (/stopped it at the (criteria|plan|result|stuck|blocked) checkpoint/.exec(L.note)?.[1] as Waiting) ?? null;   // a ledger from before stoppedAt
+	if (L.status === "stopped" && !L.stoppedAt) L.stoppedAt = stopKind(L);
 	if (L.status === "stopped" && L.stoppedAt) { L.status = "waiting"; L.waiting = L.stoppedAt; L.stoppedAt = null; L.note = ""; }
 	if (L.status === "done" || L.status === "stopped") return L;
 	if (L.status !== "waiting") L.status = "running";   // interrupted mid-stage: that stage runs again
@@ -7801,11 +7821,14 @@ export function dialogs(ui: any | undefined): Deps["checkpoint"] {
 export const DECISIONS: Record<Waiting, Decision["action"][]> = { criteria: ["approve", "edit", "stop"], plan: ["approve", "edit", "stop"], result: ["commit", "keep", "stop"], stuck: ["more", "final", "stop"], blocked: ["retry", "stop"] };
 // "approve" reads as the checkpoint's go-ahead wherever it has another name
 const GO: Partial<Record<Waiting, Decision["action"]>> = { result: "commit", stuck: "more", blocked: "retry" };
-export function decisionFor(kind: Waiting, said: string, text?: string): Decision | string {
-	const a = said.trim().toLowerCase(); const action = (a === "approve" && GO[kind] ? GO[kind] : a) as Decision["action"];
-	if (!DECISIONS[kind].includes(action)) return `the run waits at its ${kind} checkpoint: decision is one of ${DECISIONS[kind].join(", ")}`;
+// what a checkpoint takes now: no further fix round once the rounds are used
+export const decisionsAt = (kind: Waiting, L?: Ledger): Decision["action"][] => (kind === "stuck" && L && L.rounds >= MAX_FIX_ROUNDS ? ["final", "stop"] : DECISIONS[kind]);
+export function decisionFor(kind: Waiting, said: string, text?: string, L?: Ledger): Decision | string {
+	const a = said.trim().toLowerCase(); const ok = decisionsAt(kind, L);
+	const action = (a === "approve" && GO[kind] && ok.includes(GO[kind]!) ? GO[kind] : a) as Decision["action"];
+	if (!ok.includes(action)) return `the run waits at its ${kind} checkpoint${ok !== DECISIONS[kind] ? ` with its ${MAX_FIX_ROUNDS} fix rounds used` : ""}: decision is one of ${ok.join(", ")}`;
 	if (action === "edit" && !(text ?? "").trim()) return `decision edit needs text: the ${kind === "plan" ? "plan" : "criteria"} to use`;
-	return { action, text: action === "edit" ? text : undefined, by: "the orchestrator" };
+	return { action, text: action === "edit" || action === "more" ? text : undefined, by: "the orchestrator" };
 }
 export function orchestrated(decision?: Decision): Deps["checkpoint"] {
 	let given = decision;
@@ -7855,7 +7878,7 @@ export function orchestrate(ctx: any, why: string): boolean {
 // for the orchestrator (forModel): a waiting run's checkpoint, with what to
 // decide and the call that decides it; for the user: the /factory command
 export function report(L: Ledger, forModel = false): string {
-	const call = (kind: Waiting) => `expert({action: "run", name: "software-factory", brief: {resume: "${L.id}", decision: "${DECISIONS[kind].join(" | ")}"${DECISIONS[kind].includes("edit") ? `, text: "the edited ${kind === "plan" ? "plan" : "criteria"}, with edit"` : ""}}})`;
+	const call = (kind: Waiting) => { const ok = decisionsAt(kind, L); return `expert({action: "run", name: "software-factory", brief: {resume: "${L.id}", decision: "${ok.join(" | ")}"${ok.includes("edit") ? `, text: "the edited ${kind === "plan" ? "plan" : "criteria"}, with edit"` : ok.includes("more") ? `, text: "optional: your note to the developer for that round"` : ""}}})`; };
 	const what = (kind: Waiting) => kind === "criteria" ? `Acceptance criteria:\n${L.criteria.length ? numbered(L.criteria) : "(none found in the ticket)"}`
 		: kind === "plan" ? `The developer's plan:\n${L.plan}`
 		: kind === "result" ? `The result: the change is in ${L.work}; diff: ${diffPath(L)}. commit makes one commit on ${L.branch} (nothing is pushed or merged); keep leaves it uncommitted.`
@@ -7865,9 +7888,7 @@ export function report(L: Ledger, forModel = false): string {
 		? `The run waits at its ${L.waiting} checkpoint, for you to decide.\n\n${what(L.waiting)}\n\nDecide it yourself and go on with ${call(L.waiting)}. Ask the user first only for a significant design decision.`
 		: `The run waits for the user (${L.waiting}): /factory resume ${L.id} asks it.`;
 	else if (L.status === "done") next = L.commit ? `The change is committed on ${L.branch} (worktree ${L.work}); pushing, merging or a PR is up to the user.` : `The change is left uncommitted in ${L.work} on ${L.branch}.`;
-	else if (L.status === "stopped") next = L.stoppedAt
-		? (forModel ? `Stopped. To go on, ${call(L.stoppedAt)}; the worktree stays.` : `Stopped. /factory resume ${L.id} asks the ${L.stoppedAt} checkpoint again; the worktree stays.`)
-		: "Stopped; the worktree stays.";
+	else if (L.status === "stopped") { const at = stopKind(L); next = !at ? "Stopped; the worktree stays." : forModel ? `Stopped. To go on, ${call(at)}; the worktree stays.` : `Stopped. /factory resume ${L.id} asks the ${at} checkpoint again; the worktree stays.`; }
 	return [summary(L), next].filter(Boolean).join("\n");
 }
 // the software-factory expert's run, in the main session: the brief's ticket
@@ -7898,10 +7919,10 @@ export async function runExpert(brief: Record<string, unknown>, ctx: any, signal
 	let decision: Decision | undefined;
 	if (id) {
 		const L0 = loadLedger(id); if (!L0) return { text: `Nothing ran: no factory run ${id}.`, isError: true };
-		const kind = L0.waiting ?? L0.stoppedAt ?? (L0.status === "stopped" ? (/stopped it at the (criteria|plan|result|stuck|blocked) checkpoint/.exec(L0.note)?.[1] as Waiting | undefined) : undefined);
+		const kind = L0.waiting ?? stopKind(L0);
 		if (L0.status === "done" || (L0.status === "stopped" && !kind)) return { text: report(L0, true), isError: false };
 		if (kind) {
-			const d = decisionFor(kind, v("decision") || "approve", v("text"));
+			const d = decisionFor(kind, v("decision") || "approve", v("text"), L0);
 			if (typeof d === "string") return { text: `Nothing ran: ${d}.\n\n${report(L0, true)}`, isError: true };
 			decision = d;
 		}

@@ -769,6 +769,54 @@ input), the tester's Playwright tests in Chromium,
 the judge and the suite, while the user switched into the running stages
 in place and back.
 
+**Core memory.** A memory the harness keeps so a session can find what
+earlier ones did without carrying it: one store per project (the nearest
+`.git` up from cwd, so a worktree is its own project; else cwd) and one
+global, under `~/.pi/agent/core-memory/`, next to pi's sessions, because
+entries point at session files and run records that live there. An entry
+is one dated line with a kind, a gist of at most 200 characters and
+pointers (`file:line`, `run:<id>`, `factory:<id>`, a session file). The
+store is JSONL (`memory.jsonl`, atomic, 600) with an in-memory index from
+each pointer to its entries; `memory.md` next to it is rendered from the
+store for the user and read back by `#id` when it is newer, so the file is
+editable by hand and the parse is never ambiguous (a JSONL line carries
+the id, a Markdown line only displays it). Nothing of the store is in the
+system prompt: a first design put a budgeted live file there, and was
+replaced by one line (the memory exists, how many entries, the last date,
+the tool searches it) plus the three newest headlines within 150 tokens,
+computed once a session so the prompt stays cacheable. Measured on Claude
+through the proxy (one-shot sessions, the usage counts of the first
+request): 5048 input tokens without the feature, 5538 with the line and
+the tool, 5664 with three headlines, so 490 for what is always there and
+126 for the headlines; the 3.6-characters-a-token estimate says ~60 for
+the line and ~275 for the tool, undercounting the schema, which Claude
+tokenizes at nearer 3 characters a token. The tool is most of the cost
+and the same order as the expert tool's. Retrieval is
+the `memory` tool: `search` matches every term against the gist, the
+pointers, the kind, a date prefix or the id (no scoring to tune; the store
+is hundreds of lines, not thousands); `open` follows a pointer (a file
+around its line, `report()` of a factory ledger, a run record's reply, a
+session's first message and last reply). The one automatic path is a
+lookup in the index after `read`, `edit`, `write`, `grep`, `find`, `ls`
+(their `path`) and an `expert` call that resumes a factory run: a hit adds
+one trailing line to the tool result naming the count, not the entries.
+`bash` is not lexed for paths. Writers: the model's `remember` (with
+`by: user` when the user asked, their words as the gist), and the harness
+without a model call: `factory.ts` after `advance` ends done or stopped,
+`subagents.ts` when a run finishes (a factory stage's run is left to the
+factory's entry), and the module itself after the first turn and at
+`session_shutdown` for the session pointer; both other modules reach it
+through a guarded dynamic import, as factory imports subagents, so a build
+without the module loses nothing. Dedupe is by identity pointer (a run,
+factory or session file) or by normalised gist, updating in place. Work
+and pointer entries untouched for 120 days move to `archive.jsonl` at load
+(decisions, facts and preferences stay; searched with `archive: true`). A
+child session (`LETS_CODE_SUBAGENT_DEPTH > 0`) reads and may `remember`
+but writes no pointers. Not done: the agent guard's wrap-up moment does not
+write (the session pointer after the first turn and at shutdown covers
+it, and a nudge turn is not a better moment than the end), and entries are
+not scored by priority (dates and kinds are enough to archive by).
+
 **Claude Code adapter.** Automatic: the launcher switches it on only where
 the project's `.claude` (up to the git root) has hooks or workflow scripts,
 the parts that need the adapter to work at all; skills and commands alone
@@ -881,6 +929,7 @@ extension source); the git guard (launch logic and extension source); the
 agent guard extension source; the
 optional features (`pi_write_mandate_extension`,
 `pi_write_subagent_extension`, `write_default_agents`,
+`pi_write_core_memory_extension`,
 `pi_write_claudecode_extension`, `claude_code_scan`,
 `pi_write_sandbox_extension`, `mcp_import`, `pi_write_rea`, `mandate_init`);
 main.

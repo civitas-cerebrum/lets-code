@@ -34,23 +34,59 @@ launch, and adds the guard rails a small local model needs.
 ## Quick start
 
 ```bash
-npx @civitas-cerebrum/lets-code setup   # endpoints, token, optional CA; installs pi if missing
-lets-code                               # go
-```
-
-`setup` keeps to the essentials. `setup full` also turns on the optional
-features below (modes, sandbox, MCP import); `setup granular`
-asks about each one.
-
-Setup installs the `lets-code` command itself. No npm? Grab the script:
-
-```bash
 mkdir -p ~/.local/bin
 curl -fsSL https://raw.githubusercontent.com/civitas-cerebrum/lets-code/main/lets-code -o ~/.local/bin/lets-code
-chmod +x ~/.local/bin/lets-code && lets-code setup
+chmod +x ~/.local/bin/lets-code
+lets-code setup     # endpoints, token, optional CA; installs pi if missing
+lets-code           # go
 ```
 
-Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for you.
+Or from npm: `npx @civitas-cerebrum/lets-code setup` runs the same
+onboarding and installs the `lets-code` command for you. No server, but a
+Claude subscription? `lets-code --claude` needs no setup at all (see
+[Claude](#claude-claude-code-subscription)).
+
+`setup` keeps to the essentials. `setup full` also turns on the optional
+features below (modes, sandbox, MCP import, the full footer); `setup
+granular` asks about each one. Flags lets-code does not know are passed
+to pi, so `lets-code -p "..."` and the rest of pi's options work as they are.
+
+Needs `bash` 3.2+, `curl`, `python3`; `node`/`npm` only if it installs pi
+for you. Linux and macOS (the test suite runs on both in CI). Termux on
+Android runs it too, against a server on the LAN or on Claude, and is where
+the `termux-device` expert lives; it is not in CI.
+
+## Compared with Claude Code
+
+lets-code is the [pi](https://pi.dev) coding agent with a launcher around
+it, not a Claude Code clone. Where it stands:
+
+- **Your own hardware.** Any OpenAI-compatible server (vLLM, SGLang, Ollama,
+  LM Studio, OpenRouter) and, through its proxy, Claude on a Claude
+  subscription. Claude Code runs on Anthropic's models only.
+- **It works, not only connects.** The context window, thinking and vision
+  are read from the server at each launch, and the output cap is reserved
+  so a session never overflows. The guards catch what a small model gets
+  wrong: a `reset --hard`, an untested refactor, a bash call that never
+  returns, a fact guessed instead of looked up.
+- **Modes as policy, not prompts.** `plan`, `ask`, `orchestrator` and roles
+  for subagents are enforced on every tool call, with zero tokens on
+  allowed calls. Claude Code's permission rules and `.claude/` hooks keep
+  working here through the adapter.
+- **Experts and the factory.** Specialists that cost one line of context
+  until used (a tester with its team, two reviewers, an acceptance judge, a
+  researcher, a reverse engineer, an expert builder) and a software factory
+  that takes a ticket through plan, build, reviews, tests and a judge in its
+  own worktree. Claude Code has subagents and plugins; it has no pipeline.
+- **Subagent sessions** you can switch into, steer and bring back, as live
+  as the main one.
+- **What it lacks.** Claude Code's own web search and fetch (here only the
+  researcher expert has them), its IDE, desktop and browser integrations,
+  MCP over SSE and WebSocket, a model per agent (one server serves every
+  agent), and the maturity: pi is young and this is version 0.1. A local
+  model needs a server set up for tool calling and reasoning (see
+  [server setup](#server-setup-vllm-nginx-private-tls)), and no guard makes
+  a 27B model a frontier model on hard tasks.
 
 ## What you get
 
@@ -1511,12 +1547,19 @@ start so the first session starts clean. Design notes and the reasoning
 behind each decision are in [DESIGN.md](DESIGN.md).
 
 `tests/run.sh` runs the suite CI runs on every pull request: shell tests
-for the probes, endpoint parsing, the chat-template effort probe and the
-OpenRouter config, the move into the one extension, node tests for that
-extension's index, the git guard, checkpoints, agent guard, mandate,
+for the command line, the probes, endpoint parsing, the chat-template effort
+probe and the OpenRouter config, the move into the one extension, node tests
+for that extension's index, the git guard, checkpoints, agent guard, mandate,
 subagents, experts (and a lint of every built-in expert with the expert
-builder's `expert-lint`), the Claude Code adapter and sandbox config. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for
-the memory guard. Releases are published to npm from GitHub releases.
+builder's `expert-lint`), the Claude Code adapter and sandbox config.
+`tests/mem-guard-live.sh` is a tmux-driven end-to-end run for the memory
+guard.
+
+A release is a GitHub release tagged `vX.Y.Z`: the publish workflow runs the
+suite, stamps the tag into `package.json` and `LETS_CODE_VERSION` (what
+`lets-code --version` prints and `lets-code update` compares) and publishes
+the package to npm. A checkout says `dev`; `update --snapshot` stamps
+`main-<commit>`. [CHANGELOG.md](CHANGELOG.md) lists what changed.
 
 ## License
 

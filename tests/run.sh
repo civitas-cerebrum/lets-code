@@ -70,7 +70,9 @@ def cut(start, last_fn, end="\n}\n"):
         sys.exit("cannot find %s in lets-code" % last_fn.strip())
     return s[i:j + len(end)]
 sys.stdout.write(cut("\nREA_VERSION=", "\nrea_write_agent() {"))
-sys.stdout.write(cut("\nTESTER_PINS=", "\ntester_write_agent() {"))
+sys.stdout.write(cut("\npi_write_tester() {", "\npi_write_tester() {", "\n}  # end of pi_write_tester\n"))
+sys.stdout.write(cut("\npi_write_api_tester() {", "\npi_write_api_tester() {", "\n}  # end of pi_write_api_tester\n"))
+sys.stdout.write(cut("\nUI_TESTER_PINS=", "\nui_tester_write_agent() {"))
 sys.stdout.write(cut("\nJUDGE_DIR=", "\njudge_write_agent() {"))
 i = s.find("\n# Termux device expert:"); j = s.find("\non_termux() {", i)   # its writer, knowledge and on_termux
 sys.stdout.write(s[i:s.find("\n", j + 1) + 1])
@@ -86,7 +88,7 @@ PYX
     PI_AGENT_DIR="${agent}/builtin"; mkdir -p "${PI_AGENT_DIR}"
     LOG_PREFIX="[lets-code]"; log() { :; }
     . "${agent}/experts.sh"
-    pi_write_rea files; pi_write_tester files; pi_write_judge; write_termux_agent; pi_write_expert_builder; pi_write_developer; pi_write_expert_reviewer; pi_write_design_reviewer; pi_write_software_factory; pi_write_researcher
+    pi_write_rea files; pi_write_tester; pi_write_api_tester; pi_write_ui_tester files; pi_write_judge; write_termux_agent; pi_write_expert_builder; pi_write_developer; pi_write_expert_reviewer; pi_write_design_reviewer; pi_write_software_factory; pi_write_researcher
 ) || { echo "could not write the built-in experts from lets-code"; exit 1; }
 run "built-in experts: expert-lint --builtin" node "${agent}/builtin/expert-builder/bin/expert-lint" --builtin "${agent}/builtin/agents"
 

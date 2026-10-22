@@ -526,7 +526,38 @@ same. Expert files are never listed in the `subagent` tool, whose
 description lists agents with their jobs, so nothing is listed twice; a
 call there is pointed at the expert tool.
 
-**Tester (achilles' method, not achilles).** achilles is a QA
+**Testing: a lead and its team.** The tester carried two things at once:
+a QA discipline (risk, coverage, oracles, evidence, failure diagnosis) and
+the browser and mobile tooling it was applied with. Terminal programs and
+libraries got neither, the phone had no tester at all, and the factory's
+test stage was skipped there. They are separate now. `tester` is the test
+lead: the discipline, generalized beyond the browser (test basis and
+static review, risk, levels, types, the standard design techniques,
+HICCUPPS oracles, bite checks and negative controls, exploratory charters,
+failure diagnosis, reporting), with workflows for verifying a change,
+writing tests, testing an app, hunting bugs, diagnosing a failing test and
+repairing a suite, and its own reach: the project's test framework, CLIs,
+and terminal UIs through tmux. `ui-tester` keeps the browser and mobile
+tooling and the web journey method (the tester before, renamed; its
+runtime and the user's yes move over once). `api-tester` is new: APIs in
+depth with curl and jq, no setup.
+
+A lead that starts specialists needs a level a child does not have (a
+child cannot start children). The agent file's `team:` key grants it to
+that child alone: the subagents module spawns it with
+`LETS_CODE_SUBAGENT_MAX_DEPTH` one higher and `LETS_CODE_EXPERT_TEAM`, its
+generic `subagent` tool is left out, its experts module lists and runs only
+the team (route: false members included), and the specialists, at the new
+limit, start nothing. Only a user-level agent file can do this, never a
+project's. The mandate's `tester` role is the developer's plus the expert
+tool and a dispatch list of the team. The specialists are `route: false`:
+the model routes testing to the lead, which keeps one entry in the
+always-on line; the line's budget went from 900 to 1000 characters, since
+Termux's nine routed experts were just over it. expert-lint knows `team`,
+allows the expert tool with it, and no longer warns about overlap with an
+expert the model never routes to.
+
+**Tester (achilles' method, not achilles).** (Now `ui-tester`.) achilles is a QA
 methodology for Claude Code: 24 skills of 8 to 95 KB, about 50 hooks that
 gate an 8-phase pipeline, ledgers, reviewer subagents and a role kernel,
 plus a pi adapter on a branch. Its harness assumes a frontier model that

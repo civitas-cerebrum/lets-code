@@ -4919,6 +4919,13 @@ const BUILTIN: Manifest = {
 			label: "developer", tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "tool_search"], write: [".", tmpdir()], external: "deny", mcp: "deny", dispatch: [], network: "on",
 			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
 		},
+		// the tester expert's (the QA lead): the developer's (it writes tests in
+		// its working folder, never the git state), and its team: the UI and
+		// API specialists, started with the expert tool
+		tester: {
+			label: "tester", tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "tool_search", "expert"], write: [".", tmpdir()], external: "deny", mcp: "deny", dispatch: ["ui-tester", "api-tester"], network: "on",
+			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
+		},
 		// the researcher expert's: the reviewer's, and its browser only through
 		// its helper (researcher/bin/web, which allows only navigation and
 		// reading): no Playwright CLI, the runtime that holds it, its daemon,
@@ -5387,6 +5394,7 @@ export function claudeTools(names: string[]): string[] {
 export interface AgentDef {
 	name: string; description: string; tools?: string[]; thinking?: string; role?: string; prompt: string; source: "user" | "project"; file: string;
 	agentDir?: string; skills?: string[]; appendPrompt?: string; timeout?: number; expert?: ExpertMeta;
+	team?: string[];   // experts this agent may start itself (one level below it, and no further)
 }
 // An expert's own fields. brief: the template its caller fills in, one
 // field per block-list item, "name (required): hint" or "name: hint" (none
@@ -5433,7 +5441,7 @@ export function parseAgentFile(text: string, file: string, source: "user" | "pro
 		const thinking = ["low", "medium", "high"].includes(effort) ? effort : effort === "xhigh" || effort === "max" ? "high" : undefined;
 		return { name, description: fm.description ?? "", tools, thinking, role: fm.permissionMode === "plan" ? "readonly" : undefined, prompt: body.trim(), source, file };
 	}
-	const a: AgentDef = { name, description: fm.description ?? "", tools: list(fm.tools), thinking: fm.thinking, role: fm.role, prompt: body.trim(), source, file };
+	const a: AgentDef = { name, description: fm.description ?? "", tools: list(fm.tools), thinking: fm.thinking, role: fm.role, prompt: body.trim(), source, file, team: list(fm.team) };
 	const path = (key: string) => { const p = agentPath(fm[key], roots); if (!p) throw new Error(key); return p; };
 	let ready = true;
 	const missing = () => { ready = false; return ungated; };   // true: keep going (ungated), false: hide
@@ -5997,10 +6005,13 @@ export function runAgent(agent: AgentDef, task: string, cwd: string, signal: Abo
 	}
 	if (agent.appendPrompt) args.push("--append-system-prompt", agent.appendPrompt);
 	const env: Record<string, string> = { LETS_CODE_SUBAGENT_DEPTH: String(DEPTH + 1), LETS_CODE_AGENT_NAME: agent.name };
+	// an agent with a team (the tester and its specialists) starts those experts
+	// itself: one level more for it alone, its team named; they start nothing
+	if (agent.team?.length && agent.source === "user") { env.LETS_CODE_SUBAGENT_MAX_DEPTH = String(DEPTH + 2); env.LETS_CODE_EXPERT_TEAM = agent.team.join(","); }
 	const role = agent.role || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "";
 	if (role) env.LETS_CODE_ROLE = role;
 	if (agent.agentDir) env.PI_CODING_AGENT_DIR = agent.agentDir;
-	rec.spawn = { args, env, unset: role ? [] : ["LETS_CODE_ROLE"], cwd };
+	rec.spawn = { args, env, unset: [...(role ? [] : ["LETS_CODE_ROLE"]), ...(env.LETS_CODE_EXPERT_TEAM ? [] : ["LETS_CODE_EXPERT_TEAM"])], cwd };
 	const vs = (registry() as any).view;
 	rec.home = vs && !isChildSession(vs.current) ? vs.current || vs.home || undefined : vs?.home || undefined;
 	addRun(rec); saveRun(rec, true); notifyRuns(rec);
@@ -6839,6 +6850,7 @@ function setupSessions(pi: ExtensionAPI) {
 
 export default function (pi: ExtensionAPI) {
 	if (!ACTIVE || DEPTH >= MAX_DEPTH) return;   // a child at the depth limit gets no tool at all (and pays no tokens for it)
+	if (DEPTH > 0 && process.env.LETS_CODE_EXPERT_TEAM) return;   // a child with a team starts its team's experts only (the expert tool)
 	const Item = Type.Object({ agent: Type.String({ description: "agent name" }), task: Type.String({ description: "task; in a chain, {previous} is the prior step's output" }) });
 	// Always in context, kept small: the snippet puts the tool in pi's
 	// "Available tools" list, the guideline makes the model orchestrate
@@ -7597,7 +7609,7 @@ async function step(L: Ledger, deps: Deps): Promise<boolean> {
 	}
 	if (stage === "test" && (L.tester === "off" || (L.tester === "auto" && !(deps.available?.("tester") ?? false)))) {
 		const t = (deps.now ?? Date.now)();
-		L.entries.push({ stage, round: L.rounds, verdict: "SKIPPED", summary: L.tester === "off" ? "tester off for this run" : "the tester expert is not usable or not set up here", input: 0, output_tokens: 0, seconds: 0, started: t, ended: t });
+		L.entries.push({ stage, round: L.rounds, verdict: "SKIPPED", summary: L.tester === "off" ? "tester off for this run" : "the tester expert is not enabled here", input: 0, output_tokens: 0, seconds: 0, started: t, ended: t });
 		L.stage = next(stage); return true;
 	}
 	const { text, ok, entry } = await stageRun(L, deps, stage);
@@ -7857,7 +7869,7 @@ export async function sessionDeps(ctx: any, signal?: AbortSignal, progress?: (l:
 	};
 }
 // the stage experts must be enabled: the user's yes (one dialog for all) is remembered
-export async function ensureExperts(ctx: any, names = ["developer", "expert-reviewer", "design-reviewer", "acceptance-judge"]): Promise<string | null> {
+export async function ensureExperts(ctx: any, names = ["developer", "expert-reviewer", "design-reviewer", "tester", "acceptance-judge"]): Promise<string | null> {
 	const exp = await import(pathToFileURL(join(HERE, "experts.ts")).href);
 	const off = names.filter((n) => exp.remembered()[n] !== true);
 	if (!off.length) return null;
@@ -8122,7 +8134,7 @@ export function runSetup(script: string, onLine: (l: string) => void, signal?: A
 // experts) the entries shrink to their keywords, or the first
 // USE_FOR_SHORT words of use_for, so twenty stay under 400 tokens with the
 // schema; list has the rest.
-export const LINE_BUDGET = 900;
+export const LINE_BUDGET = 1000;
 export const USE_FOR_SHORT = 4;
 export function snippet(all: Spec[]): string {
 	const specs = all.filter((s) => s.expert.routed !== false);
@@ -8150,8 +8162,11 @@ export function rulesSection(specs: Spec[]): string {
 
 export default async function (pi: ExtensionAPI) {
 	if (!ACTIVE || DEPTH >= MAX_DEPTH) return;   // a child gets no tool (it cannot start children)
+	// a child with a team (LETS_CODE_EXPERT_TEAM): its team's experts only, each
+	// in its line (a specialist the main session does not route to is still its own)
+	const TEAM = DEPTH > 0 ? (process.env.LETS_CODE_EXPERT_TEAM ?? "").split(",").map((t) => t.trim()).filter(Boolean) : [];
 	const sub = await import(pathToFileURL(join(HERE, "subagents.ts")).href);
-	const discover = (): Spec[] => sub.discoverExperts();
+	const discover = (): Spec[] => TEAM.length ? sub.discoverExperts().filter((s: Spec) => TEAM.includes(s.name)).map((s: Spec) => ({ ...s, expert: { ...s.expert, routed: true } })) : sub.discoverExperts();
 	const known = discover();
 	if (!known.length) return;   // none usable here: no tool, no tokens
 	const RULES = rulesSection(known);
@@ -11410,43 +11425,751 @@ MD
     REA_AGENT=1
 }
 
-# Tester expert: web-app QA in a child pi that knows achilles' QA method
+# Tester expert: the test lead. Software testing of any kind with QA
+# discipline (risk-based planning, test design techniques, oracles,
+# evidence), done by itself (unit, integration, CLI and terminal UIs,
+# libraries, a quick API smoke) or by its team of specialists, started with
+# the expert tool: ui-tester (browser and mobile UI, the achilles method over
+# Playwright and Appium) and api-tester (HTTP and GraphQL APIs). The team is
+# the agent file's `team:` key: the subagents module gives this child one
+# level more, and its experts module lists and runs only those experts.
+# The QA discipline here is distilled from the tester's achilles method
+# (journeys, coverage, bug discovery, failure diagnosis, evidence),
+# generalized beyond the browser, and the standard test design techniques
+# (ISTQB foundation: partitions, boundaries, decision tables, state
+# transitions, pairwise, error guessing; exploratory charters; HICCUPPS
+# oracles). Runs under the `tester` role: the developer's rights (tests and
+# fixtures in its working folder and the temp dir, no git writes or
+# installs) and the dispatch of its team. No setup and no platform: on the
+# phone it tests by itself, and a specialist that cannot run there is
+# reported as a gap.
+# tester expert: Software testing with QA discipline: a risk-based test plan, then unit, integration, CLI and terminal UI, API and UI tests, by itself or by its team (ui-tester: browser and mobile, api-tester: HTTP APIs); verifies changes, writes tests, hunts bugs, diagnoses failing tests; up to an hour
+# Written on every launch with experts on; dormant until the user enables it.
+pi_write_tester() {
+    local d="${PI_AGENT_DIR}/tester" af="${PI_AGENT_DIR}/agents/tester.md" tmp f
+    mkdir -p "${d}/ref" "${PI_AGENT_DIR}/agents"
+    # what the browser half left here before it became ui-tester
+    rm -rf "${d}/bin" "${d}/setup" "${d}/prompt.md"
+    for f in api-web.md api-mobile.md bugs.md composition.md method.md; do rm -f "${d}/ref/${f}"; done
+    cat > "${d}/ref/strategy.md.tmp" <<'LC_EOF'
+<!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
+# Test strategy: basis, risk, levels, types, the plan
+
+## 1. The test basis
+- What the software must do: acceptance criteria, requirements, the ticket,
+  the docs, the API spec, the diff and its commit message. Quote them.
+- What it must keep doing: existing behaviour around the change (ask, or
+  read the tests and docs). A change that breaks a neighbour is a failure.
+- Implied requirements: the product's own conventions, platform norms,
+  sensible error handling, no data loss, no secret in output. Label a
+  criterion you inferred "inferred" and test it, but never let it decide
+  the verdict alone.
+- Read the basis critically first (static testing): contradictions,
+  ambiguity ("fast", "correctly"), missing error cases, untestable wording.
+  Report them as findings of their own (severity by what they put at risk).
+
+## 2. Risk
+Rate each feature, criterion or area:
+- Likelihood of failure: complexity, size of the change, new code or new
+  technology, churn (`git log --oneline -- <path> | head`), past bugs,
+  concurrency, time and dates, money, parsing, external services.
+- Impact: data loss or corruption, security or privacy, money, the core
+  flow blocked, how many users, how visible, how hard to undo.
+- High x high = High: test deep, at several levels. Low x low: smoke only.
+Risk orders the work and sets depth; it never removes a criterion.
+
+## 3. Levels (where a test lives)
+- Unit: one function or class, its logic and edges; fast, many. Default
+  home for boundaries, partitions and error paths of logic.
+- Integration (component): modules together, the database, the file
+  system, a real or faked service; the contracts between parts.
+- System (end to end): through the real interface a user has: the CLI,
+  the TUI, the HTTP API, the web or mobile UI. Fewer and slower; for the
+  journeys and criteria as users observe them.
+- Acceptance: each criterion shown at the level a user observes it.
+The pyramid: most checks low, a few journeys high. Test each thing at the
+lowest level that can show it, plus one end-to-end proof per criterion.
+
+## 4. Types
+- Functional: does it do what the basis says, including its errors.
+- Confirmation: a fixed bug is fixed (its reproduction now passes).
+- Regression: what worked still works (the suite, plus the neighbours of
+  the change).
+- Smoke: it builds, starts and its main path works; first, before depth.
+- Exploratory: time-boxed, learning while testing (workflows.md, W4).
+- Non-functional: performance, security, reliability, accessibility,
+  compatibility, usability (nonfunctional.md); smoke level unless asked.
+
+## 5. The test plan (write it before testing; a temp file is enough)
+```
+# Test plan: <target> - <goal>
+Basis: <criteria, docs, diff>          Scope: in <...> / out <...>
+Depth: smoke | standard | deep          Environment: <how it runs, what differs>
+Baseline: <suite command> -> <counts, what already failed>
+## Risks
+R1 | <area> | likelihood H/M/L | impact H/M/L | why
+## Matrix
+ID | item (C<n>/R<n>) | level | type | technique | by (me/ui-tester/api-tester) | data | status
+P1 | C1 | unit | functional | boundaries | me | generated | todo
+## Entry / exit
+Entry: builds, starts, baseline known.  Exit: see section 6.
+```
+Statuses: todo, passed, failed (-> finding), blocked (why), not done (why).
+
+## 6. Depth and exit criteria
+- Smoke: each criterion's happy path; the suite runs.
+- Standard (the default): smoke, plus each criterion's errors, boundaries
+  and partitions, the regression of the change's neighbours, one
+  exploratory charter on the riskiest area.
+- Deep: standard, plus states and combinations (pairwise), every High risk
+  at two levels, non-functional smoke, a second charter.
+Done when: every matrix row has a final status; every criterion has a
+passing test or a finding; every High risk is covered at its level; new
+tests pass 3 runs in a row; no unexplained skip; the full suite was run at
+the end; what was not covered is listed as residual risk.
+
+## 7. Regression selection
+From the diff: the files changed, then their callers and the tests that
+touch them (`grep -rn <symbol>`). Run those first, then the whole suite.
+When the suite is slow, say what you ran instead and what that leaves out.
+
+## 8. Test data and environment
+- Each test makes its own data and cleans it up; no order between tests.
+- Never production data or real accounts; logins and tokens by env var
+  name, never the value.
+- Note every way the test environment differs from where the software
+  really runs (OS, versions, data size, network, permissions).
+LC_EOF
+    cat > "${d}/ref/techniques.md.tmp" <<'LC_EOF'
+<!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
+# Test design techniques and oracles
+
+## 1. Equivalence partitioning
+Split each input (and output, and state) into classes the software treats
+alike: valid classes and each kind of invalid one. One test per class.
+Take the classes from the spec or from observed behaviour (error text,
+limits in code), never invented.
+
+Partition table, written before the tests (a comment at the top of the
+test file is fine):
+```
+Input | Class | Representative | Valid? | Test
+age   | 18-65 | 30             | yes    | happy path
+age   | <18   | 17             | no     | test_age_below_min
+```
+
+## 2. Boundary values
+Both sides of every edge: min-1/min, max/max+1; 0, 1, many; empty, one
+character, the maximum length and one more; first, last and past-the-end
+of a list or page; negative numbers; dates at month end, Feb 29, the year
+change, DST switches, time zones far from UTC; floats near rounding edges.
+
+## 3. Decision tables
+For logic over several conditions: conditions as rows, the rules as
+columns, the expected action per rule. Collapse rules whose outcome does
+not depend on a condition, then one test per remaining rule.
+
+## 4. State transitions
+List the states, the events and the allowed transitions (a small table or
+a list). Test every valid transition once (0-switch), the important pairs
+of transitions (1-switch), and the invalid events in each state: they must
+be refused without corrupting the state. Typical: a game (turn, check,
+mate, stalemate, quit), an order (new, paid, shipped, cancelled), a session
+(anonymous, logged in, expired).
+
+## 5. Combinations (pairwise)
+Many parameters with a few values each: cover every pair of values at
+least once instead of every combination. Build the table by hand for small
+sets; keep it with the plan.
+
+## 6. Use cases and scenarios
+The main success scenario, each alternative flow and each exception, end
+to end through the real interface.
+
+## 7. Data lifecycle (CRUD)
+Create, read, update, delete for each entity the change touches, and their
+cross effects: read after write, delete then read, update a deleted one,
+two writers.
+
+## 8. Error guessing: the catalogue
+Null, empty, whitespace only; unicode (emoji, RTL, combining marks, `İ`
+under a Turkish locale); very long; special characters `' " ; < > & | $ \``;
+injection strings (SQL, shell, path `../`, template `{{7*7}}`, HTML
+`<script>`); numbers: 0, -1, huge, NaN, decimal comma; duplicates; order;
+concurrency and double submit; timeouts, retries and partial failure;
+missing, unreadable or locked files; disk full; network down; clock and
+time zone; permissions; interrupted operations (Ctrl-C, kill, crash) and
+the restart after them.
+
+## 9. Properties, invariants, metamorphic and differential testing
+When the exact result is hard to know:
+- Properties: round trip (decode(encode(x)) == x), idempotence (f(f(x)) ==
+  f(x)), invariants (a sorted list stays sorted, totals add up, a chess
+  position has exactly one king per side), conservation, monotonicity.
+- Metamorphic: related inputs give related outputs (a search with an extra
+  filter returns a subset; a mirrored chess position has the mirrored
+  moves).
+- Differential: the old version against the new one, or two
+  implementations, on the same inputs.
+Generate many inputs (a property-based library if the project has one,
+else a seeded loop) and print the seed on failure.
+
+## 10. Negative matrix
+For every expectation, its negation: missing or malformed field, wrong
+type, out of range, wrong user, another tenant's id, after logout, replayed
+request, out of order, twice. Each result is recorded: boundary verified,
+suspected bug, or ambiguous (ask).
+
+## 11. Oracles: how you know the result is right
+- The spec or criterion, quoted.
+- A comparable implementation, the previous version, a reference table.
+- Consistency (HICCUPPS): with the product's history, its image and
+  claims, comparable products, users' expectations, its purpose, the
+  product itself elsewhere, standards and statutes.
+- Oracle strength: re-read the effect from its source of truth (the file,
+  the database, a GET, a reload), not a message saying it worked.
+- Every check must be able to fail. Bite check: break the expectation (or
+  the code, in a temp copy), see the test go red, revert. Negative
+  control: run the new tests on the base code; one that passes on both
+  covers nothing.
+
+## 12. Coverage as a signal
+Requirement coverage (each criterion), risk coverage (each High risk), and
+code coverage where the project has a tool (`pytest --cov`, `c8`, `go test
+-cover`): look at the changed lines' branches that no test reaches. Never a
+goal by itself: a covered line can still be unchecked.
+LC_EOF
+    cat > "${d}/ref/workflows.md.tmp" <<'LC_EOF'
+<!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
+# Workflows
+
+## W1. Verify a change or ticket (a review stage, a pipeline's test stage)
+1. The criteria verbatim, numbered; what must not change.
+2. The diff (`git diff <base>`) shows where to look, not what to assert.
+3. Baseline: the suite on the base code, if not given. For a negative
+   control without git writes: `git archive <base> | tar -x -C <tmp>`, then
+   run the new tests there against the old code.
+4. Plan (strategy.md): per criterion its level, technique and executor;
+   the regression set of the touched code; one exploratory charter.
+5. Per criterion: step through it live first (run the command, start the
+   app), then write or extend the tests; assert the observable result.
+6. Report defects found outside the criteria too.
+7. Verdict: APPROVE only when nothing the change causes fails; a failure
+   that was there before the change is reported but does not decide it.
+
+## W2. Write tests for a feature or ticket
+Recon the project's framework, layout, naming and fixtures, and follow
+them. Partition table and boundaries first, then tests: happy path, errors,
+boundaries, states, data lifecycle. One behaviour per test, its title says
+which. Each ends with an assertion on the action's effect ("would this pass
+if the action did nothing?"). Bite-check each new test. Stable: 3 green
+runs in a row.
+
+## W3. Test an application or system
+1. Map it: entry points (commands, pages, endpoints), roles, data, external
+   services; what it is for. Write a short app context file.
+2. Risks and priorities: P0 money or the core flow, P1 what most users do,
+   P2 supporting, P3 peripheral.
+3. Smoke every entry point, then depth by priority (strategy.md).
+4. Specialists for the browser journeys (ui-tester: its journey map and
+   coverage passes) and API depth (api-tester), in parallel.
+5. Close with the full suite, the coverage table and residual risks.
+
+## W4. Bug hunt (exploratory testing)
+- Charters, each time-boxed (20-45 minutes): "Explore <area> with
+  <resources/inputs> to discover <information>". Pick by risk.
+- Heuristics: SFDPOT (structure, function, data, platform, operations,
+  time); tours (the main feature, the money, the bad neighbourhood: past
+  bugs, the back alley: rarely used features, the all-nighter: long
+  sessions); the error-guessing catalogue (techniques.md 8).
+- Keep session notes: what you tried, what you saw, questions, bugs. Close
+  a direction after about 8 dry probes; write down what you did not try.
+- Each confirmed bug: steps from zero, expected, actual, evidence; where it
+  fits, a test that asserts the correct behaviour (red now, green once
+  fixed; never encode the bug as passing).
+
+## W5. Diagnose a failing or flaky test
+1. Evidence before any verdict, "flake" included: the error and stack, the
+   output of the failed run (not a later retry), logs, screenshots or
+   traces where they exist, the environment.
+2. Reproduce: alone (`-k`/`--grep`/one file), then in suite order, then
+   repeated (10-20 runs). Passes alone but fails in the suite: shared state
+   or order. Varies by run: time, randomness (fix the seed), concurrency,
+   network, resource limits.
+3. Classify:
+   - Test bug: the software is right; the test's setup, wait, selector or
+     expectation is wrong. Fix the test, keeping what it checks.
+   - Product bug: the software is wrong while the test's logic is right.
+     Stop: report it, leave the test as it is.
+   - Environment: dependency versions, OS, network, CI-only differences.
+     Report it; a local pass does not explain a CI failure away.
+   - Flaky: mixed results with no cause found yet; ambiguous: ask.
+4. Fix rules: never weaken the assertion; a changed expected value or flow
+   needs the basis to say so. Stable after a fix: 3 passes alone, 5 in
+   suite order.
+
+## W6. Repair a rotted suite
+Run it 3 times; per test: green, always red, flaky. Cluster the failures by
+cause; test each hypothesis with the cheapest targeted rerun; fix one
+representative per cluster (W5), rerun the cluster. Never delete a test to
+get green; a test that tests nothing anymore is a finding of its own.
+LC_EOF
+    cat > "${d}/ref/terminal.md.tmp" <<'LC_EOF'
+<!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
+# Testing command-line programs and terminal UIs
+
+## 1. A CLI: the matrix
+- Arguments: none; `--help` and `--version`; each option alone; an unknown
+  option; an option missing its value; conflicting options; positional
+  arguments of each partition (techniques.md); `--` and a dash-leading value.
+- Input: no stdin, empty stdin, piped data, huge data, binary, a closed
+  pipe downstream (`| head -1` must not leave a traceback).
+- Exit codes: 0 on success, non-zero on failure, the documented codes;
+  check `$?` every time, not only the output.
+- Streams: results on stdout, errors and progress on stderr; machine
+  output (JSON) stays parseable (`| jq .`); no color when not a TTY, and
+  `NO_COLOR` honoured.
+- Files: missing, unreadable, a directory, already exists (overwrite or
+  refuse?), relative and absolute paths, spaces and unicode in names,
+  symlinks; temp files cleaned up, also after an error.
+- Environment: missing or odd env vars, `HOME`, `LC_ALL=C`, `TZ`.
+- Signals: Ctrl-C (SIGINT) and SIGTERM end cleanly, no partial output file.
+- Twice at once: two instances on the same files.
+Wrap every run in `timeout 30` so a hang is a finding, not a stuck tester.
+
+## 2. In the project's tests
+Run the program as a subprocess from the project's framework (pytest with
+`subprocess.run(..., capture_output=True, text=True, timeout=...)`, Node's
+`child_process.spawnSync`, Go's `exec.Command`, bats for shell): assert the
+exit code, stdout and stderr separately. Golden files for long output: the
+expected text in a file, a diff on failure, never regenerated to get green.
+
+## 3. Terminal UIs and interactive programs (games, prompts, menus)
+Drive them in tmux, which gives a real terminal you can type into and read:
+```
+tmux new-session -d -s qa1 -x 80 -y 24 'cd <dir> && <command>'
+tmux send-keys -t qa1 'e2e4' Enter           # type, then press Enter
+tmux capture-pane -p -t qa1 > screen-01.txt  # the screen as text (-e: with colors)
+tmux resize-window -t qa1 -x 60 -y 20        # another size
+tmux kill-session -t qa1                     # always, at the end
+```
+- Wait on a condition, never a fixed sleep: poll `capture-pane` (every
+  0.2 s, up to a limit) until the expected text shows, and fail with the
+  last screen when it does not.
+- Keys: `Enter`, `Escape`, `C-c`, `Up`, `Down`, `Tab`, `BSpace`; one
+  `send-keys` per step, then wait for its effect.
+- Each step's screen saved as evidence (`screen-NN.txt`).
+- Check per screen: what the criteria say must show, no garbage or broken
+  layout, the prompt where expected; at 80x24 and at a narrow width.
+- Script whole sessions: start, the main path to its end (for a game: a
+  full game to mate, a stalemate, a draw if the rules have one), invalid
+  input (it must refuse and keep the state), quit at each prompt.
+- For repeatable tests, put the same steps in the project's framework
+  (pexpect in Python if present, a tmux-driving script otherwise), or test
+  the logic below the UI at unit level and keep tmux for a few end-to-end
+  sessions.
+- No tmux (tmux not installed: do not install it, say so): Python's `pty`
+  module, `script -qfc '<cmd>' /dev/null` with piped input, or the
+  program's non-interactive mode if it has one.
+Use a session name of your own and kill it at the end, also on failure.
+LC_EOF
+    cat > "${d}/ref/nonfunctional.md.tmp" <<'LC_EOF'
+<!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
+# Non-functional checks (smoke level unless the brief asks for more)
+
+## Performance
+- Time the key operations on realistic input: `hyperfine` if installed,
+  else a loop with `date +%s%N` or `/usr/bin/time -v` (also peak memory).
+- Compare the base against the change on the same machine; report numbers
+  and the spread (several runs), a slowdown over about 20% as a finding.
+- Growth: double the input a few times; time that grows faster than the
+  input hints at a quadratic path.
+- Load tests only with the brief's permission and only on a local target,
+  never a shared or production one.
+
+## Security
+- Each input boundary gets the injection strings (techniques.md 8): SQL,
+  shell, path traversal, template, HTML.
+- Authentication and authorization: no credentials, wrong ones, another
+  user's ids (IDOR), a lower role doing a higher role's action, after
+  logout. (API depth: api-tester; in a browser: ui-tester.)
+- Secrets: none in output, logs, error messages, the repo or the diff
+  (`grep -rnE '(api[_-]?key|secret|token|password)\s*[:=]'`).
+- Error messages without stack traces or internals to users.
+- Unsafe defaults: debug on, permissive CORS, world-writable files.
+- Dependencies: a read-only audit when the tool is there offline; report,
+  never upgrade.
+
+## Reliability
+- Interrupt a long operation (Ctrl-C, kill) and start again: is the state
+  consistent, is the partial output cleaned up?
+- Re-run the same operation: idempotent where it should be.
+- Corrupt or truncated input files, a missing config, a full disk where
+  it can be simulated safely (a small file system you made, never the
+  real one).
+- External services down or slow: a clear error, a retry with limits.
+
+## Accessibility
+- Web and mobile: ui-tester (keyboard only, focus order, labels and names,
+  contrast, zoom, a screen reader's view through the accessibility tree).
+- Terminal: meaning not by color alone, `NO_COLOR`, readable at 80 columns
+  and narrower, keys shown where they are needed.
+
+## Compatibility
+The runtime versions the project supports (its CI matrix, engines,
+python_requires): run what is installed here and say which you could not.
+Paths and line endings across OSes, locale (`LC_ALL=tr_TR.UTF-8` for case
+mapping), time zones (`TZ=Pacific/Kiritimati`, `TZ=America/St_Johns`).
+
+## Usability (quick heuristics)
+Consistent wording and keys, clear errors that say what to do, no dead
+ends, undo or confirm for destructive actions, help that matches behaviour.
+LC_EOF
+    cat > "${d}/ref/team.md.tmp" <<'LC_EOF'
+<!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
+# Your team: when to dispatch, the briefs, the results
+
+## Who does what
+- **ui-tester**: anything that needs a browser or a mobile app: journeys
+  and forms end to end, a Playwright suite written or repaired, visual and
+  layout checks, accessibility in the browser, Appium for Android/iOS. It
+  has the browser tooling and the journey method; you do not.
+- **api-tester**: HTTP and GraphQL APIs in depth: the contract against its
+  spec, status codes, authentication and authorization, validation,
+  idempotency, pagination, error shapes, written as tests.
+- **You**: everything else (unit, integration, CLI, TUI, libraries,
+  scripts, data, config), a one-request API smoke with curl, and the
+  verdict over all of it.
+Dispatch when the work needs the specialist's tools or depth; do it
+yourself when it is a minute with curl. Independent work goes out at once.
+
+## The call
+```
+expert({action: "run", name: "ui-tester", brief: {...}})
+expert({action: "run", runs: [{name: "ui-tester", brief: {...}}, {name: "api-tester", brief: {...}}]})
+```
+`expert({action: "list"})` shows each one's brief template and whether it
+is usable here. A dormant one asks the user to enable it when you run it.
+
+## A brief that stands alone
+They see only their brief, never yours. Put in it:
+- target: the URL or project path, and how to start it (how_to_run);
+- goal: the task in one or two sentences, and the criteria verbatim with
+  your ids (C1...), so their findings map back;
+- scope: which pages, journeys or endpoints, how deep; what must not
+  change; read-only or mutating;
+- constraints: test data and logins by env var name, no commits, time;
+- the evidence you need back: findings with severity, steps, expected,
+  actual and file paths.
+ui-tester's fields: target, platform, goal, how_to_run, scope, constraints.
+api-tester's: target, goal, spec, auth, how_to_run, scope, constraints.
+
+## When one cannot run
+Not installed here (ui-tester on Android has no browser), declined by the
+user, or failed: do what you can yourself (curl for the API, the page's
+HTML and its own tests for the web), and list the gap under Not done with
+what it leaves untested. Never report its part as passed.
+
+## The results
+Read every report. Check that its evidence files exist; re-run one of its
+tests yourself when the verdict hangs on it. Merge its findings with yours,
+dedupe (same place, same behaviour), renumber into your T<n> list, and keep
+its evidence paths. The verdict is yours.
+LC_EOF
+    cat > "${d}/ref/reporting.md.tmp" <<'LC_EOF'
+<!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
+# Evidence, bug reports, the final message
+
+## Evidence
+- Every claim points at something on disk or a command with its output:
+  a test file and the run that printed the counts, a saved screen or
+  response, a log. Never cite a file that does not exist.
+- "Could not run" is not "found nothing": a clean result counts only next
+  to a control that shows the check could fail.
+- Secrets by env var name, never the value; redact tokens and cookies in
+  saved requests and logs.
+
+## Severity
+- critical: security or privacy breach, data loss, the core flow blocked.
+- high: a user is stuck with no workaround; wrong results that matter.
+- medium: wrong, but there is a workaround or it is recoverable.
+- low: cosmetic or minor inconvenience.
+- info: an observation, an ambiguity in the basis, a testability gap.
+Map them to a caller's scale when its report format asks:
+critical/high -> blocker/major, medium -> minor, low/info -> nit.
+
+## A bug report
+- Title: `<where> - <what goes wrong>`.
+- Environment: version or commit, OS, how it was run.
+- Steps from zero, ending with "Observe ...".
+- Expected (from the basis, quoted) and Actual (facts only), apart.
+- Evidence paths; how often it reproduces (always, n of m runs).
+- The test that shows it, if one was written (red now, green once fixed).
+
+## The final message
+```
+## Result
+What was tested, how deep, and the verdict, in two or three sentences.
+## Plan and coverage
+| item | level / type | by | result |  (every matrix row; result: passed,
+failed T<n>, blocked: why, not done: why)
+## Tests
+Files written or changed, the commands that run them, the counts the last
+run printed (and the baseline's).
+## Findings
+T<n> | severity | where | title
+  steps, expected, actual, evidence (one block per finding)
+## Not done
+What was out of scope, blocked or not reachable here, and the risk that
+leaves.
+```
+When the brief gives a report format (a pipeline that parses it: a
+`VERDICT:` line first, finding lines `T<n> | blocker|major|minor|nit |
+where | title`), follow it exactly and put the rest under its headings.
+LC_EOF
+    for f in "${d}"/ref/*.md.tmp; do
+        sed "s|@@D@@|${d}|g" "${f}" > "${f}.s" && rm -f "${f}"
+        if cmp -s "${f}.s" "${f%.tmp}"; then rm -f "${f}.s"; else mv "${f}.s" "${f%.tmp}"; fi
+    done
+    # the expert; a user's own agent of that name is left alone
+    if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    tmp="$(mktemp "${af}.XXXXXX")" || return 0
+    cat > "${tmp}" <<'LC_EOF'
+---
+# Written by lets-code (tester); regenerated on launch, edits are overwritten.
+# To keep your own version, delete this line: lets-code then leaves it alone.
+name: tester
+description: Software testing of any kind with QA discipline; tests by itself or through its UI and API specialists
+tools: read, bash, edit, write, grep, find, ls, expert
+role: tester
+team: ui-tester, api-tester
+timeout: 3600
+expert: true
+use_for: testing and QA of any software: tests, a change verified, bugs, failing tests
+keywords: testing, QA
+job: Software testing with QA discipline: a risk-based test plan, then unit, integration, CLI and terminal UI, API and UI tests, by itself or by its team (ui-tester: browser and mobile, api-tester: HTTP APIs); verifies changes, writes tests, hunts bugs, diagnoses failing tests; up to an hour
+brief:
+  - target (required): what to test: a project path, a URL, a command, or a change (a diff or branch)
+  - goal (required): the testing task in the user's words: verify a change, write tests for X, find bugs in Y, why test Z fails, test the whole app
+  - criteria: the acceptance criteria or requirements to test against
+  - how_to_run: how to build, start and test it (commands, URLs)
+  - scope: what is in and out, and how deep (smoke, standard, deep)
+  - constraints: what not to touch, test data and logins to use (env var names), time limits
+  - report: a final-message format to follow exactly, when a program reads it
+---
+You are the tester of a lets-code session: a test lead with QA
+discipline. You test software of any kind, by yourself or through your
+team of specialists, and the verdict is yours. Another agent gave you one
+brief and sees only your final message; a program may parse it.
+
+## Your team (started with the expert tool)
+- ui-tester: anything in a browser or a mobile app: journeys and forms end
+  to end, Playwright suites, visual, layout and accessibility checks, Appium.
+- api-tester: HTTP and GraphQL APIs in depth: contract, status codes, auth,
+  validation, idempotency, pagination, error shapes.
+You test everything else yourself: unit and integration tests in the
+project's framework, CLIs and terminal UIs (tmux), libraries, scripts,
+data and config, and a one-request API smoke with curl. @@D@@/ref/team.md
+says when to dispatch, how to brief them, and what to do when one cannot
+run here.
+
+## References (read the one you need before that step)
+- @@D@@/ref/strategy.md: the test basis, risk, levels and types, the test plan, depth and exit criteria
+- @@D@@/ref/techniques.md: partitions, boundaries, decision tables, states, pairwise, error guessing, properties, negative matrix, oracles
+- @@D@@/ref/workflows.md: verify a change; write tests; test an app; hunt bugs; diagnose a failing or flaky test; repair a suite
+- @@D@@/ref/terminal.md: CLIs (arguments, streams, exit codes, files) and terminal UIs and games through tmux
+- @@D@@/ref/nonfunctional.md: performance, security, reliability, accessibility, compatibility, usability
+- @@D@@/ref/team.md: your specialists
+- @@D@@/ref/reporting.md: evidence, severity, bug reports, the final message
+
+## Order of work
+1. Read the brief. Name the test basis: criteria (number them C1, C2, ...
+   if they are not), requirements, docs, the diff; and what must not change.
+2. Recon: how it builds, starts and is tested (how_to_run, README,
+   package.json, pyproject.toml, Makefile). Run the existing suite once and
+   note what already fails: that is the baseline.
+3. Plan (strategy.md): the risks, then a matrix of criterion or risk x
+   level x type x technique x who (you, ui-tester, api-tester), at the
+   depth the scope asks (standard when it says nothing). Write it to a
+   file before testing.
+4. Execute: dispatch the specialists' rows first (they run while you
+   work), then your own: step through the behaviour live, then write tests
+   in the project's framework and layout (workflows.md for the task).
+   Prove every new test can fail (techniques.md 11).
+5. Explore: one time-boxed charter on the riskiest area (workflows.md W4).
+6. Close: every matrix row passed, failed (a finding), blocked or not
+   done, each with its reason. Run the full suite at the end; your new
+   tests pass 3 runs in a row; failures from the baseline stay reported.
+7. Report (reporting.md), in the brief's report format when it gives one.
+
+## Rules
+- A verdict rests on evidence: a command and its output, a test file and
+  its run, a saved screen or response. Not run is never passed.
+- Never weaken, skip, delete or rewrite an assertion to get green. A test
+  that fails because the software is wrong stays red and is a finding.
+- Do not fix the software under test: report it. You write tests,
+  fixtures, test data and the plan; at most one testability hook (an id
+  attribute), said so.
+- Stay inside scope and constraints. No commits or git writes, no
+  installs (say what is missing), nothing destructive. Stop the servers
+  and tmux sessions you started and remove your temp data.
+- Your specialists' findings become yours when you report them: check
+  their evidence first, dedupe, and keep their file paths.
+LC_EOF
+    sed "s|@@D@@|${d}|g" "${tmp}" > "${tmp}.s" && mv "${tmp}.s" "${tmp}"
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+}  # end of pi_write_tester
+
+# API tester expert: HTTP and GraphQL API testing in depth, with curl and
+# jq or the project's own test framework: the contract against its spec,
+# status codes, authentication and authorization, validation, idempotency,
+# pagination and error shapes. One of the tester's team (route: false: the
+# tester starts it, or a user by name). Runs under the `developer` role: test
+# files in its working folder and the temp dir, no git writes or installs.
+# No setup and no platform: curl and jq are enough.
+# api-tester expert: Tests an HTTP or GraphQL API in depth with curl and jq or the project's framework: its contract against the spec, status codes, auth and authorization, validation, idempotency, pagination, error shapes; findings with request and response evidence; up to an hour
+# Written on every launch with experts on; dormant until the user enables it.
+pi_write_api_tester() {
+    local d="${PI_AGENT_DIR}/api-tester" af="${PI_AGENT_DIR}/agents/api-tester.md" tmp
+    mkdir -p "${d}" "${PI_AGENT_DIR}/agents"
+    if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
+    tmp="$(mktemp "${af}.XXXXXX")" || return 0
+    cat > "${tmp}" <<'LC_EOF'
+---
+# Written by lets-code (api-tester); regenerated on launch, edits are overwritten.
+# To keep your own version, delete this line: lets-code then leaves it alone.
+name: api-tester
+description: Tests HTTP and GraphQL APIs in depth: contract, status codes, auth, validation, idempotency, error shapes
+tools: read, bash, edit, write, grep, find, ls
+role: developer
+timeout: 3600
+expert: true
+route: false
+use_for: testing an HTTP or GraphQL API: contract, auth, validation, errors
+keywords: API testing
+job: Tests an HTTP or GraphQL API in depth with curl and jq or the project's framework: its contract against the spec, status codes, auth and authorization, validation, idempotency, pagination, error shapes; findings with request and response evidence; up to an hour
+brief:
+  - target (required): the API's base URL, or the project that serves it
+  - goal (required): what to test or verify, with the criteria verbatim
+  - spec: the OpenAPI or GraphQL schema (path or URL), or the docs
+  - auth: how to authenticate: env var names of tokens or logins, never the values
+  - how_to_run: how to start the API and run its tests
+  - scope: endpoints in and out; read-only, or mutating allowed (on test data)
+  - constraints: what not to touch, rate limits, data to use
+---
+You are the api-tester of a lets-code session: you test HTTP and GraphQL
+APIs in depth. Another agent (often the tester, your test lead) gave you
+one brief and sees only your final message.
+
+## Order of work
+1. Recon: the spec (OpenAPI, GraphQL schema) or, without one, the routes in
+   the code and the docs; how to start the API (how_to_run) and its own
+   tests. Start it if it is not running and the brief allows; check it
+   answers (`curl -sS -o /dev/null -w '%{http_code}' <base>/...`).
+2. Plan: per endpoint in scope, a row per check (below), the data each
+   needs, and which are mutating. Mutating checks only on test data you
+   create, and only when the scope allows.
+3. Probe with curl, saving every exchange as evidence:
+   `curl -sS -D <dir>/NN.headers -o <dir>/NN.body -w '%{http_code} %{time_total}\n' ...`
+   in a folder under the temp dir; `jq` for the bodies.
+4. Tests: when the goal asks for tests (or the project has an API test
+   suite), write them in the project's framework (supertest, pytest with
+   requests or httpx, Go's httptest, ...) following its layout; else a
+   shell script of curl checks that exits non-zero on the first failure.
+   Each new test must be able to fail: break its expectation once, see it
+   red, revert.
+5. Report.
+
+## The checks, per endpoint
+- Contract: status code, content type, body shape and types against the
+  spec (required fields present, no undocumented fields leaking internals),
+  headers (Location after create, caching, pagination links).
+- Happy path with representative data; the effect re-read with a GET (not
+  only the write's response).
+- Validation: each field missing, wrong type, empty, out of range,
+  too long, unicode, injection strings; unknown fields; malformed JSON;
+  wrong content type. Expect 400/422 with a consistent error shape that
+  names the field, never a 500 or a stack trace.
+- Auth: no credentials (401), invalid or expired (401), valid but not
+  allowed (403), another user's or tenant's id (403/404, never their
+  data), role escalation.
+- Methods: the wrong method (405), HEAD and OPTIONS where relevant, CORS
+  headers when the API is used from browsers.
+- Idempotency and state: PUT and DELETE repeated give the same state;
+  POST twice (duplicate?); concurrent writes; operations out of order;
+  read after delete (404).
+- Collections: empty, one, many; pagination edges (first, last, past the
+  end, size 0 and huge), sorting and filters with odd values.
+- Errors and limits: 404 for a missing id and a malformed id, rate limits
+  (429 and its headers) only if the brief allows probing them, timeouts.
+- GraphQL: the schema by introspection (if enabled, and whether it should
+  be), each query and mutation's errors array and partial data, query
+  depth and cost limits, field-level authorization.
+
+## Rules
+- Never against production unless the brief says so; read-only there.
+- Secrets by env var name only; redact Authorization, Cookie and
+  Set-Cookie in saved headers.
+- Do not change the API's code: report what is wrong.
+- No git writes, no installs (say what is missing); stop what you started
+  and delete the test data you created.
+
+## Final message
+## Result
+What was tested and the verdict, in two or three sentences.
+## Coverage
+| endpoint | checks | result |
+## Tests
+Files written, the command that runs them, the counts of the last run.
+## Findings
+T<n> | critical|high|medium|low|info | METHOD /path | title
+  request (redacted), expected, actual (status and body excerpt), evidence paths
+## Not done
+What was out of scope or out of reach, and why.
+LC_EOF
+    chmod 644 "${tmp}"
+    if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
+}  # end of pi_write_api_tester
+
+# UI tester expert (the tester's browser and mobile specialist; before the
+# test lead existed this was the tester): web-app QA in a child pi that knows achilles' QA method
 # (civitas-cerebrum/achilles: journey mapping, test composition, bug
 # discovery, failure diagnosis, evidence) and writes its tests with the API
 # achilles drives: @civitas-cerebrum/element-interactions (the Steps API and
 # page-repository.json over Playwright) and, for mobile, element-repository
 # with WebdriverIO/Appium. achilles itself (its skills, hooks, gates, role
 # kernel, ledgers) is not installed: its method is distilled into the
-# child's instructions and tester/ref/*.md, from achilles main @ 6384b5f
+# child's instructions and ui-tester/ref/*.md, from achilles main @ 6384b5f
 # (2026-10-04).
-# Dormant until the user enables it; then tester/setup installs the pinned
-# packages into tester/runtime (and so into npm's cache, which e2e-init
+# Dormant until the user enables it; then ui-tester/setup installs the pinned
+# packages into ui-tester/runtime (and so into npm's cache, which e2e-init
 # installs from) and Playwright's chromium, and checks the mobile
 # prerequisites without installing them. Not on Termux: Playwright has no
 # browser for Android, and Appium needs a host with the Android SDK.
-TESTER_PINS="@civitas-cerebrum/element-interactions@0.3.9 @civitas-cerebrum/element-repository@0.3.2 @playwright/test@1.64.1 webdriverio@9.32.0"
-TESTER_DIR="${PI_AGENT_DIR}/tester"
-pi_write_tester() {
+UI_TESTER_PINS="@civitas-cerebrum/element-interactions@0.3.9 @civitas-cerebrum/element-repository@0.3.2 @playwright/test@1.64.1 webdriverio@9.32.0"
+UI_TESTER_DIR="${PI_AGENT_DIR}/ui-tester"
+pi_write_ui_tester() {
     local invoke="$1" rc
-    TESTER_NOTE=""; TESTER_AGENT=""
-    mkdir -p "${TESTER_DIR}/bin" "${TESTER_DIR}/ref" "${TESTER_DIR}/work"
-    rm -rf "${TESTER_DIR}/agent" "${TESTER_DIR}/extension.ts"   # an earlier design's
+    UI_TESTER_NOTE=""; UI_TESTER_AGENT=""
+    mkdir -p "${UI_TESTER_DIR}/bin" "${UI_TESTER_DIR}/ref" "${UI_TESTER_DIR}/work"
+    rm -rf "${UI_TESTER_DIR}/agent" "${UI_TESTER_DIR}/extension.ts"   # an earlier design's
 
     # 1. the setup: the pinned packages and chromium (first run, or when the
     # pins change), then the mobile check (never fatal)
     {
         echo '#!/usr/bin/env bash'
-        echo '# Written by lets-code (tester); regenerated on launch, edits are overwritten.'
+        echo '# Written by lets-code (ui-tester); regenerated on launch, edits are overwritten.'
         echo '# setup [--no-install]: installs the pinned test API into runtime/ and'
         echo '# Playwright'"'"'s chromium when missing or other pins, then reports the mobile'
         echo '# prerequisites (bin/mobile-check). Progress goes to stderr; on failure the'
         echo '# last stdout line says why. --no-install: exit 3 when not installed.'
-        printf 'pins="%s"\n' "${TESTER_PINS}"
+        printf 'pins="%s"\n' "${UI_TESTER_PINS}"
         cat <<'SH'
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 rt="${here}/runtime"; mark="${rt}/.installed"
-p="${SETUP_LOG_PREFIX:+${SETUP_LOG_PREFIX} }tester:"
+p="${SETUP_LOG_PREFIX:+${SETUP_LOG_PREFIX} }ui-tester:"
 if [ "$(cat "${mark}" 2>/dev/null)" != "${pins}" ]; then
     [ "${1:-}" = --no-install ] && exit 3
     command -v npm >/dev/null 2>&1 || { echo "npm not found; run: bash ${here}/setup"; exit 2; }
@@ -11457,7 +12180,7 @@ deps = {}
 for spec in sys.argv[2:]:
     name, _, version = spec.rpartition("@")
     deps[name] = version
-json.dump({"name": "lets-code-tester", "private": True, "dependencies": deps}, open(sys.argv[1], "w"), indent=2)
+json.dump({"name": "lets-code-ui-tester", "private": True, "dependencies": deps}, open(sys.argv[1], "w"), indent=2)
 PY
     echo "${p} installing ${pins} into ${rt} (first run only, ~130 MB) ..." >&2
     # --ignore-scripts: sql-client's postinstall copies a Claude Code skill into
@@ -11472,19 +12195,19 @@ fi
 bash "${here}/bin/mobile-check" 2>/dev/null | sed "s|^|${p} |" >&2
 exit 0
 SH
-    } > "${TESTER_DIR}/setup"
-    chmod 755 "${TESTER_DIR}/setup"
+    } > "${UI_TESTER_DIR}/setup"
+    chmod 755 "${UI_TESTER_DIR}/setup"
 
     # 2. the child's helpers: a test project from the pins, the mobile check
     {
         echo '#!/usr/bin/env bash'
-        echo '# Written by lets-code (tester); regenerated on launch, edits are overwritten.'
+        echo '# Written by lets-code (ui-tester); regenerated on launch, edits are overwritten.'
         echo '# e2e-init [--mobile] <dir> [<base-url>]: makes <dir> an element-interactions test project'
         echo '# (adds the pinned packages as devDependencies, from npm'"'"'s cache when it can),'
         echo '# and writes what is missing of playwright.config.ts, tests/fixtures/base.ts,'
         echo '# tests/data/page-repository.json and tests/e2e/. Never overwrites a file.'
         echo '# --mobile: element-repository and WebdriverIO instead, for Appium scripts.'
-        printf 'pins="%s"\n' "${TESTER_PINS}"
+        printf 'pins="%s"\n' "${UI_TESTER_PINS}"
         cat <<'SH'
 set -eu
 mobile=""; [ "${1:-}" = --mobile ] && { mobile=1; shift; }
@@ -11534,10 +12257,10 @@ TS
 [ -f tests/data/page-repository.json ] || printf '{\n  "pages": []\n}\n' > tests/data/page-repository.json
 echo "ready: $(pwd) (specs in tests/e2e, selectors in tests/data/page-repository.json, import { test, expect } from '../fixtures/base'; run: npx playwright test)"
 SH
-    } > "${TESTER_DIR}/bin/e2e-init"
-    cat > "${TESTER_DIR}/bin/mobile-check" <<'SH'
+    } > "${UI_TESTER_DIR}/bin/e2e-init"
+    cat > "${UI_TESTER_DIR}/bin/mobile-check" <<'SH'
 #!/usr/bin/env bash
-# Written by lets-code (tester); regenerated on launch, edits are overwritten.
+# Written by lets-code (ui-tester); regenerated on launch, edits are overwritten.
 # mobile-check: what mobile testing (element-repository + WebdriverIO +
 # Appium) needs on this machine, one line each; exit 0 when Android or iOS
 # can run. Nothing is installed.
@@ -11572,32 +12295,35 @@ if [ "${ok}" = 1 ]; then echo "mobile: ready"; exit 0; fi
 echo "mobile: not ready${miss:+ (missing:${miss})}; web testing is unaffected"
 exit 1
 SH
-    chmod 755 "${TESTER_DIR}/bin/e2e-init" "${TESTER_DIR}/bin/mobile-check"
+    chmod 755 "${UI_TESTER_DIR}/bin/e2e-init" "${UI_TESTER_DIR}/bin/mobile-check"
 
     # 3. the child's standing instructions and references
-    tester_write_knowledge
+    ui_tester_write_knowledge
 
     # 4. the expert; a user's own agent of that name is left alone
-    # (TESTER_AGENT stays empty)
-    tester_write_agent
+    # (UI_TESTER_AGENT stays empty)
+    ui_tester_write_agent
 
     # 5. install (on) or check an installed one (files)
     if [ "${invoke}" = files ]; then
-        bash "${TESTER_DIR}/setup" --no-install >/dev/null 2>&1 || true
+        bash "${UI_TESTER_DIR}/setup" --no-install >/dev/null 2>&1 || true
         return 0
     fi
-    rc=0; TESTER_NOTE="$(SETUP_LOG_PREFIX="${LOG_PREFIX}" bash "${TESTER_DIR}/setup" 2>/dev/null)" || rc=$?
-    if [ ${rc} -eq 0 ]; then TESTER_NOTE=""; else TESTER_NOTE="$(printf '%s\n' "${TESTER_NOTE}" | tail -n 1)"; TESTER_NOTE="${TESTER_NOTE:-setup failed (exit ${rc})}"; fi
+    rc=0; UI_TESTER_NOTE="$(SETUP_LOG_PREFIX="${LOG_PREFIX}" bash "${UI_TESTER_DIR}/setup" 2>/dev/null)" || rc=$?
+    if [ ${rc} -eq 0 ]; then UI_TESTER_NOTE=""; else UI_TESTER_NOTE="$(printf '%s\n' "${UI_TESTER_NOTE}" | tail -n 1)"; UI_TESTER_NOTE="${UI_TESTER_NOTE:-setup failed (exit ${rc})}"; fi
     return 0
 }
-tester_write_knowledge() {
-    local t="${TESTER_DIR}" f
+ui_tester_write_knowledge() {
+    local t="${UI_TESTER_DIR}" f
     mkdir -p "${t}/ref" "${t}/bin"
     cat > "${t}/prompt.md" <<'MD'
-You are the tester agent of a lets-code session: QA of web apps (and of
+You are the ui-tester agent of a lets-code session: QA of web apps (and of
 Android or iOS apps where Appium is set up), following the achilles QA
-method. Another agent gave you one brief and will see only your final
-message. You have bash, read, edit, write, grep, find and ls.
+method. You are the browser and mobile specialist of the tester's team:
+usually the tester (the test lead) briefs you and merges your findings into
+its verdict, so keep your evidence paths exact. Another agent gave you one
+brief and will see only your final message. You have bash, read, edit,
+write, grep, find and ls.
 
 ## Tools here
 - `@@T@@/bin/e2e-init <dir> [<base-url>]`: makes `<dir>` a test project
@@ -12151,8 +12877,8 @@ MD
 - Reproducible: live, or from 2 artifacts. Include the reproduction test path.
 MD
     cat > "${t}/bin/peek.mjs" <<'JS'
-// Written by lets-code (tester); regenerated on launch, edits are overwritten.
-// peek.mjs <url> [<out-dir>]: loads <url> in headless chromium (the tester's
+// Written by lets-code (ui-tester); regenerated on launch, edits are overwritten.
+// peek.mjs <url> [<out-dir>]: loads <url> in headless chromium (the ui-tester's
 // pinned Playwright) and prints the final URL, the HTTP status, the title, the
 // ARIA snapshot (roles and accessible names), console errors and failed
 // requests; saves a full-page screenshot to <out-dir> (default: a temp dir).
@@ -12197,28 +12923,29 @@ JS
     done
     chmod 644 "${t}/prompt.md" "${t}"/ref/*.md "${t}/bin/peek.mjs"
 }
-tester_write_agent() {
-    local af="${PI_AGENT_DIR}/agents/tester.md" tmp
+ui_tester_write_agent() {
+    local af="${PI_AGENT_DIR}/agents/ui-tester.md" tmp
     if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
     mkdir -p "${PI_AGENT_DIR}/agents"
     tmp="$(mktemp "${af}.XXXXXX")" || return 0
     cat > "${tmp}" <<'MD'
 ---
-# Written by lets-code (tester); regenerated on launch, edits are overwritten.
+# Written by lets-code (ui-tester); regenerated on launch, edits are overwritten.
 # To keep your own version, delete this line: lets-code then leaves it alone.
-name: tester
-description: QA of web apps (and Android/iOS apps where Appium is set up) with achilles' method
+name: ui-tester
+description: Browser and mobile UI testing of web apps (and Android/iOS apps where Appium is set up) with achilles' method; the tester's UI specialist
 tools: bash, read, edit, write, grep, find, ls
-append_prompt: tester/prompt.md
+append_prompt: ui-tester/prompt.md
 timeout: 3600
-requires: tester/runtime/.installed
+requires: ui-tester/runtime/.installed
 expert: true
+route: false
 use_for: anything on a web app that needs a browser: Playwright/e2e tests, checking flows or changes, bugs
 keywords: e2e tests, Playwright
 job: QA of a web app in a browser with achilles' method and its Steps API (Playwright): e2e tests for a journey or form, a flow or change verified with evidence, bugs hunted, failing e2e tests diagnosed; mobile apps where Appium is set up; up to an hour
 platform: linux, darwin
-setup: tester/setup
-setup_note: installs element-interactions, Playwright and WebdriverIO (pinned) with npm into ~/.pi/agent/tester (about 130 MB) and Playwright's chromium unless cached (about 170 MB); reports what mobile testing would still need
+setup: ui-tester/setup
+setup_note: installs element-interactions, Playwright and WebdriverIO (pinned) with npm into ~/.pi/agent/ui-tester (about 130 MB) and Playwright's chromium unless cached (about 170 MB); reports what mobile testing would still need
 brief:
   - target (required): the web URL, the app's project path, or the mobile app id or .apk
   - platform: web (default), android or ios
@@ -12230,7 +12957,7 @@ brief:
 MD
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${af}"; then rm -f "${tmp}"; else mv "${tmp}" "${af}"; fi
-    TESTER_AGENT=1
+    UI_TESTER_AGENT=1
 }
 
 # Acceptance judge expert: an adversarial check of a piece of work against
@@ -12671,8 +13398,9 @@ entirely (it is not listed anywhere), so lint before you rely on it.
 | `name` | the name in the line and in `expert({name})` | letters, digits, `. _ -`, starts with a letter or digit; default: the file name. Use lower-case with `-`, and name the file `<name>.md` |
 | `description` | one line; the child's prompt starts `You are the "<name>" agent. <description>` | required in practice |
 | `tools` | the child's tools, comma list or block list | pi's: `read, bash, edit, write, grep, find, ls`; MCP tools as `mcp__<server>_<tool>`. None given: all tools. Give the least it needs |
+| `team` | experts this one starts itself (it needs `expert` in tools) | comma list of expert names. The child gets one level more and its expert tool lists and runs only these; they start nothing. A lead and its specialists, as `tester` with `ui-tester` and `api-tester` |
 | `thinking` | the child's thinking level | `off minimal low medium high xhigh`; default medium. Avoid xhigh on a local GPU |
-| `role` | the mandate role the child runs under | built-ins: `readonly` (reads and read-only commands only), `reviewer` (runs tests and commands, writes only under the temp dir, no git writes or installs: reviewers and judges), `developer` (edits and runs in its working folder and the temp dir only, no git writes or installs: an expert that changes code), `researcher` (the reviewer's, and no Playwright CLI or its runtime from bash: the researcher expert), `plan`, `auto`, `ask`, `yolo`; or a role from your `mandate.json`. Default: the session's mode |
+| `role` | the mandate role the child runs under | built-ins: `readonly` (reads and read-only commands only), `reviewer` (runs tests and commands, writes only under the temp dir, no git writes or installs: reviewers and judges), `developer` (edits and runs in its working folder and the temp dir only, no git writes or installs: an expert that changes code), `tester` (the developer's, plus the expert tool for its team: the test lead), `researcher` (the reviewer's, and no Playwright CLI or its runtime from bash: the researcher expert), `plan`, `auto`, `ask`, `yolo`; or a role from your `mandate.json`. Default: the session's mode |
 | `agent_dir` | the child's own `PI_CODING_AGENT_DIR` (own mcp.json, settings) | a directory under the agent dir |
 | `skills` | paths passed as `--skill` | under the agent dir |
 | `append_prompt` | a file appended to the system prompt | under the agent dir. With an empty body, only this file is the prompt |
@@ -12722,7 +13450,7 @@ A file with the line `# Written by lets-code` (inside the frontmatter) is
 lets-code's: it is rewritten on every launch. A user's own expert must
 not carry it. Deleting the line from a built-in keeps your edited copy.
 Names already taken: the built-ins (`termux-device`, `reverse-engineer`,
-`tester`, `expert-builder`, `developer`, ...) and the starter agents (`scout`,
+`tester`, `ui-tester`, `api-tester`, `expert-builder`, `developer`, ...) and the starter agents (`scout`,
 `worker`, `general`, `reviewer`).
 
 ## State
@@ -12792,7 +13520,7 @@ One prompt per line; `#` comments.
 - what is the difference between YAML and TOML?
 - add a "port" key to config.json
 # another expert's task: should go there, not here
-=tester check in a browser that the signup form shows an error
+=ui-tester check in a browser that the signup form shows an error
 ```
 - 6 positives: varied wording, short and long, some that name the
   artifact and some that only describe the goal. Never the expert's name.
@@ -13012,14 +13740,14 @@ and work only in `<repo>-<name>`.
    (filled in on launch), and leaves a user's own file of that name alone.
    It ends with `}  # end of pi_write_<name>`.
 3. Paste the function into `lets-code` next to the other expert writers
-   (`write_termux_agent`, `pi_write_rea`, `pi_write_tester`,
+   (`write_termux_agent`, `pi_write_rea`, `pi_write_ui_tester`,
    `pi_write_expert_builder`), with a comment block above it: what the
    expert does, where its knowledge comes from (repo and commit), why
    these tools and this platform.
 4. Call it in the experts block of main (search `pi_write_expert_builder`
    in the experts `case`): unconditionally, or under `on_termux` /
    `! on_termux` for a platform-gated one. An expert with a setup that
-   should stay current once enabled follows `pi_write_tester` (`on` when
+   should stay current once enabled follows `pi_write_ui_tester` (`on` when
    `lc_expert_remembered <name>` is true, else `files`).
 5. Tests: `expert-new pack <name> --test > tests/<name>.sh`, then add
    checks of its helpers with fakes for whatever they install or call.
@@ -13076,7 +13804,7 @@ const PI_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const PLATFORMS = ["termux", "linux", "darwin", "win32", "freebsd", "openbsd", "android", "aix", "sunos"];
 const KNOWN = ["name", "description", "tools", "thinking", "role", "model", "agent_dir", "skills", "append_prompt", "timeout", "requires", "requires_env",
-	"expert", "job", "use_for", "keywords", "dispatch_rule", "platform", "setup", "setup_note", "brief", "route", "runner"];
+	"expert", "job", "use_for", "keywords", "dispatch_rule", "platform", "setup", "setup_note", "brief", "route", "runner", "team"];
 const USE_FOR_MAX = 100, KEYWORDS_MAX = 40, RULE_MAX = 300, USE_FOR_WORDS = 16, BODY_WORDS = 1500, ENTRY_TOKENS = 40, MAX_TIMEOUT = 24 * 3600;
 const MARKER = /^# Written by lets-code/m;
 const TODO = "TODO" + "(expert-new)";   // split, so this file does not carry the marker itself
@@ -13237,7 +13965,14 @@ function lintFile(file, opt) {
 	if (fm.runner && fm.runner !== "factory") err("runner", `${fm.runner}: the only runner is factory (lets-code ignores the file)`);
 	if (fm.runner) note("runner", `${fm.runner}: it runs in the main session through lets-code's ${fm.runner} module, not as a child; tools, role and thinking do not apply`);
 	else if (!fm.tools) warn("tools", `none: the child gets every tool; name the least it needs (pi's: ${PI_TOOLS.join(", ")})`);
-	for (const t of tools) if (!PI_TOOLS.includes(t) && !/^mcp__\w+$/.test(t)) err("tools", `${t} is not a pi tool (${PI_TOOLS.join(", ")}, or mcp__<server>_<tool>)`);
+	for (const t of tools) if (!PI_TOOLS.includes(t) && !/^mcp__\w+$/.test(t) && !(t === "expert" && fm.team)) err("tools", `${t} is not a pi tool (${PI_TOOLS.join(", ")}, or mcp__<server>_<tool>${fm.team ? "" : "; expert only with a team"})`);
+	if (fm.team) {
+		const team = fm.team.replace(/^\[|\]$/g, "").split(",").map((x) => x.trim()).filter(Boolean);
+		if (!team.length) err("team", "empty: name the experts it may start, or drop the key");
+		for (const m of team) if (!/^[a-z0-9][a-z0-9-]*$/.test(m)) err("team", `${m}: not an expert name`);
+		if (fm.tools && !tools.includes("expert")) err("team", "a team needs the expert tool in tools");
+		note("team", `${team.join(", ")}: it starts these experts itself, one level below it; they start nothing`);
+	}
 	if (/^(readonly|plan|reviewer)$/.test(fm.role || "") && tools.some((t) => t === "write" || t === "edit")) warn("tools", `role ${fm.role} with write/edit: the role refuses them${fm.role === "reviewer" ? " outside the temp dir" : ""}`);
 	if (fm.thinking && !THINKING.includes(fm.thinking)) err("thinking", `${fm.thinking}: one of ${THINKING.join(", ")}`);
 	if (fm.thinking === "xhigh") warn("thinking", "xhigh: very long thinking on a local GPU; medium (the default) or high");
@@ -13311,8 +14046,11 @@ function lintFile(file, opt) {
 	const others = survey(A).filter((o) => path.resolve(o.file) !== path.resolve(file));
 	for (const o of others) if (o.name === name) err("name", `${path.basename(o.file)} has the same name ${name}: only one of them is used`);
 	const mine = new Set([...words(useFor), ...words(kw)]);
+	// routing confuses only routed experts: one the model never picks by itself
+	// (route: false, a lead's specialist) cannot be picked instead of another
+	const routedMe = !/^(false|no|off)$/i.test(fm.route || "");
 	for (const o of others) {
-		if (o.name === name || !platformOk(o.platform)) continue;
+		if (o.name === name || !platformOk(o.platform) || (o.expert && (!o.routed || !routedMe))) continue;
 		const theirs = o.expert ? new Set([...words(o.useFor), ...words(o.keywords)]) : words(o.description);
 		const shared = [...mine].filter((w) => theirs.has(w));
 		const ratio = shared.length / Math.max(1, Math.min(mine.size, theirs.size));
@@ -13731,7 +14469,7 @@ function verdictOk(r, expert) {
 // ------------------------------------------------------------- the scratch dir
 function makeScratch(from, dir) {
 	const src = path.resolve(from); const dst = path.resolve(dir);
-	const skipTop = new Set(["sessions", "rea", "tester", "lets-code-state.json"]);
+	const skipTop = new Set(["sessions", "rea", "tester", "ui-tester", "lets-code-state.json"]);
 	const work = path.join(src, "expert-builder", "work");
 	const copy = (s, d, rel) => {
 		for (const e of fs.readdirSync(s, { withFileTypes: true })) {
@@ -13868,7 +14606,7 @@ MD
 # do not overlap: expert-reviewer hunts bugs and edge cases against the
 # criteria, design-reviewer judges structure against the codebase's own
 # conventions and passes bugs on in a note, acceptance-judge gives the
-# per-criterion verdict and tester the browser work. Written with the
+# per-criterion verdict and tester the testing (its team: ui-tester and api-tester). Written with the
 # expert-builder's method (expert-new init in a draft dir, expert-lint,
 # route-check, expert-new pack). Tools are the least each needs: the
 # reviewers read and run under the `reviewer` role; the developer has pi's
@@ -14345,7 +15083,7 @@ brief:
   - criteria: the numbered acceptance criteria agreed with the user, when the ticket does not list them
   - repo: the git repo to work on (default: the current folder); a new or empty folder becomes a new project's repo; the user's checkout is never touched
   - how_to_run: the command that runs the test suite
-  - start: how to start the app, for the tester's browser checks
+  - start: how to start the app, for the tester's checks
   - constraints: what must not be touched, style rules, limits
   - resume: a run's id, to go on with a run that waits at a checkpoint (instead of a ticket)
   - decision: for resume, the checkpoint's decision: approve, edit or stop (criteria, plan); commit, keep or stop (result); more, final or stop (fix rounds); retry or stop (blocked)
@@ -17086,6 +17824,27 @@ print({True: "true", False: "false"}.get(v, ""))' "$1" 2>/dev/null
 # a preset: remembered once as the expert enabled, unless the state already
 # has a decision for it; after that the key is not read. false, empty and
 # REA=manual mean nothing now (a dormant expert costs only its list entry).
+# The tester became the test lead (2026-10); its browser half is ui-tester.
+# Once: an installed runtime moves over (no second download), and a yes
+# remembered for the tester is remembered for ui-tester too.
+lc_migrate_ui_tester() {
+    local old="${PI_AGENT_DIR}/tester" new="${PI_AGENT_DIR}/ui-tester" x
+    for x in runtime work; do
+        if [ -d "${old}/${x}" ] && [ ! -e "${new}/${x}" ]; then mkdir -p "${new}" && mv "${old}/${x}" "${new}/${x}"; fi
+    done
+    [ "$(lc_expert_remembered tester)" = true ] && [ -z "$(lc_expert_remembered ui-tester)" ] || return 0
+    LC_STATE="${PI_AGENT_DIR}/lets-code-state.json" python3 - <<'PY' 2>/dev/null || true
+import json, os
+p = os.environ["LC_STATE"]
+try: s = json.load(open(p))
+except Exception: s = {}
+e = s.get("experts") if isinstance(s.get("experts"), dict) else {}
+e["ui-tester"] = True; s["experts"] = e
+tmp = p + ".tmp"
+with open(tmp, "w") as f: json.dump(s, f, indent=2); f.write("\n")
+os.chmod(tmp, 0o600); os.replace(tmp, p)
+PY
+}
 lc_migrate_expert_switches() {
     local pair var name
     for pair in TERMUX:termux-device REA:reverse-engineer; do
@@ -17115,6 +17874,7 @@ PY
 # once enabled, and an enabled one is kept current here.
 unset LETS_CODE_EXPERTS_ON LETS_CODE_TERMUX_AGENT
 lc_migrate_expert_switches
+lc_migrate_ui_tester
 case "$(lc "${EXPERTS}")" in
     true|yes|1|on)
         if [ "${LETS_CODE_SUBAGENTS_ON:-}" != 1 ]; then
@@ -17142,12 +17902,13 @@ case "$(lc "${EXPERTS}")" in
             else
                 pi_write_researcher files
             fi
+            pi_write_tester; pi_write_api_tester   # the test lead and its API specialist: files only
             if ! on_termux; then   # Playwright has no browser for Android
-                if [ "$(lc_expert_remembered tester)" = true ]; then
-                    pi_write_tester on
-                    [ -z "${TESTER_NOTE}" ] || log "note: tester: ${TESTER_NOTE}"
+                if [ "$(lc_expert_remembered ui-tester)" = true ]; then
+                    pi_write_ui_tester on
+                    [ -z "${UI_TESTER_NOTE}" ] || log "note: ui-tester: ${UI_TESTER_NOTE}"
                 else
-                    pi_write_tester files
+                    pi_write_ui_tester files
                 fi
             fi
             FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }experts: on"

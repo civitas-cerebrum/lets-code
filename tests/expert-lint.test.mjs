@@ -114,6 +114,24 @@ t("lint: over 100 is an error", lint.lintFile((writeFileSync(join(agentDir, "age
 	t("lint: a bad route value is an error", lint.lintFile(f, { agentDir }).errors.some((e) => e.startsWith("route: maybe")), true);
 }
 t("lint: pi's tools are the runner's", lint.PI_TOOLS.slice().sort(), ["bash", "edit", "find", "grep", "ls", "read", "write"]);
+{
+	// overlap: only between experts the model routes to by itself
+	const f = join(agentDir, "agents", "conf.md"), g = join(agentDir, "agents", "conf2.md");
+	writeFileSync(f, file({ ...base, use_for: "converting and validating config files: YAML, TOML, JSON" }));
+	writeFileSync(g, file({ ...base, name: "conf2", use_for: "converting and validating config files between formats" }));
+	t("lint: two routed experts that overlap: a warning", lint.lintFile(f, { agentDir }).warnings.some((w) => w.startsWith("overlap: expert conf2")), true);
+	writeFileSync(g, file({ ...base, name: "conf2", route: "false", use_for: "converting and validating config files between formats" }));
+	t("lint: one of them not routed (a lead's specialist): none", [lint.lintFile(f, { agentDir }).warnings.some((w) => w.startsWith("overlap")), lint.lintFile(g, { agentDir }).warnings.some((w) => w.startsWith("overlap"))], [false, false]);
+	rmSync(g);
+	// a team: the expert tool allowed with it, the names checked, the tool required
+	writeFileSync(f, file({ ...base, tools: "read, bash, expert", team: "ui-tester, api-tester" }));
+	const T = lint.lintFile(f, { agentDir });
+	t("lint: team is known, expert allowed with it, noted", [T.warnings.some((w) => w.includes("unknown field team")), T.errors.length, T.notes.some((x) => x.startsWith("team: ui-tester, api-tester"))], [false, 0, true]);
+	writeFileSync(f, file({ ...base, tools: "read, bash, expert" }));
+	t("lint: expert without a team is an error", lint.lintFile(f, { agentDir }).errors.some((e) => e.startsWith("tools: expert")), true);
+	writeFileSync(f, file({ ...base, tools: "read, bash", team: "ui-tester" }));
+	t("lint: a team without the expert tool is an error", lint.lintFile(f, { agentDir }).errors.some((e) => e.startsWith("team: a team needs the expert tool")), true);
+}
 rmSync(join(agentDir, "agents", "conf.md"));
 
 // the built-ins lets-code ships parse as experts with the parser, and lint has their entries

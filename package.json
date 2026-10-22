@@ -16,7 +16,6 @@
   "files": [
     "lets-code",
     "scripts/postinstall.js",
-    ".githooks",
     "DESIGN.md"
   ],
   "scripts": {
@@ -26,5 +25,5 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "os": ["linux", "darwin"]
+  "os": ["linux", "darwin", "android"]
 }

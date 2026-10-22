@@ -127,6 +127,7 @@ try {
 	let starts = records().filter((x) => x.event === "start");
 	t("first turn: claude launched with Haiku, effort low, summaries", starts.map((s) => [s.model, s.effort, s.thinkingOff, s.display]), [["haiku", "low", false, "summarized"]]);
 	t("system prompt: pi's, then the brevity rules", [starts[0].system.startsWith("sys A\n\nOutput style (lets-code):"), /Be brief and direct/.test(starts[0].system), /code, commands and tool calls stay as complete/.test(starts[0].system)], [true, true, true]);
+	t("system prompt: Claude Code's own environment lines are the proxy's", starts[0].system.endsWith("never work in the proxy's folder."), true);
 	const first = r;
 	conv.push({ role: "assistant", content: r.content }, { role: "user", content: "again" });
 	r = await chat({ model: "claude-sonnet", reasoning_effort: "high", messages: conv });

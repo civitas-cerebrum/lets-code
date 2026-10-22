@@ -158,6 +158,59 @@ deny, never bypass; read once the project is trusted). A broken manifest
 fails closed to the built-in roles. Mode changes are announced on
 `pi.events` (`lets-code:mode`) for the sandbox.
 
+**Orchestrator mode.** The software factory's main session plans and
+dispatches; experts change the code. That is the `orchestrator` role: plan's
+read-only scope (no edit or write, bash read-only, MCP denied) with
+dispatch to every agent and a prompt section that says to agree the ticket
+with the user, hand each part to the expert for it and fix a blocked run by
+sharpening the ticket, never by patching its worktree. Running the tests is
+denied too: that is the tester's and the engine's. The factory module
+switches the session into it when a run starts or resumes, through a hook
+the mandate leaves on `globalThis` (the two modules are loaded separately);
+the mode's prompt reaches the model on its next turn, so the run's result
+says it as well. It is the main session's role only: a child that would
+inherit it (`LETS_CODE_MODE` travels in the environment) gets the default.
+The mandate is off by default, so where the experts are on and the mandate
+is not, the launcher still writes the module with
+`LETS_CODE_ORCHESTRATOR_ON=1`: it enforces nothing and registers only
+`/orchestrator` until a run or that command engages the orchestrator, and
+goes dormant again when the user leaves it. `--no-mandate` turns that off
+as well. Read-only bash had holes that matter once nothing else may write:
+`sed -i`, `find -exec`/`-delete`, `fd -x`, `awk` with `system()` or a pipe,
+`sort -o`, `git ... --output`, `uniq in out`, `xxd -r`, `tree -o` now count as
+writes under every deny-by-default role (plan too); `cd`, `pushd` and
+`popd` count as read-only (what follows them is judged on its own).
+
+The first live use (Haiku on the phone, "a simple chess game, start fresh")
+never reached a stage: `cd` was denied, the factory refused a folder that
+was not a repo, the model asked the user to `git init` (the prompt's "a
+change you designed line by line is the same thing" read as forbidding
+delegated setup), and the subagent's first commit failed because git on the
+phone has no identity. So a run now starts a new project itself: a folder
+that does not exist or is empty is made a repo, and a repo without a commit
+gets an empty first one from the empty tree (index and files untouched); a
+folder with files that is not a repo is still refused. The factory's commits
+add `-c user.name/user.email` ("lets-code factory") only where `git var`
+finds no identity, and change no config. The prompt now says never to ask
+the user to run a command, and that setup outside the run's repo goes to a
+subagent first.
+
+A replay of that session on borealis (same messages, git without an
+identity) then ran end to end in 15 minutes: a new repo, 7 criteria, plan,
+build, both reviews with one design fix round, the judge's ACCEPT, and a
+commit by "lets-code factory"; 29 tests pass and the game mates. Getting
+there found more: Haiku names brief fields its own way (acceptance_criteria,
+test_command), so they are read too; it writes remarks into paths and
+commands ("/x/chess (empty; becomes a repo)", "make test (the unit
+tests)"), so a trailing remark is dropped from the repo path and from a
+command that does not parse (`bash -n`), and one that still does not parse
+stops the start instead of failing "as before" at regression; the developer
+was not told its worktree is the repo the ticket names, and stopped; Claude
+Code's own environment lines (the proxy's folder and machine) misled the
+model about where it works; and the mandate read heredoc bodies and quoted
+text with `>` as redirections (a judge's script comment "-> still" was a
+write to `still`) and missed `git -C dir commit` as a git write.
+
 **Subagents.** One `subagent` tool (single / parallel / chain), modelled on
 pi's example but with a short schema (the community packages measured 6k
 to 8k tokens per turn). Agent files: Markdown + YAML frontmatter in

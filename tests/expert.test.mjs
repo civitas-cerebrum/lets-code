@@ -378,7 +378,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	const body = lc.slice(start, lc.indexOf("\nLC_EOF\n", start) + 1);
 	const a = sub.parseAgentFile(body, join(agentDir, "agents", "software-factory.md"), "user", undefined, false, true);
 	t("software-factory: an expert with the factory runner", [a?.name, !!a?.expert, a?.expert?.runner, a?.expert?.ready, a?.expert?.routed], ["software-factory", true, "factory", true, true]);
-	t("software-factory: brief", a?.expert?.brief.map((f) => `${f.name}${f.required ? "*" : ""}`), ["ticket*", "repo", "how_to_run", "start", "constraints"]);
+	t("software-factory: brief", a?.expert?.brief.map((f) => `${f.name}${f.required ? "*" : ""}`), ["ticket*", "criteria", "repo", "how_to_run", "start", "constraints"]);
 	t("an unknown runner: the file is ignored", sub.parseAgentFile("---\nname: x\ndescription: y\nexpert: true\nrunner: rocket\n---\nz\n", join(agentDir, "agents", "x.md"), "user", undefined, false, true), null);
 	writeFileSync(join(ext, "factory.ts"), "export const got = [];\nexport async function runExpert(brief, ctx, signal, progress, callId) { got.push({ brief, callId, cwd: ctx.cwd }); if (progress) progress('factory: plan'); return { text: 'factory run X: done', isError: false }; }\n");
 	A("sf.md", "---\nname: sf\ndescription: a pipeline\nrunner: factory\nexpert: true\nuse_for: pipelines of experts\nbrief:\n  - ticket (required): the ticket\n---\nDocumentation only.\n");

@@ -53,6 +53,20 @@ t("body without the status line", F.bodyOf("ok\nSTATUS: PLAN\n## Plan\n1. x", "S
 t("body: the status line last, a remark first", F.bodyOf("I have enough to plan.\n\n## Plan\n1. x\n## Risks\nnone\n\nSTATUS: PLAN", "STATUS"), "## Plan\n1. x\n## Risks\nnone");
 t("body: no heading, all but the status line", F.bodyOf("STATUS: DONE\nchanged a.js", "STATUS"), "changed a.js");
 
+// the brief a model sent in a live run (its own field names, lists): nothing lost
+{
+	const live = { ticket: "Build a simple two-player local chess game that runs in the terminal.", goal: "A terminal chess game, `python3 -m chess`.",
+		acceptance_criteria: ["1. Shows the board in text.", "2. Players alternate turns."], test_command: "python3 -m unittest",
+		constraints: ["Python 3 standard library only.", "No computer opponent."], language: "Python 3" };
+	const r = F.ticketFrom(live, "/");
+	t("brief: criteria from acceptance_criteria", F.parseCriteria(r.ticket), ["Shows the board in text.", "Players alternate turns."]);
+	t("brief: how_to_run from test_command", r.howToRun, "python3 -m unittest");
+	t("brief: a list of constraints as lines, not JSON", r.constraints, "Python 3 standard library only.\nNo computer opponent.");
+	t("brief: the goal and any other field reach the ticket", [r.ticket.includes("Goal: A terminal chess game"), r.ticket.includes("- language: Python 3")], [true, true]);
+	t("brief: criteria the ticket already lists are not added twice", F.parseCriteria(F.ticketFrom({ ticket: "# T\n## Acceptance criteria\n1. a", criteria: "1. a" }, "/").ticket), ["a"]);
+	t("brief: the schema's own names win", F.ticketFrom({ ticket: "x", how_to_run: "make test", test_command: "other" }, "/").howToRun, "make test");
+}
+
 // ------------------------------------------------------------------ a scratch repo
 function makeRepo(name) {
 	const r = join(work, name); mkdirSync(join(r, "src"), { recursive: true });
@@ -111,6 +125,7 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("happy: the work tree is clean", git(L.work, "status", "--porcelain"), "");
 	t("happy: the user's checkout untouched", [git(repo, "status", "--porcelain"), git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "--abbrev-ref", "HEAD")], [statusBefore, head, "main"]);
 	t("happy: baseline and regression", [L.baseline.code, L.entries.at(-1).verdict], [0, "PASS"]);
+	t("happy: the developer is told the ticket's repo is its worktree", [fd.calls[0].brief.workspace.includes(L.work), fd.calls[0].brief.workspace.includes(`${repo} (branch`), fd.calls[2].brief.diff.includes(`worktree of ${repo}`)], [true, true, true]);
 	t("happy: plan mode, then build with the plan", [fd.calls[0].brief.mode, fd.calls[1].brief.mode, fd.calls[1].brief.plan], ["plan", "build", "## Plan\n1. add feature.txt (C1)\n## Tests\n## Risks\nnone"]);
 	t("happy: reviewers get the diff and the criteria", [fd.calls[2].brief.diff.includes(L.base), fd.calls[2].brief.criteria], [true, "C1. feature.txt exists\nC2. a.txt still says ok"]);
 	t("happy: the judge gets the developer's report as the claim", fd.calls[4].brief.claim.startsWith("## Changes"), true);
@@ -121,6 +136,43 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	const s = F.summary(L);
 	t("happy: the summary is stage lines only", [s.split("\n").length, s.includes("Done.\nSTATUS"), /build: DONE, 1 file changed/.test(s)], [10, false, true]);
 	t("happy: listed", F.listRuns(root).some((x) => x.id === L.id), true);
+}
+
+// ------------------------------------------------------------------ a new project, where git has no identity (a fresh phone)
+{
+	const saved = { ...process.env };
+	const cfg = join(work, "no-ident.gitconfig"); writeFileSync(cfg, "[user]\n\tuseConfigOnly = true\n[init]\n\tdefaultBranch = main\n");
+	Object.assign(process.env, { GIT_CONFIG_GLOBAL: cfg, GIT_CONFIG_NOSYSTEM: "1" });
+	for (const k of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"]) delete process.env[k];
+	try {
+		const ticket = "# CHESS-1: a game\n## Acceptance criteria\n1. feature.txt exists\n";
+		const fresh = join(work, "new", "chess");
+		t("new: git has no identity here", (await F.shellExec("git var GIT_AUTHOR_IDENT", work)).code !== 0, true);
+		const fd = fakeDeps({ ...OK, judge: ["## Verdict\nACCEPT\n## Criteria\nC1: PASS x"] });
+		const L = await F.startRun({ ticket, repo: fresh, root }, fd);
+		t("new: a folder that did not exist becomes the project", [L.status, existsSync(join(fresh, ".git")), L.repo], ["done", true, fresh]);
+		t("new: the log says so", [L.entries[0].verdict, /created .*made it a git repo, added an empty first commit/.test(L.entries[0].summary)], ["new project", true]);
+		t("new: the base is the empty first commit", [git(fresh, "rev-list", "--count", "HEAD"), git(fresh, "ls-tree", "HEAD")], ["1", ""]);
+		t("new: committed with the factory's identity", [L.commit.length >= 40, git(L.work, "log", "-1", "--format=%an <%ae>")], [true, "lets-code factory <factory@lets-code.invalid>"]);
+		t("new: the user's git config untouched", [readFileSync(cfg, "utf8").includes("lets-code"), (() => { try { return git(fresh, "config", "--local", "user.name"); } catch { return ""; } })()], [false, ""]);
+		// an empty folder that exists; a repo with no commit and an untracked file
+		const empty = join(work, "empty-dir"); mkdirSync(empty);
+		const L2 = await F.startRun({ ticket, repo: empty, root }, fakeDeps(OK, { decisions: { criteria: { action: "stop" } } }));
+		t("new: an empty folder too", [existsSync(join(empty, ".git")), L2.entries[0].summary.includes("made it a git repo")], [true, true]);
+		const bare = join(work, "no-commit"); mkdirSync(bare); git(bare, "init", "-q"); writeFileSync(join(bare, "notes.txt"), "mine\n");
+		const L3 = await F.startRun({ ticket, repo: bare, root }, fakeDeps(OK, { decisions: { criteria: { action: "stop" } } }));
+		t("new: a repo without a commit gets an empty first one, its files left as they were", [L3.entries[0].summary.endsWith("added an empty first commit"), git(bare, "ls-tree", "HEAD"), git(bare, "status", "--porcelain")], [true, "", "?? notes.txt"]);
+		const full = join(work, "has-files"); mkdirSync(full); writeFileSync(join(full, "x.txt"), "x");
+		let err = ""; try { await F.startRun({ ticket, repo: full, root }, fakeDeps(OK)); } catch (e) { err = e.message; }
+		let err2 = ""; try { await F.startRun({ ticket, repo: join(work, "chess (empty; becomes a repo)"), root }, fakeDeps(OK)); } catch (e) { err2 = e.message; }
+		t("new: no folder is made from a path with a remark in it", [/a remark in the path/.test(err2), existsSync(join(work, "chess (empty; becomes a repo)"))], [true, false]);
+		const L4 = await F.startRun({ ticket, repo: join(work, "remark"), root, howToRun: "python3 -m unittest discover -s . -p 'chess_tests.py' -v (tests in chess_tests.py at repo root; game started with python3 -m chess)" }, fakeDeps(OK, { decisions: { criteria: { action: "stop" } } }));
+		t("new: a remark after the test command is dropped", L4.howToRun, "python3 -m unittest discover -s . -p 'chess_tests.py' -v");
+		let err3 = ""; try { await F.startRun({ ticket, repo: join(work, "broken"), root, howToRun: "make test ((" }, fakeDeps(OK)); } catch (e) { err3 = e.message; }
+		t("new: a test command that does not parse stops the start", /test command \(how_to_run\) is not a shell command that parses/.test(err3), true);
+		t("new: a subshell is a command, not a remark", (await F.shellCommand("(cd src && make test)", "x", fakeDeps(OK), work)), "(cd src && make test)");
+		t("new: a folder with files that is not a repo is refused, untouched", [/not a git repository, and has files/.test(err), existsSync(join(full, ".git"))], [true, false]);
+	} finally { for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); }
 }
 
 // ------------------------------------------------------------------ a fix round, then approval
@@ -262,11 +314,11 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	const L = await F.startRun(opts(repo), fd);
 	t("tester runs where it is usable, with the verdict line asked for", [fd.calls.some((c) => c.expert === "tester"), fd.calls.find((c) => c.expert === "tester").brief.report.startsWith("Start your final message with the line VERDICT:")], [true, true]);
 	// every value of every brief is made of the ledger's own artifacts
-	const sources = [L.ticket, ...L.criteria, L.plan, L.claim, L.work, L.base, L.branch, L.howToRun, F.diffPath(L), "R1 | major | a | x"];
+	const sources = [L.ticket, ...L.criteria, L.plan, L.claim, L.repo, L.work, L.base, L.branch, L.howToRun, F.diffPath(L), "R1 | major | a | x"];
 	const strayWords = new Set();
 	for (const c of fd.calls) for (const v of Object.values(c.brief)) for (const w0 of String(v).split(/[^A-Za-z0-9_.-]+/)) { const w = w0.replace(/[.]+$/, ""); if (w.length > 3 && !sources.some((s) => s.includes(w)) && !F.briefFor.toString().includes(w)) strayWords.add(w); }
 	t("no brief carries a word from outside the ledger and the engine's own text", [...strayWords], []);
-	t("the plan stage sees no plan, no findings, no diff", Object.keys(fd.calls[0].brief).sort(), ["constraints", "criteria", "how_to_run", "mode", "task"]);
+	t("the plan stage sees no plan, no findings, no diff", Object.keys(fd.calls[0].brief).sort(), ["constraints", "criteria", "how_to_run", "mode", "task", "workspace"]);
 }
 
 // ------------------------------------------------------------------ the command, in a fake session
@@ -312,7 +364,10 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 		select: async (title, options) => { selects.push(title.split("\n")[0]); return options[0]; } };
 	writeFileSync(join(repo, "notes.md"), SECRET);
 	const ctx = { cwd: repo, hasUI: true, ui, sessionManager: { getEntries: () => [{ type: "message", message: { role: "user", content: SECRET } }], getBranch: () => [] }, signal: undefined };
+	// the mandate's hook: a run puts the main session in orchestrator mode
+	const engaged = []; globalThis.__letsCodeOrchestrate = (c, why) => { engaged.push([c === ctx, why]); return true; };
 	await cmds.factory.handler("start TICKET.md grep -q ok src/a.txt", ctx);
+	t("session: /factory start engages the orchestrator", engaged, [[true, "factory run"]]);
 	const sub = await import(pathToFileURL(join(ext, "subagents.ts")).href);
 	t("session: stages through the subagents runner", sub.runs.map((r) => r.agent), ["developer", "developer", "expert-reviewer", "design-reviewer", "acceptance-judge"]);
 	t("session: runs tagged for /subagents", [...new Set(sub.runs.map((r) => r.meta.tool))], ["factory"]);
@@ -329,6 +384,8 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 	t("session: /factory status of an unknown run", await said("status nope"), "No factory run nope.");
 	t("session: /factory with a bad verb: usage", (await said("frobnicate")).startsWith("Usage: /factory start"), true);
 	t("session: /factory start without a file", await said("start missing.md"), "No ticket file missing.md.");
+	engaged.length = 0; await said("resume nope");
+	t("session: /factory resume engages it too", engaged.map((e) => e[1]), ["factory run resumed"]);
 	t("session: resume completions offer waiting runs", Array.isArray(cmds.factory.getArgumentCompletions("resume ")), true);
 	// without a UI: the run waits at the criteria and says how to go on
 	const out = []; const log = console.log; console.log = (m) => out.push(m);
@@ -339,6 +396,7 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 	// the expert's entry: runExpert, as the experts module calls it for runner: factory
 	sub.runs.length = 0; selects.length = 0;
 	const r1 = await fm.runExpert({ ticket: "TICKET.md", how_to_run: "grep -q ok src/a.txt", start: "python3 -m http.server 8123", constraints: "leave README.md alone" }, ctx, undefined, () => {}, "call-77");
+	t("expert: the run engages the orchestrator, and the model is told", [engaged.at(-1)?.[1], r1.text.endsWith(F.ORCHESTRATING)], ["software factory run", true]);
 	t("expert: a ticket given as a path is read", [r1.isError, /done, committed/.test(r1.text), sub.runs[0].task.includes("isFreeShipping") || sub.runs[0].task.includes("feature.txt exists")], [false, true, true]);
 	t("expert: its stage runs carry the tool call's id (for /subagents and detaching)", [...new Set(sub.runs.map((r) => r.meta.callId))], ["call-77"]);
 	t("expert: constraints reach the stages", sub.runs.every((r) => r.task.includes("leave README.md alone")), true);
@@ -346,13 +404,21 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 	sub.runs.length = 0;
 	const r2 = await fm.runExpert({ ticket: "# T-9: a thing\n## Acceptance criteria\n1. feature.txt exists" }, ctx, undefined, () => {}, "call-78");
 	t("expert: a ticket given as text", [r2.isError, sub.runs[0].task.includes("T-9: a thing")], [false, true]);
+	t("expert: each run that engages it says so", r2.text.includes(F.ORCHESTRATING), true);
+	globalThis.__letsCodeOrchestrate = () => false;
+	const r2b = await fm.runExpert({ ticket: "# T-10\n## Acceptance criteria\n1. feature.txt exists" }, ctx, undefined, () => {}, "call-79");
+	t("expert: already orchestrating: no line", r2b.text.includes(F.ORCHESTRATING), false);
+	delete globalThis.__letsCodeOrchestrate;
 	const r3 = await fm.runExpert({ ticket: "  " }, ctx);
 	t("expert: no ticket, nothing runs", [r3.isError, r3.text.startsWith("Nothing ran")], [true, true]);
 	const r4 = await fm.runExpert({ ticket: "TICKET.md" }, { cwd: repo, hasUI: false });
 	t("expert, no UI: it waits and says how to go on", [r4.isError, /waiting for the user: criteria/.test(r4.text), /\/factory resume/.test(r4.text)], [false, true, true]);
+	mkdirSync(join(work, "not-a-repo"), { recursive: true }); writeFileSync(join(work, "not-a-repo", "x.txt"), "x");
 	const r5 = await fm.runExpert({ ticket: "TICKET.md", repo: join(work, "not-a-repo") }, ctx);
 	t("expert: a repo that is not one", [r5.isError, /could not run: .*not a git repository/.test(r5.text)], [true, true]);
 	const stopUi = { ...ui, select: async (title, options) => (title.includes("plan") ? "Stop" : options[0]) };
+	const r7 = await fm.runExpert({ ticket: "TICKET.md", repo: `${repo} (the repo; already set up)` }, { ...ctx, ui: stopUi });
+	t("expert: a remark after the repo path is dropped", [/stopped/.test(r7.text), existsSync(`${repo} (the repo; already set up)`)], [true, false]);
 	const r6 = await fm.runExpert({ ticket: "TICKET.md" }, { ...ctx, ui: stopUi });
 	t("expert: stopped by the user is reported as such", [r6.isError, /stopped: the user stopped it at the plan checkpoint/.test(r6.text), /\/factory resume/.test(r6.text)], [true, true, true]);
 	if (!/stopped: the user stopped it at the plan checkpoint/.test(r6.text)) console.log(`  (its report: ${r6.text.slice(0, 600)})`);

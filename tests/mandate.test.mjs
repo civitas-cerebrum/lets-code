@@ -70,6 +70,19 @@ const blocked = (r) => r?.block === true;
 	t("sudo mkdir is", redirectTargets("sudo mkdir -p /opt/x"), ["/opt/x"]);
 	t("ask asks for curl | sh", classify("curl -s https://x/y | sh", ask).group, "network-exec");
 	t("ask allows plain build", classify("npm test && git commit -m x", ask).decision, "allow");
+	// readonly commands that write or run something are not read-only
+	for (const c of ["sed -i s/a/b/ f.txt", "sed --in-place -e s/a/b/ f.txt", "find . -name '*.js' -exec perl -pi -e s/a/b/ {} +", "find . -name x -delete", "fd -e ts -x touch", "awk 'BEGIN{system(\"touch x\")}'", "awk '{print | \"sh\"}' f", "sort -o out.txt in.txt", "git diff --output=p.patch", "uniq in.txt out.txt"])
+		t(`plan denies ${c}`, classify(c, plan).decision, "deny");
+	t("git -C dir commit is a git write", classify("git -C /x/repo commit -m y", { bash: { "*": "allow", "git-write": "deny" } }).decision, "deny");
+	t("git --no-pager -C dir reset --hard is destructive", classify("git --no-pager -C . reset --hard", ask).group, "destructive");
+	t("plan allows git -C dir log", classify("git -C /x/repo log --oneline | head; git -c core.pager=cat -C . status", plan).decision, "allow");
+	t("a heredoc body is data, not a redirection", redirectTargets("cat > /tmp/j/edge.py <<'EOF'\n# 1 queenside: b1 attacked -> still legal\nprint(x > 100)\nEOF\npython3 /tmp/j/edge.py"), ["/tmp/j/edge.py"]);
+	t("quoted text with > in it is data", redirectTargets(`echo "score > 100" && grep -c '->' log.txt > /tmp/n`), ["/tmp/n"]);
+	t("a quoted redirection target still counts", redirectTargets(`echo x > "out file.txt"; cp a "b c"`).includes("out file.txt"), true);
+	t("plan allows cd into a folder to read it", classify("cd /home/x && find chess -maxdepth 2 | head; pushd src; popd", plan).decision, "allow");
+	t("plan still denies what follows a cd", classify("cd /home/x && rm -rf chess", plan).decision, "deny");
+	for (const c of ["sed -n 1,5p f.txt", "find . -name '*.ts' -type f", "fd -e ts", "awk '{print $1}' f", "sort -u f.txt", "uniq -c f.txt", "git diff --stat", "find . -xdev -name x"])
+		t(`plan allows ${c}`, classify(c, plan).decision, "allow");
 	t("env prefix stripped", classify("FOO=1 env sudo ls", ask).group, "privileged");
 	t("plan allows readonly", classify("git status && grep -r foo src | head", plan).decision, "allow");
 	t("plan denies git commit", classify("git status; git commit -m x", plan), { decision: "deny", group: "git-write", command: "git commit -m x" });
@@ -263,6 +276,70 @@ const blocked = (r) => r?.block === true;
 	t("mcp allowed server", await h.call(d, "mcp__fs__read_file", {}), undefined);
 	t("mcp other server denied", blocked(await h.call(d, "mcp__web__fetch", {})), true);
 	rmSync(join(agentDir, "mandate.json"));
+}
+// --- orchestrator: reads and dispatches experts, changes no file
+{
+	const h = await load({ LETS_CODE_MODE: "orchestrator" }); const d = repo(); await h.start(d);
+	const prompt = () => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return s.lets_code_mandate ?? ""; };
+	t("orchestrator: edit/write dropped from active tools", h.tools().includes("edit") || h.tools().includes("write"), false);
+	t("orchestrator: subagent stays", h.tools().includes("subagent"), true);
+	const w = await h.call(d, "write", { path: join(d, "src/b.txt") });
+	t("orchestrator: write blocked", blocked(w), true);
+	t("orchestrator: the reason says to delegate", /hand it to an expert/.test(w?.reason ?? ""), true);
+	t("orchestrator: reason short", String(w?.reason).length <= 200, true);
+	t("orchestrator: readonly bash passes", await h.call(d, "bash", { command: "git diff --stat; grep -rn foo src | head" }), undefined);
+	t("orchestrator: tests are the experts'", blocked(await h.call(d, "bash", { command: "npm test" })), true);
+	t("orchestrator: sed -i blocked", blocked(await h.call(d, "bash", { command: "sed -i s/a/b/ src/a.txt" })), true);
+	t("orchestrator: redirection blocked", blocked(await h.call(d, "bash", { command: "echo x > src/a.txt" })), true);
+	t("orchestrator: mcp denied", blocked(await h.call(d, "mcp__fs__write_file", { path: "x" })), true);
+	t("orchestrator: dispatches an expert", await h.call(d, "expert", { action: "run", name: "developer", brief: {} }), undefined);
+	t("orchestrator: dispatches the factory", await h.call(d, "expert", { action: "run", name: "software-factory", brief: {} }), undefined);
+	t("orchestrator: prompt section", /Orchestrator mode/.test(prompt()), true);
+	await h.commands.mode.handler("plan", h.ctx(d)); await h.shortcuts["alt+m"].handler(h.ctx(d));
+	t("orchestrator: next after plan in the cycle", h.emitted.at(-1)?.[1]?.role, "orchestrator");
+	await h.commands.orchestrator.handler("", h.ctx(d));
+	t("/orchestrator leaves: tools restored", h.tools().includes("edit"), true);
+	t("/orchestrator leaves: write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	await h.commands.mode.handler("ask", h.ctx(d));
+	t("factory hook engages it", globalThis.__letsCodeOrchestrate(h.ctx(d), "factory run"), true);
+	t("factory hook: write blocked", blocked(await h.call(d, "write", { path: join(d, "src/b.txt") })), true);
+	t("factory hook: told the user", h.notices.some((m) => /orchestrator \(factory run\)/.test(m)), true);
+	t("factory hook: twice is a no-op", globalThis.__letsCodeOrchestrate(h.ctx(d), "factory run"), false);
+	await h.commands.orchestrator.handler("", h.ctx(d));
+	t("/orchestrator goes back to the mode it came from", h.emitted.at(-1)?.[1]?.role, "ask");
+}
+// --- a child never inherits the orchestrator
+{
+	const h = await load({ LETS_CODE_MODE: "orchestrator", LETS_CODE_ROLE: "orchestrator", LETS_CODE_SUBAGENT_DEPTH: "1" }); const d = repo(); await h.start(d);
+	t("orchestrator child: gets the default role", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	t("orchestrator child: no orchestrator hook command", Object.keys(h.commands).length, 0);
+}
+// --- mandate off: the orchestrator alone, dormant until engaged
+{
+	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_ORCHESTRATOR_ON = "1";
+	const h = await load({}); const d = repo(); await h.start(d);
+	const prompt = () => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); };
+	t("dormant: write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	t("dormant: any bash", await h.call(d, "bash", { command: "rm -rf build && npm install" }), undefined);
+	t("dormant: no prompt section", prompt(), []);
+	t("dormant: only /orchestrator", Object.keys(h.commands), ["orchestrator"]);
+	t("dormant: tools untouched", h.tools().includes("edit"), true);
+	t("dormant: a factory run engages it", globalThis.__letsCodeOrchestrate(h.ctx(d), "software factory run"), true);
+	t("engaged: write blocked", blocked(await h.call(d, "write", { path: join(d, "src/b.txt") })), true);
+	t("engaged: edit dropped", h.tools().includes("edit"), false);
+	t("engaged: prompt section", prompt(), ["lets_code_mandate"]);
+	await h.start(d);
+	t("engaged: stays across a new session", blocked(await h.call(d, "edit", { path: join(d, "src/a.txt") })), true);
+	await h.commands.orchestrator.handler("", h.ctx(d));
+	t("left: write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	t("left: any bash again", await h.call(d, "bash", { command: "npm install" }), undefined);
+	t("left: tools restored", h.tools().includes("edit"), true);
+	t("left: no prompt section", prompt(), []);
+	await h.commands.orchestrator.handler("", h.ctx(d));
+	t("/orchestrator engages it too", blocked(await h.call(d, "write", { path: join(d, "src/b.txt") })), true);
+	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
+	t("dormant child: inert", Object.keys(c.handlers).length, 0);
+	delete process.env.LETS_CODE_ORCHESTRATOR_ON; process.env.LETS_CODE_MANDATE_ON = "1";
 }
 t("deny log written", readFileSync(process.env.LETS_CODE_MANDATE_LOG, "utf8").split("\n").filter((l) => l.includes('"deny"')).length > 5, true);
 

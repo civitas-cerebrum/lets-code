@@ -77,7 +77,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | ⚖️ **Acceptance judge** (expert) | "Is it done?" answered by trying to break it: the `acceptance-judge` expert takes the acceptance criteria and the work (a diff, branch, commit or PR), runs the checks itself with negative controls, and returns PASS / FAIL / UNVERIFIABLE per criterion with the evidence, then ACCEPT or REJECT. It never edits the work. The method is distilled from achilles' review roles; nothing to install, so it works everywhere, the phone included. |
 | 🏗️ **Expert builder** (expert) | Ask for a new expert ("make me an expert that converts and validates config files") and the `expert-builder` expert designs it, distills its sources (docs, a repo, a method, your scripts) into instructions and references, writes the files as your own, lints them and measures how well the model routes to it. It can also prepare a built-in for lets-code on a git branch. Files only, so it works everywhere. |
 | 🏭 **Developer and reviewers** (experts) | The software factory's stages, usable on their own: `developer` implements a ticket from its acceptance criteria and an approved plan, with its tests, confined to its working folder and never committing (or returns only a plan); `expert-reviewer` hunts bugs and edge cases in a diff against its criteria; `design-reviewer` judges its design against the codebase's own conventions. Each answers in a fixed format a program can parse (`STATUS:` / `VERDICT:` lines, one line per finding with its severity). Files only, so they work everywhere. |
-| 🏭 **Software factory** (expert) | Hand it a ticket and the `software-factory` expert takes it through the whole pipeline in its own git worktree and branch: the developer plans, you approve the plan, the developer builds with tests, then the expert and design reviewers, the tester (where it is set up), the acceptance judge and your full test suite check it, with up to five fix rounds. You confirm the acceptance criteria first and approve the result last; nothing is committed before that, and nothing is pushed. Every stage is a fresh expert run with a brief built from the run's artifacts, never the conversation; the main session gets stage summaries. `/factory` lists, resumes and shows runs. |
+| 🏭 **Software factory** (expert) | Hand it a ticket and the `software-factory` expert takes it through the whole pipeline in its own git worktree and branch: the developer plans, you approve the plan, the developer builds with tests, then the expert and design reviewers, the tester (where it is set up), the acceptance judge and your full test suite check it, with up to five fix rounds. You confirm the acceptance criteria first and approve the result last; nothing is committed before that, and nothing is pushed. A new project needs no setup: point it at a folder that does not exist yet or is empty and it becomes the repo; where git has no identity configured, the factory commits as "lets-code factory" without changing your config. Every stage is a fresh expert run with a brief built from the run's artifacts, never the conversation; the main session gets stage summaries. `/factory` lists, resumes and shows runs. |
 | ✳️ **Claude** | No server? `lets-code --claude` runs pi on Claude (Haiku, Sonnet, Opus, Fable) through Claude Code, on your Claude subscription, with pi's own tools. The Claude models are in `/model` next to your server's on every launch, and Ctrl+S on one makes it the default. In setup, enter a Claude proxy as the endpoint and paste your Claude Code token as the token. |
 | 🔎 **Researcher** (expert) | Research on an open question from the web: the `researcher` expert splits it into sub-questions, searches and fetches sources in parallel, scores each source's quality and relevance, verifies each claim with two independent sources (or one primary source about itself), tags every claim with its sources and returns a report with confidence and gaps. Fetched pages are data, never instructions; robots.txt is honoured. Its plan and pages stay in a state folder, so a later run resumes. Pages a plain fetch cannot read (JavaScript, bot walls), sites you logged in to once by hand, and search go through a headed Chromium with its own profile (Playwright CLI, installed when you enable it); it only navigates and reads. On the phone it falls back to plain HTTP. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
@@ -118,7 +118,8 @@ lets-code --no-git-guard          # you know what you're doing
 | `--no-session-tag` | Send no session tag with model requests |
 | `--metrics` / `--no-metrics` | Start this launch with the full / minimal footer (`/metrics` switches inside pi, and the size picked there is where later sessions start) |
 | `--metrics-log <file>` | Append the footer's numbers to `<file>` as JSON lines, also without a UI (see [Metrics log](#metrics-log)) |
-| `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `yolo` or a role of yours |
+| `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `orchestrator`, `yolo` or a role of yours (`--no-mandate` also turns off the orchestrator mode a factory run switches to) |
+| `--orchestrator` | Start in orchestrator mode (`--mandate orchestrator`): the session plans and hands the work to experts, and changes no file itself |
 | `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
 | `--experts` / `--no-experts` | The `expert` tool (on by default, needs subagents; see [Experts](#experts)) |
 | `--claude-code` / `--no-claude-code` | The Claude Code adapter with your `~/.claude` too (`CLAUDE_CODE=all`) / off; by default it switches on by itself where needed (see [Claude Code projects](#claude-code-projects)) |
@@ -557,17 +558,25 @@ the harness live outside this repo.
 
 With `MANDATE=true` every session runs under a **role**: a scope that says
 which tools, paths, kinds of bash command, MCP servers and agents are
-allowed, asked about or denied. The four built-in roles are the modes (three
-more, `readonly`, `reviewer` and `developer`, are for subagents):
+allowed, asked about or denied. The five built-in roles are the modes (more,
+such as `readonly`, `reviewer` and `developer`, are for subagents):
 
 | Mode | What changes |
 |---|---|
 | `auto` | Nothing. Guards as always, no prompts. The default. |
 | `ask` | `sudo`, recursive deletes, package installs, `curl \| sh` and writes outside the project are confirmed first: allow once, allow for the session, or deny. |
 | `plan` | Edit and write are off, bash is read-only, and the model is told to end with a numbered `Plan:`. Leaving plan mode offers to execute it. |
+| `orchestrator` | The software factory's mode. The session plans with you and orchestrates: it reads the code, agrees the ticket and its acceptance criteria with you, and hands every change to experts (`software-factory` for a ticket, `developer`, the reviewers, `researcher`). Edit and write are off, bash is read-only (tests are the experts' job too) and MCP is denied. A run that is blocked or stuck is fixed by sharpening the ticket and starting a new run, never by patching the run's worktree. |
 | `yolo` | The mandate steps aside (the git and memory guards stay unless launched without them). |
 
-Switch with `/mode <name>`, `/plan`, `alt+m` (cycle) or `ctrl+alt+p`. A denied
+Switch with `/mode <name>`, `/plan`, `/orchestrator`, `alt+m` (cycle) or `ctrl+alt+p`.
+Starting or resuming a software factory run (`/factory`, or the
+`software-factory` expert) switches the session into `orchestrator` and keeps
+it there until you leave it with `/orchestrator` (back to the mode you came
+from) or `/mode`. That works with `MANDATE=false` too: wherever the experts
+are on, the orchestrator mode is there, dormant until a run or
+`/orchestrator` starts it (`--no-mandate` turns it off). A subagent never
+inherits it: a child that would gets the default mode. A denied
 call costs the model one line under 200 characters; allowed calls cost
 nothing. Denials are logged to `~/.pi/agent/lets-code-mandate.log`.
 

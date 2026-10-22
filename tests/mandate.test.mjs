@@ -63,6 +63,9 @@ const blocked = (r) => r?.block === true;
 	t("ask asks for rm -rf", classify("rm -rf build", ask), { decision: "ask", group: "destructive", command: "rm -rf build" });
 	t("ask asks for sudo", classify("sudo apt install x", ask).group, "privileged");
 	t("ask asks for npm install", classify("npm install left-pad", ask).group, "package-install");
+	for (const c of ["uv pip install pytest", "uv venv -q venv && uv pip install --python venv/bin/python pytest", "python3 -m pip install pytest", "python3 -I -m pip install x", "/x/venv/bin/python -m pip install pytest", "python3 -m ensurepip --user", "venv/bin/pip install pytest", "uv tool install ruff"])
+		t(`package-install: ${c}`, classify(c, ask).group, "package-install");
+	t("package-install: uv run and pip list are not installs", [classify("uv run pytest", ask).group, classify("python3 -m pip list", ask).group], ["", ""]);
 	t("npm install is not a write target", redirectTargets("npm install left-pad"), []);
 	t("pip install is not a write target", redirectTargets("cd app && pip install -r req.txt"), []);
 	t("install(1) is", redirectTargets("install -D tool /usr/local/bin/tool"), ["tool", "/usr/local/bin/tool"]);

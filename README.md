@@ -73,7 +73,7 @@ Needs `bash` 3.2+, `curl`, `python3`. `node`/`npm` only if it installs pi for yo
 | 🧑‍🔬 **Experts** (on by default) | Subagents with their own knowledge behind one `expert` tool that costs one line of context: the model sees each expert's name and what it is for, asks for a job and a brief template when it needs one, and runs it with a filled-in brief. Every expert is dormant until you say yes (a dialog the first time, remembered); one that needs an install gets it then. |
 | 📱 **Termux device** (expert) | On a phone running lets-code in Termux, the `termux-device` expert does phone tasks end to end: launch or bring an app to the front, open a file in an app, fire an intent, prepare a message (WhatsApp, SMS, mail) for you to send, and, once you set up Shizuku or adb, read the screen, tap and type. It checks first what the phone allows and tells you the one setup step that unlocks more. |
 | 🔬 **REA** (expert) | Reverse engineering with [REA](https://github.com/morluto/rea) on demand: the `reverse-engineer` expert hands the question to a separate pi that has REA's 170 tools, so they never enter your session. REA is installed when you enable it. |
-| 🧪 **Tester** (expert) | Web-app QA the way [achilles](https://github.com/civitas-cerebrum/achilles) does it, on demand: the `tester` expert maps journeys, writes and runs e2e tests with the Steps API of [element-interactions](https://github.com/civitas-cerebrum/element-interactions) (Playwright), verifies a flow or change with evidence, hunts bugs and diagnoses failing e2e tests, in a separate pi; Android and iOS apps too where Appium is set up. Installed when you enable it; Linux and macOS only. |
+| 🧪 **Tester** (expert) | Software testing of any kind with QA discipline: the `tester` expert plans by risk (levels, types, design techniques, oracles), then tests by itself (unit and integration tests, CLIs and terminal UIs driven through tmux, libraries, a quick API smoke) or through its team of specialists, which it starts itself: `ui-tester` for the browser and mobile apps (the [achilles](https://github.com/civitas-cerebrum/achilles) method with the Steps API of [element-interactions](https://github.com/civitas-cerebrum/element-interactions) over Playwright, Appium where set up; installed when you enable it, Linux and macOS only) and `api-tester` for HTTP and GraphQL APIs (contract, auth, validation, idempotency, error shapes; curl and jq). It verifies changes, writes tests, hunts bugs and diagnoses failing tests; the verdict and its evidence are its own. Everywhere, the phone included. |
 | ⚖️ **Acceptance judge** (expert) | "Is it done?" answered by trying to break it: the `acceptance-judge` expert takes the acceptance criteria and the work (a diff, branch, commit or PR), runs the checks itself with negative controls, and returns PASS / FAIL / UNVERIFIABLE per criterion with the evidence, then ACCEPT or REJECT. It never edits the work. The method is distilled from achilles' review roles; nothing to install, so it works everywhere, the phone included. |
 | 🏗️ **Expert builder** (expert) | Ask for a new expert ("make me an expert that converts and validates config files") and the `expert-builder` expert designs it, distills its sources (docs, a repo, a method, your scripts) into instructions and references, writes the files as your own, lints them and measures how well the model routes to it. It can also prepare a built-in for lets-code on a git branch. Files only, so it works everywhere. |
 | 🏭 **Developer and reviewers** (experts) | The software factory's stages, usable on their own: `developer` implements a ticket from its acceptance criteria and an approved plan, with its tests, confined to its working folder and never committing (or returns only a plan); `expert-reviewer` hunts bugs and edge cases in a diff against its criteria; `design-reviewer` judges its design against the codebase's own conventions. Each answers in a fixed format a program can parse (`STATUS:` / `VERDICT:` lines, one line per finding with its severity). Files only, so they work everywhere. |
@@ -919,20 +919,20 @@ roles see every MCP call and can allow, ask or deny per server.
 
 An expert is a subagent with knowledge of its own: standing instructions
 (recipes, traps, a report format), a brief template that says what its
-caller must tell it, and, where it needs one, a setup. lets-code ships ten,
-`acceptance-judge`, `design-reviewer`, `developer`, `expert-builder`,
-`expert-reviewer`, `researcher`, `reverse-engineer` and `software-factory` (anywhere),
-`termux-device` (on Termux only) and `tester` (Linux and macOS), and you can
+caller must tell it, and, where it needs one, a setup. lets-code ships twelve,
+`acceptance-judge`, `api-tester`, `design-reviewer`, `developer`, `expert-builder`,
+`expert-reviewer`, `researcher`, `reverse-engineer`, `software-factory` and `tester` (anywhere),
+`termux-device` (on Termux only) and `ui-tester` (Linux and macOS), and you can
 add your own (see [Build your own expert](#build-your-own-expert)). They sit behind one tool, `expert`, whose line in the
 context names each expert usable here with a few words on what it is for:
 
 ```text
-expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); design-reviewer (clean-code and design review of a change: patterns, maintainability); expert-builder (making or fixing an expert: from docs, a runbook or scripts; its knowledge, brief and routing); expert-reviewer (bug review of a diff or PR: what breaks, edge cases, severity); researcher (web research: tools, licences, prices, facts; cited, cross-checked report); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); software-factory (the software factory: a ticket taken end to end through its pipeline of experts); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
+expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); design-reviewer (clean-code and design review of a change: patterns, maintainability); expert-builder (making or fixing an expert: from docs, a runbook or scripts; its knowledge, brief and routing); expert-reviewer (bug review of a diff or PR: what breaks, edge cases, severity); researcher (web research: tools, licences, prices, facts; cited, cross-checked report); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); software-factory (the software factory: a ticket taken end to end through its pipeline of experts); tester (testing and QA of any software: tests, a change verified, bugs, failing tests); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
 ```
 
-(On Linux and macOS `tester (anything on a web app that needs a browser:
-Playwright/e2e tests, checking flows or changes, bugs)` takes
-`termux-device`'s place.)
+(On Linux and macOS `termux-device` is not in it. Neither are `developer`,
+`ui-tester` and `api-tester`: a pipeline or the tester starts them, or you
+by name.)
 
 The rest comes on demand, from the tool itself:
 
@@ -955,7 +955,9 @@ The templates:
 | `researcher` | `question`*: what to find out, in your words; `scope`: options to cover, region, time window, sources to prefer or avoid; `criteria`: what to compare or decide on, hard constraints; `known`: what you already believe, to be checked; `state`: an earlier run's state folder, to resume it |
 | `termux-device` | `goal`*: the user's goal, verbatim; `confirmed`: only after you approved the exact final step it reported (app, recipient, text) |
 | `reverse-engineer` | `target`*: absolute path or URL of the artifact; `question`*: what to find out; `purpose`: what the answer is for |
-| `tester` | `target`*: the web URL, the app's project path, or the mobile app id or .apk; `platform`: web (default), android or ios; `goal`*: the QA task in the user's words; `how_to_run`: commands that start the app and run the existing tests; `scope`: which pages, journeys or files, how deep; `constraints`: what not to touch, logins or test data, time limits |
+| `tester` | `target`*: what to test: a project path, a URL, a command, or a change (a diff or branch); `goal`*: the testing task in your words; `criteria`: acceptance criteria or requirements; `how_to_run`: how to build, start and test it; `scope`: in and out, and how deep (smoke, standard, deep); `constraints`: what not to touch, test data and logins (env var names), time limits; `report`: a final-message format to follow, when a program reads it |
+| `ui-tester` | `target`*: the web URL, the app's project path, or the mobile app id or .apk; `platform`: web (default), android or ios; `goal`*: the QA task in the user's words; `how_to_run`: commands that start the app and run the existing tests; `scope`: which pages, journeys or files, how deep; `constraints`: what not to touch, logins or test data, time limits |
+| `api-tester` | `target`*: the API's base URL, or the project that serves it; `goal`*: what to test or verify, with the criteria; `spec`: the OpenAPI or GraphQL schema, or the docs; `auth`: env var names of tokens or logins; `how_to_run`: how to start the API and run its tests; `scope`: endpoints in and out, read-only or mutating; `constraints`: what not to touch, rate limits, data |
 
 A run is a subagent run (same runner, progress, abort, timeout, depth limit
 and `LETS_CODE_SUBAGENT_CONCURRENCY`): the child gets the expert's
@@ -963,28 +965,59 @@ instructions as its system prompt and the brief as its task, one heading per
 field, and its report comes back. Experts are never listed in the
 `subagent` tool; calling one there points at `expert`.
 
-**Tester.** `tester` does QA the way
+**Tester and its team.** `tester` is a test lead with QA discipline, and
+the one testing expert the model routes to. It reads the test basis (the
+criteria, the docs, the diff) critically, rates risks, and writes a test
+plan before testing: a matrix of criterion or risk, test level (unit,
+integration, system, acceptance), type (functional, regression, smoke,
+exploratory, non-functional), design technique (partitions, boundaries,
+decision tables, state transitions, pairwise, error guessing, properties,
+a negative matrix) and who does it. It does most of it itself: tests in
+the project's own framework, command-line programs (arguments, streams,
+exit codes, files, signals) and terminal UIs and games driven through tmux,
+libraries, scripts and a quick API smoke with curl. Each new test must be
+shown to fail (a bite check or a run against the old code); a test that
+fails because the software is wrong stays red and becomes a finding; the
+verdict rests on evidence. Its references live in `~/.pi/agent/tester/ref/`
+(strategy, techniques, workflows, terminal, non-functional, team,
+reporting). It runs under the `tester` role: the developer's rights (tests
+in its working folder and the temp dir, no git writes or installs) and the
+expert tool for its team. No setup, every platform; on the phone it tests
+by itself and reports what its specialists would have covered.
+
+The team is the agent file's `team:` key. That child alone gets one more
+level of subagents, and its `expert` tool lists and runs only its team; the
+specialists start nothing. It briefs them so the brief stands alone,
+starts independent ones in parallel, checks their evidence and folds their
+findings into its own verdict.
+
+`ui-tester` does browser and mobile QA the way
 [achilles](https://github.com/civitas-cerebrum/achilles) does it, without
 achilles itself: no skills tree, hooks, gates or pipeline. Its method
 (journey mapping, test composition, test IDs, selectors, bug discovery,
 failure diagnosis, evidence, what a report holds, what done means) is
 distilled into the child's instructions and five short references in
-`~/.pi/agent/tester/ref/`. Tests are written with the API achilles drives:
+`~/.pi/agent/ui-tester/ref/`. Tests are written with the API achilles drives:
 [`@civitas-cerebrum/element-interactions`](https://www.npmjs.com/package/@civitas-cerebrum/element-interactions)
 (the Steps API over Playwright, selectors in `page-repository.json`) and,
 for Android and iOS, `@civitas-cerebrum/element-repository` with
-WebdriverIO against an Appium server. Enabling it runs `tester/setup`: the
-pinned packages with npm into `~/.pi/agent/tester/runtime` (about 130 MB),
+WebdriverIO against an Appium server. Enabling it runs `ui-tester/setup`: the
+pinned packages with npm into `~/.pi/agent/ui-tester/runtime` (about 130 MB),
 Playwright's chromium unless it is cached, and a mobile check that says
 what is missing (Appium and its driver, `adb` with a device or emulator,
 `ANDROID_HOME`, Xcode) without installing it. The child sets up a test
-project with `tester/bin/e2e-init` (in your project when the brief names
-one, else under `tester/work/`) and looks at pages with
-`tester/bin/peek.mjs`. You get its report: the tests written, the command
-that runs them, pass/fail counts and the findings with their evidence. It
-is not offered on Termux: Playwright has no browser for Android, and
-Appium needs a host with the Android SDK. For a unit test, a failing
-assertion or `npm test`, the model works as usual.
+project with `ui-tester/bin/e2e-init` (in your project when the brief names
+one, else under `ui-tester/work/`) and looks at pages with
+`ui-tester/bin/peek.mjs`. It is not offered on Termux: Playwright has no
+browser for Android, and Appium needs a host with the Android SDK. (It was
+called `tester` before; an installed runtime and your yes move over.)
+
+`api-tester` tests HTTP and GraphQL APIs in depth with curl and jq or the
+project's framework: the contract against its spec, status codes,
+authentication and authorization, validation, methods, idempotency,
+pagination, errors and limits, GraphQL's errors and depth; every exchange
+saved as evidence, secrets by env var name and redacted. No setup, every
+platform.
 
 **Acceptance judge.** `acceptance-judge` answers "is it done?" the way
 achilles' review roles do (its verifier and reviewers), without achilles:
@@ -1031,7 +1064,7 @@ APPROVE` or `REVISE` (REVISE when a blocker or major is open), then one
 line per finding, `R<n>` or `D<n> | blocker|major|minor|nit | file:line |
 title`, with ids kept across fix rounds so a repeated finding can be
 spotted. Whether the criteria are met stays with `acceptance-judge`, and
-browser work with `tester`. `developer` has `route: false`: it is a stage
+testing with `tester`. `developer` has `route: false`: it is a stage
 the factory dispatches by name, not in the always-on line. Measured, the
 model kept implementing tickets itself whatever its `use_for` said (2 of 48
 prompts routed over five wordings), and its entry made the model check
@@ -1060,9 +1093,11 @@ A REVISE, a REJECT or a suite that passed before and fails now sends the
 blocker and major findings back to the developer, and the stage that failed
 runs again with them; at most five rounds, and a finding that comes back
 after it was sent to be fixed stops the loop and asks you (one more round,
-the final approval as it is, or stop). The tester stage runs where `tester`
-is set up and enabled, with `start` telling it how to start the app;
-elsewhere it is skipped and says so. Each run has its own git worktree and
+the final approval as it is, or stop). The test stage runs `tester`, the
+test lead, on every platform once it is enabled (the factory's dialog asks
+for it with the other stages), with `start` telling it how to start the
+app; it tests by itself and through `ui-tester` and `api-tester` where they
+can run. With `tester` off the stage is skipped and says so. Each run has its own git worktree and
 branch, `pi/factory-<id>`, under `~/.pi/agent/lets-code-factory/<id>/`,
 next to its ledger (each stage's brief, reply, verdict, findings, tokens and
 time) and artifacts; your checkout is not touched, and the only commit is
@@ -1111,7 +1146,7 @@ and the `general` and `scout` subagents.
 **The researcher's browser.** Its setup installs the Playwright CLI
 (`@playwright/cli`, pinned, `--ignore-scripts`) into
 `~/.pi/agent/researcher/runtime` and reuses a Chromium already in
-Playwright's cache (the tester's), so there is no second copy. The helper
+Playwright's cache (the ui-tester's), so there is no second copy. The helper
 then reads a page in that browser when the plain fetch is empty, refused,
 a bot wall, a login wall or a JavaScript shell, and first for the domains
 you logged in to; it searches through real result pages there

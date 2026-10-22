@@ -1,152 +1,64 @@
 #!/usr/bin/env bash
-# Unit test for pi_write_tester: extracts the functions from ./lets-code and
-# runs them against a scratch agent dir with a fake npm (a stub install with a
-# fake playwright), fake appium/adb for the mobile check, and e2e-init.
+# Unit test for pi_write_tester (the test lead), pi_write_api_tester and the
+# move from the tester of before (lc_migrate_ui_tester): extracts the
+# functions from ./lets-code and runs them against a scratch agent dir.
 set -eu
 src="$(dirname "$0")/../lets-code"
-PI_AGENT_DIR=/nonexistent     # TESTER_DIR is derived from it; set for real below
 eval "$(python3 - "${src}" <<'PY'
 import sys
 s = open(sys.argv[1]).read()
-i = s.find("\nTESTER_PINS=")
-j = s.find("\n}\n", s.find("\ntester_write_agent() {"))
-sys.stdout.write(s[i:j + 3])
+for start, end in (("\npi_write_tester() {", "\n}  # end of pi_write_tester\n"), ("\npi_write_api_tester() {", "\n}  # end of pi_write_api_tester\n"),
+                   ("\nlc_expert_remembered() {", "\n}\n"), ("\nlc_migrate_ui_tester() {", "\n}\n")):
+    i = s.find(start); j = s.find(end, i)
+    if i < 0 or j < 0: sys.exit("cannot find %s" % start.strip())
+    sys.stdout.write(s[i:j + len(end)])
 PY
 )"
-LOG_PREFIX="[lets-code]"; log() { echo "${LOG_PREFIX} ${1}"; }
-bash_bin="$(command -v bash)"
-
-work="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/tester-test.XXXXXX")" && pwd)"   # macOS TMPDIR ends in /
+work="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/tester-test.XXXXXX")" && pwd)"
 trap 'rm -rf "${work}"' EXIT
-mkdir -p "${work}/bin" "${work}/agent"
-cat > "${work}/bin/npm" <<'SH'
-#!/bin/sh
-# records the call (cwd, args, deps asked for); installs a stub
-{ printf '%s|%s|' "$(pwd)" "$*"; python3 -c 'import json; d=json.load(open("package.json")); print(",".join(sorted(f"{k}@{v}" for k, v in {**d.get("dependencies", {}), **d.get("devDependencies", {})}.items())))'; } >> "${NPM_LOG}"
-mkdir -p node_modules/.bin
-printf '#!/bin/sh\necho "playwright $*" >> "%s"\n' "${PW_LOG}" > node_modules/.bin/playwright; chmod +x node_modules/.bin/playwright
-SH
-chmod +x "${work}/bin/npm"
-export PATH="${work}/bin:${PATH}" NPM_LOG="${work}/npm.log" PW_LOG="${work}/pw.log"
-: > "${NPM_LOG}"
-PI_AGENT_DIR="${work}/agent"; TESTER_DIR="${PI_AGENT_DIR}/tester"
+PI_AGENT_DIR="${work}/agent"; mkdir -p "${PI_AGENT_DIR}"
+d="${PI_AGENT_DIR}/tester"; af="${PI_AGENT_DIR}/agents/tester.md"
 
 fail=0
 t() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1 -> $2 (want $3)"; fail=1; fi; }
-pins_sorted="$(printf '%s\n' ${TESTER_PINS} | sort | tr '\n' ',' | sed 's/,$//')"
 
-pi_write_tester on >/dev/null 2>&1
-t "ready"                          "${TESTER_NOTE}" ""
-t "installed once"                 "$(grep -c "^${TESTER_DIR}/runtime|" "${NPM_LOG}")" 1
-t "the pinned packages"            "$(cut -d'|' -f3 "${NPM_LOG}")" "${pins_sorted}"
-t "install scripts off"            "$(cut -d'|' -f2 "${NPM_LOG}" | grep -c -- '--ignore-scripts')" 1
-t "exact versions"                 "$(printf '%s\n' ${TESTER_PINS} | grep -c '@[0-9][0-9.]*$')" 4
-t "the API, not achilles"          "$(printf '%s\n' ${TESTER_PINS} | grep -c '^@civitas-cerebrum/achilles')" 0
-t "chromium"                       "$(cat "${PW_LOG}")" "playwright install chromium"
-t "marker = pins"                  "$(cat "${TESTER_DIR}/runtime/.installed")" "${TESTER_PINS}"
-t "no agent dir, no extension"     "$([ -e "${TESTER_DIR}/agent" ] || [ -e "${TESTER_DIR}/extension.ts" ] && echo yes || echo no)" no
-t "helpers executable"             "$([ -x "${TESTER_DIR}/bin/e2e-init" ] && [ -x "${TESTER_DIR}/bin/mobile-check" ] && echo yes)" yes
-t "peek: lets-code's"              "$(head -n 1 "${TESTER_DIR}/bin/peek.mjs" | grep -c 'Written by lets-code')" 1
-t "refs: paths filled in"          "$(cat "${TESTER_DIR}"/ref/*.md | grep -c '@@T@@')" 0
-t "prompt: paths filled in"        "$(grep -c '@@T@@' "${TESTER_DIR}/prompt.md"):$(grep -c "${TESTER_DIR}/bin/e2e-init" "${TESTER_DIR}/prompt.md")" "0:1"
-t "prompt: no harness tools"       "$(grep -c -E '\b(Skill|Agent|Task) ?\{|hook|ledger' "${TESTER_DIR}/prompt.md")" 0
-for r in $(grep -o "${TESTER_DIR}/ref/[a-z-]*\.md" "${TESTER_DIR}/prompt.md" | sort -u); do
-    t "ref $(basename "${r}") written" "$([ -s "${r}" ] && echo yes)" yes
+# the tester of before left its browser half here
+mkdir -p "${d}/bin" "${d}/ref" "${d}/runtime" "${d}/work/proj"
+: > "${d}/setup"; : > "${d}/prompt.md"; : > "${d}/bin/e2e-init"; : > "${d}/ref/api-web.md"; : > "${d}/ref/bugs.md"
+echo "pins" > "${d}/runtime/.installed"
+printf '{"experts": {"tester": true, "researcher": true}, "other": 1}\n' > "${PI_AGENT_DIR}/lets-code-state.json"
+lc_migrate_ui_tester
+t "migrate: the runtime moves to ui-tester"     "$(cat "${PI_AGENT_DIR}/ui-tester/runtime/.installed" 2>/dev/null)" pins
+t "migrate: and the work folder"                "$([ -d "${PI_AGENT_DIR}/ui-tester/work/proj" ] && echo yes)" yes
+t "migrate: a yes for tester is one for ui-tester, the rest kept" "$(python3 -c "import json; s=json.load(open('${PI_AGENT_DIR}/lets-code-state.json')); print(s['experts'].get('ui-tester'), s['experts'].get('tester'), s['experts'].get('researcher'), s['other'])")" "True True True 1"
+python3 -c "import json; p='${PI_AGENT_DIR}/lets-code-state.json'; s=json.load(open(p)); s['experts']['ui-tester']=False; json.dump(s, open(p,'w'))"
+lc_migrate_ui_tester
+t "migrate: a later no for ui-tester stays"     "$(python3 -c "import json; print(json.load(open('${PI_AGENT_DIR}/lets-code-state.json'))['experts']['ui-tester'])")" False
+
+pi_write_tester
+t "the browser half's files go"                 "$(ls "${d}" | tr '\n' ' '):$(ls "${d}/ref" | grep -c -E '^(api-web|bugs)\.md$')" "ref :0"
+t "the references"                              "$(ls "${d}/ref" | tr '\n' ' ')" "nonfunctional.md reporting.md strategy.md team.md techniques.md terminal.md workflows.md "
+t "the agent file: name, role, team"            "$(grep -c -E '^(name: tester|role: tester|team: ui-tester, api-tester)$' "${af}")" 3
+t "the expert tool for its team"                "$(grep -c '^tools: .*\bexpert$' "${af}")" 1
+t "no platform, no setup: everywhere"           "$(grep -c -E '^(platform|setup|requires):' "${af}")" 0
+t "paths filled in"                             "$(cat "${af}" "${d}"/ref/*.md | grep -c '@@D@@')" 0
+for r in "${d}"/ref/*.md; do
+    t "body names $(basename "${r}")"           "$(grep -q "${r}" "${af}" && echo yes)" yes
 done
-t "refs: none unreferenced"        "$(for r in "${TESTER_DIR}"/ref/*.md; do grep -q "${r}" "${TESTER_DIR}/prompt.md" || echo "${r}"; done)" ""
-
-# the tester expert
-af="${PI_AGENT_DIR}/agents/tester.md"
-t "agent file written"             "$(grep -c '^# Written by lets-code' "${af}")" 1
-t "agent: in place"                "${TESTER_AGENT}" 1
-t "agent: no agent dir"            "$(grep -c '^agent_dir:' "${af}")" 0
-t "agent: prompt exists"           "$([ -f "${PI_AGENT_DIR}/$(sed -n 's/^append_prompt: //p' "${af}")" ] && echo yes)" yes
-t "agent: requires the install"    "$([ -e "${PI_AGENT_DIR}/$(sed -n 's/^requires: //p' "${af}")" ] && echo yes)" yes
-t "agent: pi's tools"              "$(sed -n 's/^tools: //p' "${af}")" "bash, read, edit, write, grep, find, ls"
-t "agent: timeout 3600"            "$(grep '^timeout:' "${af}")" "timeout: 3600"
-t "agent: an expert"               "$(sed -n 's/^expert: //p' "${af}")" true
-t "agent: not on Termux"           "$(sed -n 's/^platform: //p' "${af}")" "linux, darwin"
-t "agent: its setup script"        "$([ -x "${PI_AGENT_DIR}/$(sed -n 's/^setup: //p' "${af}")" ] && echo yes)" yes
-t "agent: use_for fits the line"   "$([ "$(sed -n 's/^use_for: //p' "${af}" | wc -c)" -le 101 ] && echo yes)" yes
-t "agent: keywords fit"            "$([ "$(sed -n 's/^keywords: //p' "${af}" | wc -c)" -le 41 ] && echo yes)" yes
-t "agent: brief template"          "$(sed -n 's/^  - \([a-z_]*\).*/\1/p' "${af}" | tr '\n' ' ')" "target platform goal how_to_run scope constraints "
-t "agent: required fields"         "$(grep -c '^  - [a-z_]* (required):' "${af}" | tr -d ' ')" 2
-rm -rf "${PI_AGENT_DIR}/agents"; mkdir -p "${PI_AGENT_DIR}/agents"
+t "team.md: both specialists, their briefs"     "$(grep -c -E "ui-tester's fields|api-tester's:" "${d}/ref/team.md")" 2
+t "terminal.md: tmux, the session killed"       "$(grep -c -E 'tmux (new-session|send-keys|capture-pane|kill-session)' "${d}/ref/terminal.md")" 4
+t "reporting.md: the pipeline's format"         "$(grep -c 'VERDICT:' "${d}/ref/reporting.md")" 1
+t "refs carry the lets-code line"               "$(grep -L 'Written by lets-code (tester)' "${d}"/ref/*.md | wc -l | tr -d ' ')" 0
+pi_write_tester
+t "again: nothing changes, no temp left"        "$(ls "${PI_AGENT_DIR}/agents" | tr '\n' ' '):$(ls "${d}/ref" | grep -c tmp)" "tester.md :0"
 printf -- '---\nname: tester\ndescription: mine\n---\nmine\n' > "${af}"
-pi_write_tester on >/dev/null 2>&1
-t "user's own file kept"           "$(grep -c 'description: mine' "${af}")" 1
-t "user's file: not ours"          "${TESTER_AGENT:-none}" none
-rm -f "${af}"
-pi_write_tester on >/dev/null 2>&1
-t "agent rewritten after removal"  "$(grep -c '^# Written by lets-code' "${af}")" 1
-t "no temp files left"             "$(ls "${PI_AGENT_DIR}/agents" | tr '\n' ' ')" "tester.md "
-t "no reinstall"                   "$(grep -c "^${TESTER_DIR}/runtime|" "${NPM_LOG}")" 1
-echo old > "${TESTER_DIR}/runtime/.installed"
-pi_write_tester on >/dev/null 2>&1
-t "other pins -> reinstall"        "$(grep -c "^${TESTER_DIR}/runtime|" "${NPM_LOG}"):$(cat "${TESTER_DIR}/runtime/.installed")" "2:${TESTER_PINS}"
-mkdir -p "${TESTER_DIR}/agent"; : > "${TESTER_DIR}/extension.ts"
-pi_write_tester files >/dev/null
-t "an earlier design's files go"   "$([ -e "${TESTER_DIR}/agent" ] || [ -e "${TESTER_DIR}/extension.ts" ] && echo yes || echo no)" no
+pi_write_tester
+t "a user's own tester is left alone"           "$(tail -n 1 "${af}")" mine
 
-# e2e-init: a test project from the pins, nothing overwritten
-proj="${work}/site"; mkdir -p "${proj}"
-out="$(bash "${TESTER_DIR}/bin/e2e-init" "${proj}" http://localhost:8765)"
-t "e2e-init: says ready"           "$(echo "${out}" | grep -c '^ready: ')" 1
-t "e2e-init: web pins as devDeps"  "$(grep "^${proj}|" "${NPM_LOG}" | cut -d'|' -f2)" "install -D --prefer-offline --ignore-scripts --no-audit --no-fund --loglevel=error $(printf '%s\n' ${TESTER_PINS} | grep -v '^webdriverio@' | tr '\n' ' ' | sed 's/ $//')"
-t "e2e-init: baseURL"              "$(grep -c "baseURL: 'http://localhost:8765'," "${proj}/playwright.config.ts")" 1
-t "e2e-init: fixture"              "$(grep -c "baseFixture(base, 'tests/data/page-repository.json')" "${proj}/tests/fixtures/base.ts")" 1
-t "e2e-init: page repository"      "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])))' "${proj}/tests/data/page-repository.json")" "{'pages': []}"
-t "e2e-init: specs dir"            "$([ -d "${proj}/tests/e2e" ] && echo yes)" yes
-echo '// mine' > "${proj}/playwright.config.ts"; echo '{"pages":[{"name":"X"}]}' > "${proj}/tests/data/page-repository.json"
-bash "${TESTER_DIR}/bin/e2e-init" "${proj}" >/dev/null
-t "e2e-init: never overwrites"     "$(cat "${proj}/playwright.config.ts")|$(cat "${proj}/tests/data/page-repository.json")" '// mine|{"pages":[{"name":"X"}]}'
-p2="${work}/nourl"; bash "${TESTER_DIR}/bin/e2e-init" "${p2}" >/dev/null
-t "e2e-init: no URL, no baseURL"   "$(grep -c baseURL "${p2}/playwright.config.ts")" 0
-p3="${work}/app-mobile"; out="$(bash "${TESTER_DIR}/bin/e2e-init" --mobile "${p3}")"
-t "e2e-init --mobile: WebdriverIO and the repository" "$(grep "^${p3}|" "${NPM_LOG}" | cut -d'|' -f2 | tr ' ' '\n' | grep '@' | sort | tr '\n' ' ')" "$(printf '%s\n' ${TESTER_PINS} | grep -E '^(webdriverio|@civitas-cerebrum/element-repository)@' | sort | tr '\n' ' ')"
-t "e2e-init --mobile: no Playwright config" "$([ -e "${p3}/playwright.config.ts" ] && echo yes || echo no):$([ -d "${p3}/tests/mobile" ] && echo yes)" "no:yes"
+pi_write_api_tester
+aa="${PI_AGENT_DIR}/agents/api-tester.md"
+t "api-tester: name, developer role, not routed" "$(grep -c -E '^(name: api-tester|role: developer|route: false)$' "${aa}")" 3
+t "api-tester: no expert tool, no team"         "$(grep -c -E '^team:|\bexpert$' "${aa}")" 0
+t "api-tester: auth by env var name"            "$(grep -c 'env var names' "${aa}")" 1
 
-# mobile-check: what is missing, then ready with appium, adb, a device and the SDK
-min="${work}/min"; mkdir -p "${min}"
-for c in awk wc tr grep sort uname sed tail; do ln -s "$(command -v "${c}")" "${min}/${c}"; done
-rc=0; out="$(env -i PATH="${min}" HOME="${work}" "${bash_bin}" "${TESTER_DIR}/bin/mobile-check")" || rc=$?
-t "mobile: not ready -> exit 1"    "${rc}" 1
-t "mobile: says appium is missing" "$(echo "${out}" | grep -c 'appium not found')" 1
-t "mobile: says adb is missing"    "$(echo "${out}" | grep -c 'adb not found')" 1
-t "mobile: web unaffected"         "$(echo "${out}" | tail -n 1)" "mobile: not ready (missing: appium android-sdk); web testing is unaffected"
-printf '#!/bin/sh\ncase "$1" in --version) echo 2.11.0 ;; driver) echo "uiautomator2@3.0.0 [installed (npm)]" ;; esac\n' > "${min}/appium"
-printf '#!/bin/sh\nprintf "List of devices attached\\nemulator-5554\\tdevice\\n\\n"\n' > "${min}/adb"
-printf '#!/bin/sh\n' > "${min}/java"; chmod +x "${min}/appium" "${min}/adb" "${min}/java"
-rc=0; out="$(env -i PATH="${min}" HOME="${work}" ANDROID_HOME=/sdk "${bash_bin}" "${TESTER_DIR}/bin/mobile-check")" || rc=$?
-t "mobile: ready -> exit 0"        "${rc}:$(echo "${out}" | tail -n 1)" "0:mobile: ready"
-t "mobile: one device"             "$(echo "${out}" | grep -c '1 device')" 1
-t "mobile: the driver"             "$(echo "${out}" | grep -c 'drivers: uiautomator2')" 1
-
-# setup reports the mobile check on stderr, never fails on it
-rm -rf "${TESTER_DIR}/runtime/.installed"
-err="$(bash "${TESTER_DIR}/setup" 2>&1 >/dev/null)"; rc=$?
-t "setup: ok without mobile"       "${rc}" 0
-t "setup: mobile lines on stderr"  "$(echo "${err}" | grep -c 'tester: mobile: ')" "$(bash "${TESTER_DIR}/bin/mobile-check" 2>/dev/null | wc -l | tr -d ' ')"
-
-# files (experts on, the expert dormant): everything but the install
-rm -rf "${TESTER_DIR}" "${af}"; : > "${NPM_LOG}"
-pi_write_tester files >/dev/null
-t "files: no install"              "$(wc -l < "${NPM_LOG}" | tr -d ' ')" 0
-t "files: agent file, setup, prompt" "$([ -e "${af}" ] && [ -x "${TESTER_DIR}/setup" ] && [ -s "${TESTER_DIR}/prompt.md" ] && echo yes):${TESTER_AGENT}" "yes:1"
-t "files: setup --no-install says not installed" "$(bash "${TESTER_DIR}/setup" --no-install >/dev/null 2>&1; echo $?)" 3
-
-# browser download fails: a note, not marked installed (not set up)
-rm -rf "${TESTER_DIR}"
-mkdir -p "${work}/pwbad"; printf '#!/bin/sh\nmkdir -p node_modules/.bin\nprintf "#!/bin/sh\\nexit 1\\n" > node_modules/.bin/playwright; chmod +x node_modules/.bin/playwright\n' > "${work}/pwbad/npm"
-chmod +x "${work}/pwbad/npm"
-PATH="${work}/pwbad:${PATH}" pi_write_tester on >/dev/null 2>&1
-t "browsers fail -> note"          "$(echo "${TESTER_NOTE}" | grep -c 'browser download failed')" 1
-t "browsers fail -> not installed" "$([ -e "${TESTER_DIR}/runtime/.installed" ] && echo yes || echo no)" no
-
-# install fails: a note; the agent file is there but not set up (requires)
-rm -rf "${TESTER_DIR}" "${af}"
-mkdir -p "${work}/badbin"; printf '#!/bin/sh\nexit 1\n' > "${work}/badbin/npm"; chmod +x "${work}/badbin/npm"
-PATH="${work}/badbin:${PATH}" pi_write_tester on >/dev/null 2>&1
-t "install fails -> note"          "$(echo "${TESTER_NOTE}" | grep -c 'install failed')" 1
-t "not installed -> no marker"     "$([ -e "${PI_AGENT_DIR}/$(sed -n 's/^requires: //p' "${af}")" ] && echo yes || echo no)" no
-exit ${fail}
+[ "${fail}" = 0 ] && echo "all passed" || exit 1

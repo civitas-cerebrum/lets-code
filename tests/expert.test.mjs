@@ -36,7 +36,7 @@ process.stdin.on("data", (d) => {
   for (let i = buf.indexOf("\\n"); i >= 0; i = buf.indexOf("\\n")) {
     const c = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
     if (c.type !== "prompt") { out({ type: "response", id: c.id, command: c.type, success: true }); continue; }
-    if (first) { first = false; fs.writeFileSync(path.join(process.env.FAKE_PI_DIR, "call-" + id + ".json"), JSON.stringify({ argv: process.argv.slice(2), task: c.message, agentDir: process.env.PI_CODING_AGENT_DIR, depth: process.env.LETS_CODE_SUBAGENT_DEPTH })); }
+    if (first) { first = false; fs.writeFileSync(path.join(process.env.FAKE_PI_DIR, "call-" + id + ".json"), JSON.stringify({ argv: process.argv.slice(2), task: c.message, agentDir: process.env.PI_CODING_AGENT_DIR, depth: process.env.LETS_CODE_SUBAGENT_DEPTH, max: process.env.LETS_CODE_SUBAGENT_MAX_DEPTH, team: process.env.LETS_CODE_EXPERT_TEAM })); }
     out({ type: "response", id: c.id, command: "prompt", success: true, data: { disposition: "started" } });
     out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Result for: " + c.message.replace(/^Task: /, "") }], usage: { input: 10, output: 5 }, stopReason: "stop" } });
     out({ type: "agent_settled" });
@@ -285,23 +285,24 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 }
 
 
-// the tester expert as lets-code writes it (tester_write_agent): its fields parse,
+// the ui-tester expert as lets-code writes it (ui_tester_write_agent): its fields parse,
 // its brief has the two required fields, it is listed only on Linux and macOS,
-// and it is not set up until tester/setup has run
+// and it is not set up until ui-tester/setup has run
 {
 	const sub = await import(pathToFileURL(join(ext, "subagents.ts")).href);
 	const lc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lets-code"), "utf8");
-	const from = lc.indexOf("\ntester_write_agent() {");
+	const from = lc.indexOf("\nui_tester_write_agent() {");
 	const body = lc.slice(lc.indexOf("<<'MD'\n", from) + 7, lc.indexOf("\nMD\n", from) + 1);
-	const a = sub.parseAgentFile(body, join(agentDir, "agents", "tester.md"), "user", undefined, false, true);
-	t("tester: an expert", [a?.name, !!a?.expert], ["tester", true]);
-	t("tester: brief", a?.expert?.brief.map((f) => `${f.name}${f.required ? "*" : ""}`), ["target*", "platform", "goal*", "how_to_run", "scope", "constraints"]);
-	t("tester: no agent dir of its own; its prompt", [a?.agentDir, a?.appendPrompt, a?.timeout], [undefined, join(agentDir, "tester", "prompt.md"), 3600]);
-	t("tester: setup under the agent dir", a?.expert?.setup, join(agentDir, "tester", "setup"));
-	t("tester: not set up before its setup", a?.expert?.ready, false);
-	t("tester: Linux and macOS only (not Termux: process.platform android)", [sub.platformOk(a?.expert?.platform), a?.expert?.platform.split(/[,\s]+/).includes("android")], [["linux", "darwin"].includes(process.platform), false]);
-	t("tester: use_for whole in the line", a?.expert?.useFor, body.match(/^use_for: (.*)$/m)[1]);
-	t("tester: pi's tools", a?.tools, ["bash", "read", "edit", "write", "grep", "find", "ls"]);
+	const a = sub.parseAgentFile(body, join(agentDir, "agents", "ui-tester.md"), "user", undefined, false, true);
+	t("ui-tester: an expert", [a?.name, !!a?.expert], ["ui-tester", true]);
+	t("ui-tester: brief", a?.expert?.brief.map((f) => `${f.name}${f.required ? "*" : ""}`), ["target*", "platform", "goal*", "how_to_run", "scope", "constraints"]);
+	t("ui-tester: no agent dir of its own; its prompt", [a?.agentDir, a?.appendPrompt, a?.timeout], [undefined, join(agentDir, "ui-tester", "prompt.md"), 3600]);
+	t("ui-tester: setup under the agent dir", a?.expert?.setup, join(agentDir, "ui-tester", "setup"));
+	t("ui-tester: not set up before its setup", a?.expert?.ready, false);
+	t("ui-tester: Linux and macOS only (not Termux: process.platform android)", [sub.platformOk(a?.expert?.platform), a?.expert?.platform.split(/[,\s]+/).includes("android")], [["linux", "darwin"].includes(process.platform), false]);
+	t("ui-tester: use_for whole in the line", a?.expert?.useFor, body.match(/^use_for: (.*)$/m)[1]);
+	t("ui-tester: pi's tools", a?.tools, ["bash", "read", "edit", "write", "grep", "find", "ls"]);
+	t("ui-tester: the tester's specialist, not in the main session's line", a?.expert?.routed, false);
 }
 
 // the acceptance judge as lets-code writes it (judge_write_agent): ready with
@@ -344,7 +345,10 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 		"expert-reviewer": { tools: ["read", "bash", "grep", "find", "ls"], role: "reviewer", timeout: 1800, brief: ["diff*", "criteria", "context", "previous_findings", "how_to_run", "constraints"] },
 		"design-reviewer": { tools: ["read", "bash", "grep", "find", "ls"], role: "reviewer", timeout: 1800, brief: ["diff*", "context", "conventions", "previous_findings", "constraints"] },
 		researcher: { tools: ["read", "bash", "grep", "find", "ls"], role: "researcher", timeout: 2700, brief: ["question*", "scope", "criteria", "known", "state"] },
+		tester: { tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "expert"], role: "tester", timeout: 3600, brief: ["target*", "goal*", "criteria", "how_to_run", "scope", "constraints", "report"] },
+		"api-tester": { tools: ["read", "bash", "edit", "write", "grep", "find", "ls"], role: "developer", timeout: 3600, brief: ["target*", "goal*", "spec", "auth", "how_to_run", "scope", "constraints"] },
 	};
+	const routedNot = ["developer", "api-tester"];
 	for (const [name, w] of Object.entries(want)) {
 		const body = agentOf(name);
 		const a = sub.parseAgentFile(body, join(agentDir, "agents", `${name}.md`), "user", undefined, false, true);
@@ -354,14 +358,15 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 		if (name === "researcher") t(`${name}: its browser setup gates it, every platform`, [a?.expert?.ready, String(a?.expert?.setup).endsWith("researcher/setup"), a?.expert?.platform], [false, true, undefined]);
 		else t(`${name}: ready, no setup, every platform`, [a?.expert?.ready, a?.expert?.setup, a?.expert?.platform], [true, undefined, undefined]);
 		t(`${name}: use_for kept`, a?.expert?.useFor, body.match(/^use_for: (.*)$/m)[1]);
-		t(`${name}: in the always-on line`, a?.expert?.routed, name !== "developer");
-		t(`${name}: in the line built from it`, mod.snippet([a]).includes(`${name} (`), name !== "developer");
+		t(`${name}: in the always-on line`, a?.expert?.routed, !routedNot.includes(name));
+		t(`${name}: in the line built from it`, mod.snippet([a]).includes(`${name} (`), !routedNot.includes(name));
+		if (name === "tester") t("tester: its team", a?.team, ["ui-tester", "api-tester"]);
 	}
 	// every built-in expert's entry, from the agent files lets-code writes
 	const builtins = [...lc.matchAll(/\n---\n(?:#[^\n]*\n)*name: ([\w-]+)\n[\s\S]*?\n---\n/g)].map((m) => m[0]).filter((fm) => /\nexpert: true\n/.test(fm))
 		.map((fm) => ({ name: fm.match(/\nname: ([\w-]+)\n/)[1], platform: (fm.match(/\nplatform: (.*)\n/) || [])[1], expert: { useFor: (fm.match(/\nuse_for: (.*)\n/) || [])[1], keywords: (fm.match(/\nkeywords: (.*)\n/) || [])[1], routed: !/\nroute: false\n/.test(fm) } }));
 	const names = builtins.map((b) => b.name).sort();
-	t("built-ins found", names, ["acceptance-judge", "design-reviewer", "developer", "expert-builder", "expert-reviewer", "researcher", "reverse-engineer", "software-factory", "termux-device", "tester"]);
+	t("built-ins found", names, ["acceptance-judge", "api-tester", "design-reviewer", "developer", "expert-builder", "expert-reviewer", "researcher", "reverse-engineer", "software-factory", "termux-device", "tester", "ui-tester"]);
 	const linux = builtins.filter((b) => b.platform !== "termux"), termux = builtins.filter((b) => !b.platform || b.platform === "termux");
 	for (const [where, set] of [["Linux", linux], ["Termux", termux]]) {
 		const line = mod.snippet(set);
@@ -393,6 +398,31 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	has("runner: a brief without its ticket runs nothing", out(await run(tool, { action: "run", name: "sf", brief: {} }, ctx([true]))), "lacks ticket");
 	t("runner: nothing more ran", [fac.got.length, calls().length], [1, 0]);
 	rmSync(join(agentDir, "agents", "sf.md")); rmSync(join(ext, "factory.ts"));
+}
+
+// --- a team: a lead starts its specialists itself, one level down, and they start nothing
+{
+	A("spec.md", "---\nname: spec\ndescription: a specialist\nexpert: true\nroute: false\nuse_for: special checks\nbrief:\n  - goal (required): what to check\n---\nYou check.\n");
+	A("lead.md", "---\nname: lead\ndescription: a test lead\ntools: read, bash, expert\nteam: spec\nexpert: true\nuse_for: leading checks\nbrief:\n  - goal (required): what to check\n---\nYou lead.\n");
+	const sub = await import(pathToFileURL(join(ext, "subagents.ts")).href);
+	const lead = sub.parseAgentFile(readFileSync(join(agentDir, "agents", "lead.md"), "utf8"), join(agentDir, "agents", "lead.md"), "user", undefined, false, true);
+	t("team: parsed from the agent file", lead?.team, ["spec"]);
+	const { tool } = await load();
+	t("team: a specialist that is not routed stays out of the main session's line", tool.promptSnippet.includes("spec"), false);
+	clearCalls();
+	await run(tool, { action: "run", name: "lead", brief: { goal: "check it" } }, ctx([true]));
+	const lc = calls().find((x) => x.task.includes("check it"));
+	t("team: the lead runs one level down, with one more level and its team named", [lc?.depth, lc?.max, lc?.team], ["1", "2", "spec"]);
+	clearCalls();
+	await run(tool, { action: "run", name: "helper", brief: { target: "/x", question: "y" } }, ctx([true]));
+	t("team: an expert without a team gets neither", [calls()[0]?.max, calls()[0]?.team], [undefined, undefined]);
+	const child = await load({ LETS_CODE_SUBAGENT_DEPTH: "1", LETS_CODE_SUBAGENT_MAX_DEPTH: "2", LETS_CODE_EXPERT_TEAM: "spec" });
+	t("team: the lead's expert tool lists its team only, the specialist included", [!!child.tool, child.tool?.promptSnippet.includes("spec"), child.tool?.promptSnippet.includes("helper")], [true, true, false]);
+	const other = await load({ LETS_CODE_SUBAGENT_DEPTH: "1", LETS_CODE_SUBAGENT_MAX_DEPTH: "2", LETS_CODE_EXPERT_TEAM: "spec" });
+	has("team: a name outside the team is unknown there", out(await run(other.tool, { action: "run", name: "helper", brief: { target: "/x", question: "y" } }, ctx([true]))), 'Unknown expert "helper"');
+	t("team: its specialists start nothing (depth 2 of 2)", (await load({ LETS_CODE_SUBAGENT_DEPTH: "2", LETS_CODE_SUBAGENT_MAX_DEPTH: "2", LETS_CODE_EXPERT_TEAM: "spec" })).tool, null);
+	t("team: a project's agent cannot raise its depth", sub.parseAgentFile(readFileSync(join(agentDir, "agents", "lead.md"), "utf8"), join(agentDir, "agents", "lead.md"), "project", undefined, false, true)?.source, "project");
+	rmSync(join(agentDir, "agents", "spec.md")); rmSync(join(agentDir, "agents", "lead.md"));
 }
 
 console.log(`\n${n} checks, ${fail ? "FAILURES" : "all passed"}`);

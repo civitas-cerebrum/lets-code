@@ -36,7 +36,54 @@ check "unknown preset exits 1" "${rc}" 1
 check "unknown preset names the onboarding" "$(printf '%s\n' "${out}" | grep -c 'lets-code setup preset nothere')" 1
 check "presets: none yet" "$(bash "${lc}" presets 2>&1)" "No presets yet. Add one with:  lets-code setup preset <name>"
 
+# a bad value is reported as the bad value, before any endpoint is probed:
+# the endpoint here is dead, and "no endpoint reachable" must not win
+dead="LETS_CODE_ENDPOINTS=http://127.0.0.1:1"
+bad() {  # bad <label> <expected words> [env=val ...] -- [flags...]
+    local label="$1" want="$2"; shift 2; local envs=()
+    while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
+    out="$(env "${dead}" ${envs[@]+"${envs[@]}"} bash "${lc}" "$@" </dev/null 2>&1)"; rc=$?
+    check "${label}: exit 1" "${rc}" 1
+    check "${label}: names the value" "$(printf '%s\n' "${out}" | grep -c "${want}")" 1
+    check "${label}: no probe" "$(printf '%s\n' "${out}" | grep -c 'no endpoint reachable')" 0
+}
+bad "--thinking-level bogus" "got: bogus" -- --thinking-level bogus
+bad "--thinking-level adaptive:tall" "adaptive:tall" -- --thinking-level adaptive:tall
+bad "LETS_CODE_THINKING=auto:nope" "auto:nope" LETS_CODE_THINKING=auto:nope --
+bad "LETS_CODE_VISION=maybe" "got: maybe" LETS_CODE_VISION=maybe --
+bad "LETS_CODE_REASONING=maybe" "got: maybe" LETS_CODE_REASONING=maybe --
+bad "--api grpc" "api dialect: grpc" -- --api grpc
+bad "LETS_CODE_API=grpc" "api dialect: grpc" LETS_CODE_API=grpc --
+
+# a typo of a lets-code flag is an error that names the flag; anything
+# else passes to pi (and reaches "no configuration" here, since none is)
+typo() {  # typo <flag> <meant>
+    out="$(bash "${lc}" "$1" </dev/null 2>&1)"; rc=$?
+    check "$1: exit 1" "${rc}" 1
+    check "$1: did you mean $2" "$(printf '%s\n' "${out}" | grep -c "did you mean $2?")" 1
+}
+typo --no-sandbx --no-sandbox
+typo --no-expert --no-experts
+typo --thinking-levle --thinking-level
+typo --claud --claude
+typo --orchestrator=1 --orchestrator
+passes() {  # passes <flag...>: pi's own flag, or one far from any of ours
+    out="$(bash "${lc}" "$@" </dev/null 2>&1)"
+    check "$*: passes to pi" "$(printf '%s\n' "${out}" | grep -c 'did you mean')|$(printf '%s\n' "${out}" | grep -c 'lets-code setup')" "0|1"
+}
+passes --no-session
+passes --models claude
+passes --mode json
+passes --thinking high
+passes --whatever
+passes -- --claud
+mkdir -p "${d}/config/lets-code/presets"; echo 'MODEL="m"' > "${d}/config/lets-code/presets/office"
+typo --offic --office
+rm -r "${d}/config/lets-code/presets"
+
 check "update bogus exits 1" "$(bash "${lc}" update bogus >/dev/null 2>&1; echo $?)" 1
+check "--help does not list --harness (a flag that can only fail)" "$(printf '%s\n' "${help}" | grep -c -- '--harness')" 0
 check "roadmap harness exits 1" "$(bash "${lc}" --harness codex </dev/null >/dev/null 2>&1; echo $?)" 1
+check "roadmap harness says so" "$(bash "${lc}" --harness codex </dev/null 2>&1 | grep -c 'roadmap item')" 1
 check "mandate alone exits 1" "$(bash "${lc}" mandate >/dev/null 2>&1; echo $?)" 1
 exit "${fail}"

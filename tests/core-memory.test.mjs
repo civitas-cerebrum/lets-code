@@ -4,9 +4,12 @@
 // dedupe, forget, atomic 600 files, a corrupt line, the rendered file read
 // back, the archive by age), search, the always-on line and the headlines
 // under their budgets, the tool's actions and the secret refusal, the hint
-// on a tool result, the /memory command, the harness writers (a factory
-// run, a subagent run, the session pointer) and that a child session writes
-// no pointers. With a fake pi, in a scratch agent dir. Needs Node >= 22.6.
+// on a tool result, the /memories command (the list in a scripted
+// selector: rows, paging, the filter, the entry view and its actions, the
+// /memory alias), the harness writers (a factory run, a subagent run, the
+// session pointer), a worktree sharing its main checkout's memory, and that a
+// child session writes no pointers and starts with no headlines. With a fake
+// pi, in a scratch agent dir. Needs Node >= 22.6.
 //
 //   tests/core-memory.test.mjs [path/to/lets-code/core-memory.ts]
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, realpathSync, rmSync, existsSync, statSync, utimesSync, symlinkSync } from "node:fs";
@@ -49,13 +52,18 @@ async function load(env = {}, on = true) {
 	const f = join(ext, `core-memory-${loads++}.ts`); writeFileSync(f, src);
 	const mod = await import(pathToFileURL(f).href);
 	mod.reset?.();
-	const handlers = {}, commands = {}; let tool = null; const notices = [];
+	const handlers = {}, commands = {}; let tool = null; const notices = [], selects = [];
 	const pi = { on(ev, h) { handlers[ev] = h; return () => {}; }, registerTool(d) { tool = d; }, registerCommand(name, o) { commands[name] = o; } };
 	mod.default(pi);
-	const ctx = (cwd, o = {}) => ({ cwd, hasUI: o.ui ?? true, ui: { notify: (m, type) => notices.push([m, type]), editor: async () => o.edited, select: async () => undefined }, sessionManager: { getSessionFile: () => o.file, getEntries: () => o.entries ?? [] }, ...o.extra });
-	return { mod, handlers, commands, tool, notices, ctx,
+	// the selector is scripted: o.pick holds one answer a dialog (an option's index, its text, or a function of the options); none left means esc
+	const ctx = (cwd, o = {}) => ({ cwd, hasUI: o.ui ?? true, ui: {
+		notify: (m, type) => notices.push([m, type]), editor: async () => o.edited,
+		select: async (title, options) => { selects.push({ title, options }); const p = o.pick?.shift(); const v = typeof p === "function" ? p(options) : typeof p === "number" ? options[p] : p; return v !== undefined && options.includes(v) ? v : undefined; },
+		confirm: async (title, message) => { selects.push({ title, options: ["Yes", "No"], message }); return o.confirm === true; } },
+		sessionManager: { getSessionFile: () => o.file, getEntries: () => o.entries ?? [] }, ...o.extra });
+	return { mod, handlers, commands, tool, notices, selects, ctx,
 		run: (cwd, params, o) => tool.execute("id", params, undefined, undefined, ctx(cwd, o)),
-		cmd: (cwd, args, o) => commands.memory.handler(args, ctx(cwd, o)) };
+		cmd: (cwd, args, o) => commands.memories.handler(args, ctx(cwd, o)) };
 }
 const repo = (name = "proj") => { const d = join(work, name); mkdirSync(join(d, ".git"), { recursive: true }); mkdirSync(join(d, "src"), { recursive: true }); writeFileSync(join(d, "src", "a.ts"), "line1\nline2\nline3\n"); return d; };
 const textOf = (r) => r.content.map((c) => c.text).join("\n");
@@ -69,6 +77,17 @@ const textOf = (r) => r.content.map((c) => c.text).join("\n");
 	const r = repo();
 	t("project root: the nearest .git up from cwd", mod.projectRoot(join(r, "src")), r);
 	t("project root: no .git means the folder itself", mod.projectRoot(join(work, "agent")), join(work, "agent"));
+	// a real worktree: its .git file names the main repository, which is the project
+	const main = join(work, "main"); mkdirSync(main, { recursive: true });
+	const git = (...a) => execFileSync("git", a, { cwd: main, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", HOME: work } });
+	git("init", "-q"); writeFileSync(join(main, "a.txt"), "a\n"); git("add", "a.txt"); git("commit", "-q", "-m", "a");
+	const wt = join(work, "wt-main"); git("worktree", "add", "-q", wt, "-b", "wt");
+	mkdirSync(join(wt, "src"), { recursive: true });
+	t("worktree: its .git is a file", statSync(join(wt, ".git")).isFile(), true);
+	t("worktree: the project is the main checkout, from inside the tree too", [mod.projectRoot(wt), mod.projectRoot(join(wt, "src"))], [main, main]);
+	t("worktree: one store with the main checkout", mod.projectDir(mod.projectRoot(wt)) === mod.projectDir(main), true);
+	t("worktree: a path under it is read as the main checkout's", [mod.normRef("src/a.ts:3", mod.projectRoot(wt)), mod.normRef(join(wt, "src", "a.ts"), main)], [`${main}/src/a.ts:3`, `${main}/src/a.ts`]);
+	t("worktree: a submodule-like gitdir is not a worktree", (() => { const d = join(work, "sub"); mkdirSync(d, { recursive: true }); writeFileSync(join(d, ".git"), "gitdir: ../.git/modules/sub\n"); return mod.projectRoot(d); })(), join(work, "sub"));
 	t("project dir: name and a hash, under the agent dir", mod.projectDir(r).startsWith(join(agentDir, "core-memory", "projects", "proj-")) && /-[0-9a-f]{8}$/.test(mod.projectDir(r)), true);
 	t("two projects of one name differ", mod.projectDir(r) === mod.projectDir(join(work, "x", "proj")), false);
 	t("ref: a relative path becomes absolute, the line kept", mod.normRef("src/a.ts:12", r), `${r}/src/a.ts:12`);
@@ -215,29 +234,91 @@ const textOf = (r) => r.content.map((c) => c.text).join("\n");
 	t("forget: by id, with or without #", [res.isError, st.project.entries.some((e) => e.id === id)], [false, false]);
 	t("forget: unknown", (await h.run(r, { action: "forget", ref: "nope" })).isError, true);
 	t("forget: no ref", (await h.run(r, { action: "forget" })).isError, true);
-	// the command
-	h.notices.length = 0;
+	// the command: without a UI the old text, with one the list in pi's selector
+	const strip = (x) => String(x).replace(/\x1b\[[0-9;]*m/g, "");
+	const tilde = (x) => (x.startsWith(homedir() + "/") ? `~${x.slice(homedir().length)}` : x);
+	const D = h.mod.day(Date.now());
+	const logs = [], cl = console.log; console.log = (m) => logs.push(String(m));
+	await h.cmd(r, "", { ui: false }); await h.cmd(r, "words", { ui: false }); await h.cmd(r, "global", { ui: false });
+	console.log = cl;
+	has("/memories without a UI: the counts and the file as text", logs[0], `1 entry, 1 archived; 1 global\n`);
+	has("  the token cost", logs[0], "always on: ~");
+	has("  the newest entries", logs[0], "newest:\n- ");
+	has("/memories <words> without a UI: searches", logs[1], `1 match "words":`);
+	has("/memories global without a UI", logs[2], "a global preference");
+	t("alias: /memory runs the same handler, undocumented", [h.commands.memory.handler === h.commands.memories.handler, h.commands.memory.description], [true, undefined]);
+	Object.defineProperty(process.stdout, "columns", { value: 100, configurable: true, writable: true });
+	h.notices.length = 0; h.selects.length = 0;
 	await h.cmd(r, "");
-	has("/memory: counts and the file", h.notices[0][0], `1 entries, 1 archived; ${st.project.md}`);
-	has("/memory: the token cost", h.notices[0][0], "always on: ~");
-	await h.cmd(r, "show words");
-	has("/memory show <query>: searches", h.notices[1][0], `1 match "words"`);
+	t("/memories: one selector, esc closes it", [h.selects.length, h.notices.length], [1, 0]);
+	let L = h.selects[0];
+	has("list: the status line has the counts", L.title, `core memory (${tilde(r)}): 1 entry, 1 archived; 1 global`);
+	has("list: the files", L.title, `${tilde(st.project.md)} · ${tilde(st.global.md)}`);
+	has("list: the token cost", L.title, "always on: ~");
+	t("list: a row an entry, the project first, a divider, then the global", L.options.map(strip), [`${D} ${"fact".padEnd(10)} the user's words here`, `── global ${"─".repeat(85)}`, `${D} preference a global preference`]);
+	await h.cmd(r, "", { pick: [0, "back"] });
+	t("entry: a row opens it; back returns to the list; esc closes", h.selects.length, 4);
+	let E = h.selects[2];
+	has("entry: id, kind, date and who wrote it", E.title, `#${st.project.entries[0].id} · fact · ${D} · by you\n\nthe user's words here`);
+	t("entry: without pointers the actions only", E.options, ["edit", "forget", "back"]);
+	await h.run(r, { action: "remember", gist: "the deploy script lives in scripts/deploy.sh", refs: ["src/a.ts:2", "run:r9"], by: "user" });
+	h.selects.length = 0; h.notices.length = 0;
+	await h.cmd(r, "", { pick: [0, "open src/a.ts:2", "open run:r9", "edit"], edited: "the deploy script lives in scripts/deploy.sh (run from the repo root)" });
+	L = h.selects[0];
+	t("list: newest first, the pointer summary dim at the end", strip(L.options[0]), `${D} ${"fact".padEnd(10)} ${"the deploy script lives in scripts/deploy.sh".padEnd(61)}  file · run`);
+	t("list: the summary column is dimmed, not coloured", L.options[0].includes("\x1b[2mfile · run"), true);
+	E = h.selects[1];
+	has("entry: every pointer on its own line", E.title, "pointers:\n  src/a.ts:2\n  run:r9");
+	t("entry: open per pointer, then the actions", E.options, ["open src/a.ts:2", "open run:r9", "edit", "forget", "back"]);
+	has("entry: open a file shows the lines around it", h.notices[0][0], "2: line2");
+	has("entry: open a run shows what the tool's open returns", h.notices[1][0], "No run r9");
+	t("entry: edit takes the editor's gist", [h.notices[2][0].startsWith("core memory: updated - "), st.project.entries.find((e) => e.id === E.title.slice(1, 7))?.gist.endsWith("(run from the repo root)")], [true, true]);
+	t("entry: stays open after an action; esc backs out to the list", h.selects.length, 6);
+	await h.cmd(r, "", { pick: [0, "forget", "forget"], confirm: false });
+	t("entry: forget asks; no keeps it", [h.selects.filter((x) => x.title.startsWith("Forget #")).length, st.project.entries.length], [2, 2]);
+	h.selects.length = 0; h.notices.length = 0;
+	await h.cmd(r, "", { pick: [0, "forget"], confirm: true });
+	t("entry: forget, confirmed, drops it and goes back to the list", [h.notices[0][0].startsWith("forgot - "), st.project.entries.length, h.selects.at(-1).options.length], [true, 1, 3]);
+	await h.cmd(r, "edit", { edited: st.project.render() + "- fact the deploy script lives in scripts/deploy.sh\n" });
+	// the filter
+	h.selects.length = 0; h.notices.length = 0;
+	await h.cmd(r, "deploy script");
+	has("/memories <words>: the filter line", h.selects[0].title, `filter "deploy script": 1 entry matches`);
+	t("  only the matches, no divider when the global store has none", h.selects[0].options.length, 1);
+	await h.cmd(r, "show preference");
+	t("/memories show <words>: the same filter; a global-only match starts with the divider", h.selects[1].options.map((o) => strip(o).slice(0, 9)), ["── global", D.slice(0, 9)]);
+	await h.cmd(r, "nothing-like-this");
+	t("/memories: nothing matches is a warning, no selector", [h.selects.length, h.notices[0]], [2, [`core memory (${tilde(r)}): 2 entries, 1 archived; 1 global\nnothing matches "nothing-like-this"`, "warning"]]);
 	await h.cmd(r, "global");
-	has("/memory global", h.notices[2][0], "a global preference");
-	await h.cmd(r, "edit", { edited: st.project.render() + "- fact added in the editor\n" });
-	t("/memory edit: the editor's text is read back", [h.notices[3][0], st.project.entries.some((e) => e.gist === "added in the editor" || e.gist === "fact added in the editor")], ["core memory: 1 kept, 1 added, 0 removed", true]);
-	await h.cmd(r, "edit", { edited: undefined });
-	t("/memory edit: cancelled", h.notices[4][0], "unchanged");
-	await h.cmd(r, "edit", { ui: false });
-	t("/memory edit: without a UI", h.notices.length, 5);
+	has("/memories global: the global store alone", h.selects[2].title, "core memory (global): 1 entry\n");
+	t("  no divider", h.selects[2].options.map(strip), [`${D} preference a global preference`]);
+	// paging: a window of 15 rows and "N more" rows that move it
+	for (let i = 0; i < 20; i++) st.project.upsert({ kind: "work", gist: `entry ${i} ${"x".repeat(i === 3 ? 300 : 40)}`, refs: [`src/f${i}.ts`, `src/g${i}.ts`] }, Date.now() - (i + 1) * 1000);
+	st.project.save();
+	h.selects.length = 0;
+	await h.cmd(r, "", { pick: [(o) => o.at(-1), 0] });
+	t("paging: 15 rows and a more row below", [h.selects[0].options.length, strip(h.selects[0].options.at(-1))], [16, "↓ 9 more"]);
+	t("paging: the more row moves the window to the end, a more row above it", [strip(h.selects[1].options[0]), h.selects[1].options.length], ["↑ 9 more", 16]);
+	t("paging: the way back", strip(h.selects[2].options.at(-1)), "↓ 9 more");
+	t("rows: every row fits 100 columns (the selector's marker and padding aside)", h.selects.flatMap((x) => x.options).every((o) => [...strip(o)].length <= 95), true);
+	t("rows: a long gist is cut", h.selects[0].options.some((o) => strip(o).includes("xxxxx…")), true);
+	Object.defineProperty(process.stdout, "columns", { value: 70, configurable: true, writable: true });
+	h.selects.length = 0;
+	await h.cmd(r, "");
+	t("rows: at 70 columns every row fits, the date is month and day", [h.selects[0].options.every((o) => [...strip(o)].length <= 65), strip(h.selects[0].options[0]).slice(0, 5)], [true, D.slice(5)]);
+	delete process.stdout.columns;
 	await h.cmd(r, `forget ${st.project.entries[0].id}`);
-	has("/memory forget", h.notices[5][0], "forgot - ");
+	has("/memories forget", h.notices.at(-1)[0], "forgot - ");
+	await h.cmd(r, "forget");
+	has("/memories forget without an id: usage", h.notices.at(-1)[0], "Usage: /memories");
 	await h.cmd(r, "archive");
-	has("/memory archive: nothing old", h.notices[6][0], "nothing older than");
+	has("/memories archive: nothing old", h.notices.at(-1)[0], "nothing older than");
 	await h.cmd(r, "archive x");
-	has("/memory archive: bad days", h.notices[7][0], "Usage:");
-	await h.cmd(r, "what");
-	has("/memory: usage", h.notices[8][0], "Usage: /memory");
+	has("/memories archive: bad days", h.notices.at(-1)[0], "Usage:");
+	await h.cmd(r, "edit", { edited: undefined });
+	t("/memories edit: cancelled", h.notices.at(-1)[0], "unchanged");
+	logs.length = 0; console.log = (m) => logs.push(String(m)); await h.cmd(r, "edit", { ui: false }); console.log = cl;
+	has("/memories edit: without a UI names the file", logs[0], "the editor needs a UI");
 	// a corrupt line is reported at the next start, once
 	writeFileSync(st.project.file, readFileSync(st.project.file, "utf8") + "garbage\n");
 	h.notices.length = 0; await h.handlers.session_start({}, h.ctx(r));
@@ -314,6 +395,10 @@ const textOf = (r) => r.content.map((c) => c.text).join("\n");
 	t("child: no session pointer", [h.mod.noteSession(h.ctx(r, { file, entries: [] })), readFileSync(h.mod.stores(r).project.file, "utf8") === before], [undefined, true]);
 	t("child: no factory or run entries either", [h.mod.noteFactoryRun({ id: "z", status: "done", repo: r, entries: [], ticket: "x" }), h.mod.noteSubagentRun({ id: "z", status: "done", cwd: r })], [undefined, undefined]);
 	has("child: search still works", textOf(await h.run(r, { action: "search", query: "factory" })), "factory:k3f");
+	const h4 = await load({ LETS_CODE_SUBAGENT_DEPTH: "1", LETS_CODE_CORE_MEMORY_HEADLINES: "3" });
+	await h4.handlers.session_start({}, h4.ctx(r));
+	const s4 = { systemPromptOptions: { sections: {} } }; await h4.handlers.before_agent_start(s4);
+	t("child: the line only, no headlines, whatever the setting", [h4.mod.HEADLINES, s4.systemPromptOptions.sections.lets_code_core_memory.split("\n").length], [0, 1]);
 }
 
 console.log(`${n} checks, ${fail ? "FAILURES" : "all passed"}`);

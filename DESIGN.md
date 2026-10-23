@@ -771,7 +771,10 @@ in place and back.
 
 **Core memory.** A memory the harness keeps so a session can find what
 earlier ones did without carrying it: one store per project (the nearest
-`.git` up from cwd, so a worktree is its own project; else cwd) and one
+`.git` up from cwd; a worktree's `.git` is a file naming the main
+repository, read without a subprocess, so a factory run's worktree and
+the user's checkout share one memory and the worktree's paths are read
+as the main checkout's; else cwd) and one
 global, under `~/.pi/agent/core-memory/`, next to pi's sessions, because
 entries point at session files and run records that live there. An entry
 is one dated line with a kind, a gist of at most 200 characters and
@@ -784,7 +787,8 @@ the id, a Markdown line only displays it). Nothing of the store is in the
 system prompt: a first design put a budgeted live file there, and was
 replaced by one line (the memory exists, how many entries, the last date,
 the tool searches it) plus the three newest headlines within 150 tokens,
-computed once a session so the prompt stays cacheable. Measured on Claude
+computed once a session so the prompt stays cacheable; a child session
+gets the line only. Measured on Claude
 through the proxy (one-shot sessions, the usage counts of the first
 request): 5048 input tokens without the feature, 5538 with the line and
 the tool, 5664 with three headlines, so 490 for what is always there and
@@ -796,7 +800,14 @@ the `memory` tool: `search` matches every term against the gist, the
 pointers, the kind, a date prefix or the id (no scoring to tune; the store
 is hundreds of lines, not thousands); `open` follows a pointer (a file
 around its line, `report()` of a factory ledger, a run record's reply, a
-session's first message and last reply). The one automatic path is a
+session's first message and last reply). The user's view is `/memories`,
+a list in pi's selector, the dialog every other feature uses: it draws one
+option a line and knows no paging or truncation, so the module cuts each
+row (date, kind, gist, a pointer summary) to the terminal width and pages
+by fifteen with "N more" rows that move the window; a row opens the entry
+with its pointers and the actions (open a pointer, edit the gist, forget),
+and esc backs out one level, so the whole thing is two loops over
+`ctx.ui.select` and no key handling of its own. The one automatic path is a
 lookup in the index after `read`, `edit`, `write`, `grep`, `find`, `ls`
 (their `path`) and an `expert` call that resumes a factory run: a hit adds
 one trailing line to the tool result naming the count, not the entries.

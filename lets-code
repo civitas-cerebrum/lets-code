@@ -46,8 +46,6 @@
 #                                auto[:<l>] is dynamic thinking: off, raised to
 #                                the ceiling <l> (default high) in short bursts
 #                                when the output shows pi struggling
-#   lets-code --harness <name>   pi (default; only v1 harness) |
-#                                deepseek | codex (roadmap)
 #   lets-code --insecure ...     skip TLS verification (self-signed certs)
 #   lets-code --no-mem-guard     launch without the memory guard
 #   lets-code --no-git-guard     launch without the git guard
@@ -80,7 +78,7 @@
 #   lets-code --sandbox | --no-sandbox       the OS sandbox on/off
 #   lets-code --core-memory | --no-core-memory   core memory on/off (default on): a
 #                                memory per project and a global one that the
-#                                agent searches on demand and adds to (/memory)
+#                                agent searches on demand and adds to (/memories)
 #   lets-code --verbose ...      show endpoint probing
 #
 # What it does at launch:
@@ -160,9 +158,6 @@
 #      Code token from `claude setup-token`) points a machine at another
 #      one's proxy instead (see claude-remote), so it needs no Claude Code of
 #      its own and starts nothing; its requests run on that token.
-#
-# Harness: pi is the default (and only v1) harness; --harness deepseek|codex
-# are roadmap items, not yet available.
 #
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
 # Presets: ~/.config/lets-code/presets/<name>   (`lets-code setup preset <name>`)
@@ -4713,6 +4708,52 @@ harness_gate() {  # harness_gate <name>
     esac
 }
 
+# thinking_check <level>: the forms a thinking level takes (off..max,
+# adaptive[:<ceiling>], auto[:<level>]); says what is wrong with any other.
+thinking_check() {
+    case "$1" in
+        off|minimal|low|medium|high|xhigh|max|adaptive|auto) return 0 ;;
+        adaptive:*) case "${1#adaptive:}" in low|medium|high|xhigh|max) return 0 ;; esac
+                    log_error "adaptive thinking needs a ceiling: adaptive:low|medium|high|xhigh|max (got: $1)"; return 1 ;;
+        auto:*)     case "${1#auto:}" in minimal|low|medium|high|xhigh|max) return 0 ;; esac
+                    log_error "auto thinking needs a level to raise to: auto:minimal|low|medium|high|xhigh|max (got: $1)"; return 1 ;;
+    esac
+    log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max|adaptive[:<ceiling>]|auto[:<level>] (got: $1) — set it via --thinking-level, LETS_CODE_THINKING, or THINKING= in ${CONFIG_FILE} (if present)."
+    return 1
+}
+
+# flag_check <--flag>: a long flag lets-code does not know passes to pi,
+# unless it is one edit away from a lets-code flag or a saved preset's:
+# that is a typo, and the error names the flag meant rather than letting
+# pi refuse it (or, for a --no-* flag, take it as a message). pi's own
+# flags are never questioned, so --models (an edit from --model) passes.
+LC_FLAGS="--url --model --context --output-cap --api --vision --no-vision --thinking-level --insecure --no-mem-guard --no-git-guard --no-agent-guard --grounding --no-grounding --no-session-tag --metrics --no-metrics --metrics-log --mandate --orchestrator --no-mandate --subagents --no-subagents --experts --no-experts --core-memory --no-core-memory --claude-code --no-claude-code --sandbox --no-sandbox --verbose --debug --help --version --preset --claude --harness"
+PI_FLAGS="--provider --model --api-key --system-prompt --append-system-prompt --mode --print --continue --resume --session --session-id --fork --session-dir --no-session --name --models --no-tools --no-builtin-tools --tools --exclude-tools --thinking --extension --no-extensions --skill --no-skills --prompt-template --no-prompt-templates --theme --use-theme --no-themes --no-context-files --export --list-models --verbose --tui-mode --approve --no-approve --offline --help --version"
+flag_check() {
+    local f="${1%%=*}" near=""
+    case " ${PI_FLAGS} " in *" ${f} "*) return 0 ;; esac
+    # a value given to a flag that takes none (--orchestrator=1): the flag itself
+    case " ${LC_FLAGS} " in *" ${f} "*) log_error "unknown flag $1: did you mean ${f}? (it takes no value)"; return 1 ;; esac
+    command -v python3 >/dev/null 2>&1 || return 0
+    # shellcheck disable=SC2046
+    near="$(python3 -c '
+import sys
+f = sys.argv[1]
+def near(a, b):   # one edit: a character changed, dropped, added, or two swapped
+    if abs(len(a) - len(b)) > 1: return False
+    if len(a) == len(b):
+        d = [i for i in range(len(a)) if a[i] != b[i]]
+        return len(d) == 1 or (len(d) == 2 and d[1] == d[0] + 1 and a[d[0]] == b[d[1]] and a[d[1]] == b[d[0]])
+    s, l = (a, b) if len(a) < len(b) else (b, a)
+    return any(l[:i] + l[i + 1:] == s for i in range(len(l)))
+for k in sys.argv[2:]:
+    if k != f and near(f, k): print(k); break
+' "${f}" ${LC_FLAGS} $(preset_names | sed 's/\([^ ][^ ]*\)/--\1/g') 2>/dev/null)" || near=""
+    [ -n "${near}" ] || return 0
+    log_error "unknown flag $1: did you mean ${near}? (a flag lets-code does not know is passed to pi; see pi --help)"
+    return 1
+}
+
 # ------------------------------------------------------ pi presence + install
 # Detects a missing pi and offers to install it (confirm, then install).
 # Never blocks a non-interactive session: it prints the command and returns 1
@@ -8033,18 +8074,25 @@ pi_write_core_memory_extension() {
 // Written by lets-code (core memory); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with core memory on
 // (LETS_CODE_CORE_MEMORY_ON=1). A long-term memory the harness keeps: one
-// store per project (keyed by the git root, else the working folder) and
-// one global store, under the agent dir next to pi's own sessions, since
+// store per project (keyed by the git root; a worktree by its main
+// checkout's, so a factory run's worktree and the user's checkout share
+// one memory) and one global store, under the agent dir next to pi's own
+// sessions, since
 // entries point at local session files and run records. An entry is one
 // dated line: a kind (work, decision, fact, preference, pointer), a gist and
 // pointers (file:line, run:<id>, factory:<id>, session:<file>). Nothing of
 // it is carried in context: the system prompt gets one line (that the
 // memory exists, how many entries, when the last was written, that the
 // memory tool searches it) and, once a session, the newest headlines when
-// they fit HEADLINE_BUDGET tokens. Retrieval is the tool: search by words,
+// they fit HEADLINE_BUDGET tokens (the top session only: a child gets the
+// line). Retrieval is the tool: search by words,
 // path, run or session id, date or kind; open follows a pointer. A tool
 // result that touches a file, run or session an entry points at gets one
 // trailing line saying so (an index lookup, no model call).
+//
+// The user's view is /memories: a navigable list (pi's selector) of the
+// entries, a row each, that opens an entry with its pointers and actions;
+// edit opens the rendered file in the editor.
 //
 // Writers: the model (remember), the user through the model ("remember
 // that ...", in their words), and the harness without a model call: a
@@ -8070,7 +8118,7 @@ export const ACTIVE = process.env.LETS_CODE_CORE_MEMORY_ON === "1";
 export const DEPTH = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
 export const agentDir = () => process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 export const memoryRoot = () => join(agentDir(), "core-memory");
-export const HEADLINES = Math.min(5, Math.max(0, Math.round(Number(process.env.LETS_CODE_CORE_MEMORY_HEADLINES ?? "3")) || 0));
+export const HEADLINES = DEPTH > 0 ? 0 : Math.min(5, Math.max(0, Math.round(Number(process.env.LETS_CODE_CORE_MEMORY_HEADLINES ?? "3")) || 0));
 export const HEADLINE_BUDGET = 150;   // tokens, the headlines together
 export const LINE_BUDGET = 100;       // tokens, the always-on line
 export const ARCHIVE_DAYS = 120;
@@ -8098,13 +8146,29 @@ const SECRET_RES = [
 export function looksSecret(s: string): boolean { return SECRET_RES.some((re) => re.test(s)); }
 
 // ------------------------------------------------------------------ keys
-// The project is the nearest directory up from cwd with a .git (a worktree's
-// root counts as its own project), else cwd. Its store dir is the folder's
-// name plus a hash of the full path, so two "app" folders do not share.
+// The project is the nearest directory up from cwd with a .git, else cwd.
+// A worktree's .git is a file, "gitdir: <main>/.git/worktrees/<name>": the
+// project is the main checkout, so every worktree of a repository (a
+// software factory run's among them) shares its memory, and paths under
+// the worktree are read as the main checkout's (aliases, see normRef) so
+// one entry's pointers fit both. Its store dir is the folder's name plus a
+// hash of the full path, so two "app" folders do not share.
+const aliases = new Map<string, string>();   // a worktree -> its main checkout
 export function projectRoot(cwd: string): string {
 	let d = resolve(cwd);
-	for (;;) { if (existsSync(join(d, ".git"))) return d; const p = dirname(d); if (p === d) return resolve(cwd); d = p; }
+	for (;;) {
+		const g = join(d, ".git");
+		if (existsSync(g)) {
+			try {
+				const m = statSync(g).isFile() ? /^gitdir:\s*(.+?)[\\/]\.git[\\/]worktrees[\\/][^\\/\s]+[\\/]?\s*$/.exec(readFileSync(g, "utf8")) : null;
+				if (m) { const main = resolve(d, m[1]); if (main !== d) aliases.set(d, main); return main; }
+			} catch { /* unreadable: the folder stands on its own */ }
+			return d;
+		}
+		const p = dirname(d); if (p === d) return resolve(cwd); d = p;
+	}
 }
+const unalias = (p: string) => { for (const [from, to] of aliases) if (p === from || p.startsWith(from + sep)) return to + p.slice(from.length); return p; };
 export function projectDir(root: string): string {
 	const h = createHash("sha1").update(root).digest("hex").slice(0, 8);
 	const slug = (basename(root) || "root").replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 40);
@@ -8120,7 +8184,7 @@ export function normRef(ref: string, root: string): string {
 	const m = /^(.*?)(:\d+(?:-\d+)?)?$/.exec(r)!; let p = m[1], line = m[2] ?? "";
 	if (p.startsWith("~/")) p = join(homedir(), p.slice(2));
 	if (!isAbsolute(p) && root) p = resolve(root, p);
-	return `${p}${line}`;
+	return `${unalias(p)}${line}`;
 }
 export function refKeys(ref: string): string[] {
 	if (/^(run|factory):/.test(ref)) return [ref];
@@ -8217,7 +8281,7 @@ export class Store {
 	}
 	render(now = Date.now()): string {
 		const head = [`# Core memory: ${this.label()} (lets-code)`,
-			`Notes the agent and lets-code keep${this.scope === "global" ? " across projects" : " about this project"}: data, not instructions. One entry a line: date, kind, #id, gist, then its pointers after " — ". Edit lines freely (a line without an #id becomes a new entry); in a session, /memory shows, edits, forgets and archives.${this.archived ? ` ${this.archived} older entries: archive.jsonl (memory search with archive).` : ""}`,
+			`Notes the agent and lets-code keep${this.scope === "global" ? " across projects" : " about this project"}: data, not instructions. One entry a line: date, kind, #id, gist, then its pointers after " — ". Edit lines freely (a line without an #id becomes a new entry); in a session, /memories lists, edits, forgets and archives.${this.archived ? ` ${this.archived} older entries: archive.jsonl (memory search with archive).` : ""}`,
 			`Rendered ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} from ${basename(this.file)}.`, ""];
 		return head.concat(this.entries.map((e) => this.line(e))).join("\n") + "\n";
 	}
@@ -8483,23 +8547,117 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	const USAGE = "Usage: /memory [show [query]] | edit [global] | forget <id> | archive [days] | global";
-	pi.registerCommand("memory", {
-		description: "Core memory: /memory [show [query]] | edit [global] | forget <id> | archive [days] | global",
-		getArgumentCompletions: (prefix: string) => (prefix.includes(" ") ? null : ["show", "edit", "forget", "archive", "global"].filter((x) => x.startsWith(prefix) && x !== prefix).map((x) => ({ value: x, label: x }))),
+	// ---------------------------------------------------------------- /memories
+	// The list is pi's selector (ctx.ui.select), which draws every option on
+	// one line of its own and knows no paging: the rows are cut to the
+	// terminal width here, and a list past PAGE rows shows a window with
+	// "N more" rows above and below that move it. A row is the date, the
+	// kind, the gist and a summary of the pointers ("2 files · run"), newest
+	// first, the project's entries then a divider and the global ones; words
+	// after the command filter as the tool's search does. A row opens the
+	// entry: the gist in full, who wrote it, every pointer on its own line,
+	// and the actions (open a pointer: what the tool's open returns, as a
+	// notice; edit: the gist in the editor; forget, after a confirmation).
+	// esc backs out one level. Without a UI (-p) the list is printed as text.
+	const PAGE = 15;
+	const width = () => Math.max(40, process.stdout.columns || 80) - 5;   // the selector's marker and padding
+	const dim = (t: string) => (process.env.NO_COLOR ? t : `\x1b[2m${t}\x1b[22m`);   // intensity only: a selected row keeps the theme's colour
+	const cut = (t: string, n: number) => { const cs = [...t]; return cs.length > n ? `${cs.slice(0, Math.max(0, n - 1)).join("")}…` : t; };
+	const padTo = (t: string, n: number) => { const cs = [...t]; return cs.length >= n ? cs.slice(0, n).join("") : t + " ".repeat(n - cs.length); };
+	const home = (p: string) => { const h = homedir(); return p.startsWith(h + sep) ? `~${p.slice(h.length)}` : p; };
+	const author = (b: By) => (b === "harness" ? "lets-code" : b === "user" ? "you" : "the model");
+	interface Row { s: Store; e: Entry }
+	function refSummary(refs: string[]): string {
+		let files = 0, runs = 0, fac = 0, sess = 0;
+		for (const r of refs) { if (/^run:/.test(r)) runs++; else if (/^factory:/.test(r)) fac++; else if (/\.jsonl$/.test(r)) sess++; else files++; }
+		const n = (k: number, one: string, many: string) => (k ? [k > 1 ? `${k} ${many}` : one] : []);
+		return [...n(files, "file", "files"), ...n(runs, "run", "runs"), ...n(fac, "factory", "factory runs"), ...n(sess, "session", "sessions")].join(" · ");
+	}
+	function rowsOf(st: Stores, q: string, scope: "project" | "global" | "all"): Row[] {
+		const of = (s: Store) => (q ? s.search(q) : [...s.entries].sort((a, b) => b.u - a.u)).map((e) => ({ s, e }));
+		return scope === "global" ? of(st.global) : scope === "project" ? of(st.project!) : [...of(st.project!), ...of(st.global)];
+	}
+	function rowLine(r: Row, w: number, pw: number): string {
+		const date = w < 75 ? day(r.e.t).slice(5) : day(r.e.t);   // a narrow terminal: month and day
+		const gw = Math.max(8, w - date.length - 1 - 10 - 1 - (pw ? 2 + pw : 0));
+		return `${date} ${padTo(r.e.kind, 10)} ${pw ? padTo(cut(r.e.gist, gw), gw) : cut(r.e.gist, gw)}${pw ? `  ${dim(padTo(refSummary(r.e.refs), pw))}` : ""}`;
+	}
+	// what /memories showed as text before the list: the counts, the files and
+	// the cost (the title: pi wraps it, so it is not cut like a row)
+	function statusLines(st: Stores, s: Store): string[] {
+		const sec = sectionText(st.project, st.global);
+		return [
+			`core memory (${s.scope === "global" ? "global" : home(s.root)}): ${s.entries.length} ${s.entries.length === 1 ? "entry" : "entries"}${s.archived ? `, ${s.archived} archived` : ""}${s.bad ? `, ${s.bad} unreadable lines` : ""}${s.scope === "project" ? `; ${st.global.entries.length} global` : ""}`,
+			`always on: ~${est(sec)} tokens (the line${HEADLINES ? ` and up to ${HEADLINES} headlines` : ""}) + ~${toolCost()} for the memory tool`,
+			s.scope === "project" ? `${home(s.md)} · ${home(st.global.md)}` : home(s.md),
+		];
+	}
+	function textList(st: Stores, s: Store, q: string): string {
+		const es = rowsOf(st, q, s.scope).map((r) => r.e).slice(0, q ? 50 : 10);
+		return [...statusLines(st, s), ...(es.length ? [q ? `${es.length} match "${q}":` : "newest:", ...es.map((e) => s.line(e))] : [q ? `nothing matches "${q}"` : "no entries yet"])].join("\n");
+	}
+	type Item = { kind: "row"; row: Row } | { kind: "divider" } | { kind: "more"; by: number };
+	async function list(ctx: any, st: Stores, q: string, scope: "project" | "global" | "all", say: (m: string, t?: string) => void): Promise<void> {
+		let start = 0;
+		for (;;) {
+			const rows = rowsOf(st, q, scope), w = width(), s = scope === "global" ? st.global : st.project!;
+			if (!rows.length) return say(`${statusLines(st, s)[0]}\n${q ? `nothing matches "${q}"` : "no entries yet"}`, q ? "warning" : "info");
+			const pw = Math.min(18, Math.max(0, ...rows.map((r) => [...refSummary(r.e.refs)].length)));
+			const nProject = rows.filter((r) => r.s.scope === "project").length;
+			const items: Item[] = rows.flatMap((row, i): Item[] => (i === nProject && scope === "all" ? [{ kind: "divider" }, { kind: "row", row }] : [{ kind: "row", row }]));
+			start = Math.max(0, Math.min(start, items.length - PAGE));
+			const end = Math.min(items.length, start + PAGE), above = start, below = items.length - end;
+			const page: Item[] = [...(above ? [{ kind: "more", by: -PAGE } as Item] : []), ...items.slice(start, end), ...(below ? [{ kind: "more", by: PAGE } as Item] : [])];
+			const options = page.map((it) => (it.kind === "row" ? rowLine(it.row, w, pw) : it.kind === "divider" ? dim(`── global ${"─".repeat(Math.max(0, w - 10))}`) : dim(`${it.by < 0 ? `↑ ${above}` : `↓ ${below}`} more`)));
+			const title = [...statusLines(st, s), ...(q ? [`filter "${q}": ${rows.length} ${rows.length === 1 ? "entry matches" : "entries match"}`] : [])].join("\n");
+			const choice = await ctx.ui.select(title, options);
+			if (choice === undefined) return;
+			const it = page[options.indexOf(choice)];
+			if (!it) return;
+			if (it.kind === "more") start += it.by;
+			else if (it.kind === "row") await entry(ctx, st, it.row, say);
+		}
+	}
+	async function entry(ctx: any, st: Stores, r: Row, say: (m: string, t?: string) => void): Promise<void> {
+		const { s, e } = r;
+		for (;;) {
+			if (!s.entries.includes(e)) return;
+			const w = width();
+			const when = `${day(e.t)}${day(e.u) !== day(e.t) ? `, updated ${day(e.u)}` : ""}${e.n > 1 ? ` (${e.n} times)` : ""}`;
+			const head = cut(`#${e.id} · ${e.kind} · ${when} · by ${author(e.by)}${s.scope === "global" ? " · global" : ""}`, w);
+			const title = [head, "", e.gist, ...(e.refs.length ? ["", "pointers:", ...e.refs.map((x) => cut(`  ${s.showRef(x)}`, w))] : [])].join("\n");
+			const opens = e.refs.map((x) => cut(`open ${s.showRef(x)}`, w));
+			const options = [...opens, "edit", "forget", "back"];
+			const choice = await ctx.ui.select(title, options);
+			if (choice === undefined || choice === "back") return;
+			const i = options.indexOf(choice);
+			if (i >= 0 && i < opens.length) { say(short((await open(e.refs[i], st.root)).split("\n").slice(0, 40).join("\n"), OPEN_CAP)); continue; }
+			if (choice === "edit") {
+				const edited = await ctx.ui.editor(`Core memory #${e.id}: the gist`, e.gist);
+				const gist = edited === undefined ? "" : oneLine(edited);
+				if (!gist || gist === e.gist) { say("unchanged"); continue; }
+				if (looksSecret(gist)) { say("not changed: that looks like a token, key or password", "warning"); continue; }
+				s.upsert({ id: e.id, gist, kind: e.kind, refs: e.refs, by: e.by }); s.save();
+				say(`core memory: updated ${s.line(e)}`);
+				continue;
+			}
+			if (choice === "forget") {
+				if (!(await ctx.ui.confirm(`Forget #${e.id}?`, e.gist))) continue;
+				s.forget(e.id); s.save(); say(`forgot ${s.line(e)}`);
+				return;
+			}
+		}
+	}
+
+	const USAGE = "Usage: /memories [words] | edit [global] | forget <id> | archive [days] | global [words]";
+	const command = {
+		description: "Core memory: /memories [words] | edit [global] | forget <id> | archive [days] | global [words]",
+		getArgumentCompletions: (prefix: string) => (prefix.includes(" ") ? null : ["edit", "forget", "archive", "global"].filter((x) => x.startsWith(prefix) && x !== prefix).map((x) => ({ value: x, label: x }))),
 		handler: async (args: string, ctx: any) => {
 			const say = (m: string, type = "info") => (ctx.hasUI ? ctx.ui.notify(m, type) : console.log(m));
-			const [verb = "show", ...rest] = (args ?? "").trim().split(/\s+/).filter(Boolean);
+			const [verb = "", ...rest] = (args ?? "").trim().split(/\s+/).filter(Boolean);
 			cwd = ctx.cwd || cwd; const st = current(); const p = st.project!;
 			try {
-				if (verb === "show" || verb === "global") {
-					const s = verb === "global" ? st.global : p; const q = rest.join(" ");
-					const es = q ? s.search(q) : [...s.entries].sort((a, b) => b.u - a.u).slice(0, 10);
-					const sec = sectionText(st.project, st.global);
-					return say([`core memory (${s.label()}): ${s.entries.length} entries${s.archived ? `, ${s.archived} archived` : ""}${s.bad ? `, ${s.bad} unreadable lines` : ""}; ${s.md}`,
-						`always on: ~${est(sec)} tokens (the line${HEADLINES ? ` and up to ${HEADLINES} headlines` : ""}) + ~${toolCost()} for the memory tool`,
-						...(es.length ? [q ? `${es.length} match "${q}":` : "newest:", ...es.map((e) => s.line(e))] : [q ? `nothing matches "${q}"` : "no entries yet"])].join("\n"));
-				}
 				if (verb === "edit") {
 					const s = rest[0] === "global" ? st.global : p;
 					if (!ctx.hasUI) return say("the editor needs a UI; the file is " + s.md, "warning");
@@ -8519,10 +8677,16 @@ export default function (pi: ExtensionAPI) {
 					const n = p.archive(days); if (n) p.save();
 					return say(n ? `archived ${n} work/pointer ${n === 1 ? "entry" : "entries"} older than ${days} days to ${p.archiveFile}` : `nothing older than ${days} days to archive`);
 				}
-				return say(USAGE, "warning");
+				// the list: every other word filters; "show" is the list's old name, "global" the global store alone
+				const scope = verb === "global" ? "global" : "all";
+				const q = (verb === "global" || verb === "show" ? rest : [verb, ...rest]).join(" ");
+				if (!ctx.hasUI) return say(textList(st, scope === "global" ? st.global : p, q));
+				return list(ctx, st, q, scope, say);
 			} catch (e) { say(`memory: ${e instanceof Error ? e.message : String(e)}`, "error"); }
 		},
-	});
+	};
+	pi.registerCommand("memories", command);
+	pi.registerCommand("memory", { handler: command.handler });   // the old name, for one release
 }
 TS
     chmod 644 "${tmp}"
@@ -17129,7 +17293,7 @@ run_setup() {  # run_setup [full|granular]
             echo ""
             echo "# Core memory: a long-term memory per project (and a global one) the"
             echo "# agent searches on demand and adds to; lets-code adds pointers to"
-            echo "# factory runs, subagent runs and sessions. On by default; /memory in a"
+            echo "# factory runs, subagent runs and sessions. On by default; /memories in a"
             echo "# session. CORE_MEMORY_HEADLINES: how many of the newest entries (0..5)"
             echo "# a session starts with in its prompt."
             echo "CORE_MEMORY=\"${feat_core_memory}\""
@@ -17888,16 +18052,31 @@ while [ $# -gt 0 ]; do
         --no-sandbox) SANDBOX=false; shift ;;
         --verbose|--debug) VERBOSE=true; shift ;;
         -h|--help)  sed -n "3,$(grep -n '^# (auto-installed on request)\.$' "$0" | cut -d: -f1)p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --)         PASSTHROUGH+=("$@"); break ;;
+        --?*)       flag_check "$1" || exit 1; PASSTHROUGH+=("$1"); shift ;;
         *)          PASSTHROUGH+=("$1"); shift ;;
     esac
 done
 
-case "${API_OVERRIDE}" in
-    ""|openai-completions|openai-responses|anthropic-messages|google-generative-ai) ;;
-    *) log_error "unsupported --api dialect: ${API_OVERRIDE} (openai-completions | openai-responses | anthropic-messages | google-generative-ai)"; exit 1 ;;
-esac
-
 harness_gate "${HARNESS}"
+
+# The values are checked before anything is probed, so a typo is reported
+# as the typo and not as "no endpoint reachable" when the server is down
+# too. The thinking level is checked again below, where a level a session
+# saved may replace it.
+case "${API_OVERRIDE:-${API}}" in
+    ""|openai-completions|openai-responses|anthropic-messages|google-generative-ai) ;;
+    *) log_error "unsupported api dialect: ${API_OVERRIDE:-${API}} (openai-completions | openai-responses | anthropic-messages | google-generative-ai) — set it via --api, LETS_CODE_API, or API= in ${CONFIG_FILE} (if present)."; exit 1 ;;
+esac
+case "${VISION_OVERRIDE:-${VISION}}" in
+    ""|true|false) ;;
+    *) log_error "vision must be empty (auto-detect), true, or false (got: ${VISION_OVERRIDE:-${VISION}}) — set it via --vision / --no-vision, LETS_CODE_VISION, or VISION= in ${CONFIG_FILE} (if present)."; exit 1 ;;
+esac
+case "${REASONING}" in
+    ""|true|false) ;;
+    *) log_error "REASONING must be empty (auto-detect), true, or false (got: ${REASONING}) — pin it in ${CONFIG_FILE} (if present) or via LETS_CODE_REASONING."; exit 1 ;;
+esac
+[ -z "${THINKING_OVERRIDE:-${THINKING}}" ] || thinking_check "${THINKING_OVERRIDE:-${THINKING}}" || exit 1
 
 # Claude backend: Claude models through the Claude Code CLI, on the user's
 # own Claude subscription (see pi_write_claude_extension). Chosen by --claude,
@@ -18040,14 +18219,6 @@ OUTPUT_CAP_PINNED=true
 API="${API_OVERRIDE:-${API}}"
 [ -n "${API}" ] || API="${DEFAULT_API}"
 VISION="${VISION_OVERRIDE:-${VISION}}"
-case "${VISION}" in
-    ""|true|false) ;;
-    *) log_error "vision must be empty (auto-detect), true, or false (got: ${VISION}) — set it via --vision / --no-vision, LETS_CODE_VISION, or VISION= in ${CONFIG_FILE} (if present)."; exit 1 ;;
-esac
-case "${REASONING}" in
-    ""|true|false) ;;
-    *) log_error "REASONING must be empty (auto-detect), true, or false (got: ${REASONING}) — pin it in ${CONFIG_FILE} (if present) or via LETS_CODE_REASONING."; exit 1 ;;
-esac
 THINKING="${THINKING_OVERRIDE:-${THINKING}}"
 [ -n "${THINKING_OVERRIDE}" ] && THINKING_PINNED=1
 [ -n "${THINKING}" ] || THINKING="${DEFAULT_THINKING}"
@@ -18070,24 +18241,13 @@ esac
 # struggle signal fires, and drops it back as soon as the signal is resolved.
 # adaptive[:<ceiling>] (the default): medium while the task is unsolved, off once
 # pi's own tests pass, bursts to <ceiling> (default high) on struggle signals.
+thinking_check "${THINKING}" || exit 1   # a saved level too
 THINKING_AUTO=""; THINKING_BASE=""
 case "${THINKING}" in
     adaptive)   THINKING_AUTO="high"; THINKING_BASE="medium"; THINKING="medium" ;;
-    adaptive:*) THINKING_AUTO="${THINKING#adaptive:}"; THINKING_BASE="medium"; THINKING="medium"
-                case "${THINKING_AUTO}" in
-                    low|medium|high|xhigh|max) ;;
-                    *) log_error "adaptive thinking needs a ceiling: adaptive:low|medium|high|xhigh|max (got: adaptive:${THINKING_AUTO})"; exit 1 ;;
-                esac ;;
-    auto)   THINKING_AUTO="high"; THINKING="off" ;;
-    auto:*) THINKING_AUTO="${THINKING#auto:}"; THINKING="off"
-            case "${THINKING_AUTO}" in
-                minimal|low|medium|high|xhigh|max) ;;
-                *) log_error "auto thinking needs a level to raise to: auto:minimal|low|medium|high|xhigh|max (got: auto:${THINKING_AUTO})"; exit 1 ;;
-            esac ;;
-esac
-case "${THINKING}" in
-    off|minimal|low|medium|high|xhigh|max) ;;
-    *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max|adaptive[:<ceiling>]|auto[:<level>] (got: ${THINKING}) — set it via --thinking-level, LETS_CODE_THINKING, or THINKING= in ${CONFIG_FILE} (if present)."; exit 1 ;;
+    adaptive:*) THINKING_AUTO="${THINKING#adaptive:}"; THINKING_BASE="medium"; THINKING="medium" ;;
+    auto)       THINKING_AUTO="high"; THINKING="off" ;;
+    auto:*)     THINKING_AUTO="${THINKING#auto:}"; THINKING="off" ;;
 esac
 # xhigh at startup: room for its thinking budget plus an answer (see
 # XHIGH_THINKING_BUDGET). Only the default cap is raised; a pinned cap too
@@ -18520,7 +18680,10 @@ banner() {
     # a model discovered from the server, not pinned, is marked (auto)
     local auto=""
     [ "${MODEL_SOURCE}" = auto ] && auto=" (auto)"
-    line1="${MODEL}${auto} @ ${host}${PRESET:+  (preset ${PRESET})}"
+    # a saved preset is named; the built-in claude one is the host already
+    local preset=""
+    [ -z "${PRESET}" ] || [ ! -f "${PRESET_DIR}/${PRESET}" ] || preset="  (preset ${PRESET})"
+    line1="${MODEL}${auto} @ ${host}${preset}"
     line2="${ctx} context · ${think}${extras}"
     if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
         b=$'\033[1m'; d=$'\033[2m'; r=$'\033[0m'

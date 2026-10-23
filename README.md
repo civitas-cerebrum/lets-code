@@ -7,7 +7,7 @@
 
 <p align="center">
   <img alt="bash" src="https://img.shields.io/badge/bash-3.2%2B-4EAA25?logo=gnubash&logoColor=white">
-  <img alt="platforms" src="https://img.shields.io/badge/linux%20%7C%20macOS-supported-blue">
+  <img alt="platforms" src="https://img.shields.io/badge/linux%20%7C%20macOS%20%7C%20Termux-supported-blue">
   <img alt="servers" src="https://img.shields.io/badge/vLLM%20%7C%20SGLang%20%7C%20Ollama%20%7C%20LM%20Studio-OpenAI--compatible-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
@@ -54,7 +54,7 @@ to pi, so `lets-code -p "..."` and the rest of pi's options work as they are.
 Needs `bash` 3.2+, `curl`, `python3`; `node`/`npm` only if it installs pi
 for you. Linux and macOS (the test suite runs on both in CI). Termux on
 Android runs it too, against a server on the LAN or on Claude, and is where
-the `termux-device` expert lives; it is not in CI.
+the `termux-device` expert lives; it is verified by hand, not in CI.
 
 ## Compared with Claude Code
 
@@ -104,7 +104,7 @@ it, not a Claude Code clone. Where it stands:
 | 🧭 **Modes** (optional) | `plan` explores read-only and ends in a numbered plan, `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
 | 🤝 **Claude Code projects** (automatic) | A project whose `.claude/` has hooks or workflow scripts works as it is: its hooks, workflows, skills, `/commands`, agents, permission rules, MCP servers and CLAUDE.md, read live at each start. Your own `~/.claude` stays out unless `CLAUDE_CODE=all`. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
-| 🗂 **Core memory** (on by default) | A long-term memory per project and one across projects, kept out of context: the agent searches it with a `memory` tool when it needs to and adds what is worth keeping (decisions, non-obvious facts, where things live, what was done, and "remember that ..." in your words); lets-code itself adds a pointer when a factory run, a subagent run or a session ends, so the next session can open the ledger, the run record or the transcript instead of carrying it. Always on: one line saying the memory exists and how many entries it holds, plus the three newest headlines; a file the agent reads that an entry points at gets one line saying so. `/memory` shows, edits, forgets and archives. |
+| 🗂 **Core memory** (on by default) | A long-term memory per project and one across projects, kept out of context: the agent searches it with a `memory` tool when it needs to and adds what is worth keeping (decisions, non-obvious facts, where things live, what was done, and "remember that ..." in your words); lets-code itself adds a pointer when a factory run, a subagent run or a session ends, so the next session can open the ledger, the run record or the transcript instead of carrying it. Always on: one line saying the memory exists and how many entries it holds, plus the three newest headlines; a file the agent reads that an entry points at gets one line saying so. `/memories` lists them, a row each that opens into its pointers and actions; it edits, forgets and archives too. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
 | 🧑‍🔬 **Experts** (on by default) | Subagents with their own knowledge behind one `expert` tool that costs one line of context: the model sees each expert's name and what it is for, asks for a job and a brief template when it needs one, and runs it with a filled-in brief. Every expert is dormant until you say yes (a dialog the first time, remembered); one that needs an install gets it then. |
@@ -294,6 +294,12 @@ machine's own sign-in, as does anyone else who can reach 127.0.0.1:8795 on
 this machine. Each token holds at most 4 conversations at a time
 (`MAX_SESSIONS_PER_TOKEN`), so one caller cannot take every process slot.
 
+**Security.** A local request without a token runs on this machine's Claude
+sign-in, for anyone who can reach 127.0.0.1:8795 on it: every local user
+and process. `CLAUDE_TOKEN` sits in the mode-600 config (or preset file),
+never on a command line or in a URL. The proxy is made for your own
+network or VPN behind a reverse proxy, never for the open internet.
+
 **Getting the token.** On any machine where Claude Code is signed in with
 your Claude subscription (the phone itself works too):
 
@@ -361,7 +367,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS` | On by default; `false` turns the `subagent` tool off. |
 | `EXPERTS` | On by default (with subagents); `false` turns the `expert` tool off and lists no expert. Each expert is enabled in a session, not here (see [Experts](#experts)); `TERMUX=true` / `REA=true` from earlier versions are migrated once and then ignored. |
-| `CORE_MEMORY`, `CORE_MEMORY_HEADLINES` | On by default; `false` turns the `memory` tool and lets-code's own entries off. `CORE_MEMORY_HEADLINES` (0..5, default 3) is how many of the newest entries a session starts with in its prompt (see [Core memory](#core-memory)). |
+| `CORE_MEMORY`, `CORE_MEMORY_HEADLINES` | On by default; `false` turns the `memory` tool and lets-code's own entries off. `CORE_MEMORY_HEADLINES` (0..5, default 3) is how many of the newest entries a session starts with in its prompt; a subagent's session starts with none (see [Core memory](#core-memory)). |
 | `SANDBOX` | `true` turns the feature on. |
 | `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with the latest request's cache hit rate, cost, and the latest response's time to first token and output tokens (two lines that keep their height: `↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012` and `⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out`; on a narrow terminal the cache shortens to its hit rate, then cost, cache, output and TTFT drop; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi, and the size picked there is remembered (`~/.pi/agent/lets-code-state.json`): later sessions start in it, ahead of `METRICS`; `--metrics` / `--no-metrics` / `LETS_CODE_METRICS` decide for one launch without changing it. tok/s counts from each response's first streamed token, so prompt processing is not in it. |
 
@@ -847,8 +853,9 @@ both mode 0600, so a finished run reopens after `/reload`, a restart with
 <a id="core-memory"></a>
 
 A long-term memory the harness keeps for the agent, outside the context
-window: one per project (keyed by the git root, or the working folder
-without one) and one global, under `~/.pi/agent/core-memory/` next to pi's
+window: one per project (keyed by the git root, a worktree by its main
+checkout's, or the working folder without one) and one global, under
+`~/.pi/agent/core-memory/` next to pi's
 own sessions, since entries point at local session files and run records.
 An entry is one line: a date, a kind (`work`, `decision`, `fact`,
 `preference`, `pointer`), a short gist and its pointers (`file:line`,
@@ -887,15 +894,23 @@ file, a run's record, a factory run it resumes), the tool result ends with
 Measured on Claude (the usage counts of a one-shot session with and
 without the feature): the line and the tool together 490 input tokens,
 three headlines 126 more; the 3.6-characters-a-token estimate that
-`/memory` shows says ~60 for the line and ~275 for the tool, since it
+`/memories` shows says ~60 for the line and ~275 for the tool, since it
 undercounts a JSON schema.
 
-`/memory` shows the counts, the files and the cost with the newest entries
-(`/memory show <query>` searches, `/memory global` the global store);
-`/memory edit [global]` opens the rendered file in pi's editor and reads it
-back (a changed line updates its entry, a removed one forgets it, a line
-without an `#id` is a new entry of yours); `/memory forget <id>`;
-`/memory archive [days]` moves work and pointer entries untouched for that
+`/memories` lists the entries in pi's selector: a row each (date, kind,
+the gist, a summary of the pointers such as `2 files · run`), newest first,
+the project's then the global ones, fifteen a page with "N more" rows that
+move the window, and above them the counts, the files and the cost.
+`/memories <words>` filters as the tool's search does; `/memories global`
+lists the global store alone. Enter on a row opens the entry: the gist in
+full, who wrote it, every pointer on its own line, and the actions: open a
+pointer (a file around its line, a run's record, a factory run's report, a
+session's first message and last reply), edit the gist in the editor,
+forget (asked first); esc goes back one level. `/memories edit [global]`
+opens the whole rendered file in pi's editor and reads it back (a changed
+line updates its entry, a removed one forgets it, a line without an `#id`
+is a new entry of yours); `/memories forget <id>`; `/memories archive
+[days]` moves work and pointer entries untouched for that
 long (120 by default, done at every start too) to `archive.jsonl` next to
 the store, which `memory search` reaches with `archive: true`. The store is
 `memory.jsonl` (one JSON object a line, written atomically, mode 600); the
@@ -1433,8 +1448,9 @@ its entry in the line.
 <details>
 <summary><b>Termux device expert</b></summary>
 
-On Android, lets-code runs in Termux, and the model can reach the phone
-itself through Android's `am`. Doing that reliably takes device knowledge a
+On Android, lets-code runs in Termux (CI covers Ubuntu and macOS; Termux
+is verified by hand, where it runs daily on a phone with pi 1.0.3), and the
+model can reach the phone itself through Android's `am`. Doing that reliably takes device knowledge a
 model guesses wrong (which `am` works without root, `--user 0`, why
 `termux-open` fails on files in `~`, how to tell a real launch from a
 silent failure), so it is the expert `termux-device` (see

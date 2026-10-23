@@ -771,7 +771,10 @@ in place and back.
 
 **Core memory.** A memory the harness keeps so a session can find what
 earlier ones did without carrying it: one store per project (the nearest
-`.git` up from cwd, so a worktree is its own project; else cwd) and one
+`.git` up from cwd; a worktree's `.git` is a file naming the main
+repository, read without a subprocess, so a factory run's worktree and
+the user's checkout share one memory and the worktree's paths are read
+as the main checkout's; else cwd) and one
 global, under `~/.pi/agent/core-memory/`, next to pi's sessions, because
 entries point at session files and run records that live there. An entry
 is one dated line with a kind, a gist of at most 200 characters and
@@ -784,7 +787,8 @@ the id, a Markdown line only displays it). Nothing of the store is in the
 system prompt: a first design put a budgeted live file there, and was
 replaced by one line (the memory exists, how many entries, the last date,
 the tool searches it) plus the three newest headlines within 150 tokens,
-computed once a session so the prompt stays cacheable. Measured on Claude
+computed once a session so the prompt stays cacheable; a child session
+gets the line only. Measured on Claude
 through the proxy (one-shot sessions, the usage counts of the first
 request): 5048 input tokens without the feature, 5538 with the line and
 the tool, 5664 with three headlines, so 490 for what is always there and

@@ -361,7 +361,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS` | On by default; `false` turns the `subagent` tool off. |
 | `EXPERTS` | On by default (with subagents); `false` turns the `expert` tool off and lists no expert. Each expert is enabled in a session, not here (see [Experts](#experts)); `TERMUX=true` / `REA=true` from earlier versions are migrated once and then ignored. |
-| `CORE_MEMORY`, `CORE_MEMORY_HEADLINES` | On by default; `false` turns the `memory` tool and lets-code's own entries off. `CORE_MEMORY_HEADLINES` (0..5, default 3) is how many of the newest entries a session starts with in its prompt (see [Core memory](#core-memory)). |
+| `CORE_MEMORY`, `CORE_MEMORY_HEADLINES` | On by default; `false` turns the `memory` tool and lets-code's own entries off. `CORE_MEMORY_HEADLINES` (0..5, default 3) is how many of the newest entries a session starts with in its prompt; a subagent's session starts with none (see [Core memory](#core-memory)). |
 | `SANDBOX` | `true` turns the feature on. |
 | `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with the latest request's cache hit rate, cost, and the latest response's time to first token and output tokens (two lines that keep their height: `↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012` and `⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out`; on a narrow terminal the cache shortens to its hit rate, then cost, cache, output and TTFT drop; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi, and the size picked there is remembered (`~/.pi/agent/lets-code-state.json`): later sessions start in it, ahead of `METRICS`; `--metrics` / `--no-metrics` / `LETS_CODE_METRICS` decide for one launch without changing it. tok/s counts from each response's first streamed token, so prompt processing is not in it. |
 
@@ -847,8 +847,9 @@ both mode 0600, so a finished run reopens after `/reload`, a restart with
 <a id="core-memory"></a>
 
 A long-term memory the harness keeps for the agent, outside the context
-window: one per project (keyed by the git root, or the working folder
-without one) and one global, under `~/.pi/agent/core-memory/` next to pi's
+window: one per project (keyed by the git root, a worktree by its main
+checkout's, or the working folder without one) and one global, under
+`~/.pi/agent/core-memory/` next to pi's
 own sessions, since entries point at local session files and run records.
 An entry is one line: a date, a kind (`work`, `decision`, `fact`,
 `preference`, `pointer`), a short gist and its pointers (`file:line`,

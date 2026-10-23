@@ -77,6 +77,17 @@ const textOf = (r) => r.content.map((c) => c.text).join("\n");
 	const r = repo();
 	t("project root: the nearest .git up from cwd", mod.projectRoot(join(r, "src")), r);
 	t("project root: no .git means the folder itself", mod.projectRoot(join(work, "agent")), join(work, "agent"));
+	// a real worktree: its .git file names the main repository, which is the project
+	const main = join(work, "main"); mkdirSync(main, { recursive: true });
+	const git = (...a) => execFileSync("git", a, { cwd: main, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", HOME: work } });
+	git("init", "-q"); writeFileSync(join(main, "a.txt"), "a\n"); git("add", "a.txt"); git("commit", "-q", "-m", "a");
+	const wt = join(work, "wt-main"); git("worktree", "add", "-q", wt, "-b", "wt");
+	mkdirSync(join(wt, "src"), { recursive: true });
+	t("worktree: its .git is a file", statSync(join(wt, ".git")).isFile(), true);
+	t("worktree: the project is the main checkout, from inside the tree too", [mod.projectRoot(wt), mod.projectRoot(join(wt, "src"))], [main, main]);
+	t("worktree: one store with the main checkout", mod.projectDir(mod.projectRoot(wt)) === mod.projectDir(main), true);
+	t("worktree: a path under it is read as the main checkout's", [mod.normRef("src/a.ts:3", mod.projectRoot(wt)), mod.normRef(join(wt, "src", "a.ts"), main)], [`${main}/src/a.ts:3`, `${main}/src/a.ts`]);
+	t("worktree: a submodule-like gitdir is not a worktree", (() => { const d = join(work, "sub"); mkdirSync(d, { recursive: true }); writeFileSync(join(d, ".git"), "gitdir: ../.git/modules/sub\n"); return mod.projectRoot(d); })(), join(work, "sub"));
 	t("project dir: name and a hash, under the agent dir", mod.projectDir(r).startsWith(join(agentDir, "core-memory", "projects", "proj-")) && /-[0-9a-f]{8}$/.test(mod.projectDir(r)), true);
 	t("two projects of one name differ", mod.projectDir(r) === mod.projectDir(join(work, "x", "proj")), false);
 	t("ref: a relative path becomes absolute, the line kept", mod.normRef("src/a.ts:12", r), `${r}/src/a.ts:12`);
@@ -385,6 +396,10 @@ const textOf = (r) => r.content.map((c) => c.text).join("\n");
 	t("child: no session pointer", [h.mod.noteSession(h.ctx(r, { file, entries: [] })), readFileSync(h.mod.stores(r).project.file, "utf8") === before], [undefined, true]);
 	t("child: no factory or run entries either", [h.mod.noteFactoryRun({ id: "z", status: "done", repo: r, entries: [], ticket: "x" }), h.mod.noteSubagentRun({ id: "z", status: "done", cwd: r })], [undefined, undefined]);
 	has("child: search still works", textOf(await h.run(r, { action: "search", query: "factory" })), "factory:k3f");
+	const h4 = await load({ LETS_CODE_SUBAGENT_DEPTH: "1", LETS_CODE_CORE_MEMORY_HEADLINES: "3" });
+	await h4.handlers.session_start({}, h4.ctx(r));
+	const s4 = { systemPromptOptions: { sections: {} } }; await h4.handlers.before_agent_start(s4);
+	t("child: the line only, no headlines, whatever the setting", [h4.mod.HEADLINES, s4.systemPromptOptions.sections.lets_code_core_memory.split("\n").length], [0, 1]);
 }
 
 console.log(`${n} checks, ${fail ? "FAILURES" : "all passed"}`);

@@ -8033,15 +8033,18 @@ pi_write_core_memory_extension() {
 // Written by lets-code (core memory); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with core memory on
 // (LETS_CODE_CORE_MEMORY_ON=1). A long-term memory the harness keeps: one
-// store per project (keyed by the git root, else the working folder) and
-// one global store, under the agent dir next to pi's own sessions, since
+// store per project (keyed by the git root; a worktree by its main
+// checkout's, so a factory run's worktree and the user's checkout share
+// one memory) and one global store, under the agent dir next to pi's own
+// sessions, since
 // entries point at local session files and run records. An entry is one
 // dated line: a kind (work, decision, fact, preference, pointer), a gist and
 // pointers (file:line, run:<id>, factory:<id>, session:<file>). Nothing of
 // it is carried in context: the system prompt gets one line (that the
 // memory exists, how many entries, when the last was written, that the
 // memory tool searches it) and, once a session, the newest headlines when
-// they fit HEADLINE_BUDGET tokens. Retrieval is the tool: search by words,
+// they fit HEADLINE_BUDGET tokens (the top session only: a child gets the
+// line). Retrieval is the tool: search by words,
 // path, run or session id, date or kind; open follows a pointer. A tool
 // result that touches a file, run or session an entry points at gets one
 // trailing line saying so (an index lookup, no model call).
@@ -8074,7 +8077,7 @@ export const ACTIVE = process.env.LETS_CODE_CORE_MEMORY_ON === "1";
 export const DEPTH = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
 export const agentDir = () => process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 export const memoryRoot = () => join(agentDir(), "core-memory");
-export const HEADLINES = Math.min(5, Math.max(0, Math.round(Number(process.env.LETS_CODE_CORE_MEMORY_HEADLINES ?? "3")) || 0));
+export const HEADLINES = DEPTH > 0 ? 0 : Math.min(5, Math.max(0, Math.round(Number(process.env.LETS_CODE_CORE_MEMORY_HEADLINES ?? "3")) || 0));
 export const HEADLINE_BUDGET = 150;   // tokens, the headlines together
 export const LINE_BUDGET = 100;       // tokens, the always-on line
 export const ARCHIVE_DAYS = 120;
@@ -8102,13 +8105,29 @@ const SECRET_RES = [
 export function looksSecret(s: string): boolean { return SECRET_RES.some((re) => re.test(s)); }
 
 // ------------------------------------------------------------------ keys
-// The project is the nearest directory up from cwd with a .git (a worktree's
-// root counts as its own project), else cwd. Its store dir is the folder's
-// name plus a hash of the full path, so two "app" folders do not share.
+// The project is the nearest directory up from cwd with a .git, else cwd.
+// A worktree's .git is a file, "gitdir: <main>/.git/worktrees/<name>": the
+// project is the main checkout, so every worktree of a repository (a
+// software factory run's among them) shares its memory, and paths under
+// the worktree are read as the main checkout's (aliases, see normRef) so
+// one entry's pointers fit both. Its store dir is the folder's name plus a
+// hash of the full path, so two "app" folders do not share.
+const aliases = new Map<string, string>();   // a worktree -> its main checkout
 export function projectRoot(cwd: string): string {
 	let d = resolve(cwd);
-	for (;;) { if (existsSync(join(d, ".git"))) return d; const p = dirname(d); if (p === d) return resolve(cwd); d = p; }
+	for (;;) {
+		const g = join(d, ".git");
+		if (existsSync(g)) {
+			try {
+				const m = statSync(g).isFile() ? /^gitdir:\s*(.+?)[\\/]\.git[\\/]worktrees[\\/][^\\/\s]+[\\/]?\s*$/.exec(readFileSync(g, "utf8")) : null;
+				if (m) { const main = resolve(d, m[1]); if (main !== d) aliases.set(d, main); return main; }
+			} catch { /* unreadable: the folder stands on its own */ }
+			return d;
+		}
+		const p = dirname(d); if (p === d) return resolve(cwd); d = p;
+	}
 }
+const unalias = (p: string) => { for (const [from, to] of aliases) if (p === from || p.startsWith(from + sep)) return to + p.slice(from.length); return p; };
 export function projectDir(root: string): string {
 	const h = createHash("sha1").update(root).digest("hex").slice(0, 8);
 	const slug = (basename(root) || "root").replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 40);
@@ -8124,7 +8143,7 @@ export function normRef(ref: string, root: string): string {
 	const m = /^(.*?)(:\d+(?:-\d+)?)?$/.exec(r)!; let p = m[1], line = m[2] ?? "";
 	if (p.startsWith("~/")) p = join(homedir(), p.slice(2));
 	if (!isAbsolute(p) && root) p = resolve(root, p);
-	return `${p}${line}`;
+	return `${unalias(p)}${line}`;
 }
 export function refKeys(ref: string): string[] {
 	if (/^(run|factory):/.test(ref)) return [ref];

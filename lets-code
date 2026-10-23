@@ -18650,7 +18650,10 @@ banner() {
     # a model discovered from the server, not pinned, is marked (auto)
     local auto=""
     [ "${MODEL_SOURCE}" = auto ] && auto=" (auto)"
-    line1="${MODEL}${auto} @ ${host}${PRESET:+  (preset ${PRESET})}"
+    # a saved preset is named; the built-in claude one is the host already
+    local preset=""
+    [ -z "${PRESET}" ] || [ ! -f "${PRESET_DIR}/${PRESET}" ] || preset="  (preset ${PRESET})"
+    line1="${MODEL}${auto} @ ${host}${preset}"
     line2="${ctx} context · ${think}${extras}"
     if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
         b=$'\033[1m'; d=$'\033[2m'; r=$'\033[0m'

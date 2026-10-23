@@ -70,7 +70,7 @@ print(h["input"], h["output"], h["cacheRead"], h["cacheWrite"], h["tiers"][0]["i
 t "--claude: names read (Anthropic) Claude <alias>" "$(python3 -c 'import json, sys; print([m["name"] for m in json.load(open(sys.argv[1]))["providers"]["Anthropic"]["models"]])' "${h}/.pi/agent/models.json")" \
     "['(Anthropic) Claude Haiku', '(Anthropic) Claude Sonnet', '(Anthropic) Claude Opus', '(Anthropic) Claude Fable']"
 t "--claude: proxy endpoint" "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["providers"]["Anthropic"]["baseUrl"])' "${h}/.pi/agent/models.json")" "http://127.0.0.1:8795/v1"
-t "--claude: banner" "$(grep -o 'claude-haiku @ Claude Code  (preset claude)' "${h}/out")" "claude-haiku @ Claude Code  (preset claude)"
+t "--claude: banner, no preset suffix for the built-in" "$(grep -o 'claude-haiku @ Claude Code[^·]*' "${h}/out" | sed 's/ *$//')" "claude-haiku @ Claude Code"
 
 # --claude --model, and a saved claude preset adding a model
 h="${work}/h2"; launch "${h}" --claude --model claude-opus
@@ -78,6 +78,7 @@ t "--claude --model claude-opus" "$(args "${h}")" "--provider Anthropic --model 
 h="${work}/h3"; mkdir -p "${h}/.config/lets-code/presets"; echo 'MODEL="claude-sonnet"' > "${h}/.config/lets-code/presets/claude"
 launch "${h}" --claude
 t "saved claude preset: its model" "$(args "${h}")" "--provider Anthropic --model claude-sonnet -p hi"
+t "saved claude preset: named in the banner" "$(grep -c 'claude-sonnet @ Claude Code  (preset claude)' "${h}/out")" 1
 
 # BACKEND=claude in the config (setup's second choice), with CLAUDE_MODELS
 h="${work}/h4"; mkdir -p "${h}/.config/lets-code"

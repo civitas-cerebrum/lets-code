@@ -4713,6 +4713,20 @@ harness_gate() {  # harness_gate <name>
     esac
 }
 
+# thinking_check <level>: the forms a thinking level takes (off..max,
+# adaptive[:<ceiling>], auto[:<level>]); says what is wrong with any other.
+thinking_check() {
+    case "$1" in
+        off|minimal|low|medium|high|xhigh|max|adaptive|auto) return 0 ;;
+        adaptive:*) case "${1#adaptive:}" in low|medium|high|xhigh|max) return 0 ;; esac
+                    log_error "adaptive thinking needs a ceiling: adaptive:low|medium|high|xhigh|max (got: $1)"; return 1 ;;
+        auto:*)     case "${1#auto:}" in minimal|low|medium|high|xhigh|max) return 0 ;; esac
+                    log_error "auto thinking needs a level to raise to: auto:minimal|low|medium|high|xhigh|max (got: $1)"; return 1 ;;
+    esac
+    log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max|adaptive[:<ceiling>]|auto[:<level>] (got: $1) — set it via --thinking-level, LETS_CODE_THINKING, or THINKING= in ${CONFIG_FILE} (if present)."
+    return 1
+}
+
 # ------------------------------------------------------ pi presence + install
 # Detects a missing pi and offers to install it (confirm, then install).
 # Never blocks a non-interactive session: it prints the command and returns 1
@@ -18014,12 +18028,25 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-case "${API_OVERRIDE}" in
-    ""|openai-completions|openai-responses|anthropic-messages|google-generative-ai) ;;
-    *) log_error "unsupported --api dialect: ${API_OVERRIDE} (openai-completions | openai-responses | anthropic-messages | google-generative-ai)"; exit 1 ;;
-esac
-
 harness_gate "${HARNESS}"
+
+# The values are checked before anything is probed, so a typo is reported
+# as the typo and not as "no endpoint reachable" when the server is down
+# too. The thinking level is checked again below, where a level a session
+# saved may replace it.
+case "${API_OVERRIDE:-${API}}" in
+    ""|openai-completions|openai-responses|anthropic-messages|google-generative-ai) ;;
+    *) log_error "unsupported api dialect: ${API_OVERRIDE:-${API}} (openai-completions | openai-responses | anthropic-messages | google-generative-ai) — set it via --api, LETS_CODE_API, or API= in ${CONFIG_FILE} (if present)."; exit 1 ;;
+esac
+case "${VISION_OVERRIDE:-${VISION}}" in
+    ""|true|false) ;;
+    *) log_error "vision must be empty (auto-detect), true, or false (got: ${VISION_OVERRIDE:-${VISION}}) — set it via --vision / --no-vision, LETS_CODE_VISION, or VISION= in ${CONFIG_FILE} (if present)."; exit 1 ;;
+esac
+case "${REASONING}" in
+    ""|true|false) ;;
+    *) log_error "REASONING must be empty (auto-detect), true, or false (got: ${REASONING}) — pin it in ${CONFIG_FILE} (if present) or via LETS_CODE_REASONING."; exit 1 ;;
+esac
+[ -z "${THINKING_OVERRIDE:-${THINKING}}" ] || thinking_check "${THINKING_OVERRIDE:-${THINKING}}" || exit 1
 
 # Claude backend: Claude models through the Claude Code CLI, on the user's
 # own Claude subscription (see pi_write_claude_extension). Chosen by --claude,
@@ -18162,14 +18189,6 @@ OUTPUT_CAP_PINNED=true
 API="${API_OVERRIDE:-${API}}"
 [ -n "${API}" ] || API="${DEFAULT_API}"
 VISION="${VISION_OVERRIDE:-${VISION}}"
-case "${VISION}" in
-    ""|true|false) ;;
-    *) log_error "vision must be empty (auto-detect), true, or false (got: ${VISION}) — set it via --vision / --no-vision, LETS_CODE_VISION, or VISION= in ${CONFIG_FILE} (if present)."; exit 1 ;;
-esac
-case "${REASONING}" in
-    ""|true|false) ;;
-    *) log_error "REASONING must be empty (auto-detect), true, or false (got: ${REASONING}) — pin it in ${CONFIG_FILE} (if present) or via LETS_CODE_REASONING."; exit 1 ;;
-esac
 THINKING="${THINKING_OVERRIDE:-${THINKING}}"
 [ -n "${THINKING_OVERRIDE}" ] && THINKING_PINNED=1
 [ -n "${THINKING}" ] || THINKING="${DEFAULT_THINKING}"
@@ -18192,24 +18211,13 @@ esac
 # struggle signal fires, and drops it back as soon as the signal is resolved.
 # adaptive[:<ceiling>] (the default): medium while the task is unsolved, off once
 # pi's own tests pass, bursts to <ceiling> (default high) on struggle signals.
+thinking_check "${THINKING}" || exit 1   # a saved level too
 THINKING_AUTO=""; THINKING_BASE=""
 case "${THINKING}" in
     adaptive)   THINKING_AUTO="high"; THINKING_BASE="medium"; THINKING="medium" ;;
-    adaptive:*) THINKING_AUTO="${THINKING#adaptive:}"; THINKING_BASE="medium"; THINKING="medium"
-                case "${THINKING_AUTO}" in
-                    low|medium|high|xhigh|max) ;;
-                    *) log_error "adaptive thinking needs a ceiling: adaptive:low|medium|high|xhigh|max (got: adaptive:${THINKING_AUTO})"; exit 1 ;;
-                esac ;;
-    auto)   THINKING_AUTO="high"; THINKING="off" ;;
-    auto:*) THINKING_AUTO="${THINKING#auto:}"; THINKING="off"
-            case "${THINKING_AUTO}" in
-                minimal|low|medium|high|xhigh|max) ;;
-                *) log_error "auto thinking needs a level to raise to: auto:minimal|low|medium|high|xhigh|max (got: auto:${THINKING_AUTO})"; exit 1 ;;
-            esac ;;
-esac
-case "${THINKING}" in
-    off|minimal|low|medium|high|xhigh|max) ;;
-    *) log_error "thinking level must be one of off|minimal|low|medium|high|xhigh|max|adaptive[:<ceiling>]|auto[:<level>] (got: ${THINKING}) — set it via --thinking-level, LETS_CODE_THINKING, or THINKING= in ${CONFIG_FILE} (if present)."; exit 1 ;;
+    adaptive:*) THINKING_AUTO="${THINKING#adaptive:}"; THINKING_BASE="medium"; THINKING="medium" ;;
+    auto)       THINKING_AUTO="high"; THINKING="off" ;;
+    auto:*)     THINKING_AUTO="${THINKING#auto:}"; THINKING="off" ;;
 esac
 # xhigh at startup: room for its thinking budget plus an answer (see
 # XHIGH_THINKING_BUDGET). Only the default cap is raised; a pinned cap too

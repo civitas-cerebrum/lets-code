@@ -8582,25 +8582,26 @@ export default function (pi: ExtensionAPI) {
 		const gw = Math.max(8, w - date.length - 1 - 10 - 1 - (pw ? 2 + pw : 0));
 		return `${date} ${padTo(r.e.kind, 10)} ${pw ? padTo(cut(r.e.gist, gw), gw) : cut(r.e.gist, gw)}${pw ? `  ${dim(padTo(refSummary(r.e.refs), pw))}` : ""}`;
 	}
-	// what /memories showed as text before the list: the counts, the files and the cost
-	function statusLines(st: Stores, s: Store, w: number): string[] {
+	// what /memories showed as text before the list: the counts, the files and
+	// the cost (the title: pi wraps it, so it is not cut like a row)
+	function statusLines(st: Stores, s: Store): string[] {
 		const sec = sectionText(st.project, st.global);
 		return [
 			`core memory (${s.scope === "global" ? "global" : home(s.root)}): ${s.entries.length} ${s.entries.length === 1 ? "entry" : "entries"}${s.archived ? `, ${s.archived} archived` : ""}${s.bad ? `, ${s.bad} unreadable lines` : ""}${s.scope === "project" ? `; ${st.global.entries.length} global` : ""}`,
 			`always on: ~${est(sec)} tokens (the line${HEADLINES ? ` and up to ${HEADLINES} headlines` : ""}) + ~${toolCost()} for the memory tool`,
 			s.scope === "project" ? `${home(s.md)} · ${home(st.global.md)}` : home(s.md),
-		].map((l) => cut(l, w));
+		];
 	}
 	function textList(st: Stores, s: Store, q: string): string {
 		const es = rowsOf(st, q, s.scope).map((r) => r.e).slice(0, q ? 50 : 10);
-		return [...statusLines(st, s, 10_000), ...(es.length ? [q ? `${es.length} match "${q}":` : "newest:", ...es.map((e) => s.line(e))] : [q ? `nothing matches "${q}"` : "no entries yet"])].join("\n");
+		return [...statusLines(st, s), ...(es.length ? [q ? `${es.length} match "${q}":` : "newest:", ...es.map((e) => s.line(e))] : [q ? `nothing matches "${q}"` : "no entries yet"])].join("\n");
 	}
 	type Item = { kind: "row"; row: Row } | { kind: "divider" } | { kind: "more"; by: number };
 	async function list(ctx: any, st: Stores, q: string, scope: "project" | "global" | "all", say: (m: string, t?: string) => void): Promise<void> {
 		let start = 0;
 		for (;;) {
 			const rows = rowsOf(st, q, scope), w = width(), s = scope === "global" ? st.global : st.project!;
-			if (!rows.length) return say(`${statusLines(st, s, w)[0]}\n${q ? `nothing matches "${q}"` : "no entries yet"}`, q ? "warning" : "info");
+			if (!rows.length) return say(`${statusLines(st, s)[0]}\n${q ? `nothing matches "${q}"` : "no entries yet"}`, q ? "warning" : "info");
 			const pw = Math.min(18, Math.max(0, ...rows.map((r) => [...refSummary(r.e.refs)].length)));
 			const nProject = rows.filter((r) => r.s.scope === "project").length;
 			const items: Item[] = rows.flatMap((row, i): Item[] => (i === nProject && scope === "all" ? [{ kind: "divider" }, { kind: "row", row }] : [{ kind: "row", row }]));
@@ -8608,7 +8609,7 @@ export default function (pi: ExtensionAPI) {
 			const end = Math.min(items.length, start + PAGE), above = start, below = items.length - end;
 			const page: Item[] = [...(above ? [{ kind: "more", by: -PAGE } as Item] : []), ...items.slice(start, end), ...(below ? [{ kind: "more", by: PAGE } as Item] : [])];
 			const options = page.map((it) => (it.kind === "row" ? rowLine(it.row, w, pw) : it.kind === "divider" ? dim(`── global ${"─".repeat(Math.max(0, w - 10))}`) : dim(`${it.by < 0 ? `↑ ${above}` : `↓ ${below}`} more`)));
-			const title = [...statusLines(st, s, w), ...(q ? [cut(`filter "${q}": ${rows.length} ${rows.length === 1 ? "entry matches" : "entries match"}`, w)] : [])].join("\n");
+			const title = [...statusLines(st, s), ...(q ? [`filter "${q}": ${rows.length} ${rows.length === 1 ? "entry matches" : "entries match"}`] : [])].join("\n");
 			const choice = await ctx.ui.select(title, options);
 			if (choice === undefined) return;
 			const it = page[options.indexOf(choice)];

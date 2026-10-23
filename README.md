@@ -7,7 +7,7 @@
 
 <p align="center">
   <img alt="bash" src="https://img.shields.io/badge/bash-3.2%2B-4EAA25?logo=gnubash&logoColor=white">
-  <img alt="platforms" src="https://img.shields.io/badge/linux%20%7C%20macOS-supported-blue">
+  <img alt="platforms" src="https://img.shields.io/badge/linux%20%7C%20macOS%20%7C%20Termux-supported-blue">
   <img alt="servers" src="https://img.shields.io/badge/vLLM%20%7C%20SGLang%20%7C%20Ollama%20%7C%20LM%20Studio-OpenAI--compatible-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
@@ -54,7 +54,7 @@ to pi, so `lets-code -p "..."` and the rest of pi's options work as they are.
 Needs `bash` 3.2+, `curl`, `python3`; `node`/`npm` only if it installs pi
 for you. Linux and macOS (the test suite runs on both in CI). Termux on
 Android runs it too, against a server on the LAN or on Claude, and is where
-the `termux-device` expert lives; it is not in CI.
+the `termux-device` expert lives; it is verified by hand, not in CI.
 
 ## Compared with Claude Code
 
@@ -293,6 +293,12 @@ request look local, and a local request without a token runs on this
 machine's own sign-in, as does anyone else who can reach 127.0.0.1:8795 on
 this machine. Each token holds at most 4 conversations at a time
 (`MAX_SESSIONS_PER_TOKEN`), so one caller cannot take every process slot.
+
+**Security.** A local request without a token runs on this machine's Claude
+sign-in, for anyone who can reach 127.0.0.1:8795 on it: every local user
+and process. `CLAUDE_TOKEN` sits in the mode-600 config (or preset file),
+never on a command line or in a URL. The proxy is made for your own
+network or VPN behind a reverse proxy, never for the open internet.
 
 **Getting the token.** On any machine where Claude Code is signed in with
 your Claude subscription (the phone itself works too):
@@ -1442,8 +1448,9 @@ its entry in the line.
 <details>
 <summary><b>Termux device expert</b></summary>
 
-On Android, lets-code runs in Termux, and the model can reach the phone
-itself through Android's `am`. Doing that reliably takes device knowledge a
+On Android, lets-code runs in Termux (CI covers Ubuntu and macOS; Termux
+is verified by hand, where it runs daily on a phone with pi 1.0.3), and the
+model can reach the phone itself through Android's `am`. Doing that reliably takes device knowledge a
 model guesses wrong (which `am` works without root, `--user 0`, why
 `termux-open` fails on files in `~`, how to tell a real launch from a
 silent failure), so it is the expert `termux-device` (see

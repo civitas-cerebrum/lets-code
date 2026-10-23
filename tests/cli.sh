@@ -56,6 +56,8 @@ bad "--api grpc" "api dialect: grpc" -- --api grpc
 bad "LETS_CODE_API=grpc" "api dialect: grpc" LETS_CODE_API=grpc --
 
 check "update bogus exits 1" "$(bash "${lc}" update bogus >/dev/null 2>&1; echo $?)" 1
+check "--help does not list --harness (a flag that can only fail)" "$(printf '%s\n' "${help}" | grep -c -- '--harness')" 0
 check "roadmap harness exits 1" "$(bash "${lc}" --harness codex </dev/null >/dev/null 2>&1; echo $?)" 1
+check "roadmap harness says so" "$(bash "${lc}" --harness codex </dev/null 2>&1 | grep -c 'roadmap item')" 1
 check "mandate alone exits 1" "$(bash "${lc}" mandate >/dev/null 2>&1; echo $?)" 1
 exit "${fail}"

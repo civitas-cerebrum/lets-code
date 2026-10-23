@@ -46,8 +46,6 @@
 #                                auto[:<l>] is dynamic thinking: off, raised to
 #                                the ceiling <l> (default high) in short bursts
 #                                when the output shows pi struggling
-#   lets-code --harness <name>   pi (default; only v1 harness) |
-#                                deepseek | codex (roadmap)
 #   lets-code --insecure ...     skip TLS verification (self-signed certs)
 #   lets-code --no-mem-guard     launch without the memory guard
 #   lets-code --no-git-guard     launch without the git guard
@@ -160,9 +158,6 @@
 #      Code token from `claude setup-token`) points a machine at another
 #      one's proxy instead (see claude-remote), so it needs no Claude Code of
 #      its own and starts nothing; its requests run on that token.
-#
-# Harness: pi is the default (and only v1) harness; --harness deepseek|codex
-# are roadmap items, not yet available.
 #
 # Config: ~/.config/lets-code/config   (created by `lets-code setup`)
 # Presets: ~/.config/lets-code/presets/<name>   (`lets-code setup preset <name>`)

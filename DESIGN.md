@@ -121,6 +121,20 @@ md, markdown, rst, txt, org, adoc, tex, csv). Config files (json, yaml,
 toml, xml, ini, env, lock files) still count: a `package.json`, a CI
 workflow or a `tsconfig.json` can break a build.
 
+Nothing in the guard ends work on its own (#75). The one literal kill is the
+default bash timeout: pi stops the process tree and errors the call, and
+pi's bash tool tells the model there is no default, so a long build or test
+suite died at 300 s and the model never knew to pass a longer `timeout`.
+The prompt section now names the default, a call stopped by it gets a
+one-line hint to rerun with a larger timeout, and `LETS_CODE_BASH_TIMEOUT=0`
+turns it off. The wrap-up note is advice ("finish with a short summary if
+every requirement is covered by a test you ran; otherwise test what is
+missing"), never "make no further tool calls", and `LETS_CODE_WRAP_TURNS=0`
+turns it off. The firm stop that followed an ignored note fired on time
+alone, without re-checking that the tests still passed and with test-file
+edits not counting as work; it is opt-in (`LETS_CODE_FIRM_STOP=1`) and then
+needs the tests passing and no edit of any kind since the note.
+
 A hard thinking budget was once a fixed `samplingParams` value (half the
 output cap) for every level; Qwen3's template ignores the soft hint, so
 low, medium and high were the same configuration. pi's per-level budget is

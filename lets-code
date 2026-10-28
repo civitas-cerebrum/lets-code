@@ -175,8 +175,8 @@
 #                LETS_CODE_CLAUDE_CODE (auto|all|false)
 #                LETS_CODE_EXPERTS (true|false)
 #                LETS_CODE_CORE_MEMORY (true|false), LETS_CODE_CORE_MEMORY_HEADLINES (0..5, default 3)
-#                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_METRICS_LOG (<file>), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_GROUNDING (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
-#                LETS_CODE_WRAP_TURNS (6), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
+#                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_METRICS_LOG (<file>), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_GROUNDING (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300, 0 = none),
+#                LETS_CODE_WRAP_TURNS (6, 0 = off), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_FIRM_STOP (0|1), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
 #                LETS_CODE_BURST_TURNS (3), LETS_CODE_MAX_BURSTS (8), LETS_CODE_THINKING_REPLAY (all|<n>)
 #                LETS_CODE_FINAL_REVIEW (auto|on|0), LETS_CODE_PLAN_BURST (0|1), LETS_CODE_PLAN_LEVEL (low)
 #                LETS_CODE_OPENROUTER_PROVIDER (pin upstream providers, comma-separated, no fallbacks)
@@ -3972,18 +3972,19 @@ TS
 # -------------------------------------------------------------- agent guard
 # Rules for failure modes measured in pi sessions against a local thinking
 # model (2026-10 thinking-level benchmark, 48 sessions: 6 tasks x 4 levels x 2):
-#   * bash calls get a default timeout (LETS_CODE_BASH_TIMEOUT, 300 s): pi's
-#     bash tool has none, and two sessions sat 19 and 38 minutes on a script
-#     that never returned;
+#   * bash calls get a default timeout (LETS_CODE_BASH_TIMEOUT, 300 s; 0 = none),
+#     named in the prompt section: pi's bash tool has none, and two sessions sat
+#     19 and 38 minutes on a script that never returned;
 #   * a reply the output limit cut off before any tool call is continued
 #     with a nudge to act (up to 3 times): a server-terminated thinking
 #     section can turn into plain-text reasoning that eats the whole output
 #     cap, after which pi stopped with nothing done;
 #   * after pi's own tests have passed for LETS_CODE_WRAP_TURNS turns (6) and
-#     2 minutes, or for LETS_CODE_WRAP_MINUTES (5), pi is told once to finish
-#     if executed tests cover every requirement: sessions that had passed
-#     every hidden test kept polishing for 20+ minutes, one breaking a
-#     working solution;
+#     2 minutes, or for LETS_CODE_WRAP_MINUTES (5), pi is advised once to finish
+#     if executed tests cover every requirement (LETS_CODE_WRAP_TURNS=0: never):
+#     sessions that had passed every hidden test kept polishing for 20+ minutes,
+#     one breaking a working solution; a firm "stop now" after an ignored note
+#     is opt-in (LETS_CODE_FIRM_STOP=1);
 #   * verification means execution: a system-prompt section tells pi to check
 #     behaviour and derive test expectations by running code, not by
 #     reasoning about it (benchmark thinking hand-evaluated Python in 58% of
@@ -4015,9 +4016,11 @@ pi_write_agentguard_extension() {
 // (LETS_CODE_AGENT_GUARD_ON=1). Each rule answers a failure seen in pi
 // sessions against a local thinking model (2026-10 thinking-level benchmark):
 //   1. bash calls without a timeout get one (LETS_CODE_BASH_TIMEOUT, default
-//      300 s). pi's bash tool has no default, so a script that never returns
-//      (a self-written fuzzer, a parser stuck in a loop) idled sessions for
-//      19 and 38 minutes. The model can still pass a longer timeout itself.
+//      300 s; 0 or off disables it). pi's bash tool has no default, so a script
+//      that never returns (a self-written fuzzer, a parser stuck in a loop) idled
+//      sessions for 19 and 38 minutes. The model can still pass a longer timeout
+//      itself: the prompt section names the default, and a call stopped by it
+//      gets a one-line hint to rerun with a larger timeout.
 //   2. a reply cut off by the output limit before any tool call gets one
 //      continuation that tells the model to act instead of reasoning on. When
 //      the server ends a thinking section at its budget, the model can keep
@@ -4025,8 +4028,9 @@ pi_write_agentguard_extension() {
 //      whole 32K budget that way, made no tool call, and stopped with nothing.
 //   3. once the model's own tests have passed for LETS_CODE_WRAP_TURNS turns
 //      (default 6) and at least 2 minutes, or for LETS_CODE_WRAP_MINUTES
-//      minutes (default 5), it is told once to finish if its executed tests
-//      cover every requirement. Thinking sessions that had already passed
+//      minutes (default 5), it is told once (advisory, never "stop") to finish
+//      if its executed tests cover every requirement; LETS_CODE_WRAP_TURNS=0
+//      turns the note off. Thinking sessions that had already passed
 //      every hidden test kept refactoring for another 20+ minutes, and one
 //      broke a passing solution while doing so.
 //   4. dynamic thinking (LETS_CODE_THINKING_AUTO=<ceiling>): the level is a
@@ -4106,9 +4110,9 @@ pi_write_agentguard_extension() {
 //  15. the firm stop never fires while the last executed command failed (incl. a syntax
 //      or indentation error): in wave 12 it told a model to stop right after its
 //      sed edit broke the file, and the session ended at 0/23 from 20/23.
-//  12. firm stop: if the model keeps calling tools for 6 turns or 4 minutes after the
-//      wrap-up note without changing any source file, it is told once to stop and
-//      summarise. In wave 10 an adaptive session solved its task at 9 minutes, got
+//  12. firm stop (off by default, LETS_CODE_FIRM_STOP=1): if the model keeps calling
+//      tools for 6 turns or 4 minutes after the wrap-up note with its tests still passing
+//      and no file edited since, it is told once to stop and summarise. In wave 10 an adaptive session solved its task at 9 minutes, got
 //      the wrap-up at 17, then spent 13 more minutes hand-tracing expected outputs
 //      for one detail (and getting them wrong) without editing anything.
 // Apart from that prompt section, nothing is added unless a rule acts.
@@ -4123,8 +4127,15 @@ const AUTO = (process.env.LETS_CODE_THINKING_AUTO ?? "").trim();
 // medium until the tests pass, then dials down to off, and bursts up to AUTO when it struggles.
 const BASE = (process.env.LETS_CODE_THINKING_BASE ?? "off").trim() || "off";
 const DOWN = (process.env.LETS_CODE_THINKING_DOWN ?? "off").trim() || "off";
-const BASH_TIMEOUT = Math.max(1, Number(process.env.LETS_CODE_BASH_TIMEOUT) || 300);
-const WRAP_TURNS = Math.max(1, Number(process.env.LETS_CODE_WRAP_TURNS) || 6);
+const OFF_WORDS = ["0", "off", "false", "no"];
+const BASH_TIMEOUT_RAW = (process.env.LETS_CODE_BASH_TIMEOUT ?? "").trim().toLowerCase();
+// 0 means no default timeout: bash calls run as long as the model's own timeout, or unbounded
+const BASH_TIMEOUT = OFF_WORDS.includes(BASH_TIMEOUT_RAW) ? 0 : Math.max(1, Number(BASH_TIMEOUT_RAW) || 300);
+const WRAP_TURNS_RAW = (process.env.LETS_CODE_WRAP_TURNS ?? "").trim().toLowerCase();
+// 0 turns the wrap-up note off, and with it the firm stop
+const WRAP_TURNS = OFF_WORDS.includes(WRAP_TURNS_RAW) ? 0 : Math.max(1, Number(WRAP_TURNS_RAW) || 6);
+// the firm stop "make no further tool calls" is opt-in: on its own it ended sessions that were still working (#75)
+const FIRM_STOP = ["1", "on", "true", "yes"].includes((process.env.LETS_CODE_FIRM_STOP ?? "").trim().toLowerCase());
 const WRAP_MS = Math.max(1, Number(process.env.LETS_CODE_WRAP_MINUTES) || 5) * 60_000;
 const BURST_TURNS = Math.max(1, Number(process.env.LETS_CODE_BURST_TURNS) || 3);
 const MAX_BURSTS = Math.max(0, Number(process.env.LETS_CODE_MAX_BURSTS ?? 8));
@@ -4165,7 +4176,9 @@ const PROMPT_SECTION = [
 	"- Decide ambiguities once. When the task is silent on a detail, choose the simplest reading, state it in one line, and move on; do not revisit it unless a test or the task contradicts it.",
 	"- Change files with the edit and write tools, not with scripts that rewrite source or test files.",
 	"- After changing source, rerun the tests. Before finishing, run them once more and read the output: any failure it prints is unresolved.",
+	...(BASH_TIMEOUT > 0 ? [`- bash calls without a timeout are stopped after ${BASH_TIMEOUT}s; pass \`timeout\` for long builds, test suites or installs.`] : []),
 ].join("\n");
+const TIMEOUT_HINT = `[lets-code] Stopped by the ${BASH_TIMEOUT}s default timeout; rerun with a larger \`timeout\` if it needs longer.`;
 const TEST_TEXT =
 	"[lets-code] You have changed the source several times since your last test run. " +
 	"Run your tests now, before making further changes.";
@@ -4173,11 +4186,10 @@ const LENGTH_TEXT =
 	"[lets-code] Your last reply hit the output limit before making any tool call, so it was cut off. " +
 	"Do not repeat that reasoning. Act now: make the next tool call (for example, write the file).";
 const WRAP_TEXT =
-	"[lets-code] Your own tests have been passing for a while. If every requirement in the original task is covered " +
-	"by a test you have actually run, finish now: reply with a short summary and make no further tool calls. " +
-	"If a requirement is not covered by an executed test, test it first; do not refactor or polish working code.";
+	"[lets-code] Your tests have been passing for a while. If every requirement is covered by a test you ran, " +
+	"finish with a short summary; otherwise test what is missing first. Do not refactor working code.";
 const STOP_TEXT =
-	"[lets-code] Stop now. Your tests pass, and since the wrap-up note you have changed no source code: more " +
+	"[lets-code] Stop now. Your tests pass, and since the wrap-up note you have changed no file: more " +
 	"re-checking will not change the result. Reply with a short summary of what you built and make no further tool calls.";
 const STOP_AFTER_TURNS = 6;
 const STOP_AFTER_MS = 4 * 60_000;
@@ -4472,7 +4484,9 @@ export default function (pi: ExtensionAPI) {
 	let wrapNudged = false;
 	let wrapTurn = -1;
 	let wrapAt = 0;
-	let wrapSourceEdit = 0;
+	let wrapEdit = 0;
+	// bash calls that got the guard's default timeout, so a timeout there is ours to explain
+	const timedByUs = new Set<string>();
 	let stopNudged = false;
 	let lengthNudges = 0;
 	let testReminders = 0;
@@ -4570,8 +4584,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event: any) => {
 		if (event.parentToolCallId) return undefined;
 		d.toolCall(event.toolName, event.input);
-		if (event.toolName === "bash" && event.input && event.input.timeout == null) {
+		if (BASH_TIMEOUT > 0 && event.toolName === "bash" && event.input && event.input.timeout == null) {
 			event.input.timeout = BASH_TIMEOUT;
+			timedByUs.add(String(event.toolCallId));
 		}
 		return undefined;
 	});
@@ -4579,7 +4594,13 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_result", async (event: any) => {
 		if (event.parentToolCallId) return undefined;
 		const text = textOf(event.content);
-		if (event.toolName === "bash" && /timed out/i.test(text)) log("bash-timeout");
+		const ours = timedByUs.delete(String(event.toolCallId));
+		const timedOut = event.toolName === "bash" && /timed out/i.test(text);
+		if (timedOut) log("bash-timeout", { byDefault: ours });
+		// pi's bash tool says "no default timeout", so the model would not know the stop was ours
+		const hinted = ours && /Command timed out after \d+ seconds/.test(text)
+			? { content: [...(Array.isArray(event.content) ? event.content : []), { type: "text", text: "\n" + TIMEOUT_HINT }] }
+			: undefined;
 		const failing = d.toolResult(event.toolName, !!event.isError, text, String(event.input?.path ?? ""));
 		if (failing !== null) log("tests", { failing });
 		// adaptive mode: a green run arms the dial-down (applied after a settled turn, see turn_end);
@@ -4606,7 +4627,7 @@ export default function (pi: ExtensionAPI) {
 				log("escalate", { why: trigger.why, to: AUTO, burst: bursts });
 			}
 		}
-		return undefined;
+		return hinted;
 	});
 
 	pi.on("turn_end", async (event: any) => {
@@ -4662,9 +4683,9 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 		}
-		if (wrapNudged && !stopNudged && madeToolCall && d.lastSourceEdit === wrapSourceEdit && !d.lastExecFailed &&
+		if (FIRM_STOP && wrapNudged && !stopNudged && madeToolCall && d.passing && d.lastOkEdit === wrapEdit && !d.lastExecFailed &&
 			(d.totalTurns - wrapTurn >= STOP_AFTER_TURNS || Date.now() - wrapAt >= STOP_AFTER_MS)) {
-			// the wrap-up was ignored and nothing has changed in the source since: the rest is re-checking
+			// opt-in: the wrap-up was ignored, the tests still pass and no file has changed since: the rest is re-checking
 			stopNudged = true;
 			log("stop-nudge", { turnsSinceWrap: d.totalTurns - wrapTurn });
 			entries.push(msg(STOP_TEXT));
@@ -4679,11 +4700,11 @@ export default function (pi: ExtensionAPI) {
 			d.editsSinceTest = 0;
 			log("test-nudge", { n: testReminders });
 			entries.push(msg(TEST_TEXT));
-		} else if (!wrapNudged && madeToolCall && d.passedFor(WRAP_TURNS, WRAP_MS, WRAP_MIN_MS)) {
+		} else if (WRAP_TURNS > 0 && !wrapNudged && madeToolCall && d.passedFor(WRAP_TURNS, WRAP_MS, WRAP_MIN_MS)) {
 			wrapNudged = true;
 			wrapTurn = d.totalTurns;
 			wrapAt = Date.now();
-			wrapSourceEdit = d.lastSourceEdit;
+			wrapEdit = d.lastOkEdit;
 			log("wrap-nudge");
 			entries.push(msg(WRAP_TEXT));
 		}

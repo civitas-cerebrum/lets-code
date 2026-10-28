@@ -367,7 +367,30 @@ copy, pi would list the runs dir), `/new` is cancelled in
 `session_before_switch` and a new main session started instead,
 `/fork`/`/clone` are cancelled in `session_before_fork` with a note. A
 mandate `/mode` acts on the main session: children register no mode
-commands, their role is fixed. `/subagents` alone always opens the navigator:
+commands, their role is fixed.
+
+The footer and the thinking level follow the session on screen. Each run
+record carries `stats` (the child's own session): its model and thinking
+level from the spawn arguments at launch; after each of its responses its
+usage counted from `message_end`, then replaced by its RPC
+`get_session_stats` (tokens, cost, context use) and `get_state` (model,
+thinking level), which an older pi without them simply leaves out; tok/s
+and time to first token from its stream (`turn_start` to the first
+`*_delta`, first delta to `message_end`). While `view.viewing` names a run
+(switched or in place), the footer module reads that record (from the
+registry on `globalThis`) instead of the TUI's session: the copy a switch
+opens is frozen and has no stream, and in place the TUI holds the main
+session. A level changed there goes to the child (`cycle_thinking_level`,
+`set_thinking_level`) and the answer is recorded as its level; the copy is
+set to the child's level when it opens, so pi's keys move on from it. The
+main session's level is kept aside when a child's session opens and put
+back on the way out (pi may have moved it: in place, pi's own handlers
+change the TUI's session; switched, the main session reopens at pi's
+default, which the copy's change persisted); in place a change pi makes
+to the main session is undone at once. The thinking memory saves nothing
+while a child's session is open, and the agent guard's adaptive reset to
+BASE at session start is for the top session only, so an agent file's
+`thinking:` holds in its child. `/subagents` alone always opens the navigator:
 its argument completions appear only once a letter is typed (pi 0.87 takes
 Enter for a highlighted completion, which turned `/subagents ` into a
 subcommand).

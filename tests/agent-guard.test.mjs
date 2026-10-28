@@ -595,6 +595,19 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 		check(`v14: test command recognised: ${c}`, h.mod.TEST_RUN_RE.test(c), true);
 }
 
+// a subagent (depth > 0) starts at its agent file's level: no reset to BASE there
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium", LETS_CODE_SUBAGENT_DEPTH: "1" });
+	h.pi.level = "low";
+	await h.emit("session_start", {});
+	check("subagent: its own thinking level holds at session start", h.pi.level, "low");
+	delete process.env.LETS_CODE_SUBAGENT_DEPTH;
+	const h0 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium" });
+	h0.pi.level = "low";
+	await h0.emit("session_start", {});
+	check("top session: reset to BASE at session start", h0.pi.level, "medium");
+}
+
 rmSync(work, { recursive: true, force: true });
 console.log(`${n - fail}/${n} checks passed`);
 process.exit(fail ? 1 : 0);

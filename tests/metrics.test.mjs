@@ -325,6 +325,34 @@ try {
 	t("log unwritable: footer still drawn", stats(x), "50.0 tok/s · 22.0%/262k (auto)");
 	t("appendRecord reports failure", x.mod.appendRecord(join(work, "a-file", "x"), { a: 1 }), false);
 
+	// a subagent's session on screen (/subagents): the footer is that session's
+	{
+		const REG = Symbol.for("lets-code.subagent-runs");
+		x = await load({ LETS_CODE_METRICS_ON: "0" });
+		clock = 0; x.ev("session_start");
+		x.st.entries.push(usage(1000, 0, 500));
+		const run = { id: "r1", agent: "scout", status: "done", started: 0, ended: 83000, input: 10, output: 5,
+			stats: { input: 2000, output: 3000, cacheRead: 8000, cacheWrite: 0, cost: 0, hit: 80, contextUsage: { tokens: 13000, contextWindow: 131072, percent: 9.9 },
+				model: "child-model", provider: "lets-code", reasoning: true, thinkingLevel: "low", tokPerSec: 55.5, ttftMs: 1200, lastOut: 400 } };
+		globalThis[REG] = { runs: [run], view: { viewing: "r1" } };
+		t("viewing a subagent, minimal: its name and level first, then its numbers", x.foot(), ["scout • low · ↑10k ↓3.0k · 55.5 tok/s · 9.9%/131k (auto)"]);
+		await x.cmd("on");
+		const full = x.foot();
+		t("viewing a subagent, full: its name after the directory, its model and level", [full[0].startsWith("~/github/app (main) • scout "), full[0].endsWith("child-model • low")], [true, true]);
+		t("viewing a subagent, full: its totals, cache, speed, TTFT and clock", full[1], "↑10k ↓3.0k · 9.9%/131k (auto) · cache 8.0k (80%) · 55.5 tok/s · TTFT 1.2s · 400 out · done in 1m 23s");
+		run.stats.thinkingLevel = "high";
+		t("the child's level changes: the footer shows it", x.foot()[0].endsWith("child-model • high"), true);
+		const old = { id: "r2", agent: "worker", status: "running", started: 0, input: 700, output: 90, live: 10 };
+		globalThis[REG].runs.push(old); globalThis[REG].view.viewing = "r2"; clock = 5000;
+		t("a run without stats (an older one): its own counts", x.foot()[1].startsWith("↑700 ↓100 · ?/0"), true);
+		globalThis[REG].view.viewing = undefined;
+		const back = x.foot();
+		t("back in the main session: its model, level and numbers", [back[0].endsWith("qwen3.8-27b • medium"), /scout|worker/.test(back.join(" ")), back[1].startsWith("↑1.0k ↓500")], [true, false, true]);
+		await x.cmd("off");
+		t("back in the main session, minimal: no name", /scout|worker/.test(x.foot().join(" ")), false);
+		delete globalThis[REG];
+	}
+
 	// helpers
 	t("compact like pi", [999, 1234, 45200, 1_234_567, 15_000_000].map(x.mod.compact), ["999", "1.2k", "45k", "1.2M", "15M"]);
 	t("tilde", [x.mod.tilde(join(HOME, "a/b"), HOME), x.mod.tilde(HOME, HOME), x.mod.tilde("/etc", HOME)], ["~/a/b", "~", "/etc"]);

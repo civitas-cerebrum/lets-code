@@ -31,6 +31,7 @@ const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const log = (o) => fs.appendFileSync(path.join(dir, "cmds"), JSON.stringify({ pid: process.pid, ...o }) + "\\n");
 const ap = argv.indexOf("--append-system-prompt");
 let first = true, turn = null; const steers = []; let uiWait = null;
+let lvl = argv.includes("--thinking") ? argv[argv.indexOf("--thinking") + 1] : "medium";
 process.on("SIGTERM", () => { if (turn) { try { fs.unlinkSync(turn.running); } catch {} } process.exit(143); });
 const later = (ms, f) => { const t = setTimeout(f, ms); if (turn) turn.timers.push(t); };
 const settle = (stop = "stop") => {
@@ -116,6 +117,10 @@ process.stdin.on("data", (d) => {
     if (c.type === "abort") { if (turn) settle("aborted"); ok(); continue; }
     if (c.type === "bash") { ok({ output: "ran: " + c.command, exitCode: 0 }); continue; }
     if (c.type === "clear_queue") { ok({ steering: steers.splice(0), followUp: [] }); continue; }
+    if (c.type === "get_session_stats") { ok({ sessionId: "s", tokens: { input: 111, output: 22, cacheRead: 333, cacheWrite: 4, total: 470 }, cost: 0.5, contextUsage: { tokens: 448, contextWindow: 32768, percent: 1.4 } }); continue; }
+    if (c.type === "get_state") { ok({ thinkingLevel: lvl, model: { id: "test-model", provider: "lets-code", reasoning: true, contextWindow: 32768 }, isStreaming: !!turn }); continue; }
+    if (c.type === "cycle_thinking_level") { lvl = "high"; ok({ level: lvl }); continue; }
+    if (c.type === "set_thinking_level") { lvl = c.level; ok(); continue; }
     ok();
   }
 });
@@ -156,7 +161,9 @@ async function load(env = {}) {
 	const sent = [], userSent = [], renderers = {};
 	mod.default({ registerTool: (d) => { tool = d; tools.push(d); }, on(ev, h) { handlers[ev] = h; return () => {}; },
 		registerCommand: (name, d) => { commands[name] = d; }, registerShortcut: (key, d) => { shortcuts[key] = d; },
-		sendMessage: (m, o) => { sent.push([m, o]); }, sendUserMessage: (m, o) => { userSent.push([m, o]); }, registerMessageRenderer: (k, f) => { renderers[k] = f; }, getSettings: () => ({ ...(globalThis.__piSettings ?? {}) }) });
+		sendMessage: (m, o) => { sent.push([m, o]); }, sendUserMessage: (m, o) => { userSent.push([m, o]); }, registerMessageRenderer: (k, f) => { renderers[k] = f; }, getSettings: () => ({ ...(globalThis.__piSettings ?? {}) }),
+		// the TUI session's thinking level (the main session's, or the copy's while a child's session is open)
+		getThinkingLevel: () => globalThis.__piLevel ?? "medium", setThinkingLevel: (l) => { globalThis.__piLevel = l; } });
 	return { mod, tool, tools, commands, shortcuts, handlers, sent, userSent, renderers, run: (params, cwd = work, trusted = true) => tool.execute("id", params, undefined, undefined, { cwd, isProjectTrusted: trusted }) };
 }
 
@@ -532,8 +539,14 @@ async function load(env = {}) {
 	const ac = new AbortController(); abortTurn = () => ac.abort();
 	const call = h.tool.execute("call-d", { tasks: [{ agent: "worker", task: "stream d1" }, { agent: "scout", task: "stream d2" }] }, ac.signal, undefined, { cwd: work, isProjectTrusted: true });
 	let d1; for (let i = 0; i < 100 && !((d1 = reg().runs.find((r) => r.task === "stream d1")) && d1.events.length > 1 && existsSync(d1.sessionFile)); i++) await new Promise((r) => setTimeout(r, 20));
+	globalThis.__piLevel = "xhigh";   // the main session's level
 	await h.commands.subagents.handler("1", ctxFor());
 	const res = await call;
+	t("switch: the copy at the child's thinking level, the main session's kept aside", [globalThis.__piLevel, reg().view.mainLevel], [d1.stats?.thinkingLevel ?? "medium", "xhigh"]);
+	globalThis.__piLevel = "low";   // pi's shift+tab in the copy
+	h.handlers.thinking_level_select({ level: "low", previousLevel: "medium" });
+	for (let i = 0; i < 100 && d1.stats?.thinkingLevel !== "low"; i++) await new Promise((r) => setTimeout(r, 20));
+	t("switched view: a level change goes to the child and is its level now", d1.stats?.thinkingLevel, "low");
 	t("switch: into a copy of the run's own session file, with reg.switching set while pi tears the turn down", [switched[0], existsSync(mod.viewFile(d1.sessionFile))], [[mod.viewFile(d1.sessionFile), true], true]);
 	t("switch: reg.switching is cleared after", reg().switching, false);
 	t("detach: the call returns at once, says its runs go on, not an error", [/Still running in the background/.test(res.content[0].text), /worker, scout/.test(res.content[0].text), res.isError], [true, true, false]);
@@ -547,6 +560,7 @@ async function load(env = {}) {
 	// the reports wait while the run's session is open
 	for (let i = 0; i < 200 && reg().runs.some((r) => /stream d[12]/.test(r.task) && r.status === "running"); i++) await new Promise((r) => setTimeout(r, 20));
 	t("detach: the runs finished on their own", reg().runs.filter((r) => /stream d[12]/.test(r.task)).map((r) => r.status), ["done", "done"]);
+	t("stats: speed and time to first token from the child's own stream", [typeof d1.stats?.tokPerSec, d1.stats?.tokPerSec > 0, d1.stats?.ttftMs >= 0, d1.stats?.lastOut], ["number", true, true, 10]);
 	t("detach: the report waits while another session is open", [h.sent.filter(([m]) => m?.customType === "lets-code-subagents").length, (reg().pending ?? []).length, /1 report waiting/.test(statuses.at(-1)?.[1] ?? "")], [0, 1, true]);
 	// back: alt+s sends /subagents back as a command; the command switches home and the report goes out
 	await h.shortcuts["alt+s"].handler({});
@@ -557,6 +571,8 @@ async function load(env = {}) {
 	await h.commands.subagents.handler("back", ctxFor());
 	await new Promise((r) => setTimeout(r, 120));
 	t("back: the main session's file", switched.at(-1)[0], home);
+	t("back: the main session's own thinking level again", [globalThis.__piLevel, reg().view.mainLevel], ["xhigh", undefined]);
+	globalThis.__piLevel = undefined;
 	const reps = h.sent.filter(([m]) => m?.customType === "lets-code-subagents");
 	t("back: the report continues the main session as a message", [reps.length, reps[0]?.[0]?.customType, /^Reports of the subagent call that went on in the background:/.test(reps[0]?.[0]?.content ?? ""), /## worker[\s\S]*## scout/.test(reps[0]?.[0]?.content ?? ""), reps[0]?.[1]], [1, "lets-code-subagents", true, true, { triggerTurn: true, deliverAs: "followUp" }]);
 	t("back: prompts are the user's again", await h.handlers.input({ text: "hello", source: "interactive" }, { ui }), undefined);
@@ -627,6 +643,15 @@ async function load(env = {}) {
 	t("steer: queued by the child while it works", [res.success, res.data?.disposition, cmds().some((c) => c.type === "prompt" && c.message === "go left" && c.streamingBehavior === "steer")], [true, "queued", true]);
 	t("steer: the user's message and the child's answer in the transcript", [s1.events.some((e) => e.t === "user" && e.text === "go left"), s1.events.some((e) => e.t === "assistant" && e.blocks?.some((b) => b.text === "Steered: go left"))], [true, true]);
 	t("steer: the call still gets the turn's last reply", /Result for: steer me/.test(out.content[0].text), true);
+	// the footer's numbers of a child: its own session's totals and state, asked over RPC after its responses
+	await wait(() => s1.stats?.contextUsage?.percent === 1.4 && s1.stats?.reasoning === true);
+	t("stats: the child's totals, context use and state from its RPC answers", [s1.stats?.input, s1.stats?.output, s1.stats?.cacheRead, s1.stats?.cacheWrite, s1.stats?.cost, s1.stats?.contextUsage, s1.stats?.model, s1.stats?.thinkingLevel], [111, 22, 333, 4, 0.5, { tokens: 448, contextWindow: 32768, percent: 1.4 }, "test-model", "medium"]);
+	t("stats: asked with get_session_stats and get_state", ["get_session_stats", "get_state"].every((k) => cmds().some((c) => c.type === k)), true);
+	{
+		const old = { rec: { ...s1, stats: { input: 7, output: 3, cacheRead: 0, cacheWrite: 0, cost: 0, thinkingLevel: "low" } }, alive: true, send: async () => ({ success: false, error: "Unknown command" }) };
+		await mod.refreshStats(old);
+		t("stats: a pi without those commands leaves the numbers as they were", [old.rec.stats.input, old.rec.stats.thinkingLevel], [7, "low"]);
+	}
 
 	// going on with a finished child: the same process, a new turn; its reply goes to the main session, quietly
 	const c1 = mod.childOf(s1);
@@ -689,6 +714,8 @@ async function load(env = {}) {
 	const b = h.handlers.user_bash({ command: "ls -la", excludeFromContext: false });
 	h.handlers.model_select({ model: { provider: "lets-code", id: "other-model" }, source: "set" });
 	h.handlers.thinking_level_select({ level: "high" });
+	await wait(() => hr.stats?.thinkingLevel === "high");
+	t("thinking in a child's session: recorded as the child's level", hr.stats?.thinkingLevel, "high");
 	const comp = h.handlers.session_before_compact({ reason: "manual", customInstructions: "keep it short" });
 	await wait(() => ["bash", "set_model", "set_thinking_level", "compact"].every((k) => cmds().some((c) => c.type === k && c.pid === cpid)));
 	t("! in a child's session: runs in the child", [/ran: ls -la/.test((await b)?.result?.output ?? ""), cmds().some((c) => c.type === "bash" && c.command === "ls -la" && c.pid === cpid)], [true, true]);
@@ -793,6 +820,7 @@ async function load(env = {}) {
 	const call = h.tool.execute("call-i", { agent: "worker", task: "hang in place" }, undefined, undefined, { cwd: work, isProjectTrusted: true });
 	let r; await wait(() => (r = reg().runs.find((x) => x.task === "hang in place")) && r.events.length > 1);
 	const sent0 = h.sent.length;
+	globalThis.__piLevel = "minimal";   // the main session's level
 	await h.commands.subagents.handler(`id:${r.id}`, ctx());
 	t("main working: no switchSession (it would abort the turn); the child shown in place", [switched.length, reg().view.inplace?.run, doc.children[2] !== chat, tui.children[1] !== pending, tui.children[2] !== statusC, renders > 0], [0, r.id, true, true, true, true]);
 	t("in place: the child's transcript where the chat was, within the width", [doc.children[2].render(70).some((l) => /hang in place/.test(l)), doc.children[2].render(70).every((l) => l.replace(/\x1b\[[0-9;]*m|\x1b\][^\x07]*\x07/g, "").length <= 70), tui.children[1].render(70), tui.children[2].render(70)], [true, true, [], []]);
@@ -819,9 +847,17 @@ async function load(env = {}) {
 	t("in place: shift+tab cycles the child's thinking level", termHandler("\x1b[Z")?.consume, true);
 	await wait(() => cmds().some((c) => c.type === "cycle_thinking_level"));
 	t("in place: shift+tab cycles the child's thinking level", cmds().some((c) => c.type === "cycle_thinking_level" && c.pid === pid), true);
+	await wait(() => r.stats?.thinkingLevel === "high");
+	t("in place: the level the child answered is its level; the main session's untouched", [r.stats?.thinkingLevel, globalThis.__piLevel], ["high", "minimal"]);
+	globalThis.__piLevel = "off";   // pi moved the main session's level (the TUI holds it in place)
+	h.handlers.thinking_level_select({ level: "off", previousLevel: "minimal" });
+	await wait(() => r.stats?.thinkingLevel === "off");
+	t("in place: a level picked goes to the child; the main session's is put back", [r.stats?.thinkingLevel, globalThis.__piLevel], ["off", "minimal"]);
 	// back: pi's own containers again, with what the turn did meanwhile
 	await h.commands.subagents.handler("back", ctx());
 	t("back from in place: pi's containers restored, no switch", [doc.children[2] === chat, tui.children[1] === pending, tui.children[2] === statusC, reg().view.inplace, switched.length], [true, true, true, undefined, 0]);
+	t("back from in place: the main session's level as it was", [globalThis.__piLevel, reg().view.mainLevel], ["minimal", undefined]);
+	globalThis.__piLevel = undefined;
 	t("back: the editor's keys are pi's again", termHandler("\x1b"), undefined);
 	// once the main session is idle, the switch is a real one again
 	h.handlers.agent_settled?.({}); idle = true;

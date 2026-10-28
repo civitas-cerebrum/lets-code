@@ -14,6 +14,9 @@ model on your own hardware:
   cut-off recovery, test reminders, dynamic thinking), grounding
 - modes and roles (`plan`, `auto`, `ask`, `orchestrator`, `yolo`) enforced
   on every tool call, with manifests per user and per project
+- `/plan` (and `ctrl+alt+p`) without the mandate too; a finished plan asks
+  to execute, refine or stay, and executing returns to the previous mode;
+  Claude Code hooks see a runtime switch to plan as `permission_mode: plan`
 - subagents in their own pi sessions, switchable from the footer, with a
   30-minute task budget by default (`LETS_CODE_SUBAGENT_TIMEOUT`; a cut task
   reports its last tool calls), and the

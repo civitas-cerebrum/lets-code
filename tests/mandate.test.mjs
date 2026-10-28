@@ -21,23 +21,24 @@ let fail = 0, n = 0;
 const t = (name, got, want) => { n++; const ok = JSON.stringify(got) === JSON.stringify(want); if (!ok) { fail = 1; console.log(`FAIL ${name}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); } else console.log(`ok    ${name}`); };
 
 let loads = 0;
-async function load(env, { trusted = true, ui = true, answers = [] } = {}) {
+async function load(env, { trusted = true, ui = true, answers = [], entries = [], editor } = {}) {
 	for (const k of ["LETS_CODE_MODE", "LETS_CODE_ROLE", "LETS_CODE_SUBAGENT_DEPTH"]) delete process.env[k];
 	Object.assign(process.env, env);
 	const f = join(agentDir, "extensions", `mandate-${loads++}.ts`); writeFileSync(f, src);
 	const mod = await import(pathToFileURL(f).href);
-	const handlers = {}, commands = {}, shortcuts = {}, emitted = [], notices = [];
+	const handlers = {}, commands = {}, shortcuts = {}, emitted = [], notices = [], selects = [], appended = [];
 	let active = ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"];
 	const pi = {
 		on(ev, h) { handlers[ev] = h; return () => {}; },
 		registerCommand(name, o) { commands[name] = o; }, registerShortcut(k, o) { shortcuts[k] = o; },
 		getActiveTools: () => [...active], setActiveTools: (l) => { active = [...l]; },
 		events: { emit: (c, d) => emitted.push([c, d]), on: () => () => {} },
-		sendUserMessage: (m) => emitted.push(["user", m]),
+		sendUserMessage: (m, o) => emitted.push(["user", m, o]),
+		appendEntry: (type, data) => appended.push([type, data]),
 	};
 	mod.default(pi);
-	const ctx = (cwd) => ({ cwd, hasUI: ui, isProjectTrusted: trusted, ui: { notify: (m) => notices.push(m), setStatus() {}, select: async () => answers.shift() ?? "Deny" }, sessionManager: { getEntries: () => [] } });
-	return { mod, handlers, commands, shortcuts, emitted, notices, ctx, tools: () => active,
+	const ctx = (cwd) => ({ cwd, hasUI: ui, isProjectTrusted: trusted, ui: { notify: (m) => notices.push(m), setStatus() {}, select: async (title) => { selects.push(title); return answers.shift() ?? "Deny"; }, editor: async (title, pre) => editor?.(title, pre), input: async () => undefined }, sessionManager: { getEntries: () => entries } });
+	return { mod, handlers, commands, shortcuts, emitted, notices, selects, appended, ctx, tools: () => active,
 		start: async (cwd) => handlers.session_start?.({ type: "session_start" }, ctx(cwd)),
 		call: async (cwd, toolName, input) => handlers.tool_call({ type: "tool_call", toolCallId: "x", toolName, input }, ctx(cwd)) };
 }
@@ -347,6 +348,76 @@ const blocked = (r) => r?.block === true;
 	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
 	t("dormant child: inert", Object.keys(c.handlers).length, 0);
 	delete process.env.LETS_CODE_ORCHESTRATOR_ON; process.env.LETS_CODE_MANDATE_ON = "1";
+}
+// --- mandate off: plan mode alone, dormant until /plan; approve, then execute
+{
+	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_PLAN_ON = "1";
+	const PLAN = "I read the code.\n\nPlan:\n1. Add x\n2. Test x";
+	const EXEC = "Execute the plan you wrote above, step by step. Run the tests after each step and report what changed.";
+	const end = (h, d, text) => h.handlers.agent_end({ type: "agent_end", messages: [{ role: "user", content: "go" }, { role: "assistant", content: [{ type: "text", text }] }] }, h.ctx(d));
+	const modes = (h) => h.emitted.filter(([c]) => c === "lets-code:mode").map(([, x]) => x);
+	const h = await load({}, { answers: ["Stay in plan mode", "Execute the plan"] }); const d = repo(); await h.start(d);
+	t("plan alone: /plan and ctrl+alt+p, no /mode or /orchestrator", [Object.keys(h.commands), "ctrl+alt+p" in h.shortcuts], [["plan"], true]);
+	t("plan alone: dormant, write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	t("plan alone: dormant, tools untouched", h.tools().includes("edit"), true);
+	await h.commands.plan.handler("", h.ctx(d));
+	t("/plan: write blocked", blocked(await h.call(d, "write", { path: join(d, "src/b.txt") })), true);
+	t("/plan: edit dropped", h.tools().includes("edit"), false);
+	t("/plan: announced", modes(h).at(-1)?.role, "plan");
+	await end(h, d, "Still reading the code.");
+	t("no Plan: heading, no dialog", h.selects.length, 0);
+	await end(h, d, PLAN);
+	t("a plan: asked what next", h.selects.length, 1);
+	t("Stay: still in plan", blocked(await h.call(d, "write", { path: join(d, "src/b.txt") })), true);
+	await end(h, d, PLAN);
+	t("the same plan is asked about once", h.selects.length, 1);
+	await end(h, d, `${PLAN}\n3. Docs`);
+	t("Execute: back to unrestricted", await h.call(d, "bash", { command: "npm install" }), undefined);
+	t("Execute: tools restored", h.tools().includes("edit"), true);
+	t("Execute: announced as off", modes(h).at(-1)?.off, true);
+	t("Execute: the execute message as a followUp", h.emitted.at(-1), ["user", EXEC, { deliverAs: "followUp" }]);
+	t("Execute: the plan persisted", [h.appended.length, h.appended[0]?.[0], h.appended[0]?.[1]?.plan, typeof h.appended[0]?.[1]?.at], [1, "lets-code-plan", "Plan:\n1. Add x\n2. Test x\n3. Docs", "string"]);
+	await end(h, d, `${PLAN}\n4. More`);
+	t("out of plan: no dialog", h.selects.length, 2);
+	// refine: the edited plan goes back as the next message, plan mode stays
+	const r = await load({}, { answers: ["Refine the plan"], editor: (_t, pre) => `${pre}\n3. Also y` }); await r.start(d);
+	await r.shortcuts["ctrl+alt+p"].handler(r.ctx(d)); await end(r, d, PLAN);
+	t("Refine: the edited plan as a followUp", r.emitted.at(-1), ["user", "Revise the plan:\n\nPlan:\n1. Add x\n2. Test x\n3. Also y", { deliverAs: "followUp" }]);
+	t("Refine: still in plan", blocked(await r.call(d, "write", { path: join(d, "src/b.txt") })), true);
+	// leaving by hand with a plan on the table: asked, Switch only sends nothing
+	const m = await load({}, { answers: ["Switch mode only"], entries: [{ type: "message", message: { role: "assistant", content: [{ type: "text", text: PLAN }] } }] }); await m.start(d);
+	await m.commands.plan.handler("", m.ctx(d)); await m.commands.plan.handler("", m.ctx(d));
+	t("leaving by hand: asked once, nothing sent", [m.selects.length, m.emitted.filter(([c]) => c === "user").length], [1, 0]);
+	t("leaving by hand: unrestricted again", await m.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	t("leaving by hand: no prompt section", (() => { const s = {}; m.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), []);
+	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
+	t("plan alone, child: inert", Object.keys(c.handlers).length, 0);
+	// with the orchestrator too: each goes back to where it came from
+	process.env.LETS_CODE_ORCHESTRATOR_ON = "1";
+	const o = await load({}); await o.start(d);
+	t("plan and orchestrator: both commands", Object.keys(o.commands).sort(), ["orchestrator", "plan"]);
+	await o.commands.plan.handler("", o.ctx(d)); await o.commands.orchestrator.handler("", o.ctx(d));
+	t("plan -> orchestrator", modes(o).at(-1)?.role, "orchestrator");
+	await o.commands.orchestrator.handler("", o.ctx(d));
+	t("orchestrator leaves back to plan", [modes(o).at(-1)?.role, blocked(await o.call(d, "write", { path: join(d, "src/b.txt") }))], ["plan", true]);
+	await o.commands.plan.handler("", o.ctx(d));
+	t("plan leaves to unrestricted", [modes(o).at(-1)?.off, await o.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
+	delete process.env.LETS_CODE_ORCHESTRATOR_ON; delete process.env.LETS_CODE_PLAN_ON; process.env.LETS_CODE_MANDATE_ON = "1";
+}
+// --- mandate on: plan goes back to the mode it was entered from
+{
+	const PLAN = "Plan:\n1. Fix it";
+	const h = await load({ LETS_CODE_MODE: "ask" }, { answers: ["Execute the plan"] }); const d = repo(); await h.start(d);
+	const role = () => h.emitted.filter(([c]) => c === "lets-code:mode").at(-1)?.[1]?.role;
+	await h.shortcuts["ctrl+alt+p"].handler(h.ctx(d));
+	t("mandate: ctrl+alt+p enters plan", role(), "plan");
+	await h.handlers.agent_end({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: PLAN }] }] }, h.ctx(d));
+	t("mandate: Execute goes back to ask, not auto", role(), "ask");
+	t("mandate: execute message sent", h.emitted.at(-1)?.[0], "user");
+	await h.commands.mode.handler("plan", h.ctx(d)); await h.commands.plan.handler("", h.ctx(d));
+	t("mandate: /mode plan then /plan: back to ask", role(), "ask");
+	const a = await load({ LETS_CODE_MODE: "plan" }); await a.start(d); await a.commands.plan.handler("", a.ctx(d));
+	t("mandate: started in plan, /plan leaves to the default", a.emitted.filter(([c]) => c === "lets-code:mode").at(-1)?.[1]?.role, "auto");
 }
 t("deny log written", readFileSync(process.env.LETS_CODE_MANDATE_LOG, "utf8").split("\n").filter((l) => l.includes('"deny"')).length > 5, true);
 

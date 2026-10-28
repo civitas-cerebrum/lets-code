@@ -221,6 +221,23 @@ as well. Read-only bash had holes that matter once nothing else may write:
 writes under every deny-by-default role (plan too); `cd`, `pushd` and
 `popd` count as read-only (what follows them is judged on its own).
 
+**Plan mode, always there.** `/plan` lived below the mandate's on switch, and
+the mandate is off by default, so a plain launch had no plan mode. Now the
+launcher writes the module with `LETS_CODE_PLAN_ON=1` whenever the mandate
+is off (not with `--no-mandate`), the same dormant form as the orchestrator:
+nothing is enforced and only `/plan` and `ctrl+alt+p` are registered until
+the user enters plan; leaving it returns to the dormant, unrestricted state
+(the mode event then carries `off: true`). The plan role's scope is
+unchanged. Plan remembers the mode it was entered from and goes back there
+(it used to go to `auto` always); so does the orchestrator, and the two
+nest. The approval works like Claude Code's: on `agent_end` in plan mode
+with a UI, if the last reply has a `Plan:` heading, one dialog per plan:
+execute (leave plan, keep the plan with `appendEntry("lets-code-plan")`,
+send the execute message as a follow-up), refine (the plan in the editor,
+sent back as the next message), or stay. The Claude Code adapter now takes
+`permission_mode` from the mode event when there is one, so hooks see a
+runtime `/plan` as `plan`.
+
 The first live use (Haiku on the phone, "a simple chess game, start fresh")
 never reached a stage: `cd` was denied, the factory refused a folder that
 was not a repo, the model asked the user to `git init` (the prompt's "a

@@ -316,13 +316,14 @@ async function load(cwd, env = {}) {
 	for (const k of ["LETS_CODE_SUBAGENT_DEPTH", "LETS_CODE_CLAUDE_TRUST", "LETS_CODE_CLAUDE_ENV", "LETS_CODE_SUBAGENTS_ON"]) delete process.env[k];
 	Object.assign(process.env, env);
 	const mod = await importModule();
-	const handlers = {}; const commands = {}; const tools = {}; const mcp = []; const sent = []; const messages = [];
+	const handlers = {}; const commands = {}; const tools = {}; const mcp = []; const sent = []; const messages = []; const listeners = {};
 	let active = ["read", "bash", "edit", "write", "grep"];
 	mod.default({
 		on(ev, h) { (handlers[ev] ??= []).push(h); return () => {}; },
 		registerCommand(n, o) { commands[n] = o; }, registerTool(d) { tools[d.name] = d; },
 		registerMcpServer(n, c) { mcp.push([n, c]); }, sendUserMessage(text, o) { sent.push([text, o ?? null]); }, sendMessage(msg) { messages.push(msg); },
 		getActiveTools: () => active, setActiveTools(l) { active = l; },
+		events: { on(c, h) { listeners[c] = h; return () => {}; }, emit() {} },
 	});
 	process.chdir(saved);
 	const notes = []; const selects = [];
@@ -330,7 +331,7 @@ async function load(cwd, env = {}) {
 	const ctx = (ui) => ({ cwd, hasUI: !!ui, signal: undefined, abort() {}, isIdle: () => true, sessionManager: { getSessionId: () => "sess-1", getSessionFile: () => "/s.jsonl" },
 		ui: { notify: (msg) => notes.push(msg), select: async (title, opts) => { selects.push(title); return ui?.answer ?? opts[0]; }, setStatus() {} } });
 	const emit = async (ev, e, c) => { let out; for (const h of handlers[ev] ?? []) { const r = await h(e, c); if (r !== undefined) out = r; } return out; };
-	return { handlers, commands, tools, mcp, sent, messages, notes, selects, ctx, emit, active: () => active };
+	return { handlers, commands, tools, mcp, sent, messages, notes, selects, listeners, ctx, emit, active: () => active };
 }
 {
 	const proj = join(work, "live"); mkdirSync(proj);
@@ -377,6 +378,14 @@ async function load(cwd, env = {}) {
 	const ev = { toolName: "bash", toolCallId: "4", input: { command: "ls" } };
 	t("allow + updatedInput", [await x.emit("tool_call", ev, c), ev.input.command], [undefined, "ls -1"]);
 	t("an allowed call is marked for the mandate", globalThis.__letsCodeClaudeApproved.has("4"), true);
+	const lastMode = () => JSON.parse(readFileSync(log, "utf8").split("\n").filter(Boolean).at(-1)).permission_mode;
+	t("permission_mode from the launch mode", lastMode(), "default");
+	x.listeners["lets-code:mode"]({ role: "plan", network: "off" });
+	await x.emit("tool_call", { toolName: "bash", toolCallId: "4p", input: { command: "git status" } }, c);
+	t("permission_mode follows a runtime switch to plan", lastMode(), "plan");
+	x.listeners["lets-code:mode"]({ role: "auto", network: "on", off: true });
+	await x.emit("tool_call", { toolName: "bash", toolCallId: "4q", input: { command: "git status" } }, c);
+	t("  and back when plan mode is left", lastMode(), "default");
 	const ask = await x.emit("tool_call", { toolName: "bash", toolCallId: "5", input: { command: "git push origin main" } }, x.ctx({ answer: "Deny" }));
 	t("ask rule: the user is asked, a no blocks", ask?.block, true);
 	const askNoUi = await x.emit("tool_call", { toolName: "bash", toolCallId: "6", input: { command: "git push" } }, x.ctx(null));

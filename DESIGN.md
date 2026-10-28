@@ -115,6 +115,12 @@ test reminder, required executed verification, and the auto thinking level
 the benchmark, no signal fired on easy tasks and every thinking-off session
 that thrashed on a hard task tripped one within 1 to 4 minutes.
 
+For the test reminder and the verification check, an edit counts as a
+source change unless the file is documentation or text (`NONCODE_RE`:
+md, markdown, rst, txt, org, adoc, tex, csv). Config files (json, yaml,
+toml, xml, ini, env, lock files) still count: a `package.json`, a CI
+workflow or a `tsconfig.json` can break a build.
+
 A hard thinking budget was once a fixed `samplingParams` value (half the
 output cap) for every level; Qwen3's template ignores the soft hint, so
 low, medium and high were the same configuration. pi's per-level budget is
@@ -373,11 +379,14 @@ boxes pass to the renderer; Ctrl+T calls `setHideThinkingBlock` only on its
 part read the state themselves: tool output from `ui.getToolsExpanded()`
 and pi's per-message expanded flag, hidden thinking from pi's setting
 (`pi.getSettings()` on pi 1.0, `settings.json` on 0.87, and the toggle
-key itself so the change shows at once). Keys whose effect is the child's
-go to the child: Esc (`abort`), the follow-up key (the next prompt is sent
-as `followUp`), the dequeue key (`clear_queue`, back into the editor),
-copy (the view catches up first). The bindings are read from
-`<agent dir>/keybindings.json` over pi's defaults.
+key itself so the change shows at once). Expansion (Ctrl+O) applies to
+completed tools only: a running tool keeps its live tail preview, so its
+output cannot outgrow the live widget, which is not scrollable. Keys
+whose effect is the child's go to the child: Esc (`abort`), the follow-up
+key (the next prompt is sent as `followUp`), the dequeue key
+(`clear_queue`, back into the editor), copy (the view catches up first).
+The bindings are read from `<agent dir>/keybindings.json` over pi's
+defaults.
 
 One writer: the child process owns its session file, and pi appends to
 whatever session it has open (a model or thinking change, a `!` record),

@@ -514,7 +514,9 @@ it adds nothing unless a rule acts.
   model is told to run its tests, up to 5 times per session.
 - **Verification.** If pi tries to finish with edits no executed command
   has seen, or right after a failed check, it gets one continuation asking
-  for a real run, up to 2 times.
+  for a real run, up to 2 times. Edits to documentation and text files
+  (`.md`, `.rst`, `.txt`, `.csv` and the like) do not count; config such
+  as `package.json` or CI YAML does.
 - **Wrap-up.** Once the model's own tests have passed for
   `LETS_CODE_WRAP_TURNS` turns (6) and 2 minutes, or `LETS_CODE_WRAP_MINUTES`
   minutes (5), it is told once to finish if every requirement is covered

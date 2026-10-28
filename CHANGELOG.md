@@ -29,3 +29,9 @@ model on your own hardware:
   agents, permission rules, MCP servers and workflows, read at each start
 - presets for more backends, an OS sandbox, MCP import, a footer with
   tokens, speed and cost, a session tag for proxy logs, `update`
+- sessions and messages (#79): a `message` tool, `/sessions`, `lets-code
+  sessions` and `lets-code message` for one session on the machine to tell
+  another something: by pid, session id or name, `repo` for every session
+  in the repository, `parent` and `children` between an orchestrator and
+  its subagents; shown after the receiver's current turn, never in the
+  middle of it, with delivered / queued / undeliverable back to the sender

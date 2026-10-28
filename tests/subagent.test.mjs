@@ -329,6 +329,25 @@ async function load(env = {}) {
 	const started = Date.now();
 	const slow = await on.run({ agent: "slow", task: "slow down" });
 	t("timeout stops the child", [slow.isError, /timed out after 1s/.test(slow.content[0].text), Date.now() - started < 8000], [true, true, true]);
+	t("a cut run says where it stopped", slow.content[0].text.includes('[cut at its 1s budget — last: bash {"command":"ls"}; not finished]'), true);
+	t("default task budget: 30 minutes", mod.SUBAGENT_TIMEOUT, 1800);
+	// an agent file without timeout: gets LETS_CODE_SUBAGENT_TIMEOUT; one with it keeps its own
+	writeFileSync(join(agentDir, "agents", "slow2.md"), "---\ndescription: times out later\ntimeout: 2\n---\nx\n");
+	const short = await load({ LETS_CODE_SUBAGENT_TIMEOUT: "1" });
+	t("env budget", short.mod.SUBAGENT_TIMEOUT, 1);
+	const dflt = await short.run({ agent: "worker", task: "slow without a timeout of its own" });
+	t("no timeout in the file: the default budget applies", [dflt.isError, /timed out after 1s/.test(dflt.content[0].text)], [true, true]);
+	const own = await short.run({ agent: "slow2", task: "slow with its own" });
+	t("a timeout in the file wins", /timed out after 2s[\s\S]*\[cut at its 2s budget/.test(own.content[0].text), true);
+	delete process.env.LETS_CODE_SUBAGENT_TIMEOUT;
+	rmSync(join(agentDir, "agents", "slow2.md"));
+	t("bad env budget: the default", (await load({ LETS_CODE_SUBAGENT_TIMEOUT: "abc" })).mod.SUBAGENT_TIMEOUT, 1800);
+	delete process.env.LETS_CODE_SUBAGENT_TIMEOUT;
+	const evs = ["read", "edit", "bash", "bash"].map((name, i) => ({ t: "tool", id: String(i), name, args: name === "edit" ? { path: "a.ts", text: "y".repeat(200) } : { command: `step ${i}` }, done: true, output: "", cut: 0, v: 0, at: 0 }));
+	const steps = mod.lastSteps({ events: [{ t: "note", text: "x", v: 0, at: 0 }, ...evs] });
+	t("last steps: the newest three tool calls, clipped", [steps.split("; ").length, steps.startsWith('edit {"path":"a.ts"'), steps.split("; ")[0].length <= 80, steps.endsWith('bash {"command":"step 3"}')], [3, true, true, true]);
+	t("no tool call before the cut", mod.render({ agent: "w", task: "x", text: "", exitCode: 124, stderr: "", turns: 0, input: 0, output: 0, timedOut: 5 }).includes("[cut at its 5s budget — last: no tool call; not finished]"), true);
+	t("method: a cut task is narrowed, not re-sent", /not retried by re-sending it/.test(mod.orchestration([])), true);
 	delete process.env.TEST_RE_ON;
 	rmSync(join(agentDir, "agents", "re.md")); rmSync(join(agentDir, "agents", "slow.md"));
 

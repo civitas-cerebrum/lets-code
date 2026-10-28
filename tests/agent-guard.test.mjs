@@ -538,10 +538,26 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	await edit(h, "calc.py");
 	const r = await h.emit("agent_before_settle", {});
 	check("edit then finish: continuation", r?.continue, true);
-	check("asks for a real run", /no command has been executed/.test(r?.entries?.[0]?.content ?? ""), true);
+	check("asks for a real run", /no code has been executed/.test(r?.entries?.[0]?.content ?? ""), true);
 	bash(h, "cat calc.py"); await result(h, "bash", "def f(): ...");
 	check("reading the file is not execution", (await h.emit("agent_before_settle", {}))?.continue, true);
 	check("capped at 2", await h.emit("agent_before_settle", {}), undefined);
+}
+
+// --- documentation and text edits do not ask for a run; config still does
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
+	await edit(h, "docs/notes.md");
+	check("markdown edit then finish: settles", await h.emit("agent_before_settle", {}), undefined);
+	await edit(h, "docs/usage.rst");
+	check("text edit then finish: settles", await h.emit("agent_before_settle", {}), undefined);
+	await edit(h, "calc.py");
+	check("a code edit still asks for a run", (await h.emit("agent_before_settle", {}))?.continue, true);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
+	await edit(h, "package.json");
+	check("a config (.json) edit still asks for a run", (await h.emit("agent_before_settle", {}))?.continue, true);
 }
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });

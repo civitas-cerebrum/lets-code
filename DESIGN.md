@@ -115,6 +115,12 @@ test reminder, required executed verification, and the auto thinking level
 the benchmark, no signal fired on easy tasks and every thinking-off session
 that thrashed on a hard task tripped one within 1 to 4 minutes.
 
+For the test reminder and the verification check, an edit counts as a
+source change unless the file is documentation or text (`NONCODE_RE`:
+md, markdown, rst, txt, org, adoc, tex, csv). Config files (json, yaml,
+toml, xml, ini, env, lock files) still count: a `package.json`, a CI
+workflow or a `tsconfig.json` can break a build.
+
 A hard thinking budget was once a fixed `samplingParams` value (half the
 output cap) for every level; Qwen3's template ignores the soft hint, so
 low, medium and high were the same configuration. pi's per-level budget is

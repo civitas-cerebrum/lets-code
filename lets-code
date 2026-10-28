@@ -5228,7 +5228,7 @@ export default function (pi: ExtensionAPI) {
 		if (announce) { pi.events.emit("lets-code:mode", { role: name, network: role.network ?? "on", bypass: !!role.bypass, sandbox: role.sandbox ?? {}, ...(on ? {} : { off: true }) }); if (prev !== name) log("mode", { from: prev, to: name }); }
 	}
 	function reload(ctx: ExtensionContext | undefined) {
-		try { manifest = loadManifest(cwd, ctx?.isProjectTrusted ?? false, (m) => warn(ctx, m)); }
+		try { manifest = loadManifest(cwd, typeof (ctx as any)?.isProjectTrusted === "function" ? ctx!.isProjectTrusted() : !!(ctx as any)?.isProjectTrusted, (m) => warn(ctx, m)); }
 		catch (e) { // a broken manifest fails closed: built-in roles only, and the strictest mode that still works
 			warn(ctx, `mandate: ${(e as Error).message} — using built-in roles`); manifest = BUILTIN;
 		}
@@ -7008,7 +7008,7 @@ export default function (pi: ExtensionAPI) {
 			chain: Type.Optional(Type.Array(Item, { description: "run in order" })),
 		}),
 		async execute(_id, params: any, signal, onUpdate, ctx: ExtensionContext) {
-			const agents = discoverAgents(ctx.cwd, ctx.isProjectTrusted);
+			const agents = discoverAgents(ctx.cwd, typeof (ctx as any).isProjectTrusted === "function" ? ctx.isProjectTrusted() : !!(ctx as any).isProjectTrusted);
 			const list = agents.map((a) => `- ${a.name}: ${a.description || "(no description)"}`).join("\n") || "(none: add ~/.pi/agent/agents/<name>.md)";
 			const find = (n: string) => agents.find((a) => a.name === n);
 			const missing = (n: string) => EXPERTS && discoverExperts().some((s) => s.name === n)

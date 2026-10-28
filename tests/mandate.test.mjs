@@ -260,6 +260,12 @@ const blocked = (r) => r?.block === true;
 	const u = await load({}, { trusted: false }); const d4 = repo(); mkdirSync(join(d4, ".pi")); writeFileSync(join(d4, ".pi", "mandate.json"), "{ roles: { ask: { bash: { privileged: \"deny\" } } } }");
 	await u.start(d4);
 	t("untrusted project manifest ignored", u.notices.some((m) => /ignored \(project not trusted\)/.test(m)), true);
+	// pi 1.0.3: isProjectTrusted is a method, not a boolean
+	const d6 = repo(); mkdirSync(join(d6, ".pi")); writeFileSync(join(d6, ".pi", "mandate.json"), JSON.stringify({ roles: { ask: { bash: { privileged: "deny" } } } }));
+	const um = await load({ LETS_CODE_MODE: "ask" }, { trusted: () => false, answers: ["Allow once"] }); await um.start(d6);
+	t("isProjectTrusted() false: project manifest ignored", [um.notices.some((m) => /ignored \(project not trusted\)/.test(m)), await um.call(d6, "bash", { command: "sudo ls" })], [true, undefined]);
+	const tm = await load({ LETS_CODE_MODE: "ask" }, { trusted: () => true, answers: ["Allow once"] }); await tm.start(d6);
+	t("isProjectTrusted() true: project manifest applied", blocked(await tm.call(d6, "bash", { command: "sudo ls" })), true);
 	writeFileSync(join(agentDir, "mandate.json"), "{ not json");
 	const b = await load({ LETS_CODE_MODE: "ask" }); const d5 = repo(); await b.start(d5);
 	t("broken global manifest: warns and keeps built-ins", b.notices.some((m) => /using built-in roles/.test(m)) && blocked(await b.call(d5, "bash", { command: "sudo ls" })), true);

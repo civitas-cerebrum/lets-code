@@ -366,11 +366,14 @@ boxes pass to the renderer; Ctrl+T calls `setHideThinkingBlock` only on its
 part read the state themselves: tool output from `ui.getToolsExpanded()`
 and pi's per-message expanded flag, hidden thinking from pi's setting
 (`pi.getSettings()` on pi 1.0, `settings.json` on 0.87, and the toggle
-key itself so the change shows at once). Keys whose effect is the child's
-go to the child: Esc (`abort`), the follow-up key (the next prompt is sent
-as `followUp`), the dequeue key (`clear_queue`, back into the editor),
-copy (the view catches up first). The bindings are read from
-`<agent dir>/keybindings.json` over pi's defaults.
+key itself so the change shows at once). Expansion (Ctrl+O) applies to
+completed tools only: a running tool keeps its live tail preview, so its
+output cannot outgrow the live widget, which is not scrollable. Keys
+whose effect is the child's go to the child: Esc (`abort`), the follow-up
+key (the next prompt is sent as `followUp`), the dequeue key
+(`clear_queue`, back into the editor), copy (the view catches up first).
+The bindings are read from `<agent dir>/keybindings.json` over pi's
+defaults.
 
 One writer: the child process owns its session file, and pi appends to
 whatever session it has open (a model or thinking change, a `!` record),

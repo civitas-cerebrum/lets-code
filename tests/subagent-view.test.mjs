@@ -115,6 +115,15 @@ t("status labels", runs.map(v.statusLabel), ["done", "running", "running", "fail
 	const q = v.liveLines(live, file4, { width: 70, now, queued: [{ text: "go left", kind: "steer" }, { text: "then right " + "x".repeat(90), kind: "followUp" }] }).map(strip);
 	t("live: sent and not yet taken, one line each, as pi labels them", [q.includes(" Steering: go left"), q.some((l) => l.startsWith(" Follow-up: then right") && W(l) <= 70)], [true, true]);
 	t("live: the streaming text and the working line, in 70 columns", [lines.some((l) => /Found it/.test(l)), /● scout working · 30s · ↑1\.2k ↓340 · live/.test(lines.at(-1)), lines.every((l) => W(l) <= 70)], [true, true, true]);
+	// #78: ctrl+o expands completed tools only; a running one keeps its tail (the live widget does not scroll)
+	const many = Array.from({ length: 10 }, (_, i) => `out${i + 1}`).join("\n");
+	live.events[5].output = many;
+	const runX = v.liveLines(live, file4, { width: 70, now, flags: { expanded: true, thinking: false } }).map(strip);
+	t("live: a running bash, tools expanded: only the tail preview", [runX.some((l) => /… 4 earlier lines/.test(l)), runX.some((l) => /^ {2}out4$/.test(l)), runX.some((l) => /^ {2}out5$/.test(l)), runX.some((l) => /^ {2}out10$/.test(l))], [true, false, true, true]);
+	const doneX = { ...live, events: live.events.map((e, i) => i === 5 ? { ...e, done: true } : e) };
+	const finX = v.liveLines(doneX, file4, { width: 70, now, flags: { expanded: true, thinking: false } }).map(strip);
+	t("live: a finished bash, tools expanded: the whole output", [finX.some((l) => /earlier line/.test(l)), finX.some((l) => /^ {2}out1$/.test(l)), finX.some((l) => /^ {2}out10$/.test(l))], [false, true, true]);
+	live.events[5].output = "calc.py\n";
 	const done = { ...live, status: "done", ended: now, events: live.events.map((e) => ({ ...e, done: true })) };
 	const full = v.loadedOf(entries([{ role: "user" }, { role: "assistant" }, { role: "toolResult", toolCallId: "c1" }, { role: "assistant" }, { role: "toolResult", toolCallId: "c2" }, { role: "toolResult", toolCallId: "c3" }, { role: "assistant" }]));
 	t("live: a finished run whose file has it all draws nothing", v.liveLines(done, full, { width: 120, now }), []);
@@ -139,6 +148,16 @@ t("status labels", runs.map(v.statusLabel), ["done", "running", "running", "fail
 		tools: {} } };
 	const tr3 = new v.Transcript(fake, { fg: (_c, s) => s }, {});
 	t("pi's components: each event drawn by them", tr3.lines(evs, r, 60, { expanded: false, thinking: true }), ["USER Task: look", "ASSISTANT hmm|Hello there …", "TOOL bash ls -> a\nb"]);
+	// #78: setExpanded(true) only once the tool is done
+	const calls = [];
+	const rec = { ...fake, pi: { ...fake.pi, ToolExecutionComponent: class extends fake.pi.ToolExecutionComponent { setExpanded(x) { calls.push(x); } } } };
+	const tr4 = new v.Transcript(rec, { fg: (_c, s) => s }, {});
+	const tool = ev({ t: "tool", id: "c9", name: "bash", args: { command: "yes" }, done: false, output: "y\ny" });
+	tr4.lines([tool], r, 60, { expanded: true, thinking: false });
+	t("pi's components: a running tool is not expanded, even with tools expanded", [calls.length > 0, calls.includes(true)], [true, false]);
+	calls.length = 0;
+	tr4.lines([{ ...tool, v: 1, done: true }], r, 60, { expanded: true, thinking: false });
+	t("pi's components: once done, the tool is expanded", calls, [true]);
 }
 
 console.log(`\n${n} checks, ${fail ? "FAILURES" : "all passed"}`);

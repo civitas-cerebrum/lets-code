@@ -7277,7 +7277,7 @@ export function plainEvent(ev: Ev, width: number, flags: Flags, th: Theme = iden
 		const lines = String(ev.output ?? "").replace(/\s+$/, "").split("\n").filter((l, i, a) => a.length > 1 || l);
 		if (!lines.length || (lines.length === 1 && !lines[0])) { if (!ev.done) out.push(`  ${th.fg("dim", "running…")}`); }
 		else {
-			const shown = flags.expanded || lines.length <= TOOL_PREVIEW ? lines : ev.name === "bash" ? lines.slice(-TOOL_PREVIEW) : lines.slice(0, TOOL_PREVIEW);
+			const shown = (flags.expanded && ev.done) || lines.length <= TOOL_PREVIEW ? lines : ev.name === "bash" ? lines.slice(-TOOL_PREVIEW) : lines.slice(0, TOOL_PREVIEW);
 			const more = lines.length - shown.length;
 			if (more && ev.name === "bash") out.push(`  ${th.fg("dim", `… ${more} earlier line${more === 1 ? "" : "s"}`)}`);
 			for (const l of shown) out.push(cutTo(`  ${th.fg(ev.isError ? "error" : "dim", l.replace(/\t/g, "    "))}`, W, deps));
@@ -7341,7 +7341,7 @@ export class Transcript {
 			if (st && typeof st === "object") { st.startedAt = ev.at; if (ev.done) st.endedAt = ev.end ?? ev.at; }
 			c.markExecutionStarted?.(); c.setArgsComplete?.();
 			if (ev.done || ev.output) c.updateResult({ content: [{ type: "text", text: ev.output ?? "" }], details: ev.details, isError: !!ev.isError }, !ev.done);
-			c.setExpanded?.(flags.expanded);
+			c.setExpanded?.(flags.expanded && ev.done);
 			const lines = c.render(width);   // it brings its own spacer, as in the main view
 			// a running tool's renderer starts a timer to redraw itself; this component is thrown away
 			if (st?.interval) { clearInterval(st.interval); st.interval = undefined; }

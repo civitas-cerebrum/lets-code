@@ -416,7 +416,20 @@ hook refuses it, so nothing lands in the main session), `/thinking
 change the open session (`IN_PLACE_DEFER`, ctrl+l, ctrl+x) are held with
 a note until the main session is idle, then run in the child's real
 session. Completed child messages are not added to the main session as
-custom messages in place (the view draws them). When the main session is
+custom messages in place (the view draws them). In place the TUI's session
+is still the main session, so its `input` hook sees the main session's
+own input too: messages typed into the main session while it compacted
+(pi keeps them in its compaction queue and submits them, as `interactive`
+input, when compaction ends) and other extensions' `sendUserMessage`.
+Routing all of that to the viewed child leaked the main session's queued
+messages into the child (#73). So in place a message typed for the child
+goes to it from the key hook (Enter, and the follow-up key as a
+follow-up), never through pi's submit, whose compaction queue would hold
+it for the main session; a slash text (a prompt template or skill) is pi's
+to submit and is marked there, and the `input` hook in place takes only
+that marked text; everything else is the main session's. The child's
+queue as drawn follows its own pi's `queue_update` events (by text match
+on `message_end` as a fallback). When the main session is
 idle the switch is the real one as before (no turn to abort). If pi's
 layout is not as expected the switch is deferred with a note (the last
 resort).

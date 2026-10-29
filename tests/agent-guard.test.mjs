@@ -29,7 +29,7 @@ function check(name, got, want) {
 // Each load gets its own copy so module-level env reads see that load's env.
 let loads = 0;
 async function load(env) {
-	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_THINKING_REPLAY", "LETS_CODE_FINAL_REVIEW", "LETS_CODE_PLAN_BURST", "LETS_CODE_PLAN_LEVEL", "LETS_CODE_THINKING_BASE", "LETS_CODE_THINKING_DOWN"]) delete process.env[k];
+	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_THINKING_REPLAY", "LETS_CODE_FINAL_REVIEW", "LETS_CODE_PLAN_BURST", "LETS_CODE_PLAN_LEVEL", "LETS_CODE_THINKING_BASE", "LETS_CODE_THINKING_DOWN", "LETS_CODE_FIRM_STOP"]) delete process.env[k];
 	Object.assign(process.env, env);
 	const f = join(work, `agentguard-${loads++}.ts`);
 	writeFileSync(f, src);
@@ -83,6 +83,29 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	const other = { toolName: "read", toolCallId: "y", input: { path: "a" } };
 	h.emit("tool_call", other);
 	check("read untouched", other.input.timeout, undefined);
+	const ev = { systemPromptOptions: { sections: {} } };
+	await h.emit("before_agent_start", ev);
+	check("prompt names the default timeout", /without a timeout are stopped after 120s; pass `timeout`/.test(ev.systemPromptOptions.sections.lets_code_verification), true);
+	// a call stopped by our default gets a hint; one with the model's own timeout does not
+	bash(h, "npm run build");
+	const r = await result(h, "bash", "building...\n\nCommand timed out after 120 seconds", true);
+	check("timeout by the default: hint appended", /Stopped by the 120s default timeout; rerun with a larger `timeout`/.test(r?.content?.at(-1)?.text ?? ""), true);
+	check("timeout hint keeps the original output", r?.content?.[0]?.text, "building...\n\nCommand timed out after 120 seconds");
+	bash(h, "npm run build", { timeout: 900 });
+	check("model's own timeout: no hint", await result(h, "bash", "Command timed out after 900 seconds", true), undefined);
+	bash(h, "ls");
+	check("no timeout: no hint", await result(h, "bash", "a b"), undefined);
+}
+for (const off of ["0", "off"]) {
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_BASH_TIMEOUT: off });
+	check(`BASH_TIMEOUT=${off}: no timeout set`, bash(h, "python3 fuzz.py").timeout, undefined);
+	const ev = { systemPromptOptions: { sections: {} } };
+	await h.emit("before_agent_start", ev);
+	check(`BASH_TIMEOUT=${off}: prompt does not mention a timeout`, /timeout/.test(ev.systemPromptOptions.sections.lets_code_verification), false);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
+	check("default bash timeout is 300", bash(h, "python3 fuzz.py").timeout, 300);
 }
 
 // --- cut-off reply without a tool call: continuation, capped at 3
@@ -112,10 +135,19 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("3 passing turns within 2 min: no wrap yet", await turn(h), undefined);
 	advance(2 * 60_000);
 	const r = await turn(h);
-	check("wrap after 3 passing turns and 2 min", r?.entries?.[0]?.content?.includes("finish now"), true);
+	check("wrap after 3 passing turns and 2 min", r?.entries?.[0]?.content?.includes("finish with a short summary"), true);
+	check("wrap is advisory: no 'make no further tool calls'", /no further tool calls|finish now/.test(r?.entries?.[0]?.content ?? ""), false);
 	check("wrap does not force a request", r?.continue, undefined);
 	await turn(h);
 	check("wrap only once", await turn(h), undefined);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "0", LETS_CODE_FIRM_STOP: "1" });
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
+	advance(10 * 60_000);
+	let any = false;
+	for (let i = 0; i < 12; i++) { const r = await turn(h); if (r?.entries?.length) any = true; if (i === 5) advance(10 * 60_000); }
+	check("WRAP_TURNS=0: no wrap note and no firm stop", any, false);
 }
 
 // --- dynamic thinking: bursts to the ceiling with a goal, end on resolution / turn cap / passing tests
@@ -426,14 +458,26 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("adaptive, easy task: no review without a burst", await h.emit("agent_before_settle", {}), undefined);
 }
 
-// --- v10: firm stop after an ignored wrap-up
+// --- v10: firm stop after an ignored wrap-up (opt-in: LETS_CODE_FIRM_STOP=1)
 {
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2" });
 	await edit(h, "calc.py");
 	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
 	advance(3 * 60_000);
+	let wrapped = false, stopped = false;
+	for (let i = 0; i < 14; i++) { const r = await turn(h); if (r?.entries?.some((e) => /finish with a short summary/.test(e.content))) wrapped = true; if (r?.entries?.some((e) => /Stop now|no further tool calls/.test(e.content))) stopped = true; }
+	advance(10 * 60_000);
+	if ((await turn(h))?.entries?.some((e) => /Stop now|no further tool calls/.test(e.content))) stopped = true;
+	check("default: wrap-up note fires", wrapped, true);
+	check("default: no firm stop, however long", stopped, false);
+}
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2", LETS_CODE_FIRM_STOP: "1" });
+	await edit(h, "calc.py");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
+	advance(3 * 60_000);
 	let w = null;
-	for (let i = 0; i < 5 && !w; i++) { const r = await turn(h); if (r?.entries?.some((e) => /finish now/.test(e.content))) w = r; }
+	for (let i = 0; i < 5 && !w; i++) { const r = await turn(h); if (r?.entries?.some((e) => /finish with a short summary/.test(e.content))) w = r; }
 	check("wrap-up fires", !!w, true);
 	for (let i = 0; i < 5; i++) check(`no stop yet ${i}`, (await turn(h))?.entries?.some((e) => /Stop now/.test(e.content)) ?? false, false);
 	const st = await turn(h);
@@ -441,7 +485,7 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	check("firm stop only once", (await turn(h))?.entries?.some((e) => /Stop now/.test(e.content)) ?? false, false);
 }
 {
-	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2" });
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2", LETS_CODE_FIRM_STOP: "1" });
 	await edit(h, "calc.py");
 	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
 	advance(3 * 60_000);
@@ -450,7 +494,7 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	let stopped = false;
 	for (let i = 0; i < 6; i++) { const r = await turn(h); if (r?.entries?.some((e) => /Stop now/.test(e.content))) stopped = true; }
 	check("a source change after the wrap-up: no firm stop", stopped, false);
-	const h2 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2" });
+	const h2 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2", LETS_CODE_FIRM_STOP: "1" });
 	await edit(h2, "calc.py");
 	bash(h2, "python3 test_t.py"); await result(h2, "bash", "Ran 5 tests\n\nOK");
 	advance(3 * 60_000);
@@ -458,6 +502,38 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	advance(4 * 60_000);
 	const st2 = await turn(h2);
 	check("4 minutes after the wrap-up without a source change: firm stop", st2?.entries?.some((e) => /Stop now/.test(e.content)), true);
+}
+{
+	// opt-in firm stop needs the tests passing now
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2", LETS_CODE_FIRM_STOP: "1" });
+	await edit(h, "calc.py");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
+	advance(3 * 60_000);
+	let w = false;
+	for (let i = 0; i < 5 && !w; i++) { const r = await turn(h); if (r?.entries?.some((e) => /finish with a short summary/.test(e.content))) w = true; }
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nFAILED (failures=1)", true);
+	bash(h, "python3 -c 'print(1)'"); await result(h, "bash", "1");
+	let stopped = false;
+	for (let i = 0; i < 8; i++) { const r = await turn(h); if (r?.entries?.some((e) => /Stop now/.test(e.content))) stopped = true; }
+	advance(5 * 60_000);
+	if ((await turn(h))?.entries?.some((e) => /Stop now/.test(e.content))) stopped = true;
+	check("firm stop on, tests failing now: no firm stop", stopped, false);
+}
+{
+	// opt-in firm stop: a test-file edit after the wrap-up also counts as work
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2", LETS_CODE_FIRM_STOP: "1" });
+	await edit(h, "calc.py");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
+	advance(3 * 60_000);
+	let w = false;
+	for (let i = 0; i < 5 && !w; i++) { const r = await turn(h); if (r?.entries?.some((e) => /finish with a short summary/.test(e.content))) w = true; }
+	await edit(h, "test_calc.py");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 6 tests\n\nOK");
+	let stopped = false;
+	for (let i = 0; i < 8; i++) { const r = await turn(h); if (r?.entries?.some((e) => /Stop now/.test(e.content))) stopped = true; }
+	advance(5 * 60_000);
+	if ((await turn(h))?.entries?.some((e) => /Stop now/.test(e.content))) stopped = true;
+	check("firm stop on, a test-file edit after the wrap-up: no firm stop", stopped, false);
 }
 
 // --- v11: test detection for unusual output, 40-turn signal needs a recognised run
@@ -511,7 +587,7 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 
 // --- v13: no firm stop right after a failed command
 {
-	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2" });
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_WRAP_TURNS: "2", LETS_CODE_FIRM_STOP: "1" });
 	await edit(h, "calc.py");
 	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 5 tests\n\nOK");
 	advance(3 * 60_000);
@@ -593,6 +669,29 @@ const turn = (h, msg) => h.emit("turn_end", { message: { role: "assistant", stop
 	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
 	for (const c of ["npm test", "npm run test", "go test ./...", "cargo test", "make check", "npx vitest run", "node --test", "bun test", "python3 tests/test_api.py", "node calc.test.mjs", "bash test.sh"])
 		check(`v14: test command recognised: ${c}`, h.mod.TEST_RUN_RE.test(c), true);
+}
+
+// a subagent (depth > 0) starts at its agent file's level: no reset to BASE there
+{
+	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium", LETS_CODE_THINKING_DOWN: "off", LETS_CODE_SUBAGENT_DEPTH: "1" });
+	h.pi.level = "low";
+	await h.emit("session_start", {});
+	check("subagent: its own thinking level holds at session start", h.pi.level, "low");
+	await edit(h, "calc.py");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nFAILED (failures=1)", true);
+	check("subagent: a red test: stays at its start level, not BASE", h.pi.level, "low");
+	await edit(h, "calc.py", false); await edit(h, "calc.py", false);
+	check("subagent: a struggle still bursts", h.pi.level, "high");
+	await turn(h); await edit(h, "calc.py"); await turn(h);
+	check("subagent: the burst ends back at its start level", h.pi.level, "low");
+	bash(h, "python3 test_t.py"); await result(h, "bash", "Ran 9 tests\n\nOK");
+	await turn(h); await turn(h);
+	check("subagent: green and settled: no dial-down, its start level", h.pi.level, "low");
+	delete process.env.LETS_CODE_SUBAGENT_DEPTH;
+	const h0 = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_AUTO: "high", LETS_CODE_THINKING_BASE: "medium" });
+	h0.pi.level = "low";
+	await h0.emit("session_start", {});
+	check("top session: reset to BASE at session start", h0.pi.level, "medium");
 }
 
 rmSync(work, { recursive: true, force: true });

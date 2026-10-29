@@ -101,7 +101,7 @@ it, not a Claude Code clone. Where it stands:
 | 🧭 **Backend facts** | The agent knows its backend (server, model, API, context, thinking, vision) without discovering it, at no cost until it needs it: a prompt about the backend adds a short section, or the first command probing it gets the facts in its result. The API key is never written out. |
 | 🛟 **Git guard** | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
 | 🧭 **Agent guard** | Default bash timeout, a nudge to run tests after untested edits, a wrap-up hint once they pass, and thinking that switches on only while the model struggles. |
-| 🧭 **Modes** (optional) | `plan` explores read-only and ends in a numbered plan, `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
+| 🧭 **Modes** (optional; `/plan` always) | `plan` explores read-only and ends in a numbered plan you approve before it runs (`/plan` works without the mandate too), `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
 | 🤝 **Claude Code projects** (automatic) | A project whose `.claude/` has hooks or workflow scripts works as it is: its hooks, workflows, skills, `/commands`, agents, permission rules, MCP servers and CLAUDE.md, read live at each start. Your own `~/.claude` stays out unless `CLAUDE_CODE=all`. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 🗂 **Core memory** (on by default) | A long-term memory per project and one across projects, kept out of context: the agent searches it with a `memory` tool when it needs to and adds what is worth keeping (decisions, non-obvious facts, where things live, what was done, and "remember that ..." in your words); lets-code itself adds a pointer when a factory run, a subagent run or a session ends, so the next session can open the ledger, the run record or the transcript instead of carrying it. Always on: one line saying the memory exists and how many entries it holds, plus the three newest headlines; a file the agent reads that an entry points at gets one line saying so. `/memories` lists them, a row each that opens into its pointers and actions; it edits, forgets and archives too. |
@@ -156,7 +156,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--no-session-tag` | Send no session tag with model requests |
 | `--metrics` / `--no-metrics` | Start this launch with the full / minimal footer (`/metrics` switches inside pi, and the size picked there is where later sessions start) |
 | `--metrics-log <file>` | Append the footer's numbers to `<file>` as JSON lines, also without a UI (see [Metrics log](#metrics-log)) |
-| `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `orchestrator`, `yolo` or a role of yours (`--no-mandate` also turns off the orchestrator mode a factory run switches to) |
+| `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `orchestrator`, `yolo` or a role of yours (`--no-mandate` also turns off `/plan` and the orchestrator mode a factory run switches to) |
 | `--orchestrator` | Start in orchestrator mode (`--mandate orchestrator`): the session plans and hands the work to experts, and changes no file itself |
 | `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
 | `--experts` / `--no-experts` | The `expert` tool (on by default, needs subagents; see [Experts](#experts)) |
@@ -372,7 +372,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `CORE_MEMORY`, `CORE_MEMORY_HEADLINES` | On by default; `false` turns the `memory` tool and lets-code's own entries off. `CORE_MEMORY_HEADLINES` (0..5, default 3) is how many of the newest entries a session starts with in its prompt; a subagent's session starts with none (see [Core memory](#core-memory)). |
 | `SESSIONS` | On by default; `false` turns the `message` tool and `/sessions` off (see [Sessions and messages](#sessions-and-messages)). |
 | `SANDBOX` | `true` turns the feature on. |
-| `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with the latest request's cache hit rate, cost, and the latest response's time to first token and output tokens (two lines that keep their height: `↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012` and `⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out`; on a narrow terminal the cache shortens to its hit rate, then cost, cache, output and TTFT drop; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi, and the size picked there is remembered (`~/.pi/agent/lets-code-state.json`): later sessions start in it, ahead of `METRICS`; `--metrics` / `--no-metrics` / `LETS_CODE_METRICS` decide for one launch without changing it. tok/s counts from each response's first streamed token, so prompt processing is not in it. |
+| `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with the latest request's cache hit rate, cost, and the latest response's time to first token and output tokens (two lines that keep their height: `↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012` and `⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out`; on a narrow terminal the cache shortens to its hit rate, then cost, cache, output and TTFT drop; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi, and the size picked there is remembered (`~/.pi/agent/lets-code-state.json`): later sessions start in it, ahead of `METRICS`; `--metrics` / `--no-metrics` / `LETS_CODE_METRICS` decide for one launch without changing it. tok/s counts from each response's first streamed token, so prompt processing is not in it. The footer follows the session on screen: in a subagent's session (`/subagents`) its numbers, model and thinking level are that subagent's own (the minimal size starts with its name and level, `scout • low · ↑10k ↓3.0k · …`), and back in the main session they are the main session's again. |
 
 Listing several endpoints lets one config follow you around:
 `http://localhost:8000 https://llm.home.example` works on the server box,
@@ -506,11 +506,15 @@ repo the guard is off. `LETS_CODE_GIT_CHECKPOINTS=0` turns checkpoints off.
 
 A pi extension (part of lets-code's, `~/.pi/agent/extensions/lets-code/agent-guard.ts`) with
 rules for failure modes measured in sessions against a local thinking
-model. Apart from a five-line working-method section in the system prompt
-it adds nothing unless a rule acts.
+model. Apart from a short working-method section in the system prompt
+it adds nothing unless a rule acts. It never ends a session on its own:
+the wrap-up is advice, and the firm stop is opt-in.
 
 - **Bash timeout.** Calls without a timeout get `LETS_CODE_BASH_TIMEOUT`
-  (300 s); a timeout the model passes is kept.
+  (300 s; `0` or `off`: none); a timeout the model passes is kept. The
+  prompt section names the default so the model passes a longer one for
+  builds, test suites and installs, and a call stopped by the default gets
+  a one-line hint to rerun it with a larger `timeout`.
 - **Cut-off replies.** A reply cut off by the output limit before any tool
   call is continued with a note to act, up to 3 times per session.
 - **Test reminder.** After 3 source edits with no test run in between, the
@@ -522,17 +526,19 @@ it adds nothing unless a rule acts.
   as `package.json` or CI YAML does.
 - **Wrap-up.** Once the model's own tests have passed for
   `LETS_CODE_WRAP_TURNS` turns (6) and 2 minutes, or `LETS_CODE_WRAP_MINUTES`
-  minutes (5), it is told once to finish if every requirement is covered
-  by a test it has run.
+  minutes (5), it is advised once to finish with a summary if every
+  requirement is covered by a test it has run, and otherwise to test what
+  is missing. `LETS_CODE_WRAP_TURNS=0` turns the note off.
 - **Adaptive thinking** (`--thinking-level adaptive[:<ceiling>]`, opt-in).
   Rests at medium while the task is unsolved, dials down to low once pi's
   own tests pass and a later turn changes no source, back to medium if they
   fail again, and bursts to the ceiling (default `high`) on the struggle
   signals below. Faster and leaner than fixed medium on medium-sized tasks
   in the benchmark; not yet shown to be faster on hard ones.
-- **Firm stop.** If pi keeps calling tools for 6 turns or 4 minutes after
-  the wrap-up note without changing any source file, it is told once to
-  stop and summarise.
+- **Firm stop** (`LETS_CODE_FIRM_STOP=1`, off by default). If pi keeps
+  calling tools for 6 turns or 4 minutes after the wrap-up note, with its
+  tests passing and no file (source or test) edited since, it is told once
+  to stop and summarise.
 - **Dynamic thinking** (`--thinking-level auto[:<ceiling>]`, default
   `high`). The level is a ceiling. pi starts with thinking off; a struggle
   signal (the same tests still failing after 3 runs, more failures after a
@@ -615,7 +621,7 @@ such as `readonly`, `reviewer` and `developer`, are for subagents):
 |---|---|
 | `auto` | Nothing. Guards as always, no prompts. The default. |
 | `ask` | `sudo`, recursive deletes, package installs, `curl \| sh` and writes outside the project are confirmed first: allow once, allow for the session, or deny. |
-| `plan` | Edit and write are off, bash is read-only, and the model is told to end with a numbered `Plan:`. Leaving plan mode offers to execute it. |
+| `plan` | Edit and write are off, bash is read-only, and the model is told to end with a numbered `Plan:`. When it does, you choose: execute the plan (back to the mode you came from, and the plan is kept in the session), refine it (edit it and send it back), or stay. Leaving plan mode by hand offers to execute it too. |
 | `orchestrator` | The software factory's mode. The session plans with you and orchestrates: it reads the code, agrees the ticket and its acceptance criteria with you, and hands every change to experts: code goes through `software-factory` however small, `general` does setup chores and checks, `researcher` open questions; the `worker` subagent is off. It decides the factory's checkpoints (criteria, plan, fix rounds, the commit on the run's branch) and asks you only for significant design decisions. Edit and write are off, bash is read-only (tests are the experts' job too) and MCP is denied. A blocked run is retried, or sharpened into a new ticket, never patched by hand; merging or pushing a run's branch is yours. |
 | `yolo` | The mandate steps aside (the git and memory guards stay unless launched without them). |
 
@@ -625,7 +631,9 @@ Starting or resuming a software factory run (`/factory`, or the
 it there until you leave it with `/orchestrator` (back to the mode you came
 from) or `/mode`. That works with `MANDATE=false` too: wherever the experts
 are on, the orchestrator mode is there, dormant until a run or
-`/orchestrator` starts it (`--no-mandate` turns it off). A subagent never
+`/orchestrator` starts it (`--no-mandate` turns it off). Plan mode is there
+with `MANDATE=false` as well: `/plan` and `ctrl+alt+p` enter it, leaving it
+returns to the unrestricted session (`--no-mandate` turns it off). A subagent never
 inherits it: a child that would gets the default mode. A denied
 call costs the model one line under 200 characters; allowed calls cost
 nothing. Denials are logged to `~/.pi/agent/lets-code-mandate.log`.
@@ -782,6 +790,13 @@ as on the main session's (<kbd>Ctrl</kbd>+<kbd>T</kbd> thinking blocks,
   so you can go on.
 - `!` and `!!` run in the child's process and land in its session; pi
   shows the output as for any `!` command.
+- **The footer and the thinking level are the child's.** The footer's
+  tokens, cost, context use, speed, model and thinking level are those of
+  the child's own session, named after it; `/metrics` switches the size as
+  anywhere. Each agent keeps its own thinking level: one picked in a
+  child's session (<kbd>Shift</kbd>+<kbd>Tab</kbd>, `/thinking`) is the
+  child's, the main session keeps its own (and back there it is as you left
+  it), and it is not remembered as the level the next launch starts at.
 - **Slash commands** work as in the main session. Those that concern the
   conversation act on the child: `/model` and the thinking level
   (<kbd>Shift</kbd>+<kbd>Tab</kbd>, `/thinking`) are passed on to it,

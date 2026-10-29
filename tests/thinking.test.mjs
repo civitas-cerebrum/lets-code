@@ -53,6 +53,16 @@ try {
 	writeFileSync(state, "not json");
 	x.pick("high");
 	t("unreadable file: started over", saved(), { thinkingLevels: { [KEY]: "high" } });
+
+	// a subagent's session on screen (/subagents): the level picked is the child's, not saved for the next launch
+	const REG = Symbol.for("lets-code.subagent-runs");
+	globalThis[REG] = { runs: [], view: { viewing: "run-1" } };
+	x.pick("off");
+	t("viewing a subagent: not saved", saved().thinkingLevels[KEY], "high");
+	globalThis[REG].view.viewing = undefined;
+	x.pick("low");
+	t("back in the main session: saved again", saved().thinkingLevels[KEY], "low");
+	delete globalThis[REG];
 } finally {
 	rmSync(work, { recursive: true, force: true });
 }

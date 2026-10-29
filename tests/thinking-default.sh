@@ -33,8 +33,21 @@ check "kept on later launches" "$(lc_thinking_default "${K}")" "low"
 setj settings.json 'd["modelThinkingLevels"]["lets-code/qwen"] = "huge"'
 check "an invalid level is ignored" "$(lc_thinking_default "${K}")" "low"
 write low
+# the global default is noticed by each model at its own next launch
+K2=lets-code/other2
+check "model 2: first launch" "$(lc_thinking_default "${K2}")" ""
+setj settings.json 'd["defaultThinkingLevel"] = "xhigh"'
+check "set-as-default: model 2 takes it up" "$(lc_thinking_default "${K2}")" "xhigh"
+check "set-as-default: and model 1 too, launched later" "$(lc_thinking_default "${K}")" "xhigh"
+write xhigh
+# pi's "remove override" in the settings menu: back to lets-code's level
+setj settings.json 'd["modelThinkingLevels"].pop("lets-code/qwen")'
+check "override removed in pi: the adopted default goes" "$(lc_thinking_default "${K}")" ""
+write medium
+setj settings.json 'd["modelThinkingLevels"]["lets-code/qwen"] = "low"'
+setj settings.json 'd["defaultThinkingLevel"] = "high"'
 LC_THINKING_RESET=1 write medium
-check "setup's answer replaces it" "$(lc_thinking_default "${K}")" ""
+check "setup's answer replaces it, and changes in pi made before setup" "$(lc_thinking_default "${K}")" ""
 write medium
 pi_write_configs http://h/v1 openai-completions qwen 131072 32768 false false off >/dev/null
 check "thinking unregistered: nothing noted for it" "$(st '"lets-code/qwen" in d["thinkingSeen"]["models"]')" "False"

@@ -850,9 +850,19 @@ def note_written(doc):
         models.pop(provider + "/" + model, None)
     seen["models"] = models
     doc["thinkingSeen"] = seen
-    # setup's answer is the new default: one adopted from pi before gives way
-    if os.environ.get("LC_THINKING_RESET") and isinstance(doc.get("thinkingDefaults"), dict):
-        doc["thinkingDefaults"].pop(provider + "/" + model, None)
+    # setup's answer is the new default: one adopted from pi before gives
+    # way, and so does a global default set before setup
+    if os.environ.get("LC_THINKING_RESET"):
+        if isinstance(doc.get("thinkingDefaults"), dict):
+            doc["thinkingDefaults"].pop(provider + "/" + model, None)
+        try:
+            with open(os.path.join(agent_dir, "settings.json"), encoding="utf-8") as f:
+                pd = json.load(f).get("defaultThinkingLevel")
+        except Exception:
+            pd = None
+        defaults_seen = seen.get("defaults") if isinstance(seen.get("defaults"), dict) else {}
+        defaults_seen[provider + "/" + model] = pd if pd in ("off", "minimal", "low", "medium", "high", "xhigh", "max") else None
+        seen["defaults"] = defaults_seen
 try:
     upsert(os.path.join(agent_dir, "lets-code-state.json"), note_written)
 except SystemExit:
@@ -3435,17 +3445,26 @@ seen, defaults = obj(state, "thinkingSeen"), obj(state, "thinkingDefaults")
 adopted = defaults.get(key) if defaults.get(key) in LEVELS else None
 pd = settings.get("defaultThinkingLevel")
 pm = obj(settings, "modelThinkingLevels").get(key)
-# the selector's "set as default": the global default moved since the last launch
-if "default" in seen and pd in LEVELS and pd != seen["default"]:
+# the selector's "set as default": the global default moved since this
+# model's last launch (seen per model, so each model takes it up)
+seen_default = obj(seen, "defaults")
+if key in seen_default and pd in LEVELS and pd != seen_default[key]:
     adopted = pd
-# pi's settings menu: the model's level is not the one lets-code wrote
+# pi's settings menu: the model's level is not the one lets-code wrote;
+# removed there (pi's "remove override"), the adopted default goes too
 wrote = obj(seen, "models").get(key)
 if wrote is not None and pm in LEVELS and pm != wrote:
     adopted = pm
+elif wrote is not None and pm is None:
+    adopted = None
 if adopted:
     defaults[key] = adopted
-    state["thinkingDefaults"] = defaults
-seen["default"] = pd if pd in LEVELS else None
+else:
+    defaults.pop(key, None)
+state["thinkingDefaults"] = defaults
+seen_default[key] = pd if pd in LEVELS else None
+seen["defaults"] = seen_default
+seen.pop("default", None)
 state["thinkingSeen"] = seen
 try:
     if not keep:

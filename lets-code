@@ -176,8 +176,8 @@
 #                LETS_CODE_CLAUDE_CODE (auto|all|false)
 #                LETS_CODE_EXPERTS (true|false)
 #                LETS_CODE_CORE_MEMORY (true|false), LETS_CODE_CORE_MEMORY_HEADLINES (0..5, default 3)
-#                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_METRICS_LOG (<file>), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_GROUNDING (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300),
-#                LETS_CODE_WRAP_TURNS (6), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
+#                LETS_CODE_SESSION_TAG (true|false), LETS_CODE_METRICS (true|false), LETS_CODE_METRICS_LOG (<file>), LETS_CODE_AGENT_GUARD (true|false), LETS_CODE_GROUNDING (true|false), LETS_CODE_BASH_TIMEOUT (s, default 300, 0 = none),
+#                LETS_CODE_WRAP_TURNS (6, 0 = off), LETS_CODE_WRAP_MINUTES (5), LETS_CODE_FIRM_STOP (0|1), LETS_CODE_TEMPLATE_EFFORT (auto|neutral|off),
 #                LETS_CODE_BURST_TURNS (3), LETS_CODE_MAX_BURSTS (8), LETS_CODE_THINKING_REPLAY (all|<n>)
 #                LETS_CODE_FINAL_REVIEW (auto|on|0), LETS_CODE_PLAN_BURST (0|1), LETS_CODE_PLAN_LEVEL (low)
 #                LETS_CODE_OPENROUTER_PROVIDER (pin upstream providers, comma-separated, no fallbacks)
@@ -1229,6 +1229,12 @@ pi_write_metrics_extension() {
 // provider's exact counts (4 until the first response); "~" marks an
 // estimate the provider never replaced. Other extensions' statuses keep a
 // line of their own. /metrics toggles the size; /metrics on|off picks one.
+// The footer follows the session on screen: while a subagent's session is
+// open (/subagents, in place or switched), the numbers, the model and the
+// thinking level are that run's (its own session's totals, asked over RPC
+// after each of its responses), the minimal size led by its name and level
+// and the full one naming it after the directory; back in the main session
+// they are the main session's again.
 // Nothing reaches the model.
 //
 // Metrics log: with LETS_CODE_METRICS_LOG=<file> (--metrics-log <file>) the
@@ -1297,6 +1303,8 @@ export interface Stats {
 	firstMs?: number; waiting?: boolean; out?: number; estimated?: boolean;
 	percent?: number | null; window: number; auto: boolean;
 	runMs?: number; running?: boolean; stopped?: boolean;
+	label?: string;   // whose numbers (a subagent's session on screen): its name and thinking level
+	noContext?: boolean;   // context use not known (a run saved before its numbers were kept): left out
 }
 
 // how long a prompt took, from sending it until pi settled: 14s, 1m 23s, 1h 2m
@@ -1326,7 +1334,7 @@ export function statsLines(s: Stats, full: boolean, color: Color = plain, w = In
 	const pct = s.percent === null || s.percent === undefined ? "?" : `${s.percent.toFixed(1)}%`;
 	const ctxText = `${pct}/${compact(s.window)}${s.auto ? " (auto)" : ""}`;
 	const v = s.percent ?? 0;
-	const ctx = v > 90 ? color("error", ctxText) : v > 70 ? color("warning", ctxText) : color("dim", ctxText);
+	const ctx = s.noContext ? "" : v > 90 ? color("error", ctxText) : v > 70 ? color("warning", ctxText) : color("dim", ctxText);
 	const io = [s.sent ? `↑${compact(s.sent)}` : "", s.received ? `↓${compact(s.received)}` : ""].filter(Boolean).join(" ");
 	const speed = `${s.glyph ? s.glyph + " " : ""}${s.tps !== undefined ? s.tps.toFixed(1) + " tok/s" : full ? "– tok/s" : "…"}`;
 	const sep = color("dim", " · ");
@@ -1335,7 +1343,7 @@ export function statsLines(s: Stats, full: boolean, color: Color = plain, w = In
 	const fit = (variants: string[][]) => (variants.find((p) => vis(p) <= w) ?? variants[variants.length - 1]).join(sep);
 	const d = (t: string) => color("dim", t);
 	if (!full) {
-		const parts = [io ? d(io) : "", s.tps !== undefined || s.glyph ? d(speed) : "", ctx].filter(Boolean);
+		const parts = [s.label ? color("accent", s.label) : "", io ? d(io) : "", s.tps !== undefined || s.glyph ? d(speed) : "", ctx].filter(Boolean);
 		if (vis(parts) <= w || parts.length < 2) return [parts.join(sep)];
 		// narrow: break between parts
 		const rows: string[][] = [[]];
@@ -1394,6 +1402,33 @@ type Ctx = {
 	sessionManager?: { getEntries(): any[]; getCwd?(): string; getSessionName?(): string | undefined };
 	getContextUsage?(): { percent: number | null; contextWindow: number } | undefined;
 	model?: { id?: string; provider?: string; reasoning?: boolean; contextWindow?: number };
+};
+
+// the run whose session is on screen (the subagents module's view state), if any
+export const viewedRun = (): any => {
+	const reg = (globalThis as any)[Symbol.for("lets-code.subagent-runs")];
+	const id = reg?.view?.viewing;
+	return id && Array.isArray(reg.runs) ? reg.runs.find((r: any) => r?.id === id) : undefined;
+};
+// a subagent's numbers as the footer's: its own session's (rec.stats), else the run's counts
+export const runStats = (r: any, auto: boolean, now = Date.now()): Stats => {
+	const x = r.stats ?? {}, n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+	const sent = r.stats ? n(x.input) + n(x.cacheRead) + n(x.cacheWrite) : n(r.input);
+	const received = (r.stats ? n(x.output) : n(r.output)) + n(r.live);
+	const cu = x.contextUsage;
+	// the level only for a model that reasons (known once the child's state has come)
+	const level = x.reasoning === true && typeof x.thinkingLevel === "string" ? x.thinkingLevel : "";
+	const s: Stats = { sent, received, cached: n(x.cacheRead), written: n(x.cacheWrite), hit: x.hit, cost: n(x.cost),
+		tps: typeof x.tokPerSec === "number" ? x.tokPerSec : undefined, percent: cu ? cu.percent : null, window: n(cu?.contextWindow) || n(x.contextWindow), auto,
+		noContext: !cu && !(n(x.contextWindow) > 0),
+		label: `${r.agent}${level ? ` • ${level}` : ""}` };
+	if (typeof x.ttftMs === "number") s.firstMs = x.ttftMs;
+	if (typeof x.lastOut === "number") s.out = x.lastOut;
+	if (typeof r.started === "number") {
+		if (r.status === "running") { s.runMs = now - r.started; s.running = true; }
+		else if (typeof r.ended === "number") { s.runMs = r.ended - r.started; s.stopped = r.status === "aborted" || r.status === "failed" || r.status === "timeout"; }
+	}
+	return s;
 };
 
 // one JSON line appended to the metrics log; never throws
@@ -1499,6 +1534,8 @@ export default function (pi: ExtensionAPI) {
 	// the glyph moves; a new phase (sent, first token, done) shows at once
 	let held: { at: number; s: Stats } | undefined;
 	const stats = (): Stats => {
+		const vr = viewedRun();
+		if (vr) return runStats(vr, AUTO);   // a subagent's session on screen: its numbers
 		if (sentAt !== undefined && held && Date.now() - held.at < NUMBERS_MS) return { ...held.s, glyph: glyph || undefined };
 		const u = usage();
 		const cu = ui?.getContextUsage?.();
@@ -1521,18 +1558,21 @@ export default function (pi: ExtensionAPI) {
 		let where = tilde(ui?.sessionManager?.getCwd?.() ?? ui?.cwd ?? process.cwd());
 		const branch = data.getGitBranch?.();
 		if (branch) where += ` (${branch})`;
-		const name = ui?.sessionManager?.getSessionName?.();
+		// a subagent's session on screen: its name, model and thinking level
+		const vr = viewedRun(), vx = vr?.stats;
+		const name = vr ? String(vr.agent ?? "subagent") : ui?.sessionManager?.getSessionName?.();
 		if (name) where += ` • ${name}`;
-		const m = ui?.model;
+		const m = vr ? (vx?.model ? { id: vx.model, provider: vx.provider, reasoning: vx.reasoning === true } : undefined) : ui?.model;
 		// Claude through Claude Code (the claude module) reads as Anthropic's: (anthropic) haiku
 		const claude = !!m?.provider && m.provider === (process.env.LETS_CODE_CLAUDE_PROVIDER || "Anthropic");
-		let model = m?.id ? (claude ? m.id.replace(/^claude-/, "") : m.id) : "no model";
-		if (m?.reasoning) { const lvl = pi.getThinkingLevel?.() ?? "off"; model += lvl === "off" ? " • thinking off" : ` • ${lvl}`; }
+		// a run saved before its numbers were kept: no model to name, the right side stays empty
+		let model = m?.id ? (claude ? m.id.replace(/^claude-/, "") : m.id) : vr ? "" : "no model";
+		if (m?.reasoning) { const lvl = (vr ? vx?.thinkingLevel : pi.getThinkingLevel?.()) ?? "off"; model += lvl === "off" ? " • thinking off" : ` • ${lvl}`; }
 		if ((data.getAvailableProviderCount?.() ?? 1) > 1 && m?.provider) model = `(${claude ? "anthropic" : m.provider}) ${model}`;
-		const right = mode ? `${mode}${color("dim", " · ")}${color("dim", model)}` : color("dim", model);
+		const right = mode ? (model ? `${mode}${color("dim", " · ")}${color("dim", model)}` : mode) : model ? color("dim", model) : "";
 		const room = w - width(right) - 2;
 		if (mode && room >= 12) return { line: spread(color("dim", width(where) > room ? `${cut(where, room - 1)}…` : where), right, w), placed: true };
-		return { line: spread(color("dim", where), color("dim", model), w), placed: false };
+		return { line: spread(color("dim", where), model ? color("dim", model) : "", w), placed: false };
 	};
 	// lines other lets-code modules put in the footer, above the numbers (the
 	// subagents list of /subagents toggle): globalThis, so a module loaded
@@ -2925,7 +2965,8 @@ pi_write_thinking_extension() {
 // the session (Shift+Tab, /thinking, the settings menu) is written to
 // LETS_CODE_STATE_FILE under that key, and lets-code starts the next session
 // at it. Only while the launched model is the current one; subagents
-// (LETS_CODE_SUBAGENT_DEPTH > 0) save nothing.
+// (LETS_CODE_SUBAGENT_DEPTH > 0) save nothing, and neither does a change made
+// while a subagent's session is open (/subagents): that level is the child's.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 
@@ -2941,11 +2982,15 @@ export function saveLevel(file: string, key: string, level: string): void {
 	renameSync(tmp, file);
 }
 
+// a subagent's session is on screen (the subagents module's view state, on globalThis)
+export const viewingChild = (): boolean => !!(globalThis as any)[Symbol.for("lets-code.subagent-runs")]?.view?.viewing;
+
 export default function (pi: ExtensionAPI) {
 	const key = process.env.LETS_CODE_THINKING_SAVE ?? "";
 	const file = process.env.LETS_CODE_STATE_FILE ?? "";
 	if (!key || !file || (Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0) > 0) return;
 	pi.on("thinking_level_select", (event: any, ctx: any) => {
+		if (viewingChild()) return;
 		const m = ctx?.model;
 		if (!m || `${m.provider}/${m.id}` !== key) return;
 		try { saveLevel(file, key, String(event.level)); } catch { /* best effort: the level just isn't remembered */ }
@@ -3973,18 +4018,19 @@ TS
 # -------------------------------------------------------------- agent guard
 # Rules for failure modes measured in pi sessions against a local thinking
 # model (2026-10 thinking-level benchmark, 48 sessions: 6 tasks x 4 levels x 2):
-#   * bash calls get a default timeout (LETS_CODE_BASH_TIMEOUT, 300 s): pi's
-#     bash tool has none, and two sessions sat 19 and 38 minutes on a script
-#     that never returned;
+#   * bash calls get a default timeout (LETS_CODE_BASH_TIMEOUT, 300 s; 0 = none),
+#     named in the prompt section: pi's bash tool has none, and two sessions sat
+#     19 and 38 minutes on a script that never returned;
 #   * a reply the output limit cut off before any tool call is continued
 #     with a nudge to act (up to 3 times): a server-terminated thinking
 #     section can turn into plain-text reasoning that eats the whole output
 #     cap, after which pi stopped with nothing done;
 #   * after pi's own tests have passed for LETS_CODE_WRAP_TURNS turns (6) and
-#     2 minutes, or for LETS_CODE_WRAP_MINUTES (5), pi is told once to finish
-#     if executed tests cover every requirement: sessions that had passed
-#     every hidden test kept polishing for 20+ minutes, one breaking a
-#     working solution;
+#     2 minutes, or for LETS_CODE_WRAP_MINUTES (5), pi is advised once to finish
+#     if executed tests cover every requirement (LETS_CODE_WRAP_TURNS=0: never):
+#     sessions that had passed every hidden test kept polishing for 20+ minutes,
+#     one breaking a working solution; a firm "stop now" after an ignored note
+#     is opt-in (LETS_CODE_FIRM_STOP=1);
 #   * verification means execution: a system-prompt section tells pi to check
 #     behaviour and derive test expectations by running code, not by
 #     reasoning about it (benchmark thinking hand-evaluated Python in 58% of
@@ -4016,9 +4062,11 @@ pi_write_agentguard_extension() {
 // (LETS_CODE_AGENT_GUARD_ON=1). Each rule answers a failure seen in pi
 // sessions against a local thinking model (2026-10 thinking-level benchmark):
 //   1. bash calls without a timeout get one (LETS_CODE_BASH_TIMEOUT, default
-//      300 s). pi's bash tool has no default, so a script that never returns
-//      (a self-written fuzzer, a parser stuck in a loop) idled sessions for
-//      19 and 38 minutes. The model can still pass a longer timeout itself.
+//      300 s; 0 or off disables it). pi's bash tool has no default, so a script
+//      that never returns (a self-written fuzzer, a parser stuck in a loop) idled
+//      sessions for 19 and 38 minutes. The model can still pass a longer timeout
+//      itself: the prompt section names the default, and a call stopped by it
+//      gets a one-line hint to rerun with a larger timeout.
 //   2. a reply cut off by the output limit before any tool call gets one
 //      continuation that tells the model to act instead of reasoning on. When
 //      the server ends a thinking section at its budget, the model can keep
@@ -4026,8 +4074,9 @@ pi_write_agentguard_extension() {
 //      whole 32K budget that way, made no tool call, and stopped with nothing.
 //   3. once the model's own tests have passed for LETS_CODE_WRAP_TURNS turns
 //      (default 6) and at least 2 minutes, or for LETS_CODE_WRAP_MINUTES
-//      minutes (default 5), it is told once to finish if its executed tests
-//      cover every requirement. Thinking sessions that had already passed
+//      minutes (default 5), it is told once (advisory, never "stop") to finish
+//      if its executed tests cover every requirement; LETS_CODE_WRAP_TURNS=0
+//      turns the note off. Thinking sessions that had already passed
 //      every hidden test kept refactoring for another 20+ minutes, and one
 //      broke a passing solution while doing so.
 //   4. dynamic thinking (LETS_CODE_THINKING_AUTO=<ceiling>): the level is a
@@ -4107,9 +4156,9 @@ pi_write_agentguard_extension() {
 //  15. the firm stop never fires while the last executed command failed (incl. a syntax
 //      or indentation error): in wave 12 it told a model to stop right after its
 //      sed edit broke the file, and the session ended at 0/23 from 20/23.
-//  12. firm stop: if the model keeps calling tools for 6 turns or 4 minutes after the
-//      wrap-up note without changing any source file, it is told once to stop and
-//      summarise. In wave 10 an adaptive session solved its task at 9 minutes, got
+//  12. firm stop (off by default, LETS_CODE_FIRM_STOP=1): if the model keeps calling
+//      tools for 6 turns or 4 minutes after the wrap-up note with its tests still passing
+//      and no file edited since, it is told once to stop and summarise. In wave 10 an adaptive session solved its task at 9 minutes, got
 //      the wrap-up at 17, then spent 13 more minutes hand-tracing expected outputs
 //      for one detail (and getting them wrong) without editing anything.
 // Apart from that prompt section, nothing is added unless a rule acts.
@@ -4124,8 +4173,15 @@ const AUTO = (process.env.LETS_CODE_THINKING_AUTO ?? "").trim();
 // medium until the tests pass, then dials down to off, and bursts up to AUTO when it struggles.
 const BASE = (process.env.LETS_CODE_THINKING_BASE ?? "off").trim() || "off";
 const DOWN = (process.env.LETS_CODE_THINKING_DOWN ?? "off").trim() || "off";
-const BASH_TIMEOUT = Math.max(1, Number(process.env.LETS_CODE_BASH_TIMEOUT) || 300);
-const WRAP_TURNS = Math.max(1, Number(process.env.LETS_CODE_WRAP_TURNS) || 6);
+const OFF_WORDS = ["0", "off", "false", "no"];
+const BASH_TIMEOUT_RAW = (process.env.LETS_CODE_BASH_TIMEOUT ?? "").trim().toLowerCase();
+// 0 means no default timeout: bash calls run as long as the model's own timeout, or unbounded
+const BASH_TIMEOUT = OFF_WORDS.includes(BASH_TIMEOUT_RAW) ? 0 : Math.max(1, Number(BASH_TIMEOUT_RAW) || 300);
+const WRAP_TURNS_RAW = (process.env.LETS_CODE_WRAP_TURNS ?? "").trim().toLowerCase();
+// 0 turns the wrap-up note off, and with it the firm stop
+const WRAP_TURNS = OFF_WORDS.includes(WRAP_TURNS_RAW) ? 0 : Math.max(1, Number(WRAP_TURNS_RAW) || 6);
+// the firm stop "make no further tool calls" is opt-in: on its own it ended sessions that were still working (#75)
+const FIRM_STOP = ["1", "on", "true", "yes"].includes((process.env.LETS_CODE_FIRM_STOP ?? "").trim().toLowerCase());
 const WRAP_MS = Math.max(1, Number(process.env.LETS_CODE_WRAP_MINUTES) || 5) * 60_000;
 const BURST_TURNS = Math.max(1, Number(process.env.LETS_CODE_BURST_TURNS) || 3);
 const MAX_BURSTS = Math.max(0, Number(process.env.LETS_CODE_MAX_BURSTS ?? 8));
@@ -4166,7 +4222,9 @@ const PROMPT_SECTION = [
 	"- Decide ambiguities once. When the task is silent on a detail, choose the simplest reading, state it in one line, and move on; do not revisit it unless a test or the task contradicts it.",
 	"- Change files with the edit and write tools, not with scripts that rewrite source or test files.",
 	"- After changing source, rerun the tests. Before finishing, run them once more and read the output: any failure it prints is unresolved.",
+	...(BASH_TIMEOUT > 0 ? [`- bash calls without a timeout are stopped after ${BASH_TIMEOUT}s; pass \`timeout\` for long builds, test suites or installs.`] : []),
 ].join("\n");
+const TIMEOUT_HINT = `[lets-code] Stopped by the ${BASH_TIMEOUT}s default timeout; rerun with a larger \`timeout\` if it needs longer.`;
 const TEST_TEXT =
 	"[lets-code] You have changed the source several times since your last test run. " +
 	"Run your tests now, before making further changes.";
@@ -4174,11 +4232,10 @@ const LENGTH_TEXT =
 	"[lets-code] Your last reply hit the output limit before making any tool call, so it was cut off. " +
 	"Do not repeat that reasoning. Act now: make the next tool call (for example, write the file).";
 const WRAP_TEXT =
-	"[lets-code] Your own tests have been passing for a while. If every requirement in the original task is covered " +
-	"by a test you have actually run, finish now: reply with a short summary and make no further tool calls. " +
-	"If a requirement is not covered by an executed test, test it first; do not refactor or polish working code.";
+	"[lets-code] Your tests have been passing for a while. If every requirement is covered by a test you ran, " +
+	"finish with a short summary; otherwise test what is missing first. Do not refactor working code.";
 const STOP_TEXT =
-	"[lets-code] Stop now. Your tests pass, and since the wrap-up note you have changed no source code: more " +
+	"[lets-code] Stop now. Your tests pass, and since the wrap-up note you have changed no file: more " +
 	"re-checking will not change the result. Reply with a short summary of what you built and make no further tool calls.";
 const STOP_AFTER_TURNS = 6;
 const STOP_AFTER_MS = 4 * 60_000;
@@ -4473,7 +4530,9 @@ export default function (pi: ExtensionAPI) {
 	let wrapNudged = false;
 	let wrapTurn = -1;
 	let wrapAt = 0;
-	let wrapSourceEdit = 0;
+	let wrapEdit = 0;
+	// bash calls that got the guard's default timeout, so a timeout there is ours to explain
+	const timedByUs = new Set<string>();
 	let stopNudged = false;
 	let lengthNudges = 0;
 	let testReminders = 0;
@@ -4498,7 +4557,10 @@ export default function (pi: ExtensionAPI) {
 	// too early: hidden fixes often came after it, and at off the model missed a wrong order its own check printed.
 	let greenSettled = false;
 	let greenEdit = -1;
-	const restLevel = () => (d.passing && greenSettled ? DOWN : BASE);
+	// the levels this instance rests at: BASE and DOWN in the top session; in a subagent (depth > 0)
+	// its start level throughout (its agent file's), so bursts come back to it and nothing dials it
+	let base = BASE, down = DOWN;
+	const restLevel = () => (d.passing && greenSettled ? down : base);
 	const endBurst = (why: string) => {
 		pi.setThinkingLevel(restLevel() as any);
 		log("deescalate", { why, burstTurns: burst?.turns ?? 0 });
@@ -4510,12 +4572,14 @@ export default function (pi: ExtensionAPI) {
 		// a subagent's own session, opened from /subagents: read-only, and its
 		// process may still be writing it, so nothing here may append to it
 		if (/[\\/]lets-code-runs[\\/][^\\/]+[\\/][^\\/]+\.(pi|view)\.jsonl$/.test(String(ctx?.sessionManager?.getSessionFile?.() ?? ""))) return;
-		if (AUTO && pi.getThinkingLevel() !== BASE) pi.setThinkingLevel(BASE as any);
+		// a subagent (depth > 0) keeps the level it started at (its agent file's) and rests there
+		if (Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") > 0) { base = down = String(pi.getThinkingLevel() ?? BASE); }
+		else if (AUTO && pi.getThinkingLevel() !== base) pi.setThinkingLevel(base as any);
 		if (AUTO && PLAN) {
 			planning = true;
 			pi.setThinkingLevel(PLAN_LEVEL as any);
 		}
-		log("start", { auto: AUTO || null, base: BASE, down: DOWN, bashTimeout: BASH_TIMEOUT, wrapTurns: WRAP_TURNS, wrapMinutes: WRAP_MS / 60_000, burstTurns: BURST_TURNS, maxBursts: MAX_BURSTS, replay: Number.isFinite(REPLAY) ? REPLAY : "all" });
+		log("start", { auto: AUTO || null, base, down, bashTimeout: BASH_TIMEOUT, wrapTurns: WRAP_TURNS, wrapMinutes: WRAP_MS / 60_000, burstTurns: BURST_TURNS, maxBursts: MAX_BURSTS, replay: Number.isFinite(REPLAY) ? REPLAY : "all" });
 	});
 
 	pi.on("before_agent_start", async (event: any) => {
@@ -4571,8 +4635,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event: any) => {
 		if (event.parentToolCallId) return undefined;
 		d.toolCall(event.toolName, event.input);
-		if (event.toolName === "bash" && event.input && event.input.timeout == null) {
+		if (BASH_TIMEOUT > 0 && event.toolName === "bash" && event.input && event.input.timeout == null) {
 			event.input.timeout = BASH_TIMEOUT;
+			timedByUs.add(String(event.toolCallId));
 		}
 		return undefined;
 	});
@@ -4580,20 +4645,26 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_result", async (event: any) => {
 		if (event.parentToolCallId) return undefined;
 		const text = textOf(event.content);
-		if (event.toolName === "bash" && /timed out/i.test(text)) log("bash-timeout");
+		const ours = timedByUs.delete(String(event.toolCallId));
+		const timedOut = event.toolName === "bash" && /timed out/i.test(text);
+		if (timedOut) log("bash-timeout", { byDefault: ours });
+		// pi's bash tool says "no default timeout", so the model would not know the stop was ours
+		const hinted = ours && /Command timed out after \d+ seconds/.test(text)
+			? { content: [...(Array.isArray(event.content) ? event.content : []), { type: "text", text: "\n" + TIMEOUT_HINT }] }
+			: undefined;
 		const failing = d.toolResult(event.toolName, !!event.isError, text, String(event.input?.path ?? ""));
 		if (failing !== null) log("tests", { failing });
 		// adaptive mode: a green run arms the dial-down (applied after a settled turn, see turn_end);
 		// a red run cancels it and returns to base
-		if (AUTO && failing !== null && BASE !== DOWN) {
+		if (AUTO && failing !== null && base !== down) {
 			if (failing === 0) {
 				if (greenEdit < 0) greenEdit = d.lastSourceEdit;
 			} else {
 				greenSettled = false;
 				greenEdit = -1;
-				if (!burst && !planning && !reviewing && pi.getThinkingLevel() !== BASE) {
-					pi.setThinkingLevel(BASE as any);
-					log("dial", { to: BASE, why: `${failing} failing` });
+				if (!burst && !planning && !reviewing && pi.getThinkingLevel() !== base) {
+					pi.setThinkingLevel(base as any);
+					log("dial", { to: base, why: `${failing} failing` });
 				}
 			}
 		}
@@ -4607,7 +4678,7 @@ export default function (pi: ExtensionAPI) {
 				log("escalate", { why: trigger.why, to: AUTO, burst: bursts });
 			}
 		}
-		return undefined;
+		return hinted;
 	});
 
 	pi.on("turn_end", async (event: any) => {
@@ -4622,12 +4693,12 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		// adaptive dial-down: tests green and this turn changed no source since the green run
-		if (AUTO && BASE !== DOWN && d.passing && greenEdit >= 0 && !greenSettled) {
+		if (AUTO && base !== down && d.passing && greenEdit >= 0 && !greenSettled) {
 			if (d.lastSourceEdit === greenEdit) {
 				greenSettled = true;
-				if (!burst && !planning && !reviewing && pi.getThinkingLevel() !== DOWN) {
-					pi.setThinkingLevel(DOWN as any);
-					log("dial", { to: DOWN, why: "tests pass, work settled" });
+				if (!burst && !planning && !reviewing && pi.getThinkingLevel() !== down) {
+					pi.setThinkingLevel(down as any);
+					log("dial", { to: down, why: "tests pass, work settled" });
 				}
 			} else {
 				greenEdit = d.lastSourceEdit; // still editing after green: wait for a turn without edits
@@ -4663,9 +4734,9 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 		}
-		if (wrapNudged && !stopNudged && madeToolCall && d.lastSourceEdit === wrapSourceEdit && !d.lastExecFailed &&
+		if (FIRM_STOP && wrapNudged && !stopNudged && madeToolCall && d.passing && d.lastOkEdit === wrapEdit && !d.lastExecFailed &&
 			(d.totalTurns - wrapTurn >= STOP_AFTER_TURNS || Date.now() - wrapAt >= STOP_AFTER_MS)) {
-			// the wrap-up was ignored and nothing has changed in the source since: the rest is re-checking
+			// opt-in: the wrap-up was ignored, the tests still pass and no file has changed since: the rest is re-checking
 			stopNudged = true;
 			log("stop-nudge", { turnsSinceWrap: d.totalTurns - wrapTurn });
 			entries.push(msg(STOP_TEXT));
@@ -4680,11 +4751,11 @@ export default function (pi: ExtensionAPI) {
 			d.editsSinceTest = 0;
 			log("test-nudge", { n: testReminders });
 			entries.push(msg(TEST_TEXT));
-		} else if (!wrapNudged && madeToolCall && d.passedFor(WRAP_TURNS, WRAP_MS, WRAP_MIN_MS)) {
+		} else if (WRAP_TURNS > 0 && !wrapNudged && madeToolCall && d.passedFor(WRAP_TURNS, WRAP_MS, WRAP_MIN_MS)) {
 			wrapNudged = true;
 			wrapTurn = d.totalTurns;
 			wrapAt = Date.now();
-			wrapSourceEdit = d.lastSourceEdit;
+			wrapEdit = d.lastOkEdit;
 			log("wrap-nudge");
 			entries.push(msg(WRAP_TEXT));
 		}
@@ -5676,7 +5747,75 @@ export interface RunRecord {
 	sessionFile?: string;   // the child's own pi session file
 	spawn?: Spawn;          // how its process starts (again): args, environment, folder
 	home?: string;          // the session file of the main session it belongs to
+	stats?: RunStats;       // the child's own session numbers, for the footer while its session is on screen
 }
+// A run's session as the footer shows it while the run's session is open
+// (in place or switched): token totals, cost and context use from the child's
+// get_session_stats, model and thinking level from its get_state (both asked
+// after each of its responses; a pi without them leaves the numbers counted
+// from the stream), the speed and time to first token from its own stream.
+export type RunStats = {
+	input: number; output: number; cacheRead: number; cacheWrite: number; cost: number;
+	hit?: number;                 // the latest response's cache hit rate, %
+	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
+	model?: string; provider?: string; reasoning?: boolean; contextWindow?: number;
+	thinkingLevel?: string;
+	tokPerSec?: number; ttftMs?: number; lastOut?: number;
+	genOut?: number; genMs?: number;   // the speed's sums: output tokens and ms from first token to end
+};
+export const STATS_MS = 2000;
+export const emptyStats = (): RunStats => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
+const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+// a flag's value in the run's spawn args (a restart of its process starts with it); only a flag it has
+const spawnArg = (rec: RunRecord, flag: string, value: string | undefined): void => {
+	const a = rec.spawn?.args, i = a ? a.indexOf(flag) : -1;
+	if (a && value && i >= 0 && i + 1 < a.length) a[i + 1] = value;
+};
+// a thinking level the child took (its RPC answer), recorded for the footer and its next start
+export const noteLevel = (rec: RunRecord, level: unknown): void => {
+	if (typeof level !== "string" || !level) return;
+	(rec.stats ??= emptyStats()).thinkingLevel = level;
+	spawnArg(rec, "--thinking", level);
+	saveRun(rec, true); notifyRuns(rec);
+};
+// one response's usage, counted until the child's own totals come
+export const noteUsage = (rec: RunRecord, u: any): void => {
+	if (!u || typeof u !== "object") return;
+	const x = (rec.stats ??= emptyStats());
+	x.input += num(u.input); x.output += num(u.output); x.cacheRead += num(u.cacheRead); x.cacheWrite += num(u.cacheWrite);
+	x.cost += num(typeof u.cost === "object" ? u.cost?.total : u.cost);
+	const prompt = num(u.input) + num(u.cacheRead) + num(u.cacheWrite);
+	x.hit = prompt > 0 ? (num(u.cacheRead) / prompt) * 100 : undefined;
+};
+// the child's session totals and state over RPC; an answer that is not there (an older pi) changes nothing
+export const applyStats = (rec: RunRecord, st: any, state: any): boolean => {
+	const x = (rec.stats ??= emptyStats());
+	let changed = false;
+	const k = st?.success ? st.data?.tokens : undefined;
+	if (k && typeof k === "object") {
+		x.input = num(k.input); x.output = num(k.output); x.cacheRead = num(k.cacheRead); x.cacheWrite = num(k.cacheWrite); x.cost = num(st.data.cost);
+		const cu = st.data.contextUsage;
+		if (cu && typeof cu === "object") x.contextUsage = { tokens: typeof cu.tokens === "number" ? cu.tokens : null, contextWindow: num(cu.contextWindow), percent: typeof cu.percent === "number" ? cu.percent : null };
+		changed = true;
+	}
+	const s = state?.success ? state.data : undefined;
+	if (s && typeof s === "object") {
+		if (typeof s.thinkingLevel === "string" && s.thinkingLevel) { x.thinkingLevel = s.thinkingLevel; spawnArg(rec, "--thinking", s.thinkingLevel); }
+		const m = s.model;
+		if (m && typeof m === "object" && m.id) {
+			x.model = String(m.id); x.provider = m.provider ? String(m.provider) : undefined; x.reasoning = !!m.reasoning; if (num(m.contextWindow)) x.contextWindow = num(m.contextWindow);
+			if (x.provider && rec.spawn?.args.includes("--model")) { spawnArg(rec, "--provider", x.provider); spawnArg(rec, "--model", x.model); }
+		}
+		changed = true;
+	}
+	return changed;
+};
+export const refreshStats = async (c: { rec: RunRecord; alive: boolean; send(cmd: Record<string, unknown>): Promise<any> }): Promise<void> => {
+	if (!c.alive) return;
+	const rec = c.rec;
+	const [st, state] = await Promise.all([c.send({ type: "get_session_stats" }), c.send({ type: "get_state" })]);
+	if (applyStats(rec, st, state)) { saveRun(rec); notifyRuns(rec); }
+};
 export const TOOL_OUT_CAP = 6000;
 export const TEXT_CAP = 32000;
 export const ARG_CAP = 2000;
@@ -5925,6 +6064,8 @@ export class Child {
 	waiting = new Map<string, (res: any) => void>();
 	turn?: Turn; idle?: ReturnType<typeof setTimeout>;
 	queued: { text: string; kind: "steer" | "followUp" }[] = [];   // sent while it works, not yet in the conversation
+	reqAt?: number; firstAt?: number;   // the response on its way: asked (turn_start), its first token
+	refreshedAt = 0;                    // the last time its totals were asked for (at most every STATS_MS)
 	constructor(rec: RunRecord) { this.rec = rec; }
 	get alive(): boolean { return !!this.proc && this.proc.exitCode === null && this.proc.signalCode === null; }
 	get busy(): boolean { return !!this.turn; }
@@ -5970,11 +6111,17 @@ export class Child {
 		let ev: any; try { ev = JSON.parse(line); } catch { return; }
 		if (ev?.type === "response") { const w = this.waiting.get(ev.id); if (w) { this.waiting.delete(ev.id); w(ev); } return; }
 		if (ev?.type === "extension_ui_request") { void childDialog(this, ev); return; }
+		// pi's own queue (what it holds, as it holds it): a text it expanded or a hook changed still leaves it
+		if (ev?.type === "queue_update" && Array.isArray(ev.steering) && Array.isArray(ev.followUp)) {
+			this.queued = [...ev.steering.map((text: unknown) => ({ text: String(text), kind: "steer" as const })), ...ev.followUp.map((text: unknown) => ({ text: String(text), kind: "followUp" as const }))];
+			notifyRuns(this.rec); return;
+		}
 		if (ev?.type === "message_end" && ev.message?.role === "user" && this.queued.length) {
 			const t = lastText(ev.message.content).trim(), i = this.queued.findIndex((q) => q.text.trim() === t);
 			if (i >= 0) this.queued.splice(i, 1);
 		}
 		if (recordEvent(this.rec, ev)) { saveRun(this.rec); notifyRuns(this.rec); }
+		this.stats(ev);
 		const t = this.turn;
 		if (!t) return;
 		if (ev.type === "message_end" && ev.message?.role === "assistant") {
@@ -5985,6 +6132,34 @@ export class Child {
 		}
 		if (ev.type === "tool_execution_start" && t.onProgress) t.onProgress(`${this.rec.agent}: ${ev.toolName} ${ev.toolName === "bash" ? String(ev.args?.command ?? "").slice(0, 60) : String(ev.args?.path ?? "")}`);
 		if (ev.type === "agent_settled") this.endTurn();
+	}
+	// the footer's numbers of this child: usage, speed and time to first token
+	// from its stream; its own totals and state asked after each response
+	stats(ev: any): void {
+		const now = Date.now(), rec = this.rec;
+		if (ev?.type === "turn_start") { this.reqAt = now; this.firstAt = undefined; return; }
+		if (ev?.type === "message_update") {
+			const k = String(ev.assistantMessageEvent?.type ?? "");
+			if (this.firstAt === undefined && /_delta$/.test(k)) this.firstAt = now;
+			return;
+		}
+		if (ev?.type === "message_end" && ev.message?.role === "assistant") {
+			noteUsage(rec, ev.message.usage);
+			const x = (rec.stats ??= emptyStats()), out = num(ev.message.usage?.output);
+			if (this.firstAt !== undefined) {
+				if (this.reqAt !== undefined) x.ttftMs = this.firstAt - this.reqAt;
+				const ms = now - this.firstAt;
+				if (out > 0 && ms >= 50) { x.genOut = (x.genOut ?? 0) + out; x.genMs = (x.genMs ?? 0) + ms; x.tokPerSec = x.genOut / (x.genMs / 1000); }
+				x.lastOut = out;
+			}
+			this.reqAt = undefined; this.firstAt = undefined;
+			notifyRuns(rec);
+			// only with a UI to show them, and at most every STATS_MS while it works
+			if ((registry() as any).ui && now - this.refreshedAt >= STATS_MS) { this.refreshedAt = now; void refreshStats(this); }
+			return;
+		}
+		// at rest with a UI to show it: the totals once more, after the last response is in the session
+		if (ev?.type === "agent_settled" && (registry() as any).ui) { this.refreshedAt = now; void refreshStats(this); }
 	}
 	// one turn: the task (first) or the user's next prompt; resolves when it settles
 	prompt(text: string, o: { first?: boolean; signal?: AbortSignal; timeout?: number; onProgress?: (line: string) => void; images?: unknown[] } = {}): Promise<RunResult> {
@@ -6157,6 +6332,8 @@ export function runAgent(agent: AgentDef, task: string, cwd: string, signal: Abo
 	if (role) env.LETS_CODE_ROLE = role;
 	if (agent.agentDir) env.PI_CODING_AGENT_DIR = agent.agentDir;
 	rec.spawn = { args, env, unset: [...(role ? [] : ["LETS_CODE_ROLE"]), ...(env.LETS_CODE_EXPERT_TEAM ? [] : ["LETS_CODE_EXPERT_TEAM"])], cwd };
+	// what it starts with, until its own state says more
+	rec.stats = { ...emptyStats(), thinkingLevel: agent.thinking || "medium", ...(MODEL ? { model: MODEL, provider: process.env.LETS_CODE_PROVIDER || "lets-code" } : {}) };
 	const vs = (registry() as any).view;
 	rec.home = vs && !isChildSession(vs.current) ? vs.current || vs.home || undefined : vs?.home || undefined;
 	addRun(rec); saveRun(rec, true); notifyRuns(rec);
@@ -6378,8 +6555,12 @@ interface ViewState {
 	nav?: boolean; sel?: number; confirm?: boolean;   // the footer navigator has the keys; its selected row
 	expanded?: boolean;                               // the navigator shows the whole list (from the short list's "more" row)
 	followUpNext?: boolean;               // the follow-up key was pressed: the next prompt is a follow-up
+	typed?: string;                       // in place: a slash text typed for the child, taken by the input hook
 	inplace?: { run: string; chat: any; pending: any; status: any };   // a child shown in place while the main session works
 	mainBusy?: boolean;                   // the main session's turn is running (agent_start .. agent_settled)
+	mainLevel?: string;                   // the main session's thinking level when a child's copy opened; put back on return to it
+	mainHome?: string;                    // that main session's file (another session opened from the copy does not get the level)
+	echo?: string[];                      // levels this view set on the copy itself: their thinking_level_select is not passed on
 	picker: boolean;
 	footer: boolean;
 }
@@ -6464,6 +6645,19 @@ function setupSessions(pi: ExtensionAPI) {
 	const viewed = () => (vs.viewing ? reg.runs.find((r) => r.id === vs.viewing) : undefined);
 	// a child's session is open: its copy (switchSession), or shown in place while the main session works
 	const inChild = () => isChildSession(vs.current) || !!vs.inplace;
+	// the thinking level is the viewed session's: a change made in a child's
+	// copy goes to the child, and the main session's own level is kept aside
+	// when the copy opens and put back when that main session opens again (pi
+	// may have moved it: the copy's change becomes pi's default). In place the
+	// TUI holds the main session, whose level (the agent guard's too) is left
+	// alone; there the thinking keys are passed on to the child directly.
+	const levelNow = (): string | undefined => { try { const v = (reg.pi ?? pi as any).getThinkingLevel?.(); return typeof v === "string" ? v : undefined; } catch { return undefined; } };
+	const keepMainLevel = () => { if (!inChild()) { vs.mainLevel = levelNow(); vs.mainHome = vs.home; } };
+	const restoreMainLevel = (file: string) => {
+		const want = vs.mainLevel, home = vs.mainHome; vs.mainLevel = undefined; vs.mainHome = undefined;
+		if (!want || file !== home || levelNow() === want) return;   // another session (/resume, /new): its own level
+		try { (reg.pi ?? pi as any).setThinkingLevel?.(want); } catch { /* a stale pi: the level stays as it is */ }
+	};
 	const FOOTER = Symbol.for("lets-code.footer-blocks");
 	const viaFooter = process.env.LETS_CODE_METRICS_ON !== undefined;   // lets-code's footer draws the list
 	let liveTui: any, footTui: any, lastStatus: string | undefined, transcript: any, clock: ReturnType<typeof setInterval> | undefined;
@@ -6706,9 +6900,21 @@ function setupSessions(pi: ExtensionAPI) {
 			// a run's own session: the main session (and its runs) stay as they were
 			const r = reg.runs.find((x) => x.sessionFile && (x.sessionFile === file || viewFile(x.sessionFile) === file));
 			vs.viewing = r?.id ?? basename(file).replace(/\.(pi|view)\.jsonl$/, "");
+			// the copy at the child's level, so pi's keys move on from it (not passed on: it is the child's already)
+			const lv = r?.stats?.thinkingLevel;
+			const was = levelNow();
+			if (lv && was !== lv) {
+				const echo = (vs.echo ??= []);
+				echo.push(lv);   // before the call: pi may run the handlers at once
+				try { (pi as any).setThinkingLevel?.(lv); } catch { /* the copy keeps its own */ }
+				// no event (nothing changed) or another level (clamped): that echo never comes
+				const now = levelNow();
+				if (now === was || now !== lv) { const i = echo.lastIndexOf(lv); if (i >= 0) echo.splice(i, 1); }
+			}
 		} else {
 			vs.home = file; vs.homeId = String(sm?.getSessionId?.() ?? "");
 			vs.viewing = undefined; vs.added = undefined;
+			restoreMainLevel(file); vs.echo = undefined;
 			useSession(vs.homeId);
 		}
 		if (clock) { clearInterval(clock); clock = undefined; }
@@ -6756,7 +6962,10 @@ function setupSessions(pi: ExtensionAPI) {
 						// (the new state is known at once: pi may write its setting a moment later)
 						if (action(data, "app.thinking.toggle")) { const v = !hideThinking(); setTimeout(() => { hideMemo = { at: Date.now() + 2000, v }; repaint(); }, 0); return undefined; }
 						if (action(data, "app.tools.expand")) { setTimeout(repaint, 0); return undefined; }
-						if (action(data, "app.message.followUp")) { vs.followUpNext = true; setTimeout(() => { vs.followUpNext = false; }, 500); return undefined; }
+						if (action(data, "app.message.followUp")) {
+							if (vs.inplace && typedForChild(String(reg.ui?.getEditorText?.() ?? "").trim(), "followUp")) return { consume: true };
+							vs.followUpNext = true; setTimeout(() => { vs.followUpNext = false; }, 500); return undefined;
+						}
 						if (action(data, "app.message.dequeue")) {
 							const r = viewed(), c = r && (reg as any).children?.get(r.id);
 							if (!c?.queued?.length) return undefined;   // nothing queued: pi says so
@@ -6797,6 +7006,9 @@ function setupSessions(pi: ExtensionAPI) {
 							if (th) { try { reg.ui.setEditorText(""); } catch { /* keep going */ } void forward({ type: "set_thinking_level", level: th[1] }, `thinking ${th[1]}`); return { consume: true }; }
 							if (IN_PLACE_DEFER.test(text)) { vs.resubmit = text; command("refresh"); return { consume: true }; }
 						}
+						// in place, a message for the child goes to it from here: through pi's
+						// submit it is the main session's input (queued there while it compacts)
+						if (vs.inplace && typedForChild(text, "steer")) return { consume: true };
 						// /resume lists the sessions of the session that is open: from a
 						// child's, that would be the runs; it opens in the main session
 						if (/^\/resume$/.test(text) && !vs.resubmit) {
@@ -6846,22 +7058,50 @@ function setupSessions(pi: ExtensionAPI) {
 		// the main session ends (quit, /new, /resume elsewhere): its children go; our own switches and /reload keep them
 		if (!reg.switching && event?.reason !== "reload") killChildren();
 	});
+	// a message for the viewed child: a steer or follow-up while it works, else its next turn
+	const toChild = (r: RunRecord, text: string, kind: "steer" | "followUp", images?: unknown[]) => {
+		const c = childOf(r);
+		if (c.busy) void c.steer(text, kind, images).then((res) => { if (!res?.success) notify(`${r.agent}: ${res?.error ?? "the message was refused"}`, "error"); });
+		else {
+			if (!r.spawn) { notify("This run predates restartable subagents; it cannot go on.", "warning"); return; }
+			void c.prompt(text, { images }).then((x) => { if (x.exitCode !== 0 && !x.stopped && x.exitCode !== 130) notify(`${r.agent}: ${(x.stderr || "the turn failed").trim().slice(-200)}`, "error"); });
+		}
+		repaint();
+	};
+	// In place the TUI's session is the main session, so its input hook also
+	// sees the main session's own input: messages queued while it compacted
+	// (pi submits them when compaction ends), other extensions' messages. A
+	// message typed for the child goes to it from the key hook (it never
+	// enters pi's submit, whose compaction queue is the main session's); a
+	// slash text (a prompt template or skill) is marked there and taken here.
+	const typedForChild = (text: string, kind: "steer" | "followUp"): boolean => {
+		vs.typed = undefined;
+		if (!text) return false;
+		const ed = (reg as any).tui?.focusedComponent;
+		try { if (ed?.isShowingAutocomplete?.()) return false; } catch { /* as typed */ }
+		if (text.startsWith("/")) { vs.typed = text; return false; }   // pi's command, or a template the input hook takes
+		const r = viewed();
+		if (!r) return false;
+		try { ed?.addToHistory?.(text); } catch { /* no history */ }
+		try { reg.ui?.setEditorText?.(""); } catch { /* keep going */ }
+		toChild(r, text, kind);
+		return true;
+	};
 	// in a child's session, the editor talks to the child; this view's own command text never reaches the model
 	pi.on("input", (event: any) => {
 		const text = String(event?.text ?? "");
 		if (/^\/subagents(\s|$)/.test(text.trim())) return { action: "handled" };
 		if (!inChild()) return undefined;
+		if (vs.inplace) {   // the main session's own input, not the child's (see typedForChild)
+			if ((event?.source && event.source !== "interactive") || !vs.typed || text.trim() !== vs.typed) return undefined;
+			vs.typed = undefined;
+		}
 		const r = viewed();
 		if (!r) { notify("This subagent's run is not known here any more.", "warning"); return { action: "handled" }; }
 		if (!text.trim()) return { action: "handled" };
-		const c = childOf(r), images = Array.isArray(event?.images) && event.images.length ? event.images : undefined;
+		const images = Array.isArray(event?.images) && event.images.length ? event.images : undefined;
 		const kind = vs.followUpNext ? "followUp" : "steer"; vs.followUpNext = false;
-		if (c.busy) void c.steer(text, kind, images).then((res) => { if (!res?.success) notify(`${r.agent}: ${res?.error ?? "the message was refused"}`, "error"); });
-		else {
-			if (!r.spawn) { notify("This run predates restartable subagents; it cannot go on.", "warning"); return { action: "handled" }; }
-			void c.prompt(text, { images }).then((x) => { if (x.exitCode !== 0 && !x.stopped && x.exitCode !== 130) notify(`${r.agent}: ${(x.stderr || "the turn failed").trim().slice(-200)}`, "error"); });
-		}
-		repaint();
+		toChild(r, text, kind, images);
 		return { action: "handled" };
 	});
 	// ! and !! in a child's session run in the child (and land in its session);
@@ -6882,6 +7122,9 @@ function setupSessions(pi: ExtensionAPI) {
 		const c = childOf(r);
 		if (!c.alive && !c.start()) { notify(`${r.agent} could not start: ${c.stderr}`, "error"); return; }
 		const res = await c.send(cmd);
+		// the level the child took (pi may clamp it to what its model has): asked back
+		if (res?.success && cmd.type === "set_thinking_level") { noteLevel(r, cmd.level); void refreshStats(c); }
+		if (res?.success && (cmd.type === "set_model" || cmd.type === "compact")) void refreshStats(c);
 		notify(res?.success ? `${r.agent}: ${what}` : `${r.agent}: ${res?.error ?? `${what} failed`}`, res?.success ? "info" : "error");
 	};
 	const forwardTo = async (c: Child, r: RunRecord, cmd: Record<string, unknown>, what: string) => {
@@ -6889,6 +7132,7 @@ function setupSessions(pi: ExtensionAPI) {
 		const res = await c.send(cmd);
 		const d = res?.data ?? {};
 		const now = d.level ?? d.model?.id ?? d.id ?? "";
+		if (res?.success) { if (cmd.type === "cycle_thinking_level") noteLevel(r, d.level); else if (cmd.type === "cycle_model") void refreshStats(c); }
 		notify(res?.success ? `${r.agent}: ${what}${now ? ` ${now}` : ""}` : `${r.agent}: ${res?.error ?? `${what} failed`}`, res?.success ? "info" : "error");
 	};
 	pi.on("model_select", (event: any) => {
@@ -6896,7 +7140,11 @@ function setupSessions(pi: ExtensionAPI) {
 		void forward({ type: "set_model", provider: event.model.provider, modelId: event.model.id }, `model ${event.model.id}`);
 	});
 	pi.on("thinking_level_select", (event: any) => {
-		if (!inChild() || !event?.level) return;
+		// in place the event is the main session's (pi's or the agent guard's): not the child's
+		if (!inChild() || vs.inplace || !event?.level) return;
+		// the copy set to the child's level on opening: nothing to pass on
+		const i = vs.echo?.indexOf(event.level) ?? -1;
+		if (i >= 0) { vs.echo!.splice(i, 1); return; }
 		void forward({ type: "set_thinking_level", level: event.level }, `thinking ${event.level}`);
 	});
 	pi.on("session_before_compact", (event: any) => {
@@ -6934,9 +7182,12 @@ function setupSessions(pi: ExtensionAPI) {
 		}
 		if (!r.sessionFile || !existsSync(r.sessionFile)) { notify("That run has no session file (it predates this version).", "warning"); return; }
 		const copy = viewFile(r.sessionFile);
+		keepMainLevel();
+		// not opened (the copy not written, the switch refused or cancelled): nothing kept aside
+		const unkeep = () => { if (!inChild()) { vs.mainLevel = undefined; vs.mainHome = undefined; } };
 		try { writeFileSync(copy, viewLines(readFileSync(r.sessionFile, "utf8")).join("\n") + "\n", { mode: 0o600 }); chmodSync(copy, 0o600); }
-		catch (e) { notify(`Could not open that session: ${e instanceof Error ? e.message : String(e)}`, "error"); return; }
-		await switchTo(ctx, copy, refresh);
+		catch (e) { unkeep(); notify(`Could not open that session: ${e instanceof Error ? e.message : String(e)}`, "error"); return; }
+		if (!(await switchTo(ctx, copy, refresh))) unkeep();
 	};
 	const listText = () => {
 		const rs = view ? view.order(reg.runs) : reg.runs;

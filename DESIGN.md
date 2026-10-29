@@ -121,6 +121,20 @@ md, markdown, rst, txt, org, adoc, tex, csv). Config files (json, yaml,
 toml, xml, ini, env, lock files) still count: a `package.json`, a CI
 workflow or a `tsconfig.json` can break a build.
 
+Nothing in the guard ends work on its own (#75). The one literal kill is the
+default bash timeout: pi stops the process tree and errors the call, and
+pi's bash tool tells the model there is no default, so a long build or test
+suite died at 300 s and the model never knew to pass a longer `timeout`.
+The prompt section now names the default, a call stopped by it gets a
+one-line hint to rerun with a larger timeout, and `LETS_CODE_BASH_TIMEOUT=0`
+turns it off. The wrap-up note is advice ("finish with a short summary if
+every requirement is covered by a test you ran; otherwise test what is
+missing"), never "make no further tool calls", and `LETS_CODE_WRAP_TURNS=0`
+turns it off. The firm stop that followed an ignored note fired on time
+alone, without re-checking that the tests still passed and with test-file
+edits not counting as work; it is opt-in (`LETS_CODE_FIRM_STOP=1`) and then
+needs the tests passing and no edit of any kind since the note.
+
 A hard thinking budget was once a fixed `samplingParams` value (half the
 output cap) for every level; Qwen3's template ignores the soft hint, so
 low, medium and high were the same configuration. pi's per-level budget is
@@ -394,7 +408,39 @@ copy, pi would list the runs dir), `/new` is cancelled in
 `session_before_switch` and a new main session started instead,
 `/fork`/`/clone` are cancelled in `session_before_fork` with a note. A
 mandate `/mode` acts on the main session: children register no mode
-commands, their role is fixed. `/subagents` alone always opens the navigator:
+commands, their role is fixed.
+
+The footer and the thinking level follow the session on screen. Each run
+record carries `stats` (the child's own session): its model and thinking
+level from the spawn arguments at launch; after each of its responses its
+usage counted from `message_end`, then replaced by its RPC
+`get_session_stats` (tokens, cost, context use) and `get_state` (model,
+thinking level), asked only with a UI and at most every 2 s while it works
+(once more when it settles), which an older pi without them simply leaves
+out; tok/s
+and time to first token from its stream (`turn_start` to the first
+`*_delta`, first delta to `message_end`). While `view.viewing` names a run
+(switched or in place), the footer module reads that record (from the
+registry on `globalThis`) instead of the TUI's session: the copy a switch
+opens is frozen and has no stream, and in place the TUI holds the main
+session. A level changed there goes to the child (`cycle_thinking_level`,
+`set_thinking_level`) and the answer is recorded as its level, and as the
+`--thinking` of its spawn arguments, so a restart keeps it. In a switched
+copy the copy is set to the child's level when it opens, so pi's keys move
+on from it; the `thinking_level_select` that this fires is matched against
+a queue of the levels the view set itself, not against the recorded level,
+so picking A, B, A quickly passes on all three. The main session's level
+is kept aside (with its file) when a copy opens and put back when that same
+session opens again: pi reopens it at its default, which the copy's change
+persisted; `/resume` of another session from the copy, or a switch that
+does not happen, drops it. In place the TUI holds the main session: its
+`thinking_level_select` events are its own (pi's, or the agent guard's
+bursts and dials) and are neither passed on nor undone; there Shift+Tab and
+`/thinking <level>` are taken by the key hook and sent to the child. The
+thinking memory saves nothing while a child's session is open. The agent
+guard in a child (depth > 0) rests at the level the child started at (its
+agent file's): no reset to BASE at session start, no dial to BASE on a red
+test or to DOWN once green, and a burst ends back at that level. `/subagents` alone always opens the navigator:
 its argument completions appear only once a letter is typed (pi 0.87 takes
 Enter for a highlighted completion, which turned `/subagents ` into a
 subcommand).
@@ -459,7 +505,20 @@ hook refuses it, so nothing lands in the main session), `/thinking
 change the open session (`IN_PLACE_DEFER`, ctrl+l, ctrl+x) are held with
 a note until the main session is idle, then run in the child's real
 session. Completed child messages are not added to the main session as
-custom messages in place (the view draws them). When the main session is
+custom messages in place (the view draws them). In place the TUI's session
+is still the main session, so its `input` hook sees the main session's
+own input too: messages typed into the main session while it compacted
+(pi keeps them in its compaction queue and submits them, as `interactive`
+input, when compaction ends) and other extensions' `sendUserMessage`.
+Routing all of that to the viewed child leaked the main session's queued
+messages into the child (#73). So in place a message typed for the child
+goes to it from the key hook (Enter, and the follow-up key as a
+follow-up), never through pi's submit, whose compaction queue would hold
+it for the main session; a slash text (a prompt template or skill) is pi's
+to submit and is marked there, and the `input` hook in place takes only
+that marked text; everything else is the main session's. The child's
+queue as drawn follows its own pi's `queue_update` events (by text match
+on `message_end` as a fallback). When the main session is
 idle the switch is the real one as before (no turn to abort). If pi's
 layout is not as expected the switch is deferred with a note (the last
 resort).

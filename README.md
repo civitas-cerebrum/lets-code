@@ -369,7 +369,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `EXPERTS` | On by default (with subagents); `false` turns the `expert` tool off and lists no expert. Each expert is enabled in a session, not here (see [Experts](#experts)); `TERMUX=true` / `REA=true` from earlier versions are migrated once and then ignored. |
 | `CORE_MEMORY`, `CORE_MEMORY_HEADLINES` | On by default; `false` turns the `memory` tool and lets-code's own entries off. `CORE_MEMORY_HEADLINES` (0..5, default 3) is how many of the newest entries a session starts with in its prompt; a subagent's session starts with none (see [Core memory](#core-memory)). |
 | `SANDBOX` | `true` turns the feature on. |
-| `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with the latest request's cache hit rate, cost, and the latest response's time to first token and output tokens (two lines that keep their height: `↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012` and `⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out`; on a narrow terminal the cache shortens to its hit rate, then cost, cache, output and TTFT drop; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi, and the size picked there is remembered (`~/.pi/agent/lets-code-state.json`): later sessions start in it, ahead of `METRICS`; `--metrics` / `--no-metrics` / `LETS_CODE_METRICS` decide for one launch without changing it. tok/s counts from each response's first streamed token, so prompt processing is not in it. |
+| `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with the latest request's cache hit rate, cost, and the latest response's time to first token and output tokens (two lines that keep their height: `↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012` and `⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out`; on a narrow terminal the cache shortens to its hit rate, then cost, cache, output and TTFT drop; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi, and the size picked there is remembered (`~/.pi/agent/lets-code-state.json`): later sessions start in it, ahead of `METRICS`; `--metrics` / `--no-metrics` / `LETS_CODE_METRICS` decide for one launch without changing it. tok/s counts from each response's first streamed token, so prompt processing is not in it. The footer follows the session on screen: in a subagent's session (`/subagents`) its numbers, model and thinking level are that subagent's own (the minimal size starts with its name and level, `scout • low · ↑10k ↓3.0k · …`), and back in the main session they are the main session's again. |
 
 Listing several endpoints lets one config follow you around:
 `http://localhost:8000 https://llm.home.example` works on the server box,
@@ -503,11 +503,15 @@ repo the guard is off. `LETS_CODE_GIT_CHECKPOINTS=0` turns checkpoints off.
 
 A pi extension (part of lets-code's, `~/.pi/agent/extensions/lets-code/agent-guard.ts`) with
 rules for failure modes measured in sessions against a local thinking
-model. Apart from a five-line working-method section in the system prompt
-it adds nothing unless a rule acts.
+model. Apart from a short working-method section in the system prompt
+it adds nothing unless a rule acts. It never ends a session on its own:
+the wrap-up is advice, and the firm stop is opt-in.
 
 - **Bash timeout.** Calls without a timeout get `LETS_CODE_BASH_TIMEOUT`
-  (300 s); a timeout the model passes is kept.
+  (300 s; `0` or `off`: none); a timeout the model passes is kept. The
+  prompt section names the default so the model passes a longer one for
+  builds, test suites and installs, and a call stopped by the default gets
+  a one-line hint to rerun it with a larger `timeout`.
 - **Cut-off replies.** A reply cut off by the output limit before any tool
   call is continued with a note to act, up to 3 times per session.
 - **Test reminder.** After 3 source edits with no test run in between, the
@@ -519,17 +523,19 @@ it adds nothing unless a rule acts.
   as `package.json` or CI YAML does.
 - **Wrap-up.** Once the model's own tests have passed for
   `LETS_CODE_WRAP_TURNS` turns (6) and 2 minutes, or `LETS_CODE_WRAP_MINUTES`
-  minutes (5), it is told once to finish if every requirement is covered
-  by a test it has run.
+  minutes (5), it is advised once to finish with a summary if every
+  requirement is covered by a test it has run, and otherwise to test what
+  is missing. `LETS_CODE_WRAP_TURNS=0` turns the note off.
 - **Adaptive thinking** (`--thinking-level adaptive[:<ceiling>]`, opt-in).
   Rests at medium while the task is unsolved, dials down to low once pi's
   own tests pass and a later turn changes no source, back to medium if they
   fail again, and bursts to the ceiling (default `high`) on the struggle
   signals below. Faster and leaner than fixed medium on medium-sized tasks
   in the benchmark; not yet shown to be faster on hard ones.
-- **Firm stop.** If pi keeps calling tools for 6 turns or 4 minutes after
-  the wrap-up note without changing any source file, it is told once to
-  stop and summarise.
+- **Firm stop** (`LETS_CODE_FIRM_STOP=1`, off by default). If pi keeps
+  calling tools for 6 turns or 4 minutes after the wrap-up note, with its
+  tests passing and no file (source or test) edited since, it is told once
+  to stop and summarise.
 - **Dynamic thinking** (`--thinking-level auto[:<ceiling>]`, default
   `high`). The level is a ceiling. pi starts with thinking off; a struggle
   signal (the same tests still failing after 3 runs, more failures after a
@@ -781,6 +787,13 @@ as on the main session's (<kbd>Ctrl</kbd>+<kbd>T</kbd> thinking blocks,
   so you can go on.
 - `!` and `!!` run in the child's process and land in its session; pi
   shows the output as for any `!` command.
+- **The footer and the thinking level are the child's.** The footer's
+  tokens, cost, context use, speed, model and thinking level are those of
+  the child's own session, named after it; `/metrics` switches the size as
+  anywhere. Each agent keeps its own thinking level: one picked in a
+  child's session (<kbd>Shift</kbd>+<kbd>Tab</kbd>, `/thinking`) is the
+  child's, the main session keeps its own (and back there it is as you left
+  it), and it is not remembered as the level the next launch starts at.
 - **Slash commands** work as in the main session. Those that concern the
   conversation act on the child: `/model` and the thinking level
   (<kbd>Shift</kbd>+<kbd>Tab</kbd>, `/thinking`) are passed on to it,

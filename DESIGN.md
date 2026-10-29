@@ -115,6 +115,12 @@ test reminder, required executed verification, and the auto thinking level
 the benchmark, no signal fired on easy tasks and every thinking-off session
 that thrashed on a hard task tripped one within 1 to 4 minutes.
 
+For the test reminder and the verification check, an edit counts as a
+source change unless the file is documentation or text (`NONCODE_RE`:
+md, markdown, rst, txt, org, adoc, tex, csv). Config files (json, yaml,
+toml, xml, ini, env, lock files) still count: a `package.json`, a CI
+workflow or a `tsconfig.json` can break a build.
+
 A hard thinking budget was once a fixed `samplingParams` value (half the
 output cap) for every level; Qwen3's template ignores the soft hint, so
 low, medium and high were the same configuration. pi's per-level budget is
@@ -253,7 +259,14 @@ rpc --session <run>.pi.jsonl --provider lets-code --model <id> [--thinking]
 [--tools] --append-system-prompt <file>` sent `"Task: ..."` as its first RPC `prompt` with
 `LETS_CODE_SUBAGENT_DEPTH` and `LETS_CODE_ROLE` in its environment, parsed
 from `message_end` events; concurrency 2 by default (one GPU); depth 1 (a
-child registers no tool, so it pays nothing for it); 50 KB output cap.
+child registers no tool, so it pays nothing for it); 50 KB output cap. A
+task turn has a budget: the agent file's `timeout`, else
+`LETS_CODE_SUBAGENT_TIMEOUT` (1800 s; a fix-test-fail loop keeps every bash
+call short, so the agent guard's bash timeout never ends it). A cut turn's
+result names the child's last three tool calls from its run record
+(`runAgent` attaches them before resolving), so the orchestrator narrows the
+next task to that obstacle; the method says so, and the starter worker stops
+and reports a failure that survives three different fixes.
 
 **Subagent sessions (`/subagents`).** Each child writes a real pi session
 file (`--session`, created empty and 0600 first; pi writes its header into
@@ -366,11 +379,14 @@ boxes pass to the renderer; Ctrl+T calls `setHideThinkingBlock` only on its
 part read the state themselves: tool output from `ui.getToolsExpanded()`
 and pi's per-message expanded flag, hidden thinking from pi's setting
 (`pi.getSettings()` on pi 1.0, `settings.json` on 0.87, and the toggle
-key itself so the change shows at once). Keys whose effect is the child's
-go to the child: Esc (`abort`), the follow-up key (the next prompt is sent
-as `followUp`), the dequeue key (`clear_queue`, back into the editor),
-copy (the view catches up first). The bindings are read from
-`<agent dir>/keybindings.json` over pi's defaults.
+key itself so the change shows at once). Expansion (Ctrl+O) applies to
+completed tools only: a running tool keeps its live tail preview, so its
+output cannot outgrow the live widget, which is not scrollable. Keys
+whose effect is the child's go to the child: Esc (`abort`), the follow-up
+key (the next prompt is sent as `followUp`), the dequeue key
+(`clear_queue`, back into the editor), copy (the view catches up first).
+The bindings are read from `<agent dir>/keybindings.json` over pi's
+defaults.
 
 One writer: the child process owns its session file, and pi appends to
 whatever session it has open (a model or thinking change, a `!` record),

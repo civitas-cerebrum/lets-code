@@ -171,7 +171,8 @@
 #                LETS_CODE_MEM_GUARD (true|false), LETS_CODE_GIT_GUARD (true|false),
 #                LETS_CODE_GIT_CHECKPOINTS (1|0),
 #                LETS_CODE_MANDATE (true|false), LETS_CODE_MODE, LETS_CODE_SUBAGENTS,
-#                LETS_CODE_SANDBOX (true|false), LETS_CODE_SUBAGENT_CONCURRENCY (2)
+#                LETS_CODE_SANDBOX (true|false), LETS_CODE_SUBAGENT_CONCURRENCY (2),
+#                LETS_CODE_SUBAGENT_TIMEOUT (s per subagent task, default 1800)
 #                LETS_CODE_CLAUDE_CODE (auto|all|false)
 #                LETS_CODE_EXPERTS (true|false)
 #                LETS_CODE_CORE_MEMORY (true|false), LETS_CODE_CORE_MEMORY_HEADLINES (0..5, default 3)
@@ -4151,6 +4152,8 @@ const REVIEW_ALWAYS = ["on", "1", "true", "yes", "always"].includes(REVIEW_MODE)
 const EXEC_RE = /(^|[\s;&|(])(python3?|pytest|node|npm|npx|pnpm|yarn|bun|deno|go|cargo|make|ruby|rspec|java|mvn|gradle|dotnet|php|perl|bash|sh|\.\/[\w.\/-]+)(\s|$)/;
 const FAILURE_RE = /\b(FAIL(ED)?|MISMATCH|AssertionError|SyntaxError|IndentationError|Traceback \(most recent call last\))\b/;
 const TEST_PATH_RE = /(^|[\/_.-])tests?([\/_.-]|$)/i;
+// documentation or text files: editing them is not a source change the verify nudge should chase
+const NONCODE_RE = /\.(md|markdown|rst|txt|org|adoc|tex|csv)$/i;
 // a bash command that runs a test file or test runner (not an ad-hoc heredoc check)
 // what counts as running the tests: a test runner, or a file named like a test
 export const TEST_RUN_RE = /(\bpytest\b|-m\s+(unittest|pytest)\b|\b[\w\/.-]*test[\w.-]*\.(py|[cm]?[jt]s|go|rb|sh)\b|\b(npm|yarn|pnpm|bun|deno|go|cargo|dotnet|mvn|gradle|mix|swift)\s+(run\s+)?test\b|\bmake\s+(test|check)\b|\b(jest|vitest|mocha|rspec|tox|nox|ctest|phpunit)\b|\bnode\s+--test\b|\b[\w\/.-]*\.(test|spec)\.[cm]?[jt]sx?\b)/i;
@@ -4180,7 +4183,7 @@ const STOP_TEXT =
 const STOP_AFTER_TURNS = 6;
 const STOP_AFTER_MS = 4 * 60_000;
 const VERIFY_TEXT =
-	"[lets-code] You are about to finish, but no command has been executed since your last source change. " +
+	"[lets-code] You are about to finish, but no code has been executed since your last source change. " +
 	"Run the tests and any checks the task requires now, and base your summary on their actual output.";
 const REVIEW_TEXT =
 	"[lets-code] Final review before you finish. This is a verification step, not a refactor. Re-read the original task " +
@@ -4335,7 +4338,7 @@ export class Detector {
 			this.lastOkEdit = this.seq;
 			if (TEST_PATH_RE.test(path)) {
 				this.lastTestEdit = this.seq;
-			} else {
+			} else if (!NONCODE_RE.test(path)) {
 				this.editsSinceTest++;
 				this.lastSourceEdit = this.seq;
 			}
@@ -5381,7 +5384,8 @@ pi_write_subagent_extension() {
 //   agent_dir      the child's PI_CODING_AGENT_DIR (own mcp.json, ...)
 //   skills         paths passed as --skill
 //   append_prompt  a file appended with --append-system-prompt
-//   timeout        seconds before the child is stopped (default: none)
+//   timeout        seconds before a task turn is stopped (default
+//                  LETS_CODE_SUBAGENT_TIMEOUT, 1800; a large value is none)
 //   requires       a path that must exist, else the agent is hidden
 //   requires_env   an environment variable that must be set (not 0), else hidden
 // A missing agent_dir, skill or append_prompt hides the agent too.
@@ -5421,6 +5425,8 @@ const ACTIVE = process.env.LETS_CODE_SUBAGENTS_ON === "1";
 const DEPTH = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
 const MAX_DEPTH = Number(process.env.LETS_CODE_SUBAGENT_MAX_DEPTH ?? "1") || 1;
 export const CONCURRENCY = Math.max(1, Number(process.env.LETS_CODE_SUBAGENT_CONCURRENCY ?? "2") || 2);
+// a task turn's budget when the agent file sets no timeout
+export const SUBAGENT_TIMEOUT = Math.max(1, Number(process.env.LETS_CODE_SUBAGENT_TIMEOUT ?? "1800") || 1800);
 export const MAX_PARALLEL = 8;
 const OUTPUT_CAP = 50 * 1024;
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -5555,7 +5561,7 @@ export function discoverAgents(cwd: string, trusted: boolean): AgentDef[] {
 	return [...out.values()];
 }
 
-interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number; timedOut?: number; stopped?: boolean }
+interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number; timedOut?: number; stopped?: boolean; lastSteps?: string }
 
 // ------------------------------------------------------------ run transcripts
 // Each child's JSON event stream is also kept as a transcript: the live part
@@ -6071,7 +6077,8 @@ export function runAgent(agent: AgentDef, task: string, cwd: string, signal: Abo
 	const vs = (registry() as any).view;
 	rec.home = vs && !isChildSession(vs.current) ? vs.current || vs.home || undefined : vs?.home || undefined;
 	addRun(rec); saveRun(rec, true); notifyRuns(rec);
-	return childOf(rec).prompt(`Task: ${task}`, { first: true, signal, timeout: agent.timeout, onProgress });
+	return childOf(rec).prompt(`Task: ${task}`, { first: true, signal, timeout: agent.timeout ?? SUBAGENT_TIMEOUT, onProgress })
+		.then((r) => { if (r.timedOut) r.lastSteps = lastSteps(rec); return r; });
 }
 // a turn the user started in a run's own session: its reply goes to the main
 // session too (one line of where it comes from, then the reply), held while
@@ -6086,11 +6093,19 @@ export function reportContinuation(rec: RunRecord, r: RunResult): void {
 	notifyRuns(); flushPending();
 }
 export function cap(s: string): string { if (Buffer.byteLength(s, "utf8") <= OUTPUT_CAP) return s; let t = s.slice(0, OUTPUT_CAP); while (Buffer.byteLength(t, "utf8") > OUTPUT_CAP) t = t.slice(0, -1); return `${t}\n\n[output truncated at 50 KB]`; }
+// a cut run's last tool calls (name and arguments, clipped), for its report
+export const lastSteps = (rec: RunRecord, n = 3): string =>
+	rec.events.filter((e) => e.t === "tool").slice(-n).map((e: any) => {
+		const a = e.args === undefined || e.args === null ? "" : typeof e.args === "string" ? e.args : JSON.stringify(e.args);
+		const s = `${e.name}${a && a !== "{}" ? ` ${a}` : ""}`.replace(/\s+/g, " ");
+		return s.length > 80 ? `${s.slice(0, 79)}…` : s;
+	}).join("; ");
 export function render(r: RunResult): string {
 	const status = r.stopped ? "stopped by the user" : r.timedOut ? `timed out after ${r.timedOut}s` : r.exitCode === 0 ? "done" : `exit ${r.exitCode}`;
 	const head = `## ${r.agent}${r.step ? ` (step ${r.step})` : ""} — ${status}, ${r.turns} turn${r.turns === 1 ? "" : "s"}, ↑${r.input} ↓${r.output}`;
 	const body = r.text.trim() || (r.stderr.trim() ? `(no output; stderr: ${r.stderr.trim().slice(-800)})` : "(no output)");
-	return `${head}\n${cap(body)}`;
+	const cut = r.timedOut ? `\n\n[cut at its ${r.timedOut}s budget — last: ${r.lastSteps || "no tool call"}; not finished]` : "";
+	return `${head}\n${cap(body)}${cut}`;
 }
 export async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) => Promise<R>): Promise<R[]> {
 	const out: R[] = new Array(items.length); let next = 0;
@@ -6126,7 +6141,7 @@ export function wantsOrchestration(prompt: string): boolean {
 	return /\b(design|plan|build|set up|sketch)\b[^.?!\n]{0,40}\bworkflows?\b/i.test(p) && !/\b(github|gitlab|ci|actions?|yaml|pipeline|n8n|zapier)\b/i.test(p);
 }
 
-// The method, about 170 tokens.
+// The method, about 190 tokens.
 export function orchestration(agents: AgentDef[]): string {
 	const has = (n: string) => agents.some((a) => a.name === n);
 	const work = has("scout") && has("worker") && has("reviewer")
@@ -6140,6 +6155,7 @@ export function orchestration(agents: AgentDef[]): string {
 		"- Brief each task fully (goal, paths or names, constraints, answer shape): they see nothing of this conversation.",
 		`- Usual flow: ${flow}.`,
 		"- Trust their reports; re-read code only to settle a conflict or verify a change.",
+		"- A cut or failed task is not retried by re-sending it: narrow the next task to the obstacle its report names.",
 	].join("\n");
 }
 
@@ -7315,7 +7331,7 @@ export function plainEvent(ev: Ev, width: number, flags: Flags, th: Theme = iden
 		const lines = String(ev.output ?? "").replace(/\s+$/, "").split("\n").filter((l, i, a) => a.length > 1 || l);
 		if (!lines.length || (lines.length === 1 && !lines[0])) { if (!ev.done) out.push(`  ${th.fg("dim", "running…")}`); }
 		else {
-			const shown = flags.expanded || lines.length <= TOOL_PREVIEW ? lines : ev.name === "bash" ? lines.slice(-TOOL_PREVIEW) : lines.slice(0, TOOL_PREVIEW);
+			const shown = (flags.expanded && ev.done) || lines.length <= TOOL_PREVIEW ? lines : ev.name === "bash" ? lines.slice(-TOOL_PREVIEW) : lines.slice(0, TOOL_PREVIEW);
 			const more = lines.length - shown.length;
 			if (more && ev.name === "bash") out.push(`  ${th.fg("dim", `… ${more} earlier line${more === 1 ? "" : "s"}`)}`);
 			for (const l of shown) out.push(cutTo(`  ${th.fg(ev.isError ? "error" : "dim", l.replace(/\t/g, "    "))}`, W, deps));
@@ -7379,7 +7395,7 @@ export class Transcript {
 			if (st && typeof st === "object") { st.startedAt = ev.at; if (ev.done) st.endedAt = ev.end ?? ev.at; }
 			c.markExecutionStarted?.(); c.setArgsComplete?.();
 			if (ev.done || ev.output) c.updateResult({ content: [{ type: "text", text: ev.output ?? "" }], details: ev.details, isError: !!ev.isError }, !ev.done);
-			c.setExpanded?.(flags.expanded);
+			c.setExpanded?.(flags.expanded && ev.done);
 			const lines = c.render(width);   // it brings its own spacer, as in the main view
 			// a running tool's renderer starts a timer to redraw itself; this component is thrown away
 			if (st?.interval) { clearInterval(st.interval); st.interval = undefined; }
@@ -9117,6 +9133,8 @@ description: Makes a delegated change and tests it
 ---
 Complete the assigned task autonomously. Make the change, run the tests
 that cover it, and fix what fails.
+If the same failure survives three different fixes, stop and report it
+with what you tried.
 
 Output:
 ## Done
@@ -9155,12 +9173,15 @@ MD
 # agent dir with no file of the user's; from then on they are the user's.
 # An earlier version's starters are upgraded on launch, each only while the
 # file is exactly as that version wrote it: reviewer.md moves to the
-# reviewer role, worker.md gets the description that tells it from general.
+# reviewer role, worker.md gets the description that tells it from general
+# and the stop-after-three-fixes lines.
 # general came later: it joins an install that has one of the earlier
 # starters and no general.md. The dir's .lets-code-starters lists it once
 # written, so a general.md the user deletes stays deleted (remove "general"
 # from that file to get it back).
 STARTER_WORKER_V1='General-purpose agent with full tools for a delegated change; isolated context'
+# worker.md as versions before the stop-after-three-fixes lines wrote it
+starter_worker_v2() { starter_worker | sed '/^If the same failure survives three different fixes/,/^with what you tried\.$/d'; }
 write_default_agents() {
     local dir="${PI_AGENT_DIR}/agents" e mark
     mark="${dir}/.lets-code-starters"
@@ -9168,9 +9189,12 @@ write_default_agents() {
         starter_reviewer > "${dir}/reviewer.md"
         log "subagents: ${dir}/reviewer.md moved to the reviewer role (it can run the tests now)"
     fi
-    if [ -f "${dir}/worker.md" ] && [ "$(cat "${dir}/worker.md")" = "$(starter_worker | sed "s|^description: .*|description: ${STARTER_WORKER_V1}|")" ]; then
+    if [ -f "${dir}/worker.md" ] && [ "$(cat "${dir}/worker.md")" = "$(starter_worker_v2 | sed "s|^description: .*|description: ${STARTER_WORKER_V1}|")" ]; then
         starter_worker > "${dir}/worker.md"
         log "subagents: ${dir}/worker.md: new description (changes; general takes research)"
+    elif [ -f "${dir}/worker.md" ] && [ "$(cat "${dir}/worker.md")" = "$(starter_worker_v2)" ]; then
+        starter_worker > "${dir}/worker.md"
+        log "subagents: ${dir}/worker.md: stops and reports a failure that survives three fixes"
     fi
     if [ ! -e "${dir}/general.md" ] && ! grep -qx general "${mark}" 2>/dev/null \
         && { [ -f "${dir}/scout.md" ] || [ -f "${dir}/worker.md" ] || [ -f "${dir}/reviewer.md" ]; }; then

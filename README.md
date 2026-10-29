@@ -503,11 +503,15 @@ repo the guard is off. `LETS_CODE_GIT_CHECKPOINTS=0` turns checkpoints off.
 
 A pi extension (part of lets-code's, `~/.pi/agent/extensions/lets-code/agent-guard.ts`) with
 rules for failure modes measured in sessions against a local thinking
-model. Apart from a five-line working-method section in the system prompt
-it adds nothing unless a rule acts.
+model. Apart from a short working-method section in the system prompt
+it adds nothing unless a rule acts. It never ends a session on its own:
+the wrap-up is advice, and the firm stop is opt-in.
 
 - **Bash timeout.** Calls without a timeout get `LETS_CODE_BASH_TIMEOUT`
-  (300 s); a timeout the model passes is kept.
+  (300 s; `0` or `off`: none); a timeout the model passes is kept. The
+  prompt section names the default so the model passes a longer one for
+  builds, test suites and installs, and a call stopped by the default gets
+  a one-line hint to rerun it with a larger `timeout`.
 - **Cut-off replies.** A reply cut off by the output limit before any tool
   call is continued with a note to act, up to 3 times per session.
 - **Test reminder.** After 3 source edits with no test run in between, the
@@ -519,17 +523,19 @@ it adds nothing unless a rule acts.
   as `package.json` or CI YAML does.
 - **Wrap-up.** Once the model's own tests have passed for
   `LETS_CODE_WRAP_TURNS` turns (6) and 2 minutes, or `LETS_CODE_WRAP_MINUTES`
-  minutes (5), it is told once to finish if every requirement is covered
-  by a test it has run.
+  minutes (5), it is advised once to finish with a summary if every
+  requirement is covered by a test it has run, and otherwise to test what
+  is missing. `LETS_CODE_WRAP_TURNS=0` turns the note off.
 - **Adaptive thinking** (`--thinking-level adaptive[:<ceiling>]`, opt-in).
   Rests at medium while the task is unsolved, dials down to low once pi's
   own tests pass and a later turn changes no source, back to medium if they
   fail again, and bursts to the ceiling (default `high`) on the struggle
   signals below. Faster and leaner than fixed medium on medium-sized tasks
   in the benchmark; not yet shown to be faster on hard ones.
-- **Firm stop.** If pi keeps calling tools for 6 turns or 4 minutes after
-  the wrap-up note without changing any source file, it is told once to
-  stop and summarise.
+- **Firm stop** (`LETS_CODE_FIRM_STOP=1`, off by default). If pi keeps
+  calling tools for 6 turns or 4 minutes after the wrap-up note, with its
+  tests passing and no file (source or test) edited since, it is told once
+  to stop and summarise.
 - **Dynamic thinking** (`--thinking-level auto[:<ceiling>]`, default
   `high`). The level is a ceiling. pi starts with thinking off; a struggle
   signal (the same tests still failing after 3 runs, more failures after a

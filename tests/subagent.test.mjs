@@ -110,7 +110,7 @@ process.stdin.on("data", (d) => {
     if (c.type === "extension_ui_response") { const w = uiWait; uiWait = null; w?.(c); continue; }
     log({ type: c.type, message: c.message, streamingBehavior: c.streamingBehavior, command: c.command, provider: c.provider, modelId: c.modelId, level: c.level });
     if (c.type === "prompt") {
-      if (first) { first = false; fs.writeFileSync(path.join(dir, "call-" + id + ".json"), JSON.stringify({ argv, task: c.message, env: { role: process.env.LETS_CODE_ROLE, depth: process.env.LETS_CODE_SUBAGENT_DEPTH, ...(process.env.LETS_CODE_MANDATE_ON ? { mandate: process.env.LETS_CODE_MANDATE_ON } : {}) }, agentDir: process.env.PI_CODING_AGENT_DIR, cwd: process.cwd(), prompt: ap >= 0 ? fs.readFileSync(argv[ap + 1], "utf8") : "" })); }
+      if (first) { first = false; fs.writeFileSync(path.join(dir, "call-" + id + ".json"), JSON.stringify({ argv, task: c.message, env: { role: process.env.LETS_CODE_ROLE, depth: process.env.LETS_CODE_SUBAGENT_DEPTH, ...(process.env.LETS_CODE_MANDATE_ON ? { mandate: process.env.LETS_CODE_MANDATE_ON } : {}) }, parentPid: process.env.LETS_CODE_PARENT_PID, agentDir: process.env.PI_CODING_AGENT_DIR, cwd: process.cwd(), prompt: ap >= 0 ? fs.readFileSync(argv[ap + 1], "utf8") : "" })); }
       if (turn) { if (c.streamingBehavior !== "steer" && c.streamingBehavior !== "followUp") { out({ type: "response", id: c.id, command: "prompt", success: false, error: "busy" }); continue; } steers.push(c.message); ok({ disposition: "queued" }); continue; }
       ok({ disposition: "started" }); startTurn(c.message); continue;
     }
@@ -243,6 +243,13 @@ async function load(env = {}) {
 	t("child prompt file content", /"scout" agent\. finds things[\s\S]*You look around\./.test(c.prompt), true);
 	t("child role from agent file, depth 1", c.env, { role: "plan", depth: "1" });
 	t("child cwd", c.cwd, work);
+	t("child knows its parent pi (LETS_CODE_PARENT_PID)", c.parentPid, String(process.pid));
+	t("sessions off: the allowlist as written", c.argv[c.argv.indexOf("--tools") + 1], "read,grep");
+	process.env.LETS_CODE_SESSIONS_ON = "1";
+	await h.run({ agent: "scout", task: "with sessions" });
+	delete process.env.LETS_CODE_SESSIONS_ON;
+	const cs = calls().find((x) => /Task: with sessions$/.test(x.task));
+	t("sessions on: an allowlist keeps the message tool", cs.argv[cs.argv.indexOf("--tools") + 1], "read,grep,message");
 	const r2 = await h.run({ agent: "worker", task: "x" });
 	t("worker inherits parent mode as role", calls().find((x) => /Task: x$/.test(x.task)).env.role, "ask");
 	// the parent's live mode (the mandate's hook) wins over the launch one; in plan a child is read-only

@@ -59,7 +59,7 @@ const ok = (name) => `export default function (pi) { globalThis.__loaded.push(${
 	t("  and not the ones that loaded", /footer|sandbox|agent-guard/.test(r.notes[0]?.[0] ?? ""), false);
 	t("nothing on stderr with a UI", r.errs, []);
 	t("a file that is not a feature is not loaded", r.loaded.includes("unknown"), false);
-	t("the feature list", r.mod.FEATURES, ["agent-guard", "backend", "claude", "claude-code", "core-memory", "footer", "git-guard", "grounding", "mandate", "memory-guard", "sandbox", "session-tag", "experts", "factory", "subagents", "thinking"]);
+	t("the feature list", r.mod.FEATURES, ["agent-guard", "backend", "claude", "claude-code", "core-memory", "footer", "git-guard", "grounding", "mandate", "memory-guard", "sandbox", "session-tag", "sessions", "experts", "factory", "subagents", "thinking"]);
 }
 {
 	const r = await load({ "backend.ts": `export default function () { throw "plain"; }\n`, "session-tag.ts": ok("session-tag") }, false);

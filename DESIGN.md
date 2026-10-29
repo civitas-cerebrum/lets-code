@@ -352,7 +352,8 @@ rests; Esc (a terminal input hook, active only while the child works)
 sends `abort`; `!` is the RPC `bash` command, `/model` and the thinking
 level `set_model` / `set_thinking_level` (from pi's `model_select` and
 `thinking_level_select` events), `/compact` the RPC `compact` (the TUI's
-own compaction is cancelled in `session_before_compact`). A child that
+own compaction is cancelled in `session_before_compact`; in place only
+`/compact` is, as the session pi compacts on its own there is the main one). A child that
 rested `LETS_CODE_SUBAGENT_IDLE_S` (300 s) gets its stdin closed (pi's
 orderly exit; SIGTERM, then SIGKILL after it); so does every child when
 the main session ends (`session_shutdown` other than our own switches and

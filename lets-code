@@ -7579,8 +7579,10 @@ function setupSessions(pi: ExtensionAPI) {
 	});
 	pi.on("session_before_compact", (event: any) => {
 		if (!inChild()) return undefined;
+		// in place the session pi compacts on its own is the main one: it goes ahead
+		if (vs.inplace && event?.reason !== "manual") return undefined;
 		if (event?.reason === "manual") void forward({ type: "compact", ...(event.customInstructions ? { customInstructions: event.customInstructions } : {}) }, "session compacted");
-		return { cancel: true };   // the copy is never compacted here
+		return { cancel: true };   // the copy (or, in place, the main session on /compact) is not compacted here
 	});
 
 	// switch the TUI to a session file; a call in flight detaches (see above)

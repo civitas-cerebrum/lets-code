@@ -924,6 +924,11 @@ async function load(env = {}) {
 	await new Promise((r2) => setTimeout(r2, 150));
 	t("in place: a main-session level change is left alone and not passed on", [globalThis.__piLevel, r.stats?.thinkingLevel, cmds().filter((c) => c.type === "set_thinking_level" && c.pid === pid).length, reg().view.mainLevel], ["xhigh", "high", 0, undefined]);
 	globalThis.__piLevel = "minimal";
+	// the main session's own compaction (its context filling) goes ahead in place; /compact is the child's
+	t("in place: the main session's auto-compaction is not cancelled", [h.handlers.session_before_compact({ reason: "threshold" }), h.handlers.session_before_compact({ reason: "overflow" })], [undefined, undefined]);
+	t("in place: /compact goes to the child, the main session is not compacted", h.handlers.session_before_compact({ reason: "manual" })?.cancel, true);
+	await wait(() => cmds().some((c) => c.type === "compact" && c.pid === pid));
+	t("in place: /compact reached the child", cmds().some((c) => c.type === "compact" && c.pid === pid), true);
 	// #73: in place the input hook is the main session's too; only what is typed for the child goes to it
 	const prompts = () => cmds().filter((c) => c.type === "prompt").map((c) => c.message);
 	t("in place: the main session's queued message (submitted by pi after compaction) stays the main session's", [await h.handlers.input({ text: "main's own queued", source: "interactive" }, { ui }), prompts().includes("main's own queued")], [undefined, false]);

@@ -680,6 +680,32 @@ async function load(env = {}) {
 		for (let i = 0; i < 100 && reports().length === n1; i++) await new Promise((r) => setTimeout(r, 20));
 		t("background: a quick run's result comes as the message", [/Running in the background/.test(q2.content[0].text), /Result for: another quick look/.test(reports().at(-1)?.[0]?.content ?? "")], [true, true]);
 		t("status: nothing running", (await h.tool.execute("call-m", { action: "status" }, undefined, undefined, tui)).content[0].text, "No subagent or expert is running.");
+		// queued tasks start after the call went on: the ctx may be stale by then (a session switch), its cwd read up front
+		let stale = false;
+		const staleCtx = { isProjectTrusted: true, hasUI: true, ui, get cwd() { if (stale) throw new Error("ctx is stale"); return work; } };
+		const n2 = reports().length;
+		const q3 = await h.tool.execute("call-n", { tasks: [1, 2, 3].map((i) => ({ agent: "scout", task: `queued look ${i}` })) }, undefined, undefined, staleCtx);
+		stale = true;
+		t("background: tasks beyond the concurrency are named as queued", /and 1 more queued/.test(q3.content[0].text), true);
+		for (let i = 0; i < 150 && reports().length === n2; i++) await new Promise((r) => setTimeout(r, 20));
+		t("background: a queued task starts after the ctx went stale; every result is in the report", [1, 2, 3].map((i) => new RegExp(`Result for: queued look ${i}`).test(reports().at(-1)?.[0]?.content ?? "")), [true, true, true]);
+		// stop all: the running runs and the tasks still queued
+		const n3 = reports().length;
+		const q4 = await h.tool.execute("call-o", { tasks: [1, 2, 3].map((i) => ({ agent: "worker", task: `hang queued ${i}` })) }, undefined, undefined, tui);
+		await new Promise((r) => setTimeout(r, 150));
+		t("status: the queued task is counted", /1 more task queued/.test((await h.tool.execute("call-p", { action: "status" }, undefined, undefined, tui)).content[0].text), true);
+		const sa = await h.tool.execute("call-q", { action: "stop", run: "all" }, undefined, undefined, tui);
+		for (let i = 0; i < 150 && reports().length === n3; i++) await new Promise((r) => setTimeout(r, 20));
+		const rep4 = reports().at(-1)?.[0]?.content ?? "";
+		t("stop all: running runs stopped, the queued task never started", [/Stopping 2 runs and 1 background call/.test(sa.content[0].text), reg().runs.some((r) => r.task === "hang queued 3"), /1 queued task was stopped before starting/.test(rep4), /background/.test(q4.content[0].text)], [true, false, true, true]);
+		// the main session ends (/new, /resume elsewhere): its background runs go, and no report is left for it
+		const n4 = reports().length, p4 = (reg().pending ?? []).length;
+		await h.tool.execute("call-r", { agent: "worker", task: "hang until new" }, undefined, undefined, tui);
+		const g5 = reg().runs.find((r) => r.task === "hang until new");
+		h.handlers.session_shutdown({ reason: "new" });
+		for (let i = 0; i < 100 && g5.status === "running"; i++) await new Promise((r) => setTimeout(r, 20));
+		await new Promise((r) => setTimeout(r, 100));
+		t("/new: the background run is stopped, its report dropped", [g5.status !== "running", reports().length - n4, (reg().pending ?? []).length - p4, mod.bgCalls().size], [true, 0, 0, 0]);
 	}
 	t("/subagents <unknown> says so", (await h.commands.subagents.handler("nobody", ctxFor()), /No run "nobody"/.test(notes.at(-1)?.[1] ?? "")), true);
 	// /subagents' completions never turn a bare /subagents into a subcommand

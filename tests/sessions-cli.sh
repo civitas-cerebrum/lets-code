@@ -59,5 +59,17 @@ out="$(cd "${d}/home" && bash "${lc}" message repo -- elsewhere 2>&1)"; rc=$?
 check "message: repo outside the repo is undeliverable" "${rc}" 1
 out="$(bash "${lc}" message 2>&1)"; rc=$?
 check "message: no args is usage" "${rc}:$(printf '%s' "${out}" | cut -c1-6)" "1:usage:"
+out="$(bash "${lc}" message worker hi --wait 2>&1)"; rc=$?
+check "message: --wait without a value is usage" "${rc}:$(printf '%s' "${out}" | cut -c1-6)" "1:usage:"
+out="$(bash "${lc}" message worker -- "$(head -c 8001 /dev/zero | tr '\0' x)" 2>&1)"; rc=$?
+check "message: over 8000 characters is refused" "${rc}:$(printf '%s' "${out}" | grep -c 'over 8000 characters')" "1:1"
+if [ "$(id -u)" != 0 ]; then   # pid 1 is root's: alive, but not ours
+    printf '{"pid":1,"name":"init","startedAt":3}\n' > "${s}/1.json"
+    check "sessions: another user's pid is not listed" "$(bash "${lc}" sessions 2>&1 | grep -c ' init ')" 0
+fi
+chmod 777 "${s}"
+out="$(bash "${lc}" sessions 2>&1)"; rc=$?
+check "sessions: a directory others can write is refused" "${rc}:$(printf '%s' "${out}" | grep -c 'not yours alone')" "1:1"
+chmod 700 "${s}"
 
 exit "${fail}"

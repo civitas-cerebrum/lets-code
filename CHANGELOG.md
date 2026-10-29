@@ -34,4 +34,8 @@ model on your own hardware:
   another something: by pid, session id or name, `repo` for every session
   in the repository, `parent` and `children` between an orchestrator and
   its subagents; shown after the receiver's current turn, never in the
-  middle of it, with delivered / queued / undeliverable back to the sender
+  middle of it, with delivered / queued / undeliverable back to the sender;
+  no unattended turn unless `LETS_CODE_SESSIONS_AUTOTURN=1`. `lets-code
+  sessions` and `lets-code message` are now subcommands: a first word of
+  `sessions` or `message` no longer passes to pi as a prompt (use
+  `lets-code -p "..."` for one)

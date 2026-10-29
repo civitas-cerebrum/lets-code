@@ -154,13 +154,14 @@ await B.start({ cwd: repoA, id: "22222222-bbbb", mode: "rpc", file: join(agentDi
 	t("hops: sent from a run a message continued", (await A.send({ to: "developer", text: "ok", wait: 5 }), B.sent.at(-1)?.m.details.hops), 1);
 	await A.handlers.agent_end({});
 }
-// by name, idle: no unattended turn; shown with a notice, the user decides
+// by name, idle: its own subagent's message is like its report: it starts a turn
 {
 	const n0 = A.s.notices.length;
 	const r = await B.send({ to: "main-work", text: "done\nsecond line", wait: 5 });
 	has("name: delivered", textOf(r), "delivered: main-work");
-	t("idle top session: no turn by default", A.sent.at(-1)?.opts, { triggerTurn: false });
-	t("idle top session: a notice with the first line", A.s.notices.slice(n0), ["message from developer: done"]);
+	t("idle top session, its own subagent: a turn", A.sent.at(-1)?.opts, { triggerTurn: true });
+	t("idle top session, a turn: shown in the conversation, no notice", A.s.notices.length - n0, 0);
+	await A.handlers.agent_end?.({});
 }
 // by agent name, by session id prefix, children
 {
@@ -184,6 +185,11 @@ const D = await load({ pid: pidD, name: "other-repo" }); await D.start({ cwd: re
 	const lines = textOf(r).split("\n").sort();
 	t("repo: B and the worktree session, not the other repo", lines, [`delivered: developer (pid ${pidB}) has it`, `delivered: wt-session (pid ${pidC}) has it`]);
 	t("repo: counts", [B.sent.length - before[0], C.sent.length - before[1], D.sent.length - before[2], A.sent.length - before[3]], [1, 1, 0, 0]);
+	// another terminal's session (not a subagent of A) to an idle A: no unattended turn, the user decides
+	const n1 = A.s.notices.length;
+	await C.send({ to: "main-work", text: "hello from the worktree\nmore", wait: 5 });
+	t("idle top session, another session's message: a notice with the first line", A.s.notices.slice(n1), ["message from wt-session: hello from the worktree"]);
+	t("idle top session, another session's message: no turn by default", [A.sent.at(-1)?.m.content.includes("hello from the worktree"), A.sent.at(-1)?.opts], [true, { triggerTurn: false }]);
 }
 
 // --- undeliverable
@@ -279,6 +285,11 @@ const D = await load({ pid: pidD, name: "other-repo" }); await D.start({ cwd: re
 	t("delivery: idle subagent, no turn even with auto-turn", d({ busy: false, child: true, autoTurn: true }, 0), { triggerTurn: false });
 	t("delivery: hops >= 1 never a turn (busy)", d({ busy: true, child: false, autoTurn: true }, 1), { triggerTurn: false });
 	t("delivery: hops >= 1 never a turn (idle, auto-turn)", d({ busy: false, child: false, autoTurn: true }, 2), { triggerTurn: false });
+	const H = A.mod.CHILD_HOPS;
+	t("delivery: own subagent, idle orchestrator: a turn, also a reply (hops 1)", [d({ busy: false, child: false }, 0, true), d({ busy: false, child: false }, 1, true)], [{ triggerTurn: true }, { triggerTurn: true }]);
+	t("delivery: own subagent, busy orchestrator: a follow-up", d({ busy: true, child: false }, 2, true), { triggerTurn: true, deliverAs: "followUp" });
+	t("delivery: own subagent, hops at the cap: no turn (a reply loop ends)", d({ busy: false, child: false }, H, true), { triggerTurn: false });
+	t("delivery: own-subagent rule only for a top session", d({ busy: false, child: true }, 0, true), { triggerTurn: false });
 }
 
 // --- a reply loop stops: P and Q with auto-turn answer each other once

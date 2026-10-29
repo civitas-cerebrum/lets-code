@@ -105,7 +105,7 @@ it, not a Claude Code clone. Where it stands:
 | 🤝 **Claude Code projects** (automatic) | A project whose `.claude/` has hooks or workflow scripts works as it is: its hooks, workflows, skills, `/commands`, agents, permission rules, MCP servers and CLAUDE.md, read live at each start. Your own `~/.claude` stays out unless `CLAUDE_CODE=all`. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 🗂 **Core memory** (on by default) | A long-term memory per project and one across projects, kept out of context: the agent searches it with a `memory` tool when it needs to and adds what is worth keeping (decisions, non-obvious facts, where things live, what was done, and "remember that ..." in your words); lets-code itself adds a pointer when a factory run, a subagent run or a session ends, so the next session can open the ledger, the run record or the transcript instead of carrying it. Always on: one line saying the memory exists and how many entries it holds, plus the three newest headlines; a file the agent reads that an entry points at gets one line saying so. `/memories` lists them, a row each that opens into its pointers and actions; it edits, forgets and archives too. |
-| 📨 **Sessions and messages** (on by default) | Sessions on one machine can talk: a `message` tool sends a note to another session by pid, session id or name, to every other session in the same repository (`repo`), or between an orchestrator and its subagents (`parent`, `children`, an agent's name). The note shows up in the other session's conversation (never in the middle of a turn, and without starting one on its own unless you allow it), marked as coming from another session rather than from you, and the sender learns whether it was seen. `/sessions` and `lets-code sessions` list the live sessions; `lets-code message` sends from a shell. Local files only, no network. |
+| 📨 **Sessions and messages** (on by default) | Sessions on one machine can talk: a `message` tool sends a note to another session by pid, session id or name, to every other session in the same repository (`repo`), or between an orchestrator and its subagents (`parent`, `children`, an agent's name). The note shows up in the other session's conversation (never in the middle of a turn, and without starting one on its own unless you allow it or it comes from the session's own subagent), marked as coming from another session rather than from you, and the sender learns whether it was seen. `/sessions` and `lets-code sessions` list the live sessions; `lets-code message` sends from a shell. Local files only, no network. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
 | 🧑‍🔬 **Experts** (on by default) | Subagents with their own knowledge behind one `expert` tool that costs one line of context: the model sees each expert's name and what it is for, asks for a job and a brief template when it needs one, and runs it with a filled-in brief. Every expert is dormant until you say yes (a dialog the first time, remembered); one that needs an install gets it then. |
@@ -723,6 +723,23 @@ a cut task's result names its last tool calls, e.g. `[cut at its 1800s
 budget — last: bash {"command":"npm test"}; not finished]`, so the next
 task can be narrowed to that obstacle instead of re-sent.
 
+Subagent runs never hold up the main session. In the interactive session a
+`subagent`, `expert` or `workflow` call returns at once and its runs go on
+in the background, so you and the orchestrator keep talking meanwhile.
+When they finish, their report arrives as a message: it starts the
+orchestrator's next turn if the session is idle, or follows the current
+turn if it is busy. The orchestrator can check on them with
+`subagent({action: "status"})` (each run's time, turns, what it last said
+and its last steps, and which workflow a run belongs to), stop one with
+`subagent({action: "stop", run})` (a run id, agent name or workflow name),
+or
+message one without stopping it (`message({to: <pid>, text})`, see
+[Sessions and messages](#sessions-and-messages)); a subagent's reply to the orchestrator also starts
+its next turn. `{..., wait: <seconds>}` on a call waits that long for the
+report before going on in the background (`LETS_CODE_SUBAGENT_WAIT` sets
+the default, 0). `lets-code -p` and RPC mode still wait for the report, as
+nothing would take it later, and so do subagents' own calls.
+
 An agent type can also bring its own environment. These fields are
 optional; unknown fields are ignored:
 
@@ -855,12 +872,14 @@ scrolls back. Switching into or out of a child's session is a session
 switch like `/resume`: pi redraws the screen then, and shows its own
 footer for a moment while it loads the session.
 
-Switching away from the main session while a call is running does not stop
-its children: the call goes on in the background (the tool call shows
-`Still running in the background ...` and the turn ends), and once the runs
-are done their report is sent to the main session as a message that
-continues it, as soon as you are back there. A plain stop
-(<kbd>Esc</kbd>) still stops them.
+A call that is still waiting (with `wait:`, or in a session without the
+TUI) does not stop its children when you switch away from the main
+session: it goes on in the background (the tool call shows `Still running
+in the background ...` and the turn ends), and once the runs are done their
+report is sent to the main session as a message that continues it, as soon
+as you are back there. A plain stop (<kbd>Esc</kbd>) during that wait still
+stops them; once a call is in the background, <kbd>Esc</kbd> stops the
+main session's turn only (`/subagents stop` stops a run).
 
 `/subagents toggle` shows the list in the main session's footer too
 (condensed on narrow terminals), and is remembered for the next launch
@@ -998,7 +1017,9 @@ I am about to rewrite tests/e2e/login.spec.ts; please leave it alone until I com
 Nothing runs unattended by default: an idle session shows the message
 with a notice and waits for you, and you decide whether the agent acts on
 it (`LETS_CODE_SESSIONS_AUTOTURN=1` lets an idle session start a turn on
-it instead). A busy session gets it as a follow-up once the current turn
+it instead). The exception is a session's own subagent: its message to
+the orchestrator is like its report and starts a turn (up to four
+exchanges in a row, so the two cannot answer each other forever). A busy session gets it as a follow-up once the current turn
 ends, so a message never interrupts work in progress, an orchestrator's
 included; a busy subagent gets it inside its task, so its final answer is
 still the last thing it says, and an idle subagent keeps it for its next

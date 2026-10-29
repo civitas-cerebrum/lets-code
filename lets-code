@@ -3033,7 +3033,12 @@ pi_write_sessions_extension() {
 // text), an idle subagent without a turn (its next task reads it). A
 // message carries hops: one sent from a turn a message caused has hops + 1,
 // and a message with hops >= 1 never causes a turn, so two sessions cannot
-// answer each other forever. Then <id>.ack {seenAt} is written for the
+// answer each other forever. The exception is a main session's own
+// subagent (its registry entry's parent is this pid), whose message to its
+// orchestrator is like its report: it starts a turn when the main session is
+// idle and is a follow-up when it is busy, up to CHILD_HOPS hops (the
+// orchestrator asks, the subagent answers, it asks again: each answer is
+// one hop further). Then <id>.ack {seenAt} is written for the
 // sender and the message removed; an id once shown is never shown again.
 // While the main session shows a subagent's own session (/subagents), its
 // messages wait. An inbox left by an earlier process with the same pid is
@@ -3228,9 +3233,11 @@ export function frame(m: any, id: string): string {
 };
 export const hopsOf = (m: any) => { const h = Number(m?.hops); return Number.isInteger(h) && h > 0 ? h : 0; };
 
-export interface DrainOpts { busy: boolean; child: boolean; autoTurn?: boolean; seen?: Set<string>; onShow?: (m: any, triggered: boolean) => void };
+export interface DrainOpts { busy: boolean; child: boolean; autoTurn?: boolean; seen?: Set<string>; onShow?: (m: any, triggered: boolean) => void; ownChild?: (pid: number) => boolean };
+export const CHILD_HOPS = 4;
 // how a message enters the session (see the header)
-export function deliveryOf(o: DrainOpts, hops: number): { triggerTurn: boolean; deliverAs?: string } {
+export function deliveryOf(o: DrainOpts, hops: number, fromOwnChild = false): { triggerTurn: boolean; deliverAs?: string } {
+	if (fromOwnChild && !o.child && hops < CHILD_HOPS) return o.busy ? { triggerTurn: true, deliverAs: "followUp" } : { triggerTurn: true };
 	if (hops >= 1) return { triggerTurn: false };
 	if (o.busy) return { triggerTurn: true, deliverAs: o.child ? "steer" : "followUp" };
 	return { triggerTurn: !o.child && !!o.autoTurn };
@@ -3251,7 +3258,7 @@ export function drain(pi: { sendMessage: (...a: any[]) => void }, pid: number, o
 		let m: any;
 		try { m = statSync(f).size > FILE_MAX ? { from: {}, text: `[a message of ${statSync(f).size} bytes was over the size limit and is not shown]` } : readJson(f); } catch { m = undefined; }
 		if (!m || typeof m !== "object") { try { unlinkSync(f); } catch { /* gone */ } continue; }
-		const hops = hopsOf(m), opts = deliveryOf(o, hops);
+		const hops = hopsOf(m), opts = deliveryOf(o, hops, !!o.ownChild?.(Number(m?.from?.pid)));
 		try { pi.sendMessage({ customType: CUSTOM_TYPE, content: frame(m, id), display: true, details: { from: m.from, sentAt: m.sentAt, hops } }, opts); }
 		catch { break; }   // a stale pi (mid-switch): the next poll delivers it
 		o.seen?.add(id);
@@ -3335,7 +3342,8 @@ export function attach(pi: ExtensionAPI, o: { pid?: number; ppid?: number; depth
 		let b = busy;
 		try { if (typeof ctxRef?.isIdle === "function") b = !ctxRef.isIdle(); } catch { /* a stale ctx: the events' flag */ }
 		try {
-			drain(pi, pid, { busy: b, child: depth > 0, autoTurn, seen: st.seen, onShow: (m, triggered) => {
+			const own = (from: number) => Number.isInteger(from) && from > 0 && liveSessions().some((e) => e.pid === from && e.parentPid === pid);
+			drain(pi, pid, { busy: b, child: depth > 0, autoTurn, seen: st.seen, ownChild: own, onShow: (m, triggered) => {
 				// a turn this message starts or continues: what it sends is one hop further
 				if (triggered) st.causeHops = Math.max(st.causeHops ?? 0, hopsOf(m));
 				notify(m, triggered);
@@ -6838,9 +6846,10 @@ export function render(r: RunResult): string {
 	const cut = r.timedOut ? `\n\n[cut at its ${r.timedOut}s budget — last: ${r.lastSteps || "no tool call"}; not finished]` : "";
 	return `${head}\n${cap(body)}${cut}`;
 }
-export async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) => Promise<R>): Promise<R[]> {
+// with a signal, items not started by the time it is aborted are left out (undefined)
+export async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) => Promise<R>, signal?: AbortSignal): Promise<R[]> {
 	const out: R[] = new Array(items.length); let next = 0;
-	const worker = async () => { while (next < items.length) { const i = next++; out[i] = await fn(items[i], i); } };
+	const worker = async () => { while (next < items.length && !signal?.aborted) { const i = next++; out[i] = await fn(items[i], i); } };
 	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 	return out;
 }
@@ -7013,6 +7022,47 @@ export function detachNote(names: string[]): string {
 	return `Still running in the background (the user opened a subagent's session, which ended this turn): ${names.join(", ") || "the runs of this call"}. Their reports follow in a message when they finish; do not start them again.`;
 }
 export const DELIVER_HEAD = "Reports of the subagent call that went on in the background:";
+// In the interactive main session a call does not hold the session up: it
+// returns after LETS_CODE_SUBAGENT_WAIT seconds (default 0, at once) or its
+// own wait, its runs go on, and their report arrives as a message (a
+// follow-up when the session is busy, else it starts a turn), so the user
+// and the orchestrator keep talking meanwhile. Print and RPC mode, and
+// subagents' own calls, still wait for the report (nothing would take it).
+export const BG_WAIT_S = Math.max(0, Number(process.env.LETS_CODE_SUBAGENT_WAIT ?? "0") || 0);
+export function backgroundAfter(ctx: any, wait?: unknown): number | undefined {
+	if (DEPTH > 0 || !isTui(ctx)) return undefined;
+	const w = Number(wait);
+	return Math.round(Math.min(3600, Math.max(0, wait === undefined || wait === null || !Number.isFinite(w) ? BG_WAIT_S : w)) * 1000);
+}
+// the calls gone on in the background, by call id: what stops them all
+// (their queued tasks too) and whether their report still has somewhere to go
+// (name: a workflow call's workflow, whose agents start as its script goes)
+export interface BgCall { abort: () => void; home: string; planned: number; name?: string; drop?: boolean }
+export const bgCalls = (): Map<string, BgCall> => ((registry() as any).bgCalls ??= new Map());
+const queuedOf = (id: string, c: BgCall) => Math.max(0, c.planned - registry().runs.filter((r) => r.parent?.callId === id).length);
+export function backgroundNote(runs: RunRecord[], queued = 0, name?: string): string {
+	const named = runs.map((r) => `${r.agent} (run ${r.id}${childPid(r) ? `, pid ${childPid(r)}` : ""})`).join(", ");
+	const who = name ? `workflow ${name}${named ? `, now running ${named}` : ""} (its agents start as its script goes; stop it with run "${name}")`
+		: (named || "the runs of this call") + (queued ? `, and ${queued} more queued` : "");
+	return `Running in the background; this session stays free: ${who}. Their report arrives as a message when they finish (it starts your next turn if you are idle). Meanwhile go on with other work or end your turn; do not wait, poll or start them again. subagent({action: "status"}) shows how each is doing; message({to: <pid>, text}) reaches one without stopping it (its reply comes back as a message); subagent({action: "stop", run}) stops one; run "all" stops every background call, its queued tasks too.`;
+}
+const childPid = (r: RunRecord): number | undefined => (registry() as any).children?.get?.(r.id)?.proc?.pid;
+// subagent({action: "status"}): the runs going on, with what each last said and did
+export function statusText(runs: RunRecord[], now = Date.now()): string {
+	const live = runs.filter((r) => r.status === "running");
+	const queued = [...bgCalls()].reduce((n, [id, c]) => n + queuedOf(id, c), 0);
+	const idle = [...bgCalls()].filter(([id, c]) => c.name && !live.some((r) => r.parent?.callId === id)).map(([, c]) => `- workflow ${c.name}: running, between agents.`);
+	const more = (idle.length ? `\n${idle.join("\n")}` : "") + (queued ? `\n${queued} more task${queued === 1 ? "" : "s"} queued in background calls.` : "");
+	if (!live.length) return more.trim() || "No subagent or expert is running.";
+	return live.map((r) => {
+		const wf = r.parent?.callId ? bgCalls().get(r.parent.callId)?.name : undefined;
+		const said = [...r.events].reverse().find((e: any) => e.t === "assistant" && e.blocks?.some((b: any) => b.type === "text" && b.text?.trim())) as any;
+		const text = said ? said.blocks.filter((b: any) => b.type === "text").map((b: any) => b.text).join(" ").replace(/\s+/g, " ").trim() : "";
+		const steps = lastSteps(r);
+		const min = Math.floor((now - r.started) / 60000), sec = Math.floor((now - r.started) / 1000) % 60;
+		return `- ${r.agent} (run ${r.id}${childPid(r) ? `, pid ${childPid(r)}` : ""}${wf ? `, workflow ${wf}` : ""}): running ${min}m${String(sec).padStart(2, "0")}s, ${r.turns} turns. Task: ${r.task.replace(/\s+/g, " ").slice(0, 120)}${text ? `\n  last said: ${text.length > 300 ? `${text.slice(0, 299)}…` : text}` : ""}${steps ? `\n  last steps: ${steps}` : ""}`;
+	}).join("\n") + more;
+}
 
 // quiet: a reply to a turn the user started in a child; it informs, it starts no turn
 interface Pending { home: string; text: string; isError: boolean; quiet?: boolean }
@@ -7027,7 +7077,7 @@ interface ViewState {
 	expanded?: boolean;                               // the navigator shows the whole list (from the short list's "more" row)
 	followUpNext?: boolean;               // the follow-up key was pressed: the next prompt is a follow-up
 	typed?: string;                       // in place: a slash text typed for the child, taken by the input hook
-	inplace?: { run: string; chat: any; pending: any; status: any };   // a child shown in place while the main session works
+	inplace?: { run: string; chat: any; pending: any; status: any };   // pi's chat, pending and status containers, set aside   // a child shown in place while the main session works
 	mainBusy?: boolean;                   // the main session's turn is running (agent_start .. agent_settled)
 	mainLevel?: string;                   // the main session's thinking level when a child's copy opened; put back on return to it
 	mainHome?: string;                    // that main session's file (another session opened from the copy does not get the level)
@@ -7060,13 +7110,16 @@ export function saveFooterOn(on: boolean, file = stateFile()): void {
 // session switch: work gets its own signal, aborted by the call's abort
 // unless that abort comes from a switch (reg.switching); then the call
 // returns detachNote at once and its result is delivered later.
-export function detachable(signal: AbortSignal | undefined, callId: string, work: (signal: AbortSignal, job: { detached: boolean }) => Promise<{ text: string; isError: boolean }>): Promise<{ text: string; isError: boolean }> {
+// With after (ms; see backgroundAfter) the call also detaches once that
+// long has passed, and from then on the call's abort no longer stops it.
+export function detachable(signal: AbortSignal | undefined, callId: string, work: (signal: AbortSignal, job: { detached: boolean }) => Promise<{ text: string; isError: boolean }>, after?: number, planned = 0, name?: string): Promise<{ text: string; isError: boolean }> {
 	const reg = registry() as Reg, vs = viewState(reg);
 	const home = vs.current;   // the session this call runs in
 	const inner = new AbortController(), job = { detached: false };
 	return new Promise((resolve) => {
-		let settled = false;
+		let settled = false, timer: ReturnType<typeof setTimeout> | undefined;
 		const onAbort = () => {
+			if (job.detached) return;   // in the background: stopped by its own run's stop only
 			if (reg.switching && home && !settled) {
 				settled = true; job.detached = true;
 				const names = reg.runs.filter((r) => r.status === "running" && r.parent?.callId === callId).map((r) => r.agent);
@@ -7076,9 +7129,20 @@ export function detachable(signal: AbortSignal | undefined, callId: string, work
 			inner.abort();
 		};
 		if (signal?.aborted) inner.abort(); else signal?.addEventListener("abort", onAbort, { once: true });
+		if (after !== undefined && home && !signal?.aborted) timer = setTimeout(() => {
+			if (settled) return;
+			settled = true; job.detached = true;
+			signal?.removeEventListener("abort", onAbort);
+			const call: BgCall = { abort: () => inner.abort(), home, planned, name };
+			bgCalls().set(callId, call);
+			resolve({ text: backgroundNote(reg.runs.filter((r) => r.status === "running" && r.parent?.callId === callId), queuedOf(callId, call), name), isError: false });
+		}, after);
 		const end = (r: { text: string; isError: boolean }) => {
+			if (timer) clearTimeout(timer);
 			signal?.removeEventListener("abort", onAbort);
 			if (!job.detached) { settled = true; resolve(r); return; }
+			const call = bgCalls().get(callId); bgCalls().delete(callId);
+			if (call?.drop) { notifyRuns(); return; }   // its session ended (/new, /resume elsewhere) and took the runs with it
 			(reg.pending ??= []).push({ home, text: `${DELIVER_HEAD}\n\n${r.text}`, isError: r.isError });
 			notifyRuns(); flushPending();   // the status says a report waits; the main session gets it now if it is open
 		};
@@ -7261,7 +7325,18 @@ function setupSessions(pi: ExtensionAPI) {
 	// with pi's components where pi's chat container is, the part on its way
 	// in the live widget; the main session's pending and status lines are set
 	// aside. Back puts pi's own containers back, with whatever the turn did.
-	const blank = { render: () => [] as string[], invalidate() {} };
+	// pi's containers back as they were (their own render; the chat where it was)
+	const hidden = new WeakMap<object, { own: boolean; render: any }>();
+	const putBack = (p: { chat: any; pending: any; status: any }) => {
+		for (const c of [p.pending, p.status]) {
+			const h = c && hidden.get(c);
+			if (!h) continue;
+			if (h.own) c.render = h.render; else delete c.render;
+			hidden.delete(c);
+		}
+		const L = layout();
+		if (L && L.doc.children[2] !== p.chat) L.doc.children[2] = p.chat;
+	};
 	let ipTranscript: any;
 	const layout = () => {
 		const kids = (reg as any).tui?.children;
@@ -7284,7 +7359,9 @@ function setupSessions(pi: ExtensionAPI) {
 			},
 			invalidate: () => ipTranscript?.clear(),
 		};
-		L.kids[1] = blank; L.kids[2] = blank;
+		// set aside on the containers themselves: pi's fullscreen layout (its
+		// default in 1.0) draws them through its own references, not tui.children
+		for (const c of [vs.inplace.pending, vs.inplace.status]) if (c && !hidden.has(c)) { hidden.set(c, { own: Object.prototype.hasOwnProperty.call(c, "render"), render: c.render }); c.render = () => []; }
 		vs.viewing = r.id; vs.loaded = view.loadedOf([]); vs.added = new WeakSet(); vs.addedCount = 0;
 		vs.nav = false; vs.confirm = false; lastStatus = undefined;
 		addDone(); applyLive(); status();
@@ -7294,8 +7371,7 @@ function setupSessions(pi: ExtensionAPI) {
 	const exitInPlace = (resubmit = true): boolean => {
 		const p = vs.inplace;
 		if (!p) return false;
-		const L = layout();
-		if (L) { L.doc.children[2] = p.chat; L.kids[1] = p.pending; L.kids[2] = p.status; }
+		putBack(p);
 		vs.inplace = undefined; vs.viewing = undefined; vs.added = undefined; vs.loaded = undefined; ipTranscript = undefined;
 		vs.nav = false; vs.confirm = false; lastStatus = undefined;
 		applyLive(); status();
@@ -7361,7 +7437,7 @@ function setupSessions(pi: ExtensionAPI) {
 	pi.on("session_start", async (_e: any, ctx: any) => {
 		reg.pi = pi;
 		if (isTui(ctx)) reg.ui = ctx.ui;
-		if (vs.inplace) { const L = layout(), p = vs.inplace; if (L) { L.doc.children[2] = p.chat; L.kids[1] = p.pending; L.kids[2] = p.status; } vs.inplace = undefined; }
+		if (vs.inplace) { putBack(vs.inplace); vs.inplace = undefined; }
 		vs.mainBusy = false;
 		const sm = ctx?.sessionManager;
 		const file = String(sm?.getSessionFile?.() ?? "");
@@ -7527,7 +7603,11 @@ function setupSessions(pi: ExtensionAPI) {
 	pi.on("session_shutdown", (event: any) => {
 		if (clock) { clearInterval(clock); clock = undefined; }
 		// the main session ends (quit, /new, /resume elsewhere): its children go; our own switches and /reload keep them
-		if (!reg.switching && event?.reason !== "reload") killChildren();
+		if (!reg.switching && event?.reason !== "reload") {
+			// its background calls go too: queued tasks not started, no report for a session that has gone
+			for (const c of bgCalls().values()) { c.drop = true; c.abort(); }
+			killChildren();
+		}
 	});
 	// a message for the viewed child: a steer or follow-up while it works, else its next turn
 	const toChild = (r: RunRecord, text: string, kind: "steer" | "followUp", images?: unknown[]) => {
@@ -7753,6 +7833,9 @@ export default function (pi: ExtensionAPI) {
 			task: Type.Optional(Type.String({ description: "task (single)" })),
 			tasks: Type.Optional(Type.Array(Item, { description: "run in parallel" })),
 			chain: Type.Optional(Type.Array(Item, { description: "run in order" })),
+			action: Type.Optional(Type.String({ description: "run (default) | status | stop" })),
+			run: Type.Optional(Type.String({ description: "stop: the run id, agent name, workflow name, or all" })),
+			wait: Type.Optional(Type.Number({ description: "seconds to wait for the report before it goes on in the background (default 0)" })),
 		}),
 		async execute(_id, params: any, signal, onUpdate, ctx: ExtensionContext) {
 			const agents = discoverAgents(ctx.cwd, typeof (ctx as any).isProjectTrusted === "function" ? ctx.isProjectTrusted() : !!(ctx as any).isProjectTrusted);
@@ -7764,14 +7847,37 @@ export default function (pi: ExtensionAPI) {
 			// a call goes on when the user switches sessions mid-call (see detachable)
 			let job = { detached: false };
 			const progress = (line: string) => { if (!job.detached) onUpdate?.({ content: [{ type: "text", text: line }] }); };
+			const cwd = ctx.cwd;   // read now: a ctx goes stale once the session switches, and queued tasks start later
+			const planned = params.tasks?.length || params.chain?.length || 1;
 			const detach = (work: (s: AbortSignal) => Promise<{ text: string; isError: boolean }>) =>
-				detachable(signal, _id, (s, j) => { job = j; return work(s); }).then((o) => ({ content: [{ type: "text" as const, text: o.text }], isError: o.isError }));
+				detachable(signal, _id, (s, j) => { job = j; return work(s); }, backgroundAfter(ctx, params.wait), planned).then((o) => ({ content: [{ type: "text" as const, text: o.text }], isError: o.isError }));
+			const reply = (text: string, isError = false) => ({ content: [{ type: "text" as const, text }], isError });
+			const action = String(params.action ?? "run").trim().toLowerCase() || "run";
+			if (action === "status") return reply(statusText(registry().runs));
+			if (action === "stop") {
+				const want = String(params.run ?? "").trim();
+				const live = registry().runs.filter((r) => r.status === "running");
+				if (want === "all") {
+					const n = bgCalls().size;
+					for (const c of bgCalls().values()) c.abort();
+					for (const r of live) registry().stops.get(r.id)?.();
+					return reply(n || live.length ? `Stopping ${live.length} run${live.length === 1 ? "" : "s"} and ${n} background call${n === 1 ? "" : "s"} (their queued tasks are not started); the reports arrive as messages.` : "Nothing is running.");
+				}
+				const r = live.find((x) => x.id === want) ?? live.find((x) => x.agent === want);
+				const wf = r ? undefined : [...bgCalls().values()].find((c) => c.name && (c.name === want || `workflow ${c.name}` === want));
+				if (wf) { wf.abort(); return reply(`Stopping workflow ${wf.name} (its running agents too, and it starts no more); its report arrives as a message.`); }
+				if (!r) return reply(want ? `No running run "${want}". subagent({action: "status"}) lists them.` : "Give run: the run id or agent name.", true);
+				registry().stops.get(r.id)?.();
+				return reply(`Stopping ${r.agent} (run ${r.id}); its report arrives as a message.`);
+			}
+			if (action !== "run") return reply("action is run, status or stop.", true);
 			if (params.tasks?.length) {
 				if (params.tasks.length > MAX_PARALLEL) return { content: [{ type: "text" as const, text: `Too many parallel tasks (${params.tasks.length}); max ${MAX_PARALLEL}.` }], isError: true };
 				for (const t of params.tasks) if (!find(t.agent)) return missing(t.agent);
 				return detach(async (sig) => {
-					const results = await mapLimit(params.tasks, CONCURRENCY, (t: any, i: number) => runAgent(find(t.agent)!, t.task, ctx.cwd, sig, progress, { tool: "subagent", callId: _id, mode: "parallel", index: i, of: params.tasks.length }));
-					return { text: results.map(render).join("\n\n"), isError: results.every((r) => r.exitCode !== 0) };
+					const all = await mapLimit(params.tasks, CONCURRENCY, (t: any, i: number) => runAgent(find(t.agent)!, t.task, cwd, sig, progress, { tool: "subagent", callId: _id, mode: "parallel", index: i, of: params.tasks.length }), sig);
+					const results = all.filter(Boolean), skipped = all.length - results.length;
+					return { text: results.map(render).join("\n\n") + (skipped ? `\n\n(${skipped} queued task${skipped === 1 ? " was" : "s were"} stopped before starting.)` : ""), isError: !results.length || results.every((r) => r.exitCode !== 0) };
 				});
 			}
 			if (params.chain?.length) {
@@ -7779,7 +7885,7 @@ export default function (pi: ExtensionAPI) {
 				return detach(async (sig) => {
 					const results: RunResult[] = []; let previous = "";
 					for (const [i, t] of (params.chain as any[]).entries()) {
-						const r = await runAgent(find(t.agent)!, t.task.replace(/\{previous\}/g, previous), ctx.cwd, sig, progress, { tool: "subagent", callId: _id, mode: "chain", index: i, of: params.chain.length });
+						const r = await runAgent(find(t.agent)!, t.task.replace(/\{previous\}/g, previous), cwd, sig, progress, { tool: "subagent", callId: _id, mode: "chain", index: i, of: params.chain.length });
 						r.step = i + 1; results.push(r); previous = r.text;
 						if (r.exitCode !== 0 || sig.aborted) break;
 					}
@@ -7789,7 +7895,7 @@ export default function (pi: ExtensionAPI) {
 			if (!params.agent || !params.task) return { content: [{ type: "text" as const, text: `Give {agent, task}, {tasks:[...]} or {chain:[...]}. Agents:\n${list}` }], isError: !agents.length };
 			const a = find(params.agent); if (!a) return missing(params.agent);
 			return detach(async (sig) => {
-				const r = await runAgent(a, params.task, ctx.cwd, sig, progress, { tool: "subagent", callId: _id, mode: "single" });
+				const r = await runAgent(a, params.task, cwd, sig, progress, { tool: "subagent", callId: _id, mode: "single" });
 				return { text: render(r), isError: r.exitCode !== 0 };
 			});
 		},
@@ -9832,17 +9938,19 @@ export default async function (pi: ExtensionAPI) {
 			}
 			if (engine) {
 				const mod = await import(pathToFileURL(join(HERE, `${engine.expert.runner}.ts`)).href);
-				const out = await sub.detachable(signal, _id, (sig: AbortSignal, j: { detached: boolean }) => mod.runExpert(asBrief(runs[0].brief)!, ctx, sig, (l: string) => { if (!j.detached) progress(l); }, _id));
+				const out = await sub.detachable(signal, _id, (sig: AbortSignal, j: { detached: boolean }) => mod.runExpert(asBrief(runs[0].brief)!, ctx, sig, (l: string) => { if (!j.detached) progress(l); }, _id), sub.backgroundAfter(ctx), 1);
 				return text(out.text, out.isError);
 			}
 			// the call goes on when the user switches sessions mid-call (the subagents module's detachable)
 			let job = { detached: false };
+			const cwd = ctx.cwd;   // read now: a ctx goes stale once the session switches, and queued runs start later
 			const quiet = (line: string) => { if (!job.detached) progress(line); };
 			const out = await sub.detachable(signal, _id, async (sig: AbortSignal, j: { detached: boolean }) => {
 				job = j;
-				const results = await sub.mapLimit(runs, sub.CONCURRENCY, (r: any, i: number) => sub.runAgent(find(r.name)!, renderBrief(find(r.name)!, asBrief(r.brief)!), ctx.cwd, sig, quiet, { tool: "expert", callId: _id, mode: runs.length > 1 ? "parallel" : "single", index: i, of: runs.length }));
-				return { text: results.map(sub.render).join("\n\n"), isError: results.every((r: any) => r.exitCode !== 0) };
-			});
+				const all = await sub.mapLimit(runs, sub.CONCURRENCY, (r: any, i: number) => sub.runAgent(find(r.name)!, renderBrief(find(r.name)!, asBrief(r.brief)!), cwd, sig, quiet, { tool: "expert", callId: _id, mode: runs.length > 1 ? "parallel" : "single", index: i, of: runs.length }), sig);
+				const results = all.filter(Boolean), skipped = all.length - results.length;
+				return { text: results.map(sub.render).join("\n\n") + (skipped ? `\n\n(${skipped} queued run${skipped === 1 ? " was" : "s were"} stopped before starting.)` : ""), isError: !results.length || results.every((r: any) => r.exitCode !== 0) };
+			}, sub.backgroundAfter(ctx), runs.length);
 			const notes = [...new Set(runs.map((r) => r.name))].map((n) => noteOf(n).trim()).filter(Boolean);
 			return text(notes.length ? `${notes.join("\n")}\n\n${out.text}` : out.text, out.isError);
 		},
@@ -12191,15 +12299,15 @@ export default function (pi: ExtensionAPI) {
 	registerMcp(undefined, claudeMcpServers(cwd0, settings, false, false).servers.filter((e) => e.scope !== "project"));
 
 	// ------------------------------------------------------------ workflows
-	async function workflowRunner() {
+	async function workflowRunner(callId?: string) {
 		const sub = await import(pathToFileURL(join(HERE, "subagents.ts")).href);
 		return async (prompt: string, label: string, signal?: AbortSignal) => {
-			const r = await sub.runAgent({ name: label.replace(/[^\w.-]+/g, "-").slice(0, 40) || "workflow", description: "", prompt: WORKER, source: "user", file: "" }, prompt, cwd, signal);
+			const r = await sub.runAgent({ name: label.replace(/[^\w.-]+/g, "-").slice(0, 40) || "workflow", description: "", prompt: WORKER, source: "user", file: "" }, prompt, cwd, signal, undefined, callId ? { tool: "workflow", callId } : undefined);
 			return { text: String(r.text ?? "").trim(), ok: r.exitCode === 0 };
 		};
 	}
 	function parseWfArgs(a: string): unknown { const s = (a ?? "").trim(); if (!s) return undefined; try { return JSON.parse(s); } catch { return s; } }
-	async function startWorkflow(name: string, rawArgs: string, signal: AbortSignal | undefined, progress: (l: string) => void): Promise<{ text: string; error: boolean }> {
+	async function startWorkflow(name: string, rawArgs: string, signal: AbortSignal | undefined, progress: (l: string) => void, callId?: string): Promise<{ text: string; error: boolean }> {
 		const list = discoverWorkflows(cwd, trusted);
 		const wf = list.find((w) => w.name === name);
 		if (!wf) {
@@ -12209,7 +12317,7 @@ export default function (pi: ExtensionAPI) {
 		const p = permissionCheck(settings, "Workflow", { name }, cwd);
 		if (p.decision === "deny") return { text: `Workflow "${name}" is denied by ${p.rule}.`, error: true };
 		try {
-			const { result, agents } = await runWorkflow(wf, parseWfArgs(rawArgs), { runAgent: await workflowRunner(), concurrency: CONCURRENCY, signal, onProgress: progress });
+			const { result, agents } = await runWorkflow(wf, parseWfArgs(rawArgs), { runAgent: await workflowRunner(callId), concurrency: CONCURRENCY, signal, onProgress: progress });
 			const body = typeof result === "string" ? result : result === undefined ? "(no result)" : JSON.stringify(result, null, 2);
 			return { text: `## workflow ${name} — ${signal?.aborted ? "stopped" : "done"}, ${agents} agent${agents === 1 ? "" : "s"}\n${body.length > 50_000 ? `${body.slice(0, 50_000)}\n[truncated at 50 KB]` : body}`, error: false };
 		} catch (e) { return { text: `Workflow "${name}" failed: ${(e as Error).message}`, error: true }; }
@@ -12220,7 +12328,7 @@ export default function (pi: ExtensionAPI) {
 			name: "workflow", label: "workflow",
 			description: "Run a project workflow script by name; without a name, lists them.",
 			parameters: Type.Object({ name: Type.Optional(Type.String()), args: Type.Optional(Type.String({ description: "input (JSON or text)" })) }),
-			async execute(_id: string, params: any, signal: AbortSignal | undefined, onUpdate: any) {
+			async execute(_id: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx?: any) {
 				if (!params?.name) {
 					const list = discoverWorkflows(cwd, trusted);
 					return { content: [{ type: "text" as const, text: list.map((w) => `- ${w.name}: ${w.description}`).join("\n") || "No workflows." }] };
@@ -12230,9 +12338,9 @@ export default function (pi: ExtensionAPI) {
 				let job = { detached: false };
 				const out = await sub.detachable(signal, _id, async (sig: AbortSignal, j: { detached: boolean }) => {
 					job = j;
-					const r = await startWorkflow(params.name, params.args ?? "", sig, (line) => { if (!job.detached) onUpdate?.({ content: [{ type: "text", text: line }] }); });
+					const r = await startWorkflow(params.name, params.args ?? "", sig, (line) => { if (!job.detached) onUpdate?.({ content: [{ type: "text", text: line }] }); }, _id);
 					return { text: r.text, isError: r.error };
-				});
+				}, sub.backgroundAfter(ctx), 0, params.name);
 				return { content: [{ type: "text" as const, text: out.text }], isError: out.isError };
 			},
 		} as any);

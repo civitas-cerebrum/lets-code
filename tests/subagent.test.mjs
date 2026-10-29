@@ -145,7 +145,7 @@ import { symlinkSync } from "node:fs"; import { execFileSync } from "node:child_
 	if (tb) { rmSync(nm, { recursive: true }); symlinkSync(tb, nm); }
 	else {	// no pi on this machine (CI): the extension only builds a schema with these four, which the fake pi never validates
 		writeFileSync(join(nm, "package.json"), JSON.stringify({ name: "typebox", type: "module", main: "index.js" }));
-		writeFileSync(join(nm, "index.js"), "export const Type = { Object: (p, o) => ({ type: 'object', properties: p, ...o }), String: (o) => ({ type: 'string', ...o }), Array: (i, o) => ({ type: 'array', items: i, ...o }), Optional: (x) => ({ ...x, optional: true }) };\n");
+		writeFileSync(join(nm, "index.js"), "export const Type = { Object: (p, o) => ({ type: 'object', properties: p, ...o }), String: (o) => ({ type: 'string', ...o }), Number: (o) => ({ type: 'number', ...o }), Array: (i, o) => ({ type: 'array', items: i, ...o }), Optional: (x) => ({ ...x, optional: true }) };\n");
 	}
 }
 let fail = 0, n = 0;
@@ -650,6 +650,79 @@ async function load(env = {}) {
 	await h.commands.subagents.handler("stop scout", ctxFor());
 	await call3;
 	t("/subagents stop <name> stops that run", f1.status, "aborted");
+	// in the interactive main session a call does not hold the session up: it returns at once, the runs go on
+	{
+		const tui = { cwd: work, isProjectTrusted: true, hasUI: true, ui };
+		const reports = () => h.sent.filter(([m]) => m?.customType === "lets-code-subagents" && m.content.startsWith(mod.DELIVER_HEAD));
+		const n0 = reports().length;
+		const acb = new AbortController();
+		const t0 = Date.now();
+		const bg = await h.tool.execute("call-g", { agent: "worker", task: "hang in the background" }, acb.signal, undefined, tui);
+		const g1 = reg().runs.find((r) => r.task === "hang in the background");
+		t("background: the call returns at once, not an error, naming the run and how to reach it", [Date.now() - t0 < 1000, bg.isError, /Running in the background/.test(bg.content[0].text), new RegExp(`worker \\(run ${g1?.id}, pid \\d+\\)`).test(bg.content[0].text), /action: "status"/.test(bg.content[0].text)], [true, false, true, true, true]);
+		acb.abort();   // the main session's turn ends or is stopped: the run goes on
+		await new Promise((r) => setTimeout(r, 150));
+		t("background: the main session's abort does not stop it", g1.status, "running");
+		const st = await h.tool.execute("call-h", { action: "status" }, undefined, undefined, tui);
+		t("status: the running run, what it last said", [new RegExp(`- worker \\(run ${g1.id}`).test(st.content[0].text), /running \d+m\d\ds/.test(st.content[0].text), /last said: working/.test(st.content[0].text)], [true, true, true]);
+		t("stop: an unknown run is an error", (await h.tool.execute("call-i", { action: "stop", run: "nobody" }, undefined, undefined, tui)).isError, true);
+		const sp = await h.tool.execute("call-j", { action: "stop", run: g1.id }, undefined, undefined, tui);
+		await new Promise((r) => setTimeout(r, 200));
+		t("stop: by run id, the run stops", [/Stopping worker/.test(sp.content[0].text), g1.status], [true, "aborted"]);
+		await new Promise((r) => setTimeout(r, 100));
+		t("background: its report arrives as a message that continues the main session", [reports().length - n0, reports().at(-1)?.[1]], [1, { triggerTurn: true, deliverAs: "followUp" }]);
+		// a call with wait: the report inline when it comes in time
+		const q = await h.tool.execute("call-k", { agent: "scout", task: "a quick look", wait: 10 }, undefined, undefined, tui);
+		t("wait: a run done within it reports inline", [/Result for: a quick look/.test(q.content[0].text), /background/.test(q.content[0].text)], [true, false]);
+		// a quick run in the background: its report follows as a message
+		const n1 = reports().length;
+		const q2 = await h.tool.execute("call-l", { agent: "scout", task: "another quick look" }, undefined, undefined, tui);
+		for (let i = 0; i < 100 && reports().length === n1; i++) await new Promise((r) => setTimeout(r, 20));
+		t("background: a quick run's result comes as the message", [/Running in the background/.test(q2.content[0].text), /Result for: another quick look/.test(reports().at(-1)?.[0]?.content ?? "")], [true, true]);
+		t("status: nothing running", (await h.tool.execute("call-m", { action: "status" }, undefined, undefined, tui)).content[0].text, "No subagent or expert is running.");
+		// queued tasks start after the call went on: the ctx may be stale by then (a session switch), its cwd read up front
+		let stale = false;
+		const staleCtx = { isProjectTrusted: true, hasUI: true, ui, get cwd() { if (stale) throw new Error("ctx is stale"); return work; } };
+		const n2 = reports().length;
+		const q3 = await h.tool.execute("call-n", { tasks: [1, 2, 3].map((i) => ({ agent: "scout", task: `queued look ${i}` })) }, undefined, undefined, staleCtx);
+		stale = true;
+		t("background: tasks beyond the concurrency are named as queued", /and 1 more queued/.test(q3.content[0].text), true);
+		for (let i = 0; i < 150 && reports().length === n2; i++) await new Promise((r) => setTimeout(r, 20));
+		t("background: a queued task starts after the ctx went stale; every result is in the report", [1, 2, 3].map((i) => new RegExp(`Result for: queued look ${i}`).test(reports().at(-1)?.[0]?.content ?? "")), [true, true, true]);
+		// stop all: the running runs and the tasks still queued
+		const n3 = reports().length;
+		const q4 = await h.tool.execute("call-o", { tasks: [1, 2, 3].map((i) => ({ agent: "worker", task: `hang queued ${i}` })) }, undefined, undefined, tui);
+		await new Promise((r) => setTimeout(r, 150));
+		t("status: the queued task is counted", /1 more task queued/.test((await h.tool.execute("call-p", { action: "status" }, undefined, undefined, tui)).content[0].text), true);
+		const sa = await h.tool.execute("call-q", { action: "stop", run: "all" }, undefined, undefined, tui);
+		for (let i = 0; i < 150 && reports().length === n3; i++) await new Promise((r) => setTimeout(r, 20));
+		const rep4 = reports().at(-1)?.[0]?.content ?? "";
+		t("stop all: running runs stopped, the queued task never started", [/Stopping 2 runs and 1 background call/.test(sa.content[0].text), reg().runs.some((r) => r.task === "hang queued 3"), /1 queued task was stopped before starting/.test(rep4), /background/.test(q4.content[0].text)], [true, false, true, true]);
+		// a workflow call in the background: its agents start as its script goes; the note, status and stop name it
+		{
+			const n5 = reports().length;
+			const worker = mod.discoverAgents(work, true).find((a) => a.name === "worker");
+			let go; const gate = new Promise((r) => { go = r; });
+			const wfCall = mod.detachable(undefined, "call-wf", async (sig) => { await gate; const r = await mod.runAgent(worker, "hang in the workflow", work, sig, undefined, { tool: "workflow", callId: "call-wf" }); return { text: `## workflow review — done\n${r.text}`, isError: false }; }, mod.backgroundAfter(tui), 0, "review");
+			const wn = (await wfCall).text;
+			t("workflow: the note names the workflow and how to stop it", [/workflow review/.test(wn), /run "review"/.test(wn), /the runs of this call/.test(wn)], [true, true, false]);
+			t("workflow: status lists it between agents", /- workflow review: running, between agents/.test((await h.tool.execute("call-wf1", { action: "status" }, undefined, undefined, tui)).content[0].text), true);
+			go();
+			let w1; for (let i = 0; i < 100 && !((w1 = reg().runs.find((r) => r.task === "hang in the workflow")) && w1.events.length > 1); i++) await new Promise((r) => setTimeout(r, 20));
+			t("workflow: status tags its run with the workflow", new RegExp(`- worker \\(run ${w1?.id}, pid \\d+, workflow review\\)`).test((await h.tool.execute("call-wf2", { action: "status" }, undefined, undefined, tui)).content[0].text), true);
+			const ws = await h.tool.execute("call-wf3", { action: "stop", run: "review" }, undefined, undefined, tui);
+			for (let i = 0; i < 150 && reports().length === n5; i++) await new Promise((r) => setTimeout(r, 20));
+			t("workflow: stop by its name stops its run; its report arrives", [/Stopping workflow review/.test(ws.content[0].text), w1?.status, /## workflow review/.test(reports().at(-1)?.[0]?.content ?? ""), mod.bgCalls().size], [true, "aborted", true, 0]);
+		}
+		// the main session ends (/new, /resume elsewhere): its background runs go, and no report is left for it
+		const n4 = reports().length, p4 = (reg().pending ?? []).length;
+		await h.tool.execute("call-r", { agent: "worker", task: "hang until new" }, undefined, undefined, tui);
+		const g5 = reg().runs.find((r) => r.task === "hang until new");
+		h.handlers.session_shutdown({ reason: "new" });
+		for (let i = 0; i < 100 && g5.status === "running"; i++) await new Promise((r) => setTimeout(r, 20));
+		await new Promise((r) => setTimeout(r, 100));
+		t("/new: the background run is stopped, its report dropped", [g5.status !== "running", reports().length - n4, (reg().pending ?? []).length - p4, mod.bgCalls().size], [true, 0, 0, 0]);
+	}
 	t("/subagents <unknown> says so", (await h.commands.subagents.handler("nobody", ctxFor()), /No run "nobody"/.test(notes.at(-1)?.[1] ?? "")), true);
 	// /subagents' completions never turn a bare /subagents into a subcommand
 	t("completions: none for /subagents and /subagents with a space", [mod.subcommandCompletions(""), mod.subcommandCompletions(" ")], [null, null]);
@@ -881,6 +954,8 @@ async function load(env = {}) {
 	let renders = 0;
 	const ed = { getText: () => editor, onSubmit: () => {}, historyIndex: -1, isShowingAutocomplete: () => false, isEditorEmpty: () => !editor, isOnLastVisualLine: () => true };
 	const tui = { children: [doc, pending, statusC, part("above"), part("editor"), part("below"), part("footer")], focusedComponent: ed, requestRender: () => { renders++; }, handleTerminalInput() {} };
+	// pi 1.0's fullscreen layout (its default) draws through its own references to the containers
+	const fullscreen = (w) => [...doc.children, pending, statusC].flatMap((c) => c.render(w));
 	reg().tui = tui;
 	const switched = [];
 	let idle = false;
@@ -892,8 +967,8 @@ async function load(env = {}) {
 	const sent0 = h.sent.length;
 	globalThis.__piLevel = "minimal";   // the main session's level
 	await h.commands.subagents.handler(`id:${r.id}`, ctx());
-	t("main working: no switchSession (it would abort the turn); the child shown in place", [switched.length, reg().view.inplace?.run, doc.children[2] !== chat, tui.children[1] !== pending, tui.children[2] !== statusC, renders > 0], [0, r.id, true, true, true, true]);
-	t("in place: the child's transcript where the chat was, within the width", [doc.children[2].render(70).some((l) => /hang in place/.test(l)), doc.children[2].render(70).every((l) => l.replace(/\x1b\[[0-9;]*m|\x1b\][^\x07]*\x07/g, "").length <= 70), tui.children[1].render(70), tui.children[2].render(70)], [true, true, [], []]);
+	t("main working: no switchSession (it would abort the turn); the child shown in place", [switched.length, reg().view.inplace?.run, doc.children[2] !== chat, pending.render(70), statusC.render(70), renders > 0], [0, r.id, true, [], [], true]);
+	t("in place: the child's transcript where the chat was, within the width", [doc.children[2].render(70).some((l) => /hang in place/.test(l)), doc.children[2].render(70).every((l) => l.replace(/\x1b\[[0-9;]*m|\x1b\][^\x07]*\x07/g, "").length <= 70), fullscreen(70).some((l) => /main pending|main status/.test(l))], [true, true, false]);
 	t("in place: nothing is added to the main session", h.sent.slice(sent0).filter(([m]) => m?.customType === "lets-code-subagent-message").length, 0);
 	t("in place: the main session's tool call runs on", await Promise.race([call.then(() => "returned"), new Promise((res) => setTimeout(() => res("running"), 50))]), "running");
 	// keys: nothing reaches pi as an abort of the main session's turn
@@ -958,7 +1033,7 @@ async function load(env = {}) {
 	mod.childOf(r).abort(true); await wait(() => r.status !== "running");
 	// back: pi's own containers again, with what the turn did meanwhile
 	await h.commands.subagents.handler("back", ctx());
-	t("back from in place: pi's containers restored, no switch", [doc.children[2] === chat, tui.children[1] === pending, tui.children[2] === statusC, reg().view.inplace, switched.length], [true, true, true, undefined, 0]);
+	t("back from in place: pi's containers restored, no switch", [doc.children[2] === chat, tui.children[1] === pending, tui.children[2] === statusC, pending.render(70), statusC.render(70), reg().view.inplace, switched.length], [true, true, true, ["main pending"], ["main status"], undefined, 0]);
 	t("back from in place: the main session's level untouched", [globalThis.__piLevel, reg().view.mainLevel], ["minimal", undefined]);
 	globalThis.__piLevel = undefined;
 	t("back: the editor's keys are pi's again", termHandler("\x1b"), undefined);

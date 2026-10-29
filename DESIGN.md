@@ -489,6 +489,21 @@ only when the user switches mid-call), and when the runs end their report
 is sent to the session the call came from with `pi.sendMessage(...,
 { triggerTurn: true, deliverAs: "followUp" })`, held while another
 session is open. A plain abort (Esc) still stops the children.
+`detachable(..., after)` also detaches once `after` ms have passed
+(`backgroundAfter`: the call's `wait` or `LETS_CODE_SUBAGENT_WAIT`, default
+0), in the interactive main session only (`isTui`, depth 0): there a call
+never holds the session up, and from then on the call's abort is ignored
+(the main session's Esc stops its own turn, not the runs; a run stops with
+its own stop: `/subagents stop`, `subagent({action: "stop"})`). The note it
+returns (`backgroundNote`) names each run's id and pid and the ways to
+reach it. A workflow's agents start as its script goes, so its note names
+the workflow (`BgCall.name`) and whatever runs have started; its runs carry
+the call id (`RunMeta` tool "workflow"), so status tags them with the
+workflow, lists a workflow between agents, and `stop` takes the workflow's
+name. `subagent({action: "status"})` lists the running runs with time,
+turns, the last assistant text and `lastSteps`. Print and RPC mode, and
+calls at depth > 0, wait as before: there nothing would take a later
+report, and a child's turn must not end with its own children running.
 
 Switching while the main session works: the teardown above aborts the
 turn in flight (the model's reply, a running tool, queued messages, and
@@ -501,7 +516,11 @@ the document of header, resources and chat, then the pending messages,
 the status, the widgets above, the editor, the widgets below, the
 footer); the chat container is swapped for a component that draws the
 run's completed events with pi's message components (the `Transcript` of
-the live widget), the pending and status containers for empty ones. The
+the live widget), and the pending and status containers draw nothing
+(their own `render` replaced, put back on `back`: pi 1.0's fullscreen
+layout, its default, draws them through its own references, so swapping
+them out of `tui.children` would leave the main session's queued
+steering and status on screen). The
 main session object is untouched: its turn runs on, writes its session
 file and fills its own chat, which comes back on `back`. In place the key
 hook keeps the main session's keys off it: Esc stops the child or is
@@ -991,7 +1010,10 @@ the child's last assistant text (a follow-up would come after it and
 become the reply the parent reads). Idle main session: no turn
 (`triggerTurn: false`) and a notice; the user decides whether the agent
 acts on it. Unattended turns are opt-in with
-`LETS_CODE_SESSIONS_AUTOTURN=1`. Idle subagent: no turn (its next task
+`LETS_CODE_SESSIONS_AUTOTURN=1`, except from the session's own subagent
+(its registry entry's `parentPid` is this pid): that is the orchestrator's
+own run talking back, so it starts a turn when idle and is a follow-up when
+busy, below `CHILD_HOPS` (4) hops, which bounds an ask-answer exchange. Idle subagent: no turn (its next task
 reads it), since a turn the subagent tool did not start would confuse its
 run accounting. Loops: each message carries `hops`. While a run that a
 message started or continued is going, whatever the session sends has

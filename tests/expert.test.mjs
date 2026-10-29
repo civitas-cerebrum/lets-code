@@ -67,7 +67,7 @@ writeFileSync(join(agentDir, "rt", "setup.sh"), "echo 'installing the runtime ..
 	if (tb) { rmSync(nm, { recursive: true }); symlinkSync(tb, nm); }
 	else {
 		writeFileSync(join(nm, "package.json"), JSON.stringify({ name: "typebox", type: "module", main: "index.js" }));
-		writeFileSync(join(nm, "index.js"), "export const Type = { Object: (p, o) => ({ type: 'object', properties: p, ...o }), String: (o) => ({ type: 'string', ...o }), Array: (i, o) => ({ type: 'array', items: i, ...o }), Optional: (x) => ({ ...x, optional: true }) };\n");
+		writeFileSync(join(nm, "index.js"), "export const Type = { Object: (p, o) => ({ type: 'object', properties: p, ...o }), String: (o) => ({ type: 'string', ...o }), Number: (o) => ({ type: 'number', ...o }), Array: (i, o) => ({ type: 'array', items: i, ...o }), Optional: (x) => ({ ...x, optional: true }) };\n");
 	}
 }
 const strip = (f) => readFileSync(f, "utf8").replace(/^import type .*$/m, "");

@@ -328,6 +328,31 @@ const blocked = (r) => r?.block === true;
 	t("orchestrator child: gets the default role", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
 	t("orchestrator child: no orchestrator hook command", Object.keys(h.commands).length, 0);
 }
+// --- a child never runs in ask mode, and never asks the user
+{
+	const h = await load({ LETS_CODE_MODE: "ask", LETS_CODE_ROLE: "ask", LETS_CODE_SUBAGENT_DEPTH: "1" }, { answers: ["Allow once"] }); const d = repo(); await h.start(d);
+	t("ask child: gets the default role", h.emitted.filter((e) => e[0] === "lets-code:mode").at(-1)?.[1]?.role, "auto");
+	t("ask child: a package install runs without a dialog", [await h.call(d, "bash", { command: "npm install left-pad" }), h.selects.length], [undefined, 0]);
+}
+{
+	writeFileSync(join(agentDir, "mandate.json"), JSON.stringify({ default: "ask" }));
+	const h = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" }); const d = repo(); await h.start(d);
+	t("ask as the default: a child still gets auto", h.emitted.filter((e) => e[0] === "lets-code:mode").at(-1)?.[1]?.role, "auto");
+	rmSync(join(agentDir, "mandate.json"));
+}
+{
+	// a role of the user's whose rule says ask: refused in a child, with no dialog
+	writeFileSync(join(agentDir, "mandate.json"), JSON.stringify({ roles: { careful: { bash: { "*": "allow", "package-install": "ask" } } } }));
+	const h = await load({ LETS_CODE_ROLE: "careful", LETS_CODE_SUBAGENT_DEPTH: "1" }, { answers: ["Allow once"] }); const d = repo(); await h.start(d);
+	const r = await h.call(d, "bash", { command: "npm install left-pad" });
+	t("child: an ask rule is refused without a dialog", [blocked(r), /does not ask the user/.test(r?.reason ?? ""), h.selects.length], [true, true, 0]);
+	t("child: the rest of its role still runs", await h.call(d, "bash", { command: "ls" }), undefined);
+	rmSync(join(agentDir, "mandate.json"));
+}
+{
+	const h = await load({ LETS_CODE_ROLE: "ask" }, { answers: ["Allow once"] }); const d = repo(); await h.start(d);
+	t("main session in ask: still asks the user", [await h.call(d, "bash", { command: "npm install left-pad" }), h.selects.length], [undefined, 1]);
+}
 // --- mandate off: the orchestrator alone, dormant until engaged
 {
 	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_ORCHESTRATOR_ON = "1";

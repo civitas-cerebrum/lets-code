@@ -5692,6 +5692,7 @@ export function mcpDecision(role: Role, tool: string): Decision {
 export function mayDispatch(role: Role, agent: string): boolean { return !role.dispatch || (!role.dispatch.includes(`!${agent}`) && (role.dispatch.includes("*") || role.dispatch.includes(agent))); }
 const short = (s: string, n = 190) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
+const MAIN_ONLY = new Set(["orchestrator", "ask"]);
 export default function (pi: ExtensionAPI) {
 	if (!ACTIVE && !ORCHESTRATOR && !PLAN) return;
 	const subagentDepth = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
@@ -5714,8 +5715,9 @@ export default function (pi: ExtensionAPI) {
 	const warn = (ctx: ExtensionContext | undefined, m: string) => { if (ctx?.hasUI) ctx.ui.notify(m, "warning"); log("warn", { m }); };
 
 	function apply(ctx: ExtensionContext | undefined, name: string, announce = true) {
-		// the orchestrator is the main session's: a child that would inherit it gets the default
-		if (name === "orchestrator" && subagentDepth > 0) name = manifest.default && manifest.default !== name ? manifest.default : "auto";
+		// the orchestrator and ask are the main session's (the user talks to the
+		// main session only): a child that would inherit either gets the default
+		if (subagentDepth > 0 && MAIN_ONLY.has(name)) name = manifest.default && !MAIN_ONLY.has(manifest.default) ? manifest.default : "auto";
 		if (!manifest.roles[name]) { warn(ctx, `mandate: unknown role '${name}', using '${manifest.default}'`); name = manifest.default ?? "auto"; }
 		const prev = roleName; roleName = name; role = roleFor(manifest, name);
 		// plan-like roles: drop tools outside the allowlist from the active set; restore on exit
@@ -5780,6 +5782,9 @@ export default function (pi: ExtensionAPI) {
 		if (d === "allow") return undefined;
 		if (d === "deny") { log("deny", { key, what }); return { block: true, reason: short(`mandate(${roleName}): ${what} is not allowed in this mode.${why()}`) }; }
 		if (ok || allowedForSession.has(key)) return undefined;
+		// a subagent does not ask the user (its dialogs would reach the user
+		// past the orchestrator): what needs approval is refused, for its report
+		if (subagentDepth > 0) { log("deny", { key, what, why: "subagent" }); return { block: true, reason: short(`mandate(${roleName}): ${what} needs the user's approval, and a subagent does not ask the user: do without it, or name it in your report.`) }; }
 		if (!ctx.hasUI) { log("deny", { key, what, why: "no-ui" }); return { block: true, reason: short(`mandate(${roleName}): ${what} needs approval and no one can be asked in this mode.`) }; }
 		const choice = await ctx.ui.select(`mandate (${roleName}): ${what}\n\nAllow?`, ["Allow once", "Allow for this session", "Deny"]);
 		if (choice === "Allow for this session") allowedForSession.add(key);

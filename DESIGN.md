@@ -374,23 +374,32 @@ record carries `stats` (the child's own session): its model and thinking
 level from the spawn arguments at launch; after each of its responses its
 usage counted from `message_end`, then replaced by its RPC
 `get_session_stats` (tokens, cost, context use) and `get_state` (model,
-thinking level), which an older pi without them simply leaves out; tok/s
+thinking level), asked only with a UI and at most every 2 s while it works
+(once more when it settles), which an older pi without them simply leaves
+out; tok/s
 and time to first token from its stream (`turn_start` to the first
 `*_delta`, first delta to `message_end`). While `view.viewing` names a run
 (switched or in place), the footer module reads that record (from the
 registry on `globalThis`) instead of the TUI's session: the copy a switch
 opens is frozen and has no stream, and in place the TUI holds the main
 session. A level changed there goes to the child (`cycle_thinking_level`,
-`set_thinking_level`) and the answer is recorded as its level; the copy is
-set to the child's level when it opens, so pi's keys move on from it. The
-main session's level is kept aside when a child's session opens and put
-back on the way out (pi may have moved it: in place, pi's own handlers
-change the TUI's session; switched, the main session reopens at pi's
-default, which the copy's change persisted); in place a change pi makes
-to the main session is undone at once. The thinking memory saves nothing
-while a child's session is open, and the agent guard's adaptive reset to
-BASE at session start is for the top session only, so an agent file's
-`thinking:` holds in its child. `/subagents` alone always opens the navigator:
+`set_thinking_level`) and the answer is recorded as its level, and as the
+`--thinking` of its spawn arguments, so a restart keeps it. In a switched
+copy the copy is set to the child's level when it opens, so pi's keys move
+on from it; the `thinking_level_select` that this fires is matched against
+a queue of the levels the view set itself, not against the recorded level,
+so picking A, B, A quickly passes on all three. The main session's level
+is kept aside (with its file) when a copy opens and put back when that same
+session opens again: pi reopens it at its default, which the copy's change
+persisted; `/resume` of another session from the copy, or a switch that
+does not happen, drops it. In place the TUI holds the main session: its
+`thinking_level_select` events are its own (pi's, or the agent guard's
+bursts and dials) and are neither passed on nor undone; there Shift+Tab and
+`/thinking <level>` are taken by the key hook and sent to the child. The
+thinking memory saves nothing while a child's session is open. The agent
+guard in a child (depth > 0) rests at the level the child started at (its
+agent file's): no reset to BASE at session start, no dial to BASE on a red
+test or to DOWN once green, and a burst ends back at that level. `/subagents` alone always opens the navigator:
 its argument completions appear only once a letter is typed (pi 0.87 takes
 Enter for a highlighted completion, which turned `/subagents ` into a
 subcommand).

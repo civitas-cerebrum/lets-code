@@ -1304,6 +1304,7 @@ export interface Stats {
 	percent?: number | null; window: number; auto: boolean;
 	runMs?: number; running?: boolean; stopped?: boolean;
 	label?: string;   // whose numbers (a subagent's session on screen): its name and thinking level
+	noContext?: boolean;   // context use not known (a run saved before its numbers were kept): left out
 }
 
 // how long a prompt took, from sending it until pi settled: 14s, 1m 23s, 1h 2m
@@ -1333,7 +1334,7 @@ export function statsLines(s: Stats, full: boolean, color: Color = plain, w = In
 	const pct = s.percent === null || s.percent === undefined ? "?" : `${s.percent.toFixed(1)}%`;
 	const ctxText = `${pct}/${compact(s.window)}${s.auto ? " (auto)" : ""}`;
 	const v = s.percent ?? 0;
-	const ctx = v > 90 ? color("error", ctxText) : v > 70 ? color("warning", ctxText) : color("dim", ctxText);
+	const ctx = s.noContext ? "" : v > 90 ? color("error", ctxText) : v > 70 ? color("warning", ctxText) : color("dim", ctxText);
 	const io = [s.sent ? `↑${compact(s.sent)}` : "", s.received ? `↓${compact(s.received)}` : ""].filter(Boolean).join(" ");
 	const speed = `${s.glyph ? s.glyph + " " : ""}${s.tps !== undefined ? s.tps.toFixed(1) + " tok/s" : full ? "– tok/s" : "…"}`;
 	const sep = color("dim", " · ");
@@ -1415,9 +1416,11 @@ export const runStats = (r: any, auto: boolean, now = Date.now()): Stats => {
 	const sent = r.stats ? n(x.input) + n(x.cacheRead) + n(x.cacheWrite) : n(r.input);
 	const received = (r.stats ? n(x.output) : n(r.output)) + n(r.live);
 	const cu = x.contextUsage;
-	const level = typeof x.thinkingLevel === "string" ? x.thinkingLevel : "";
+	// the level only for a model that reasons (known once the child's state has come)
+	const level = x.reasoning === true && typeof x.thinkingLevel === "string" ? x.thinkingLevel : "";
 	const s: Stats = { sent, received, cached: n(x.cacheRead), written: n(x.cacheWrite), hit: x.hit, cost: n(x.cost),
 		tps: typeof x.tokPerSec === "number" ? x.tokPerSec : undefined, percent: cu ? cu.percent : null, window: n(cu?.contextWindow) || n(x.contextWindow), auto,
+		noContext: !cu && !(n(x.contextWindow) > 0),
 		label: `${r.agent}${level ? ` • ${level}` : ""}` };
 	if (typeof x.ttftMs === "number") s.firstMs = x.ttftMs;
 	if (typeof x.lastOut === "number") s.out = x.lastOut;
@@ -1559,16 +1562,17 @@ export default function (pi: ExtensionAPI) {
 		const vr = viewedRun(), vx = vr?.stats;
 		const name = vr ? String(vr.agent ?? "subagent") : ui?.sessionManager?.getSessionName?.();
 		if (name) where += ` • ${name}`;
-		const m = vr ? (vx?.model ? { id: vx.model, provider: vx.provider, reasoning: vx.reasoning ?? !!vx.thinkingLevel } : undefined) : ui?.model;
+		const m = vr ? (vx?.model ? { id: vx.model, provider: vx.provider, reasoning: vx.reasoning === true } : undefined) : ui?.model;
 		// Claude through Claude Code (the claude module) reads as Anthropic's: (anthropic) haiku
 		const claude = !!m?.provider && m.provider === (process.env.LETS_CODE_CLAUDE_PROVIDER || "Anthropic");
-		let model = m?.id ? (claude ? m.id.replace(/^claude-/, "") : m.id) : "no model";
+		// a run saved before its numbers were kept: no model to name, the right side stays empty
+		let model = m?.id ? (claude ? m.id.replace(/^claude-/, "") : m.id) : vr ? "" : "no model";
 		if (m?.reasoning) { const lvl = (vr ? vx?.thinkingLevel : pi.getThinkingLevel?.()) ?? "off"; model += lvl === "off" ? " • thinking off" : ` • ${lvl}`; }
 		if ((data.getAvailableProviderCount?.() ?? 1) > 1 && m?.provider) model = `(${claude ? "anthropic" : m.provider}) ${model}`;
-		const right = mode ? `${mode}${color("dim", " · ")}${color("dim", model)}` : color("dim", model);
+		const right = mode ? (model ? `${mode}${color("dim", " · ")}${color("dim", model)}` : mode) : model ? color("dim", model) : "";
 		const room = w - width(right) - 2;
 		if (mode && room >= 12) return { line: spread(color("dim", width(where) > room ? `${cut(where, room - 1)}…` : where), right, w), placed: true };
-		return { line: spread(color("dim", where), color("dim", model), w), placed: false };
+		return { line: spread(color("dim", where), model ? color("dim", model) : "", w), placed: false };
 	};
 	// lines other lets-code modules put in the footer, above the numbers (the
 	// subagents list of /subagents toggle): globalThis, so a module loaded
@@ -4539,7 +4543,10 @@ export default function (pi: ExtensionAPI) {
 	// too early: hidden fixes often came after it, and at off the model missed a wrong order its own check printed.
 	let greenSettled = false;
 	let greenEdit = -1;
-	const restLevel = () => (d.passing && greenSettled ? DOWN : BASE);
+	// the levels this instance rests at: BASE and DOWN in the top session; in a subagent (depth > 0)
+	// its start level throughout (its agent file's), so bursts come back to it and nothing dials it
+	let base = BASE, down = DOWN;
+	const restLevel = () => (d.passing && greenSettled ? down : base);
 	const endBurst = (why: string) => {
 		pi.setThinkingLevel(restLevel() as any);
 		log("deescalate", { why, burstTurns: burst?.turns ?? 0 });
@@ -4551,13 +4558,14 @@ export default function (pi: ExtensionAPI) {
 		// a subagent's own session, opened from /subagents: read-only, and its
 		// process may still be writing it, so nothing here may append to it
 		if (/[\\/]lets-code-runs[\\/][^\\/]+[\\/][^\\/]+\.(pi|view)\.jsonl$/.test(String(ctx?.sessionManager?.getSessionFile?.() ?? ""))) return;
-		// not in a subagent (depth > 0): it starts at its agent file's thinking level
-		if (AUTO && !(Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") > 0) && pi.getThinkingLevel() !== BASE) pi.setThinkingLevel(BASE as any);
+		// a subagent (depth > 0) keeps the level it started at (its agent file's) and rests there
+		if (Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") > 0) { base = down = String(pi.getThinkingLevel() ?? BASE); }
+		else if (AUTO && pi.getThinkingLevel() !== base) pi.setThinkingLevel(base as any);
 		if (AUTO && PLAN) {
 			planning = true;
 			pi.setThinkingLevel(PLAN_LEVEL as any);
 		}
-		log("start", { auto: AUTO || null, base: BASE, down: DOWN, bashTimeout: BASH_TIMEOUT, wrapTurns: WRAP_TURNS, wrapMinutes: WRAP_MS / 60_000, burstTurns: BURST_TURNS, maxBursts: MAX_BURSTS, replay: Number.isFinite(REPLAY) ? REPLAY : "all" });
+		log("start", { auto: AUTO || null, base, down, bashTimeout: BASH_TIMEOUT, wrapTurns: WRAP_TURNS, wrapMinutes: WRAP_MS / 60_000, burstTurns: BURST_TURNS, maxBursts: MAX_BURSTS, replay: Number.isFinite(REPLAY) ? REPLAY : "all" });
 	});
 
 	pi.on("before_agent_start", async (event: any) => {
@@ -4627,15 +4635,15 @@ export default function (pi: ExtensionAPI) {
 		if (failing !== null) log("tests", { failing });
 		// adaptive mode: a green run arms the dial-down (applied after a settled turn, see turn_end);
 		// a red run cancels it and returns to base
-		if (AUTO && failing !== null && BASE !== DOWN) {
+		if (AUTO && failing !== null && base !== down) {
 			if (failing === 0) {
 				if (greenEdit < 0) greenEdit = d.lastSourceEdit;
 			} else {
 				greenSettled = false;
 				greenEdit = -1;
-				if (!burst && !planning && !reviewing && pi.getThinkingLevel() !== BASE) {
-					pi.setThinkingLevel(BASE as any);
-					log("dial", { to: BASE, why: `${failing} failing` });
+				if (!burst && !planning && !reviewing && pi.getThinkingLevel() !== base) {
+					pi.setThinkingLevel(base as any);
+					log("dial", { to: base, why: `${failing} failing` });
 				}
 			}
 		}
@@ -4664,12 +4672,12 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		// adaptive dial-down: tests green and this turn changed no source since the green run
-		if (AUTO && BASE !== DOWN && d.passing && greenEdit >= 0 && !greenSettled) {
+		if (AUTO && base !== down && d.passing && greenEdit >= 0 && !greenSettled) {
 			if (d.lastSourceEdit === greenEdit) {
 				greenSettled = true;
-				if (!burst && !planning && !reviewing && pi.getThinkingLevel() !== DOWN) {
-					pi.setThinkingLevel(DOWN as any);
-					log("dial", { to: DOWN, why: "tests pass, work settled" });
+				if (!burst && !planning && !reviewing && pi.getThinkingLevel() !== down) {
+					pi.setThinkingLevel(down as any);
+					log("dial", { to: down, why: "tests pass, work settled" });
 				}
 			} else {
 				greenEdit = d.lastSourceEdit; // still editing after green: wait for a turn without edits
@@ -5653,12 +5661,19 @@ export type RunStats = {
 	tokPerSec?: number; ttftMs?: number; lastOut?: number;
 	genOut?: number; genMs?: number;   // the speed's sums: output tokens and ms from first token to end
 };
+export const STATS_MS = 2000;
 export const emptyStats = (): RunStats => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-// a thinking level the child took (its RPC answer), recorded for the footer
+// a flag's value in the run's spawn args (a restart of its process starts with it); only a flag it has
+const spawnArg = (rec: RunRecord, flag: string, value: string | undefined): void => {
+	const a = rec.spawn?.args, i = a ? a.indexOf(flag) : -1;
+	if (a && value && i >= 0 && i + 1 < a.length) a[i + 1] = value;
+};
+// a thinking level the child took (its RPC answer), recorded for the footer and its next start
 export const noteLevel = (rec: RunRecord, level: unknown): void => {
 	if (typeof level !== "string" || !level) return;
 	(rec.stats ??= emptyStats()).thinkingLevel = level;
+	spawnArg(rec, "--thinking", level);
 	saveRun(rec, true); notifyRuns(rec);
 };
 // one response's usage, counted until the child's own totals come
@@ -5683,9 +5698,12 @@ export const applyStats = (rec: RunRecord, st: any, state: any): boolean => {
 	}
 	const s = state?.success ? state.data : undefined;
 	if (s && typeof s === "object") {
-		if (typeof s.thinkingLevel === "string" && s.thinkingLevel) x.thinkingLevel = s.thinkingLevel;
+		if (typeof s.thinkingLevel === "string" && s.thinkingLevel) { x.thinkingLevel = s.thinkingLevel; spawnArg(rec, "--thinking", s.thinkingLevel); }
 		const m = s.model;
-		if (m && typeof m === "object" && m.id) { x.model = String(m.id); x.provider = m.provider ? String(m.provider) : undefined; x.reasoning = !!m.reasoning; if (num(m.contextWindow)) x.contextWindow = num(m.contextWindow); }
+		if (m && typeof m === "object" && m.id) {
+			x.model = String(m.id); x.provider = m.provider ? String(m.provider) : undefined; x.reasoning = !!m.reasoning; if (num(m.contextWindow)) x.contextWindow = num(m.contextWindow);
+			if (x.provider && rec.spawn?.args.includes("--model")) { spawnArg(rec, "--provider", x.provider); spawnArg(rec, "--model", x.model); }
+		}
 		changed = true;
 	}
 	return changed;
@@ -5945,6 +5963,7 @@ export class Child {
 	turn?: Turn; idle?: ReturnType<typeof setTimeout>;
 	queued: { text: string; kind: "steer" | "followUp" }[] = [];   // sent while it works, not yet in the conversation
 	reqAt?: number; firstAt?: number;   // the response on its way: asked (turn_start), its first token
+	refreshedAt = 0;                    // the last time its totals were asked for (at most every STATS_MS)
 	constructor(rec: RunRecord) { this.rec = rec; }
 	get alive(): boolean { return !!this.proc && this.proc.exitCode === null && this.proc.signalCode === null; }
 	get busy(): boolean { return !!this.turn; }
@@ -6019,7 +6038,7 @@ export class Child {
 		}
 		if (ev?.type === "message_end" && ev.message?.role === "assistant") {
 			noteUsage(rec, ev.message.usage);
-			const x = rec.stats!, out = num(ev.message.usage?.output);
+			const x = (rec.stats ??= emptyStats()), out = num(ev.message.usage?.output);
 			if (this.firstAt !== undefined) {
 				if (this.reqAt !== undefined) x.ttftMs = this.firstAt - this.reqAt;
 				const ms = now - this.firstAt;
@@ -6028,11 +6047,12 @@ export class Child {
 			}
 			this.reqAt = undefined; this.firstAt = undefined;
 			notifyRuns(rec);
-			void refreshStats(this);
+			// only with a UI to show them, and at most every STATS_MS while it works
+			if ((registry() as any).ui && now - this.refreshedAt >= STATS_MS) { this.refreshedAt = now; void refreshStats(this); }
 			return;
 		}
 		// at rest with a UI to show it: the totals once more, after the last response is in the session
-		if (ev?.type === "agent_settled" && (registry() as any).ui) void refreshStats(this);
+		if (ev?.type === "agent_settled" && (registry() as any).ui) { this.refreshedAt = now; void refreshStats(this); }
 	}
 	// one turn: the task (first) or the user's next prompt; resolves when it settles
 	prompt(text: string, o: { first?: boolean; signal?: AbortSignal; timeout?: number; onProgress?: (line: string) => void; images?: unknown[] } = {}): Promise<RunResult> {
@@ -6423,7 +6443,9 @@ interface ViewState {
 	followUpNext?: boolean;               // the follow-up key was pressed: the next prompt is a follow-up
 	inplace?: { run: string; chat: any; pending: any; status: any };   // a child shown in place while the main session works
 	mainBusy?: boolean;                   // the main session's turn is running (agent_start .. agent_settled)
-	mainLevel?: string;                   // the main session's thinking level when a child's session opened; put back on return
+	mainLevel?: string;                   // the main session's thinking level when a child's copy opened; put back on return to it
+	mainHome?: string;                    // that main session's file (another session opened from the copy does not get the level)
+	echo?: string[];                      // levels this view set on the copy itself: their thinking_level_select is not passed on
 	picker: boolean;
 	footer: boolean;
 }
@@ -6508,14 +6530,17 @@ function setupSessions(pi: ExtensionAPI) {
 	const viewed = () => (vs.viewing ? reg.runs.find((r) => r.id === vs.viewing) : undefined);
 	// a child's session is open: its copy (switchSession), or shown in place while the main session works
 	const inChild = () => isChildSession(vs.current) || !!vs.inplace;
-	// the thinking level is the viewed session's: a change made while a child's
-	// session is open goes to the child, and the main session's own level is
-	// kept aside on the way in and put back on the way out (pi may have moved it)
+	// the thinking level is the viewed session's: a change made in a child's
+	// copy goes to the child, and the main session's own level is kept aside
+	// when the copy opens and put back when that main session opens again (pi
+	// may have moved it: the copy's change becomes pi's default). In place the
+	// TUI holds the main session, whose level (the agent guard's too) is left
+	// alone; there the thinking keys are passed on to the child directly.
 	const levelNow = (): string | undefined => { try { const v = (reg.pi ?? pi as any).getThinkingLevel?.(); return typeof v === "string" ? v : undefined; } catch { return undefined; } };
-	const keepMainLevel = () => { if (!inChild() && vs.mainLevel === undefined) vs.mainLevel = levelNow(); };
-	const restoreMainLevel = () => {
-		const want = vs.mainLevel; vs.mainLevel = undefined;
-		if (!want || levelNow() === want) return;
+	const keepMainLevel = () => { if (!inChild()) { vs.mainLevel = levelNow(); vs.mainHome = vs.home; } };
+	const restoreMainLevel = (file: string) => {
+		const want = vs.mainLevel, home = vs.mainHome; vs.mainLevel = undefined; vs.mainHome = undefined;
+		if (!want || file !== home || levelNow() === want) return;   // another session (/resume, /new): its own level
 		try { (reg.pi ?? pi as any).setThinkingLevel?.(want); } catch { /* a stale pi: the level stays as it is */ }
 	};
 	const FOOTER = Symbol.for("lets-code.footer-blocks");
@@ -6661,7 +6686,6 @@ function setupSessions(pi: ExtensionAPI) {
 	const enterInPlace = (r: RunRecord): boolean => {
 		const L = layout();
 		if (!L || !view) return false;
-		keepMainLevel();
 		if (!vs.inplace) vs.inplace = { run: r.id, chat: L.doc.children[2], pending: L.kids[1], status: L.kids[2] };
 		vs.inplace.run = r.id;
 		ipTranscript = new view.Transcript(deps ?? view.plainDeps(), theme(), (reg as any).tui);
@@ -6688,7 +6712,6 @@ function setupSessions(pi: ExtensionAPI) {
 		if (L) { L.doc.children[2] = p.chat; L.kids[1] = p.pending; L.kids[2] = p.status; }
 		vs.inplace = undefined; vs.viewing = undefined; vs.added = undefined; vs.loaded = undefined; ipTranscript = undefined;
 		vs.nav = false; vs.confirm = false; lastStatus = undefined;
-		restoreMainLevel();
 		applyLive(); status();
 		try { (reg as any).tui?.requestRender?.(true); } catch { repaint(); }
 		if (resubmit) runResubmit();
@@ -6764,11 +6787,19 @@ function setupSessions(pi: ExtensionAPI) {
 			vs.viewing = r?.id ?? basename(file).replace(/\.(pi|view)\.jsonl$/, "");
 			// the copy at the child's level, so pi's keys move on from it (not passed on: it is the child's already)
 			const lv = r?.stats?.thinkingLevel;
-			if (lv && levelNow() !== lv) { try { (pi as any).setThinkingLevel?.(lv); } catch { /* the copy keeps its own */ } }
+			const was = levelNow();
+			if (lv && was !== lv) {
+				const echo = (vs.echo ??= []);
+				echo.push(lv);   // before the call: pi may run the handlers at once
+				try { (pi as any).setThinkingLevel?.(lv); } catch { /* the copy keeps its own */ }
+				// no event (nothing changed) or another level (clamped): that echo never comes
+				const now = levelNow();
+				if (now === was || now !== lv) { const i = echo.lastIndexOf(lv); if (i >= 0) echo.splice(i, 1); }
+			}
 		} else {
 			vs.home = file; vs.homeId = String(sm?.getSessionId?.() ?? "");
 			vs.viewing = undefined; vs.added = undefined;
-			restoreMainLevel();
+			restoreMainLevel(file); vs.echo = undefined;
 			useSession(vs.homeId);
 		}
 		if (clock) { clearInterval(clock); clock = undefined; }
@@ -6960,13 +6991,12 @@ function setupSessions(pi: ExtensionAPI) {
 		void forward({ type: "set_model", provider: event.model.provider, modelId: event.model.id }, `model ${event.model.id}`);
 	});
 	pi.on("thinking_level_select", (event: any) => {
-		if (!inChild() || !event?.level) return;
-		const r = viewed();
-		// the copy set to the child's level on opening, or the main session's put back in place: nothing to pass on
-		if (event.level === r?.stats?.thinkingLevel || (vs.inplace && event.level === vs.mainLevel)) return;
+		// in place the event is the main session's (pi's or the agent guard's): not the child's
+		if (!inChild() || vs.inplace || !event?.level) return;
+		// the copy set to the child's level on opening: nothing to pass on
+		const i = vs.echo?.indexOf(event.level) ?? -1;
+		if (i >= 0) { vs.echo!.splice(i, 1); return; }
 		void forward({ type: "set_thinking_level", level: event.level }, `thinking ${event.level}`);
-		// in place the TUI holds the main session: its own level stays as it was
-		if (vs.inplace && vs.mainLevel && levelNow() !== vs.mainLevel) { try { (reg.pi ?? pi as any).setThinkingLevel?.(vs.mainLevel); } catch { /* stays */ } }
 	});
 	pi.on("session_before_compact", (event: any) => {
 		if (!inChild()) return undefined;
@@ -7004,9 +7034,11 @@ function setupSessions(pi: ExtensionAPI) {
 		if (!r.sessionFile || !existsSync(r.sessionFile)) { notify("That run has no session file (it predates this version).", "warning"); return; }
 		const copy = viewFile(r.sessionFile);
 		keepMainLevel();
+		// not opened (the copy not written, the switch refused or cancelled): nothing kept aside
+		const unkeep = () => { if (!inChild()) { vs.mainLevel = undefined; vs.mainHome = undefined; } };
 		try { writeFileSync(copy, viewLines(readFileSync(r.sessionFile, "utf8")).join("\n") + "\n", { mode: 0o600 }); chmodSync(copy, 0o600); }
-		catch (e) { notify(`Could not open that session: ${e instanceof Error ? e.message : String(e)}`, "error"); return; }
-		await switchTo(ctx, copy, refresh);
+		catch (e) { unkeep(); notify(`Could not open that session: ${e instanceof Error ? e.message : String(e)}`, "error"); return; }
+		if (!(await switchTo(ctx, copy, refresh))) unkeep();
 	};
 	const listText = () => {
 		const rs = view ? view.order(reg.runs) : reg.runs;

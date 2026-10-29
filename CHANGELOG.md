@@ -14,9 +14,10 @@ model on your own hardware:
   cut-off recovery, test reminders, dynamic thinking), grounding
 - modes and roles (`plan`, `auto`, `ask`, `orchestrator`, `yolo`) enforced
   on every tool call, with manifests per user and per project
-- subagents in their own pi sessions, switchable from the footer, with a
-  30-minute task budget by default (`LETS_CODE_SUBAGENT_TIMEOUT`; a cut task
-  reports its last tool calls), and the
+- subagents in their own pi sessions, switchable from the footer (which,
+  with the thinking level, follows the session on screen: each agent keeps
+  its own level), with a 30-minute task budget by default
+  (`LETS_CODE_SUBAGENT_TIMEOUT`; a cut task reports its last tool calls), and the
   experts behind one tool: tester (with `ui-tester` and `api-tester`),
   `expert-reviewer`, `design-reviewer`, `acceptance-judge`, `developer`,
   `software-factory`, `researcher`, `reverse-engineer`, `expert-builder`,

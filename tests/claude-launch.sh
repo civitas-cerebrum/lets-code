@@ -110,7 +110,35 @@ t "old name saved as pi default: launches Claude" "$(args "${h}")" "--provider A
 t "old name: settings renamed" "$(python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); print(d["defaultProvider"], d["enabledModels"], sorted(d["modelThinkingLevels"]))' "${h}/.pi/agent/settings.json")" \
     "Anthropic ['Anthropic/claude-opus', 'lets-code/x'] ['Anthropic/claude-opus', 'Anthropic/claude-sonnet']"
 t "old name: dropped from models.json" "$(python3 -c 'import json, sys; print(sorted(json.load(open(sys.argv[1]))["providers"]))' "${h}/.pi/agent/models.json")" "['Anthropic']"
-t "old name: saved thinking level still used" "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["modelThinkingLevels"]["Anthropic/claude-opus"])' "${h}/.pi/agent/settings.json")" "xhigh"
+# the level pi starts new sessions at for the model (what lets-code wrote)
+lvl() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["modelThinkingLevels"]["Anthropic/claude-opus"])' "$1/.pi/agent/settings.json"; }
+setj() { python3 -c 'import json, sys; p = sys.argv[1]; d = json.load(open(p)); exec(sys.argv[2]); json.dump(d, open(p, "w"))' "$1/.pi/agent/settings.json" "$2"; }
+t "old name: a level merely picked in a session (old thinking memory) is not a default" "$(lvl "${h}")" "medium"
+
+# the default changes only where pi changes it: its settings menu, or the
+# thinking selector's set-as-default key; a pick in a session changes nothing
+setj "${h}" 'd["modelThinkingLevels"]["Anthropic/claude-opus"] = "high"'   # pi's settings menu
+launch "${h}"
+t "thinking: a level set in pi's settings menu is the new default" "$(lvl "${h}")" "high"
+launch "${h}"
+t "thinking: and stays it" "$(lvl "${h}")" "high"
+launch "${h}" --thinking-level low
+t "thinking: --thinking-level decides for its launch" "$(lvl "${h}")" "low"
+launch "${h}"
+t "thinking: then the default again" "$(lvl "${h}")" "high"
+setj "${h}" 'd["defaultThinkingLevel"] = "minimal"'   # the selector's set-as-default key
+launch "${h}"
+t "thinking: a default set with the selector's key is the new default" "$(lvl "${h}")" "minimal"
+launch "${h}"
+t "thinking: and stays it" "$(lvl "${h}")" "minimal"
+h="${work}/h5c"; mkdir -p "${h}/.config/lets-code" "${h}/.pi/agent"
+printf 'ENDPOINTS="http://127.0.0.1:9"\n' > "${h}/.config/lets-code/config"
+printf '{"defaultProvider": "Anthropic", "defaultModel": "claude-opus", "defaultThinkingLevel": "high"}\n' > "${h}/.pi/agent/settings.json"
+mkdir -p "${h}/.pi/agent/extensions/lets-code"
+printf '// Written by lets-code (thinking memory); regenerated on launch, edits are overwritten.\n' > "${h}/.pi/agent/extensions/lets-code/thinking.ts"
+launch "${h}"
+t "thinking: a global default there before lets-code first saw it is not taken as new" "$(lvl "${h}")" "medium"
+t "thinking: the old thinking memory module is removed" "$([ -e "${h}/.pi/agent/extensions/lets-code/thinking.ts" ] && echo kept || echo gone)" "gone"
 
 # a server launch registers the Claude models too (Claude Code installed)
 cat > "${work}/srv.py" <<'EOF'

@@ -431,13 +431,14 @@ on from it; the `thinking_level_select` that this fires is matched against
 a queue of the levels the view set itself, not against the recorded level,
 so picking A, B, A quickly passes on all three. The main session's level
 is kept aside (with its file) when a copy opens and put back when that same
-session opens again: pi reopens it at its default, which the copy's change
-persisted; `/resume` of another session from the copy, or a switch that
+session opens again: pi reopens it at its default, not at the level it had; `/resume` of another session from the copy, or a switch that
 does not happen, drops it. In place the TUI holds the main session: its
 `thinking_level_select` events are its own (pi's, or the agent guard's
 bursts and dials) and are neither passed on nor undone; there Shift+Tab and
-`/thinking <level>` are taken by the key hook and sent to the child. The
-thinking memory saves nothing while a child's session is open. The agent
+`/thinking <level>` are taken by the key hook and sent to the child. A level picked
+in a session is never saved as a default (lets-code adopts only a default
+the user sets in pi, see `lc_thinking_default`), so a child's level cannot
+become the main session's. The agent
 guard in a child (depth > 0) rests at the level the child started at (its
 agent file's): no reset to BASE at session start, no dial to BASE on a red
 test or to DOWN once green, and a burst ends back at that level. `/subagents` alone always opens the navigator:

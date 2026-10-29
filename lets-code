@@ -838,6 +838,25 @@ def to_settings(doc):
 
 upsert(os.path.join(agent_dir, "models.json"), to_models)
 upsert(os.path.join(agent_dir, "settings.json"), to_settings)
+
+# the per-model level just written, so the next launch can tell a level the
+# user set in pi's settings menu from its own (see lc_thinking_default)
+def note_written(doc):
+    seen = doc.get("thinkingSeen") if isinstance(doc.get("thinkingSeen"), dict) else {}
+    models = seen.get("models") if isinstance(seen.get("models"), dict) else {}
+    if reasoning == "true":
+        models[provider + "/" + model] = thinking
+    else:
+        models.pop(provider + "/" + model, None)
+    seen["models"] = models
+    doc["thinkingSeen"] = seen
+    # setup's answer is the new default: one adopted from pi before gives way
+    if os.environ.get("LC_THINKING_RESET") and isinstance(doc.get("thinkingDefaults"), dict):
+        doc["thinkingDefaults"].pop(provider + "/" + model, None)
+try:
+    upsert(os.path.join(agent_dir, "lets-code-state.json"), note_written)
+except SystemExit:
+    pass   # an unreadable state file: a settings-menu change is just not noticed
 PY
 }
 
@@ -3379,70 +3398,68 @@ TS
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
 
-# thinking memory: the level picked in a session is the next launch's level.
-# Rewritten when its content changes.
-pi_write_thinking_extension() {
-    local dir f tmp
-    lc_ext_module thinking; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
-    tmp="$(mktemp "${dir}/.thinking.XXXXXX")"
-    cat > "${tmp}" <<'TS'
-// Written by lets-code (thinking memory); regenerated on launch, edits are overwritten.
-// Active only in a pi launched by lets-code at a fixed thinking level
-// (LETS_CODE_THINKING_SAVE = "<provider>/<model>"; not set for auto or
-// adaptive thinking, whose level the agent guard moves). A level picked in
-// the session (Shift+Tab, /thinking, the settings menu) is written to
-// LETS_CODE_STATE_FILE under that key, and lets-code starts the next session
-// at it. Only while the launched model is the current one; subagents
-// (LETS_CODE_SUBAGENT_DEPTH > 0) save nothing, and neither does a change made
-// while a subagent's session is open (/subagents): that level is the child's.
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
-
-export function saveLevel(file: string, key: string, level: string): void {
-	let doc: any = {};
-	try { doc = JSON.parse(readFileSync(file, "utf8")); } catch { /* missing or unreadable: start over */ }
-	if (!doc || typeof doc !== "object" || Array.isArray(doc)) doc = {};
-	const levels = doc.thinkingLevels && typeof doc.thinkingLevels === "object" && !Array.isArray(doc.thinkingLevels) ? doc.thinkingLevels : {};
-	if (levels[key] === level) return;
-	doc.thinkingLevels = { ...levels, [key]: level };
-	const tmp = `${file}.${process.pid}.tmp`;
-	writeFileSync(tmp, JSON.stringify(doc, null, 2) + "\n", { mode: 0o600 });
-	renameSync(tmp, file);
-}
-
-// a subagent's session is on screen (the subagents module's view state, on globalThis)
-export const viewingChild = (): boolean => !!(globalThis as any)[Symbol.for("lets-code.subagent-runs")]?.view?.viewing;
-
-export default function (pi: ExtensionAPI) {
-	const key = process.env.LETS_CODE_THINKING_SAVE ?? "";
-	const file = process.env.LETS_CODE_STATE_FILE ?? "";
-	if (!key || !file || (Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0) > 0) return;
-	pi.on("thinking_level_select", (event: any, ctx: any) => {
-		if (viewingChild()) return;
-		const m = ctx?.model;
-		if (!m || `${m.provider}/${m.id}` !== key) return;
-		try { saveLevel(file, key, String(event.level)); } catch { /* best effort: the level just isn't remembered */ }
-	});
-}
-TS
-    chmod 644 "${tmp}"
-    if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
-}
-
-# lc_saved_thinking <provider/model>: the level last picked in a session for
-# that model (see the thinking module), or nothing
-lc_saved_thinking() {
-    LC_STATE="${PI_AGENT_DIR}/lets-code-state.json" python3 - "$1" <<'PY' 2>/dev/null || true
+# thinking default: a level picked in a session (Shift+Tab, /thinking, the
+# selector's Enter) stays that session's; pi records it there and restores
+# it on /resume. The default for new sessions changes only where pi changes
+# it: the thinking selector's "set as default" key (app.thinking.save;
+# settings.json defaultThinkingLevel) or pi's settings menu (the model's
+# level in modelThinkingLevels). lets-code writes that per-model level at
+# every launch (pi_write_configs), so it notes what it wrote and what the
+# global default was (lets-code-state.json thinkingSeen); a value that
+# differs at the next launch was set by the user and becomes the default
+# for that model (thinkingDefaults), ahead of THINKING= in the config.
+#
+# lc_thinking_default <provider/model>: that default, or nothing; also notes
+# the global default as seen
+lc_thinking_default() {
+    LC_STATE="${PI_AGENT_DIR}/lets-code-state.json" LC_SETTINGS="${PI_AGENT_DIR}/settings.json" python3 - "$1" <<'PY' 2>/dev/null || true
 import json, os, sys
+LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+key = sys.argv[1]
+def load(p):
+    try:
+        d = json.load(open(p))
+        return d if isinstance(d, dict) else None
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return None
+# a state file that cannot be read is left as it is (it holds more than this)
+state, settings = load(os.environ["LC_STATE"]), load(os.environ["LC_SETTINGS"]) or {}
+keep = state is not None
+state = state if keep else {}
+def obj(d, k):
+    v = d.get(k)
+    return v if isinstance(v, dict) else {}
+seen, defaults = obj(state, "thinkingSeen"), obj(state, "thinkingDefaults")
+adopted = defaults.get(key) if defaults.get(key) in LEVELS else None
+pd = settings.get("defaultThinkingLevel")
+pm = obj(settings, "modelThinkingLevels").get(key)
+# the selector's "set as default": the global default moved since the last launch
+if "default" in seen and pd in LEVELS and pd != seen["default"]:
+    adopted = pd
+# pi's settings menu: the model's level is not the one lets-code wrote
+wrote = obj(seen, "models").get(key)
+if wrote is not None and pm in LEVELS and pm != wrote:
+    adopted = pm
+if adopted:
+    defaults[key] = adopted
+    state["thinkingDefaults"] = defaults
+seen["default"] = pd if pd in LEVELS else None
+state["thinkingSeen"] = seen
 try:
-    levels = json.load(open(os.environ["LC_STATE"]))["thinkingLevels"]
-    k = sys.argv[1]
-    # the Claude provider was lets-code-claude before: a level saved under that name still counts
-    v = levels[k] if k in levels or not k.startswith("Anthropic/") else levels["lets-code-claude/" + k[len("Anthropic/"):]]
+    if not keep:
+        raise OSError("unreadable")
+    tmp = "%s.%d.tmp" % (os.environ["LC_STATE"], os.getpid())
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, os.environ["LC_STATE"])
 except Exception:
-    sys.exit(0)
-if v in ("off", "minimal", "low", "medium", "high", "xhigh", "max"):
-    print(v)
+    pass
+if adopted:
+    print(adopted)
 PY
 }
 
@@ -18238,9 +18255,10 @@ run_setup() {  # run_setup [full|granular]
             echo ""
             echo "# Thinking support pin (empty = auto-detected at launch): true|false"
             echo "REASONING=\"\""
-            echo "# Thinking level for new sessions until one is picked in a session"
-            echo "# (that one is kept; default: medium; setup suggests one based on"
-            echo "# the detected context window):"
+            echo "# Thinking level for new sessions, unless a default is set in pi (the"
+            echo "# thinking selector's set-as-default key, or its settings menu); a level"
+            echo "# picked in a session stays that session's (default: medium; setup"
+            echo "# suggests one based on the detected context window):"
             echo "THINKING=\"${1}\""
             echo ""
             echo "# Memory guard (Linux): when the machine runs low on RAM, stop the"
@@ -18441,7 +18459,7 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
         # ')' inside "$(...)" and prints a syntax error for it.
         local startup_level
         case "${thinking_level}" in auto*) startup_level="off" ;; adaptive*) startup_level="medium" ;; *) startup_level="${thinking_level}" ;; esac
-        pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${reg_cap}" "${vision_reg}" "${reasoning_reg}" "${startup_level}" "${EFFORT_MAP}"
+        LC_THINKING_RESET=1 pi_write_configs "${found}" "${DEFAULT_API}" "${reg_id}" "${reg_len}" "${reg_cap}" "${vision_reg}" "${reasoning_reg}" "${startup_level}" "${EFFORT_MAP}"
         log "registered with pi: ${reg_id} (context ${reg_len}, output cap ${reg_cap}, vision: ${vision_reg}, thinking: ${reasoning_reg}, level: ${thinking_level})"
     fi
 
@@ -19226,18 +19244,18 @@ VISION="${VISION_OVERRIDE:-${VISION}}"
 THINKING="${THINKING_OVERRIDE:-${THINKING}}"
 [ -n "${THINKING_OVERRIDE}" ] && THINKING_PINNED=1
 [ -n "${THINKING}" ] || THINKING="${DEFAULT_THINKING}"
-# A level picked in a session is remembered (see pi_write_thinking_extension)
-# and is where the next launch starts, ahead of THINKING= in the config and
-# the medium default; --thinking-level / LETS_CODE_THINKING still decide for
-# their launch. auto and adaptive keep their mode.
+# A default the user set in pi (the thinking selector's "set as default"
+# key, or pi's settings menu; see lc_thinking_default) is where new sessions
+# start, ahead of THINKING= in the config and the medium default; a level
+# merely picked in a session stays that session's. --thinking-level /
+# LETS_CODE_THINKING still decide for their launch. auto and adaptive keep
+# their mode.
+THINKING_DEFAULT="$(lc_thinking_default "${PROVIDER_ID}/${MODEL}")"
 case "${THINKING}" in
     auto*|adaptive*) ;;
-    *) if [ -z "${THINKING_PINNED}" ]; then
-           THINKING_SAVED="$(lc_saved_thinking "${PROVIDER_ID}/${MODEL}")"
-           if [ -n "${THINKING_SAVED}" ]; then
-               THINKING="${THINKING_SAVED}"
-               log_verbose "thinking: ${THINKING} (last picked in a session)"
-           fi
+    *) if [ -z "${THINKING_PINNED}" ] && [ -n "${THINKING_DEFAULT}" ]; then
+           THINKING="${THINKING_DEFAULT}"
+           log_verbose "thinking: ${THINKING} (the default set in pi)"
        fi ;;
 esac
 # auto[:<ceiling>]: dynamic thinking. Start with thinking off; the agent
@@ -19435,11 +19453,11 @@ if [ -n "${THINKING_AUTO}" ]; then
         log "note: ${THINKING_BASE:+adaptive}${THINKING_BASE:-auto} thinking not applied — model not registered as a thinking model."
     fi
 fi
+# the thinking memory of earlier versions (every pick saved as the next
+# launch's level) is gone: its module, left inert without these, is removed
 unset LETS_CODE_THINKING_SAVE LETS_CODE_STATE_FILE
-if [ -z "${THINKING_AUTO}" ] && [ "${REASONING_SUPPORTED}" = true ]; then
-    export LETS_CODE_THINKING_SAVE="${PROVIDER_ID}/${MODEL}" LETS_CODE_STATE_FILE="${PI_AGENT_DIR}/lets-code-state.json"
-    pi_write_thinking_extension
-fi
+lc_ext_root
+if lc_written "${LC_EXT_ROOT}/thinking.ts"; then rm -f "${LC_EXT_ROOT}/thinking.ts"; fi
 
 # grounding guard: look facts up instead of guessing; read before overwrite
 unset LETS_CODE_GROUNDING_ON

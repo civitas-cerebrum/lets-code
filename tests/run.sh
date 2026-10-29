@@ -37,7 +37,7 @@ s = open(sys.argv[1]).read()
 i = s.find("\n# ------------------------------------------------------------ extension dirs\n")
 if i >= 0:
     sys.stdout.write(s[i:s.find("\n# ------------------------------------------------------------------ themes\n", i)])
-for name in ("pi_write_gitguard_extension", "pi_write_memguard_extension", "pi_write_agentguard_extension", "pi_write_mandate_extension", "pi_write_subagent_extension", "pi_write_subagent_view_extension", "pi_write_experts_extension", "pi_write_factory_extension", "pi_write_core_memory_extension", "pi_write_sandbox_extension", "pi_write_sessiontag_extension", "pi_write_sessions_extension", "pi_write_metrics_extension", "pi_write_grounding_extension", "pi_write_backend_extension", "pi_write_claude_extension", "pi_write_claudecode_extension", "pi_write_thinking_extension"):
+for name in ("pi_write_gitguard_extension", "pi_write_memguard_extension", "pi_write_agentguard_extension", "pi_write_mandate_extension", "pi_write_subagent_extension", "pi_write_subagent_view_extension", "pi_write_experts_extension", "pi_write_factory_extension", "pi_write_core_memory_extension", "pi_write_sandbox_extension", "pi_write_sessiontag_extension", "pi_write_sessions_extension", "pi_write_metrics_extension", "pi_write_grounding_extension", "pi_write_backend_extension", "pi_write_claude_extension", "pi_write_claudecode_extension"):
     i = s.find("\n%s() {" % name)
     if i < 0:
         continue
@@ -52,7 +52,7 @@ PYX
     npm() { return 1; }     # the sandbox writer would install its runtime; not here
     SANDBOX_RUNTIME_VERSION="test"; SB_NOTE=""
     . "${agent}/writers.sh"
-    for f in pi_write_lets_code_extension pi_write_gitguard_extension pi_write_memguard_extension pi_write_agentguard_extension pi_write_mandate_extension pi_write_subagent_extension pi_write_experts_extension pi_write_factory_extension pi_write_core_memory_extension pi_write_sandbox_extension pi_write_sessiontag_extension pi_write_sessions_extension pi_write_metrics_extension pi_write_grounding_extension pi_write_backend_extension pi_write_claude_extension pi_write_claudecode_extension pi_write_thinking_extension; do
+    for f in pi_write_lets_code_extension pi_write_gitguard_extension pi_write_memguard_extension pi_write_agentguard_extension pi_write_mandate_extension pi_write_subagent_extension pi_write_experts_extension pi_write_factory_extension pi_write_core_memory_extension pi_write_sandbox_extension pi_write_sessiontag_extension pi_write_sessions_extension pi_write_metrics_extension pi_write_grounding_extension pi_write_backend_extension pi_write_claude_extension pi_write_claudecode_extension; do
         if declare -F "${f}" >/dev/null; then "${f}"; fi
     done
 ) || { echo "could not extract the extensions from lets-code"; exit 1; }
@@ -112,7 +112,6 @@ for t in "${here}"/*.test.mjs; do
         metrics*)                   ext="${agent}/extensions/lets-code/footer.ts" ;;
         grounding*)                 ext="${agent}/extensions/lets-code/grounding.ts" ;;
         backend*)                   ext="${agent}/extensions/lets-code/backend.ts" ;;
-        thinking*)                  ext="${agent}/extensions/lets-code/thinking.ts" ;;
         *)                          ext="" ;;
     esac
     if [ -n "${ext}" ] && [ ! -f "${ext}" ]; then echo "=== $(basename "${t}"): skipped (no ${ext#${agent}/extensions/} in this build)"; continue; fi

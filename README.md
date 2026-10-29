@@ -149,7 +149,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--context <tok>` | Context window (default: discovered, else 128000) |
 | `--output-cap <tok>` | Max output tokens (default 32768) |
 | `--api <dialect>` | `openai-completions` (default), `openai-responses`, `anthropic-messages`, `google-generative-ai` |
-| `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`; a level picked in a session is where the next one starts, and this flag overrides it for one launch), `xhigh` (opt-in, 32k budget, also selectable in-session; see server setup), `adaptive[:<lvl>]` (medium, low once the tests pass, bursts up on struggle), or `auto[:<lvl>]` (off, bursts up on struggle); see [Choosing a thinking level](#choosing-a-thinking-level) |
+| `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`, or the default you set in pi; this flag decides for one launch), `xhigh` (opt-in, 32k budget, also selectable in-session; see server setup), `adaptive[:<lvl>]` (medium, low once the tests pass, bursts up on struggle), or `auto[:<lvl>]` (off, bursts up on struggle); see [Choosing a thinking level](#choosing-a-thinking-level) |
 | `--vision` / `--no-vision` | Pin image input instead of probing |
 | `--insecure` | Skip TLS verification |
 | `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` / `--no-grounding` | Launch without a guard |
@@ -582,13 +582,20 @@ exit 0 plus "pass" is green, an `AssertionError` is red.
 <details>
 <summary><b>Choosing a thinking level</b></summary>
 
-The first session starts at `medium` (or `THINKING=` from the config).
-A level you pick in a session (Shift+Tab, `/thinking`) is remembered per
-model in `~/.pi/agent/lets-code-state.json` and the next session starts
-there; `--thinking-level` or `LETS_CODE_THINKING` decide for one launch
-without changing it. Subagents start at `medium` unless their agent file
-sets `thinking:`. With `auto` or `adaptive` the agent guard moves the level,
-so nothing is remembered.
+New sessions start at `medium` (or `THINKING=` from the config). A level
+you pick in a session (Shift+Tab, `/thinking`, Enter in the thinking
+selector) is that session's alone: `/resume` brings it back, a new session
+starts at the default again. A level picked while a subagent's session is
+open is that subagent's.
+The default changes only where you set it: the thinking selector's
+set-as-default key (pi's `app.thinking.save`), pi's settings menu (the
+model's thinking level), or `lets-code setup`. lets-code notices the first
+two at its next launch and keeps them per model in
+`~/.pi/agent/lets-code-state.json`. `--thinking-level` or
+`LETS_CODE_THINKING` decide for one launch without changing it. Subagents
+start at `medium` unless their agent file sets `thinking:`. With `auto` or
+`adaptive` the agent guard moves the level, so a default set in pi does not
+apply.
 
 Measured October 2026 with pi against Qwen3.8-27B (local vLLM, and the same
 model on OpenRouter), on six Python tasks from easy to hard, scored by

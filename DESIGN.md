@@ -516,7 +516,11 @@ the document of header, resources and chat, then the pending messages,
 the status, the widgets above, the editor, the widgets below, the
 footer); the chat container is swapped for a component that draws the
 run's completed events with pi's message components (the `Transcript` of
-the live widget), the pending and status containers for empty ones. The
+the live widget), and the pending and status containers draw nothing
+(their own `render` replaced, put back on `back`: pi 1.0's fullscreen
+layout, its default, draws them through its own references, so swapping
+them out of `tui.children` would leave the main session's queued
+steering and status on screen). The
 main session object is untouched: its turn runs on, writes its session
 file and fills its own chat, which comes back on `back`. In place the key
 hook keeps the main session's keys off it: Esc stops the child or is

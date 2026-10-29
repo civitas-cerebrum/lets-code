@@ -7077,7 +7077,7 @@ interface ViewState {
 	expanded?: boolean;                               // the navigator shows the whole list (from the short list's "more" row)
 	followUpNext?: boolean;               // the follow-up key was pressed: the next prompt is a follow-up
 	typed?: string;                       // in place: a slash text typed for the child, taken by the input hook
-	inplace?: { run: string; chat: any; pending: any; status: any };   // a child shown in place while the main session works
+	inplace?: { run: string; chat: any; pending: any; status: any };   // pi's chat, pending and status containers, set aside   // a child shown in place while the main session works
 	mainBusy?: boolean;                   // the main session's turn is running (agent_start .. agent_settled)
 	mainLevel?: string;                   // the main session's thinking level when a child's copy opened; put back on return to it
 	mainHome?: string;                    // that main session's file (another session opened from the copy does not get the level)
@@ -7325,7 +7325,18 @@ function setupSessions(pi: ExtensionAPI) {
 	// with pi's components where pi's chat container is, the part on its way
 	// in the live widget; the main session's pending and status lines are set
 	// aside. Back puts pi's own containers back, with whatever the turn did.
-	const blank = { render: () => [] as string[], invalidate() {} };
+	// pi's containers back as they were (their own render; the chat where it was)
+	const hidden = new WeakMap<object, { own: boolean; render: any }>();
+	const putBack = (p: { chat: any; pending: any; status: any }) => {
+		for (const c of [p.pending, p.status]) {
+			const h = c && hidden.get(c);
+			if (!h) continue;
+			if (h.own) c.render = h.render; else delete c.render;
+			hidden.delete(c);
+		}
+		const L = layout();
+		if (L && L.doc.children[2] !== p.chat) L.doc.children[2] = p.chat;
+	};
 	let ipTranscript: any;
 	const layout = () => {
 		const kids = (reg as any).tui?.children;
@@ -7348,7 +7359,9 @@ function setupSessions(pi: ExtensionAPI) {
 			},
 			invalidate: () => ipTranscript?.clear(),
 		};
-		L.kids[1] = blank; L.kids[2] = blank;
+		// set aside on the containers themselves: pi's fullscreen layout (its
+		// default in 1.0) draws them through its own references, not tui.children
+		for (const c of [vs.inplace.pending, vs.inplace.status]) if (c && !hidden.has(c)) { hidden.set(c, { own: Object.prototype.hasOwnProperty.call(c, "render"), render: c.render }); c.render = () => []; }
 		vs.viewing = r.id; vs.loaded = view.loadedOf([]); vs.added = new WeakSet(); vs.addedCount = 0;
 		vs.nav = false; vs.confirm = false; lastStatus = undefined;
 		addDone(); applyLive(); status();
@@ -7358,8 +7371,7 @@ function setupSessions(pi: ExtensionAPI) {
 	const exitInPlace = (resubmit = true): boolean => {
 		const p = vs.inplace;
 		if (!p) return false;
-		const L = layout();
-		if (L) { L.doc.children[2] = p.chat; L.kids[1] = p.pending; L.kids[2] = p.status; }
+		putBack(p);
 		vs.inplace = undefined; vs.viewing = undefined; vs.added = undefined; vs.loaded = undefined; ipTranscript = undefined;
 		vs.nav = false; vs.confirm = false; lastStatus = undefined;
 		applyLive(); status();
@@ -7425,7 +7437,7 @@ function setupSessions(pi: ExtensionAPI) {
 	pi.on("session_start", async (_e: any, ctx: any) => {
 		reg.pi = pi;
 		if (isTui(ctx)) reg.ui = ctx.ui;
-		if (vs.inplace) { const L = layout(), p = vs.inplace; if (L) { L.doc.children[2] = p.chat; L.kids[1] = p.pending; L.kids[2] = p.status; } vs.inplace = undefined; }
+		if (vs.inplace) { putBack(vs.inplace); vs.inplace = undefined; }
 		vs.mainBusy = false;
 		const sm = ctx?.sessionManager;
 		const file = String(sm?.getSessionFile?.() ?? "");

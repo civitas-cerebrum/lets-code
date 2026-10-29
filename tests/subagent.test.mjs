@@ -954,6 +954,8 @@ async function load(env = {}) {
 	let renders = 0;
 	const ed = { getText: () => editor, onSubmit: () => {}, historyIndex: -1, isShowingAutocomplete: () => false, isEditorEmpty: () => !editor, isOnLastVisualLine: () => true };
 	const tui = { children: [doc, pending, statusC, part("above"), part("editor"), part("below"), part("footer")], focusedComponent: ed, requestRender: () => { renders++; }, handleTerminalInput() {} };
+	// pi 1.0's fullscreen layout (its default) draws through its own references to the containers
+	const fullscreen = (w) => [...doc.children, pending, statusC].flatMap((c) => c.render(w));
 	reg().tui = tui;
 	const switched = [];
 	let idle = false;
@@ -965,8 +967,8 @@ async function load(env = {}) {
 	const sent0 = h.sent.length;
 	globalThis.__piLevel = "minimal";   // the main session's level
 	await h.commands.subagents.handler(`id:${r.id}`, ctx());
-	t("main working: no switchSession (it would abort the turn); the child shown in place", [switched.length, reg().view.inplace?.run, doc.children[2] !== chat, tui.children[1] !== pending, tui.children[2] !== statusC, renders > 0], [0, r.id, true, true, true, true]);
-	t("in place: the child's transcript where the chat was, within the width", [doc.children[2].render(70).some((l) => /hang in place/.test(l)), doc.children[2].render(70).every((l) => l.replace(/\x1b\[[0-9;]*m|\x1b\][^\x07]*\x07/g, "").length <= 70), tui.children[1].render(70), tui.children[2].render(70)], [true, true, [], []]);
+	t("main working: no switchSession (it would abort the turn); the child shown in place", [switched.length, reg().view.inplace?.run, doc.children[2] !== chat, pending.render(70), statusC.render(70), renders > 0], [0, r.id, true, [], [], true]);
+	t("in place: the child's transcript where the chat was, within the width", [doc.children[2].render(70).some((l) => /hang in place/.test(l)), doc.children[2].render(70).every((l) => l.replace(/\x1b\[[0-9;]*m|\x1b\][^\x07]*\x07/g, "").length <= 70), fullscreen(70).some((l) => /main pending|main status/.test(l))], [true, true, false]);
 	t("in place: nothing is added to the main session", h.sent.slice(sent0).filter(([m]) => m?.customType === "lets-code-subagent-message").length, 0);
 	t("in place: the main session's tool call runs on", await Promise.race([call.then(() => "returned"), new Promise((res) => setTimeout(() => res("running"), 50))]), "running");
 	// keys: nothing reaches pi as an abort of the main session's turn
@@ -1031,7 +1033,7 @@ async function load(env = {}) {
 	mod.childOf(r).abort(true); await wait(() => r.status !== "running");
 	// back: pi's own containers again, with what the turn did meanwhile
 	await h.commands.subagents.handler("back", ctx());
-	t("back from in place: pi's containers restored, no switch", [doc.children[2] === chat, tui.children[1] === pending, tui.children[2] === statusC, reg().view.inplace, switched.length], [true, true, true, undefined, 0]);
+	t("back from in place: pi's containers restored, no switch", [doc.children[2] === chat, tui.children[1] === pending, tui.children[2] === statusC, pending.render(70), statusC.render(70), reg().view.inplace, switched.length], [true, true, true, ["main pending"], ["main status"], undefined, 0]);
 	t("back from in place: the main session's level untouched", [globalThis.__piLevel, reg().view.mainLevel], ["minimal", undefined]);
 	globalThis.__piLevel = undefined;
 	t("back: the editor's keys are pi's again", termHandler("\x1b"), undefined);

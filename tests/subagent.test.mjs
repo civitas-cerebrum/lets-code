@@ -145,7 +145,7 @@ import { symlinkSync } from "node:fs"; import { execFileSync } from "node:child_
 	if (tb) { rmSync(nm, { recursive: true }); symlinkSync(tb, nm); }
 	else {	// no pi on this machine (CI): the extension only builds a schema with these four, which the fake pi never validates
 		writeFileSync(join(nm, "package.json"), JSON.stringify({ name: "typebox", type: "module", main: "index.js" }));
-		writeFileSync(join(nm, "index.js"), "export const Type = { Object: (p, o) => ({ type: 'object', properties: p, ...o }), String: (o) => ({ type: 'string', ...o }), Array: (i, o) => ({ type: 'array', items: i, ...o }), Optional: (x) => ({ ...x, optional: true }) };\n");
+		writeFileSync(join(nm, "index.js"), "export const Type = { Object: (p, o) => ({ type: 'object', properties: p, ...o }), String: (o) => ({ type: 'string', ...o }), Number: (o) => ({ type: 'number', ...o }), Array: (i, o) => ({ type: 'array', items: i, ...o }), Optional: (x) => ({ ...x, optional: true }) };\n");
 	}
 }
 let fail = 0, n = 0;

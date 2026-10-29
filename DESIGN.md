@@ -226,8 +226,9 @@ the mandate leaves on `globalThis` (the two modules are loaded separately);
 the mode's prompt reaches the model on its next turn, so the run's result
 says it as well. It is the main session's role only: a child that would
 inherit it (`LETS_CODE_MODE` travels in the environment) gets the default.
-So does a child that would inherit `ask`, or get it as the default: a
-subagent is never in `ask` mode (if the default is `ask`, it runs `auto`).
+A child that inherits `ask` keeps its limits but never asks: what `ask`
+would ask about is refused (not loosened to `auto`); so are the Claude Code
+adapter's `ask` rules and hooks in a child.
 The mandate is off by default, so where the experts are on and the mandate
 is not, the launcher still writes the module with
 `LETS_CODE_ORCHESTRATOR_ON=1`: it enforces nothing and registers only

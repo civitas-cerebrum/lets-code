@@ -101,7 +101,7 @@ it, not a Claude Code clone. Where it stands:
 | 🧭 **Backend facts** | The agent knows its backend (server, model, API, context, thinking, vision) without discovering it, at no cost until it needs it: a prompt about the backend adds a short section, or the first command probing it gets the facts in its result. The API key is never written out. |
 | 🛟 **Git guard** | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
 | 🧭 **Agent guard** | Default bash timeout, a nudge to run tests after untested edits, a wrap-up hint once they pass, and thinking that switches on only while the model struggles. |
-| 🧭 **Modes** (optional) | `plan` explores read-only and ends in a numbered plan, `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
+| 🧭 **Modes** (optional; `/plan` always) | `plan` explores read-only and ends in a numbered plan you approve before it runs (`/plan` works without the mandate too), `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
 | 🤝 **Claude Code projects** (automatic) | A project whose `.claude/` has hooks or workflow scripts works as it is: its hooks, workflows, skills, `/commands`, agents, permission rules, MCP servers and CLAUDE.md, read live at each start. Your own `~/.claude` stays out unless `CLAUDE_CODE=all`. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 🗂 **Core memory** (on by default) | A long-term memory per project and one across projects, kept out of context: the agent searches it with a `memory` tool when it needs to and adds what is worth keeping (decisions, non-obvious facts, where things live, what was done, and "remember that ..." in your words); lets-code itself adds a pointer when a factory run, a subagent run or a session ends, so the next session can open the ledger, the run record or the transcript instead of carrying it. Always on: one line saying the memory exists and how many entries it holds, plus the three newest headlines; a file the agent reads that an entry points at gets one line saying so. `/memories` lists them, a row each that opens into its pointers and actions; it edits, forgets and archives too. |
@@ -155,7 +155,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--no-session-tag` | Send no session tag with model requests |
 | `--metrics` / `--no-metrics` | Start this launch with the full / minimal footer (`/metrics` switches inside pi, and the size picked there is where later sessions start) |
 | `--metrics-log <file>` | Append the footer's numbers to `<file>` as JSON lines, also without a UI (see [Metrics log](#metrics-log)) |
-| `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `orchestrator`, `yolo` or a role of yours (`--no-mandate` also turns off the orchestrator mode a factory run switches to) |
+| `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `orchestrator`, `yolo` or a role of yours (`--no-mandate` also turns off `/plan` and the orchestrator mode a factory run switches to) |
 | `--orchestrator` | Start in orchestrator mode (`--mandate orchestrator`): the session plans and hands the work to experts, and changes no file itself |
 | `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
 | `--experts` / `--no-experts` | The `expert` tool (on by default, needs subagents; see [Experts](#experts)) |
@@ -618,7 +618,7 @@ such as `readonly`, `reviewer` and `developer`, are for subagents):
 |---|---|
 | `auto` | Nothing. Guards as always, no prompts. The default. |
 | `ask` | `sudo`, recursive deletes, package installs, `curl \| sh` and writes outside the project are confirmed first: allow once, allow for the session, or deny. |
-| `plan` | Edit and write are off, bash is read-only, and the model is told to end with a numbered `Plan:`. Leaving plan mode offers to execute it. |
+| `plan` | Edit and write are off, bash is read-only, and the model is told to end with a numbered `Plan:`. When it does, you choose: execute the plan (back to the mode you came from, and the plan is kept in the session), refine it (edit it and send it back), or stay. Leaving plan mode by hand offers to execute it too. |
 | `orchestrator` | The software factory's mode. The session plans with you and orchestrates: it reads the code, agrees the ticket and its acceptance criteria with you, and hands every change to experts: code goes through `software-factory` however small, `general` does setup chores and checks, `researcher` open questions; the `worker` subagent is off. It decides the factory's checkpoints (criteria, plan, fix rounds, the commit on the run's branch) and asks you only for significant design decisions. Edit and write are off, bash is read-only (tests are the experts' job too) and MCP is denied. A blocked run is retried, or sharpened into a new ticket, never patched by hand; merging or pushing a run's branch is yours. |
 | `yolo` | The mandate steps aside (the git and memory guards stay unless launched without them). |
 
@@ -628,7 +628,9 @@ Starting or resuming a software factory run (`/factory`, or the
 it there until you leave it with `/orchestrator` (back to the mode you came
 from) or `/mode`. That works with `MANDATE=false` too: wherever the experts
 are on, the orchestrator mode is there, dormant until a run or
-`/orchestrator` starts it (`--no-mandate` turns it off). A subagent never
+`/orchestrator` starts it (`--no-mandate` turns it off). Plan mode is there
+with `MANDATE=false` as well: `/plan` and `ctrl+alt+p` enter it, leaving it
+returns to the unrestricted session (`--no-mandate` turns it off). A subagent never
 inherits it: a child that would gets the default mode. A denied
 call costs the model one line under 200 characters; allowed calls cost
 nothing. Denials are logged to `~/.pi/agent/lets-code-mandate.log`.

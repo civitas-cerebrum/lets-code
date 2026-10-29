@@ -110,7 +110,7 @@ process.stdin.on("data", (d) => {
     if (c.type === "extension_ui_response") { const w = uiWait; uiWait = null; w?.(c); continue; }
     log({ type: c.type, message: c.message, streamingBehavior: c.streamingBehavior, command: c.command, provider: c.provider, modelId: c.modelId, level: c.level });
     if (c.type === "prompt") {
-      if (first) { first = false; fs.writeFileSync(path.join(dir, "call-" + id + ".json"), JSON.stringify({ argv, task: c.message, env: { role: process.env.LETS_CODE_ROLE, depth: process.env.LETS_CODE_SUBAGENT_DEPTH }, agentDir: process.env.PI_CODING_AGENT_DIR, cwd: process.cwd(), prompt: ap >= 0 ? fs.readFileSync(argv[ap + 1], "utf8") : "" })); }
+      if (first) { first = false; fs.writeFileSync(path.join(dir, "call-" + id + ".json"), JSON.stringify({ argv, task: c.message, env: { role: process.env.LETS_CODE_ROLE, depth: process.env.LETS_CODE_SUBAGENT_DEPTH, ...(process.env.LETS_CODE_MANDATE_ON ? { mandate: process.env.LETS_CODE_MANDATE_ON } : {}) }, agentDir: process.env.PI_CODING_AGENT_DIR, cwd: process.cwd(), prompt: ap >= 0 ? fs.readFileSync(argv[ap + 1], "utf8") : "" })); }
       if (turn) { if (c.streamingBehavior !== "steer" && c.streamingBehavior !== "followUp") { out({ type: "response", id: c.id, command: "prompt", success: false, error: "busy" }); continue; } steers.push(c.message); ok({ disposition: "queued" }); continue; }
       ok({ disposition: "started" }); startTurn(c.message); continue;
     }
@@ -245,6 +245,19 @@ async function load(env = {}) {
 	t("child cwd", c.cwd, work);
 	const r2 = await h.run({ agent: "worker", task: "x" });
 	t("worker inherits parent mode as role", calls().find((x) => /Task: x$/.test(x.task)).env.role, "ask");
+	// the parent's live mode (the mandate's hook) wins over the launch one; in plan a child is read-only
+	const envOf = (task) => calls().find((x) => x.task === `Task: ${task}`)?.env;
+	globalThis.__letsCodeMode = () => "plan";
+	await h.run({ agent: "worker", task: "live plan" }); await h.run({ agent: "scout", task: "live plan scout" });
+	t("parent in plan: the child is readonly, its mandate on", envOf("live plan"), { role: "readonly", depth: "1", mandate: "1" });
+	t("parent in plan: a no-wider role of its own is kept", envOf("live plan scout"), { role: "plan", depth: "1", mandate: "1" });
+	globalThis.__letsCodeMode = () => "yolo";
+	await h.run({ agent: "worker", task: "live yolo" });
+	t("a runtime mode switch reaches the child", envOf("live yolo")?.role, "yolo");
+	globalThis.__letsCodeMode = () => "";
+	await h.run({ agent: "worker", task: "live off" });
+	t("dormant parent: the launch mode", envOf("live off"), { role: "ask", depth: "1" });
+	delete globalThis.__letsCodeMode;
 	t("agent without thinking runs at medium", (({ argv }) => argv[argv.indexOf("--thinking") + 1])(calls().find((x) => /Task: x$/.test(x.task))), "medium");
 	t("unknown agent lists agents", (await h.run({ agent: "nope", task: "x" })).content[0].text.includes("- scout: finds things"), true);
 	t("no args lists agents, not an error", (await h.run({})).isError, false);

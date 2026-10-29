@@ -66,7 +66,7 @@
 #                                experts and changes no file itself; a software
 #                                factory run switches into it on its own
 #   lets-code --no-mandate       launch without the mandate (modes) extension,
-#                                and without the orchestrator mode
+#                                and without the orchestrator or /plan
 #   lets-code --subagents | --no-subagents   the subagent tool on/off (default on)
 #   lets-code --experts | --no-experts   the expert tool on/off (default on, needs subagents);
 #                                each expert is enabled in a session (/experts)
@@ -4930,7 +4930,9 @@ pi_write_mandate_extension() {
     cat > "${tmp}" <<'TS'
 // Written by lets-code (mandate); regenerated on launch, edits are overwritten.
 // Active only in a pi launched by lets-code with the mandate on
-// (LETS_CODE_MANDATE_ON=1). A mandate is a named role with a scope: which
+// (LETS_CODE_MANDATE_ON=1), or dormant with the mandate off: plan mode
+// (LETS_CODE_PLAN_ON=1) and the orchestrator (LETS_CODE_ORCHESTRATOR_ON=1)
+// enforce nothing until entered. A mandate is a named role with a scope: which
 // tools may run, which paths may be read or written, which kinds of bash
 // commands are allowed, asked about or denied, which MCP servers and which
 // subagents may be used. The main session runs under the mode role
@@ -4968,10 +4970,13 @@ interface Role {
 interface Manifest { default?: string; cycle?: string[]; roles: Record<string, Role> }
 
 const ACTIVE = process.env.LETS_CODE_MANDATE_ON === "1";
-// With the mandate off, the orchestrator role alone (LETS_CODE_ORCHESTRATOR_ON,
+// With the mandate off, the orchestrator role (LETS_CODE_ORCHESTRATOR_ON,
 // set where the software factory is): dormant, enforcing nothing, until a
 // factory run or /orchestrator engages it in the main session.
 const ORCHESTRATOR = !ACTIVE && process.env.LETS_CODE_ORCHESTRATOR_ON === "1";
+// With the mandate off, plan mode too (LETS_CODE_PLAN_ON, set unless
+// --no-mandate): dormant until /plan or ctrl+alt+p enters it.
+const PLAN = !ACTIVE && process.env.LETS_CODE_PLAN_ON === "1";
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const LOG = process.env.LETS_CODE_MANDATE_LOG || join(AGENT_DIR, "lets-code-mandate.log");
 const PROTECTED = [".git/", ".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519"];
@@ -5260,17 +5265,20 @@ export function mayDispatch(role: Role, agent: string): boolean { return !role.d
 const short = (s: string, n = 190) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 export default function (pi: ExtensionAPI) {
-	if (!ACTIVE && !ORCHESTRATOR) return;
+	if (!ACTIVE && !ORCHESTRATOR && !PLAN) return;
 	const subagentDepth = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
 	if (!ACTIVE && subagentDepth > 0) return;
-	let on = ACTIVE;   // false: dormant (orchestrator only, not engaged)
+	let on = ACTIVE;   // false: dormant (mandate off, no mode entered)
 	let before = "";   // the mode the orchestrator was entered from, to go back to
+	let planFrom = ""; // the mode plan was entered from ("": unrestricted), to go back to
+	let askedPlan = ""; // the plan the approval dialog last asked about
 	let manifest: Manifest = BUILTIN;
 	let roleName = process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "auto";
 	let role: Role = BUILTIN.roles.auto;
 	let allowedForSession = new Set<string>();   // "bash:<group>" | "external" | "mcp:<server>"
 	let cwd = process.cwd();
-	let savedTools: string[] | null = null;
+	let savedTools: string[] | null = null;   // the active tools before a role with an allowlist
+	let lastSet: string[] | null = null;      // what that allowlist left active
 
 	const log = (event: string, detail: Record<string, unknown>) => {
 		try { mkdirSync(dirname(LOG), { recursive: true }); appendFileSync(LOG, JSON.stringify({ t: Date.now(), role: roleName, event, ...detail }) + "\n"); } catch { /* never fatal */ }
@@ -5283,34 +5291,58 @@ export default function (pi: ExtensionAPI) {
 		if (!manifest.roles[name]) { warn(ctx, `mandate: unknown role '${name}', using '${manifest.default}'`); name = manifest.default ?? "auto"; }
 		const prev = roleName; roleName = name; role = roleFor(manifest, name);
 		// plan-like roles: drop tools outside the allowlist from the active set; restore on exit
+		// (from the saved set, so role -> role keeps what the next allows; tools
+		// that became active meanwhile, late MCP or expert tools, are kept too)
+		const late = () => (lastSet ? pi.getActiveTools().filter((t) => !lastSet!.includes(t)) : []);
 		if (role.tools) {
-			if (!savedTools) savedTools = pi.getActiveTools();
+			savedTools = savedTools ? [...new Set([...savedTools, ...late()])] : pi.getActiveTools();
 			const allowed = new Set(role.tools);
-			pi.setActiveTools(pi.getActiveTools().filter((t) => allowed.has(t)));
-		} else if (savedTools) { pi.setActiveTools(savedTools); savedTools = null; }
+			lastSet = savedTools.filter((t) => allowed.has(t)); pi.setActiveTools(lastSet);
+		} else if (savedTools) { pi.setActiveTools([...new Set([...savedTools, ...late()])]); savedTools = null; lastSet = null; }
 		if (ctx?.hasUI) ctx.ui.setStatus("mandate", role.bypass ? "mode: yolo" : `mode: ${role.label ?? name}`);
-		if (announce) { pi.events.emit("lets-code:mode", { role: name, network: role.network ?? "on", bypass: !!role.bypass, sandbox: role.sandbox ?? {} }); if (prev !== name) log("mode", { from: prev, to: name }); }
+		if (announce) { pi.events.emit("lets-code:mode", { role: name, network: role.network ?? "on", bypass: !!role.bypass, sandbox: role.sandbox ?? {}, ...(on ? {} : { off: true }) }); if (prev !== name) log("mode", { from: prev, to: name }); }
 	}
 	function reload(ctx: ExtensionContext | undefined) {
-		try { manifest = loadManifest(cwd, ctx?.isProjectTrusted ?? false, (m) => warn(ctx, m)); }
+		try { manifest = loadManifest(cwd, typeof (ctx as any)?.isProjectTrusted === "function" ? ctx!.isProjectTrusted() : !!(ctx as any)?.isProjectTrusted, (m) => warn(ctx, m)); }
 		catch (e) { // a broken manifest fails closed: built-in roles only, and the strictest mode that still works
 			warn(ctx, `mandate: ${(e as Error).message} — using built-in roles`); manifest = BUILTIN;
 		}
-		if (!ACTIVE) { if (on) apply(ctx, "orchestrator", false); return; }
+		if (!ACTIVE) { if (on) apply(ctx, roleName, false); return; }
 		apply(ctx, process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || manifest.default || "auto");
 	}
+	// to a mode; "" (mandate off only) is back to the unrestricted, dormant state
+	function goTo(ctx: ExtensionContext | undefined, name: string) {
+		if (!name && ACTIVE) name = manifest.default ?? "auto";
+		if (name) { on = true; apply(ctx, name); return; }
+		on = false; apply(ctx, "auto"); if (ctx?.hasUI) ctx.ui.setStatus("mandate", undefined);
+	}
+	// where leaving a mode goes: the mode it was entered from, else the default
+	const backFrom = (from: string, mode: string) => (from && from !== mode && manifest.roles[from] ? from
+		: ACTIVE ? (manifest.default && manifest.default !== mode ? manifest.default : "auto") : "");
 	// into the orchestrator (a factory run, /orchestrator, /mode), and back out
 	function orchestrate(ctx: ExtensionContext | undefined, reason = ""): boolean {
 		if (on && roleName === "orchestrator") return false;
-		before = on ? roleName : ""; on = true; apply(ctx, "orchestrator");
+		// back to an orchestrator plan was entered from: no pointer back to plan (no loop)
+		if (on && roleName === "plan" && planFrom === "orchestrator") planFrom = "";
+		else before = on ? roleName : "";
+		goTo(ctx, "orchestrator");
 		log("orchestrate", { reason, from: before || "off" });
 		if (reason && ctx?.hasUI) ctx.ui.notify(`mode: orchestrator (${reason}): experts make the changes; /orchestrator leaves it`, "info");
 		return true;
 	}
 	function leave(ctx: ExtensionContext | undefined): void {
-		const back = before && before !== "orchestrator" && manifest.roles[before] ? before : manifest.default && manifest.default !== "orchestrator" ? manifest.default : "auto";
-		apply(ctx, back); before = "";
-		if (!ACTIVE) { on = false; if (ctx?.hasUI) ctx.ui.setStatus("mandate", undefined); }
+		const back = backFrom(before, "orchestrator"); before = ""; goTo(ctx, back);
+	}
+	// into plan mode, and back to the mode it was entered from
+	function enterPlan(ctx: ExtensionContext | undefined): void {
+		if (on && roleName === "plan") return;
+		// back to a plan the orchestrator was entered from: likewise
+		if (on && roleName === "orchestrator" && before === "plan") before = "";
+		else planFrom = on ? roleName : "";
+		goTo(ctx, "plan");
+	}
+	function leavePlan(ctx: ExtensionContext | undefined): void {
+		const back = backFrom(planFrom, "plan"); planFrom = ""; goTo(ctx, back);
 	}
 	const why = () => (roleName === "orchestrator" ? " The orchestrator delegates: hand it to an expert." : " Switch with /mode, or ask the user.");
 
@@ -5328,7 +5360,7 @@ export default function (pi: ExtensionAPI) {
 		return { block: true, reason: short(`mandate(${roleName}): the user did not approve: ${what}`) };
 	}
 
-	pi.on("session_start", async (_e, ctx) => { cwd = ctx.cwd; allowedForSession = new Set(); reload(ctx); });
+	pi.on("session_start", async (_e, ctx) => { cwd = ctx.cwd; allowedForSession = new Set(); askedPlan = ""; reload(ctx); });
 	pi.on("project_trust", async (_e, ctx) => reload(ctx));
 
 	pi.on("before_agent_start", async (event: any) => {
@@ -5375,52 +5407,101 @@ export default function (pi: ExtensionAPI) {
 
 	// --- commands and shortcuts (main session only; a subagent keeps its role)
 	if (subagentDepth > 0 || process.env.LETS_CODE_ROLE) return;
-	// the factory module engages the orchestrator when a run starts or resumes
-	(globalThis as any).__letsCodeOrchestrate = (ctx: ExtensionContext | undefined, reason?: string) => orchestrate(ctx, reason);
-	pi.registerCommand("orchestrator", {
-		description: "Toggle orchestrator mode: plan and dispatch experts, change no file yourself",
-		handler: async (_args, ctx) => {
-			if (on && roleName === "orchestrator") { leave(ctx); ctx.ui.notify(on ? `mode: ${roleName}` : "orchestrator mode off", "info"); return; }
-			orchestrate(ctx); ctx.ui.notify("mode: orchestrator", "info");
-		},
-	});
+	// the live mode for the subagent tool ("" unrestricted): a child started
+	// in plan mode runs read-only
+	(globalThis as any).__letsCodeMode = () => (on ? roleName : "");
+	if (ACTIVE || ORCHESTRATOR) {
+		// the factory module engages the orchestrator when a run starts or resumes
+		(globalThis as any).__letsCodeOrchestrate = (ctx: ExtensionContext | undefined, reason?: string) => orchestrate(ctx, reason);
+		pi.registerCommand("orchestrator", {
+			description: "Toggle orchestrator mode: plan and dispatch experts, change no file yourself",
+			handler: async (_args, ctx) => {
+				if (on && roleName === "orchestrator") { leave(ctx); ctx.ui.notify(on ? `mode: ${roleName}` : "orchestrator mode off", "info"); return; }
+				orchestrate(ctx); ctx.ui.notify("mode: orchestrator", "info");
+			},
+		});
+	}
+	// plan mode: read-only until the user approves the plan
+	const EXECUTE = "Execute the plan you wrote above, step by step. Run the tests after each step and report what changed.";
+	function runPlan(plan: string) {
+		try { (pi as any).appendEntry?.("lets-code-plan", { plan, at: new Date().toISOString() }); } catch { /* never fatal */ }
+		log("plan", { chars: plan.length });
+		pi.sendUserMessage(EXECUTE, { deliverAs: "followUp" } as any);
+	}
+	async function togglePlan(ctx: ExtensionContext) {
+		if (!(on && roleName === "plan")) { enterPlan(ctx); ctx.ui.notify("mode: plan", "info"); return; }
+		const plan = await leavePlanIfNeeded(ctx, "");
+		leavePlan(ctx); ctx.ui.notify(on ? `mode: ${roleName}` : "plan mode off", "info");
+		if (plan) runPlan(plan);
+	}
+	if (ACTIVE || PLAN) {
+		pi.registerCommand("plan", {
+			description: "Toggle plan mode (read-only exploration that ends in a numbered plan)",
+			handler: async (_args, ctx) => togglePlan(ctx),
+		});
+		pi.registerShortcut("ctrl+alt+p", { description: "Toggle plan mode", handler: async (ctx) => togglePlan(ctx) });
+		// a finished plan: execute it, refine it, or stay (asked once per plan)
+		pi.on("agent_end", async (event: any, ctx) => {
+			if (!on || roleName !== "plan" || !ctx?.hasUI) return;
+			const plan = planOf(lastAssistantText(ctx, event?.messages, true));
+			if (!plan || plan === askedPlan) return;
+			askedPlan = plan;
+			const choice = await ctx.ui.select("Plan ready. What next?", ["Execute the plan", "Refine the plan", "Stay in plan mode"]);
+			if (choice === "Execute the plan") { leavePlan(ctx); ctx.ui.notify(on ? `mode: ${roleName}` : "plan mode off", "info"); runPlan(plan); return; }
+			if (choice !== "Refine the plan") return;
+			const ui: any = ctx.ui;
+			const r = typeof ui.editor === "function" ? await ui.editor("Refine the plan (edit it or add notes):", plan) : await ui.input?.("How should the plan change?");
+			const text = String(r ?? "").trim();
+			if (text && text !== plan) pi.sendUserMessage(`Revise the plan:\n\n${text}`, { deliverAs: "followUp" } as any);
+		});
+	}
 	if (!ACTIVE) return;
 	const names = () => Object.keys(manifest.roles);
+	// to a mode by name: plan remembers where it came from
+	async function switchTo(ctx: ExtensionContext, next: string) {
+		const plan = await leavePlanIfNeeded(ctx, next);
+		if (next === "plan") enterPlan(ctx); else { planFrom = ""; apply(ctx, next); }
+		ctx.ui.notify(`mode: ${next}`, "info");
+		if (plan) runPlan(plan);
+	}
 	pi.registerCommand("mode", {
 		description: "Show or switch the mandate mode: /mode [plan|auto|ask|orchestrator|yolo|<role>]",
 		handler: async (args, ctx) => {
 			const want = (args ?? "").trim();
 			if (!want) { ctx.ui.notify(`mode: ${roleName}  (available: ${names().join(", ")})\nlog: ${LOG}`, "info"); return; }
 			if (!manifest.roles[want]) { ctx.ui.notify(`unknown mode '${want}' — one of ${names().join(", ")}`, "warning"); return; }
-			await leavePlanIfNeeded(ctx, want); apply(ctx, want);
-			ctx.ui.notify(`mode: ${want}`, "info");
+			await switchTo(ctx, want);
 		},
-	});
-	pi.registerCommand("plan", {
-		description: "Toggle plan mode (read-only exploration that ends in a numbered plan)",
-		handler: async (_args, ctx) => { const next = roleName === "plan" ? "auto" : "plan"; await leavePlanIfNeeded(ctx, next); apply(ctx, next); ctx.ui.notify(`mode: ${next}`, "info"); },
 	});
 	pi.registerShortcut("alt+m", {
 		description: "Cycle the mandate mode",
-		handler: async (ctx) => { const cyc = (manifest.cycle ?? []).filter((n) => manifest.roles[n]); const i = cyc.indexOf(roleName); const next = cyc[(i + 1) % cyc.length] ?? "auto"; await leavePlanIfNeeded(ctx, next); apply(ctx, next); ctx.ui.notify(`mode: ${next}`, "info"); },
+		handler: async (ctx) => { const cyc = (manifest.cycle ?? []).filter((n) => manifest.roles[n]); const i = cyc.indexOf(roleName); await switchTo(ctx, cyc[(i + 1) % cyc.length] ?? "auto"); },
 	});
-	pi.registerShortcut("ctrl+alt+p", { description: "Toggle plan mode", handler: async (ctx) => { const next = roleName === "plan" ? "auto" : "plan"; await leavePlanIfNeeded(ctx, next); apply(ctx, next); ctx.ui.notify(`mode: ${next}`, "info"); } });
 
-	async function leavePlanIfNeeded(ctx: ExtensionContext, next: string) {
-		if (roleName !== "plan" || next === "plan" || !ctx.hasUI) return;
-		const last = lastAssistantText(ctx);
-		if (!/(^|\n)\s*#*\s*Plan:/i.test(last)) return;
+	// leaving plan with a plan on the table: the plan to execute, or ""
+	async function leavePlanIfNeeded(ctx: ExtensionContext, next: string): Promise<string> {
+		if (!on || roleName !== "plan" || next === "plan" || !ctx.hasUI) return "";
+		const plan = planOf(lastAssistantText(ctx, undefined, true));
+		if (!plan) return "";
 		const choice = await ctx.ui.select("A plan is on the table. Execute it now?", ["Execute the plan", "Switch mode only"]);
-		if (choice === "Execute the plan") pi.sendUserMessage("Execute the plan you wrote above, step by step. Run the tests after each step and report what changed.", { deliverAs: "followUp" } as any);
+		return choice === "Execute the plan" ? plan : "";
 	}
-	function lastAssistantText(ctx: ExtensionContext): string {
+	// "Plan:", "**Plan**:", "**Plan:**", "## Plan:", or a heading "## Plan" / "**Plan**" alone
+	function planOf(text: string): string {
+		const at = [/(^|\n)[ \t]*(#{1,6}[ \t]*)?(\*\*|__)?Plan(\*\*|__)?[ \t]*:/i, /(^|\n)[ \t]*(#{1,6}[ \t]*(\*\*)?|\*\*)Plan(\*\*)?[ \t]*(?=\r?\n|$)/i]
+			.map((r) => r.exec(text)?.index ?? -1).filter((i) => i >= 0);
+		return at.length ? text.slice(Math.min(...at)).trim() : "";
+	}
+	function textOf(m: any): string {
+		const c = m?.content;
+		return typeof c === "string" ? c : Array.isArray(c) ? c.filter((x: any) => x?.type === "text").map((x: any) => x.text).join("\n") : "";
+	}
+	// finished: only a reply that ended normally (not aborted, cut off or failed)
+	function lastAssistantText(ctx: ExtensionContext, messages?: any[], finished = false): string {
 		try {
-			const entries: any[] = (ctx.sessionManager as any).getEntries?.() ?? (ctx.sessionManager as any).getBranch?.() ?? [];
-			for (let i = entries.length - 1; i >= 0; i--) {
-				const m = entries[i]?.message; if (!m || m.role !== "assistant") continue;
-				const c = m.content; if (typeof c === "string") return c;
-				if (Array.isArray(c)) return c.filter((x: any) => x?.type === "text").map((x: any) => x.text).join("\n");
-			}
+			const sm = ctx.sessionManager as any;
+			const list: any[] = Array.isArray(messages) ? messages : ((sm.getBranch?.() ?? sm.getEntries?.() ?? []) as any[]).map((e: any) => e?.message);
+			for (let i = list.length - 1; i >= 0; i--) if (list[i]?.role === "assistant") return finished && list[i].stopReason !== "stop" ? "" : textOf(list[i]);
 		} catch { /* fall through */ }
 		return "";
 	}
@@ -6208,6 +6289,8 @@ async function childDialog(c: Child, ev: any): Promise<void> {
 }
 
 // also the runner of the Claude Code adapter's workflow agents
+// roles that write nothing in the project: what a child started in plan mode may keep
+const PLAN_SAFE = new Set(["readonly", "plan", "reviewer", "researcher"]);
 export function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSignal | undefined, onProgress?: (line: string) => void, meta?: RunMeta): Promise<RunResult> {
 	const rec = newRun(agent, task, cwd, meta);
 	// the child's own session, next to its transcript: a real pi session file
@@ -6240,7 +6323,12 @@ export function runAgent(agent: AgentDef, task: string, cwd: string, signal: Abo
 	// an agent with a team (the tester and its specialists) starts those experts
 	// itself: one level more for it alone, its team named; they start nothing
 	if (agent.team?.length && agent.source === "user") { env.LETS_CODE_SUBAGENT_MAX_DEPTH = String(DEPTH + 2); env.LETS_CODE_EXPERT_TEAM = agent.team.join(","); }
-	const role = agent.role || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "";
+	// the parent's live mode (/plan, /mode at runtime) over the launch one; in
+	// plan mode a child runs read-only (its file's role if that is no wider),
+	// with its mandate on even where the parent's is dormant
+	const live: string | undefined = (() => { try { return (globalThis as any).__letsCodeMode?.(); } catch { return undefined; } })();
+	let role = agent.role || (live && live !== "orchestrator" ? live : "") || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "";
+	if (live === "plan") { role = PLAN_SAFE.has(agent.role ?? "") ? agent.role! : "readonly"; env.LETS_CODE_MANDATE_ON = "1"; }
 	if (role) env.LETS_CODE_ROLE = role;
 	if (agent.agentDir) env.PI_CODING_AGENT_DIR = agent.agentDir;
 	rec.spawn = { args, env, unset: [...(role ? [] : ["LETS_CODE_ROLE"]), ...(env.LETS_CODE_EXPERT_TEAM ? [] : ["LETS_CODE_EXPERT_TEAM"])], cwd };
@@ -7194,7 +7282,7 @@ export default function (pi: ExtensionAPI) {
 			chain: Type.Optional(Type.Array(Item, { description: "run in order" })),
 		}),
 		async execute(_id, params: any, signal, onUpdate, ctx: ExtensionContext) {
-			const agents = discoverAgents(ctx.cwd, ctx.isProjectTrusted);
+			const agents = discoverAgents(ctx.cwd, typeof (ctx as any).isProjectTrusted === "function" ? ctx.isProjectTrusted() : !!(ctx as any).isProjectTrusted);
 			const list = agents.map((a) => `- ${a.name}: ${a.description || "(no description)"}`).join("\n") || "(none: add ~/.pi/agent/agents/<name>.md)";
 			const find = (n: string) => agents.find((a) => a.name === n);
 			const missing = (n: string) => EXPERTS && discoverExperts().some((s) => s.name === n)
@@ -11501,6 +11589,9 @@ export default function (pi: ExtensionAPI) {
 	const approved: Set<string> = ((globalThis as any).__letsCodeClaudeApproved ??= new Set<string>());   // read by the mandate
 	const sessionAllowed = new Set<string>();
 	const agentName = process.env.LETS_CODE_AGENT_NAME ?? "";
+	// the mode as the mandate announces it (/plan, /mode at runtime); off: unrestricted
+	let liveMode: string | undefined;
+	pi.events?.on?.("lets-code:mode", (d: any) => { liveMode = d?.off ? "" : String(d?.role ?? ""); });
 
 	const notify = (ctx: ExtensionContext | undefined, m: string, kind: "info" | "warning" | "error" = "warning") => {
 		if (ctx?.hasUI) ctx.ui.notify(`claude code: ${m}`, kind); else console.error(`[lets-code] claude code: ${m}`);
@@ -11508,7 +11599,7 @@ export default function (pi: ExtensionAPI) {
 	const common = (event: string, ctx?: ExtensionContext) => drop({
 		session_id: (() => { try { return ctx?.sessionManager.getSessionId(); } catch { return undefined; } })() ?? "",
 		transcript_path: (() => { try { return ctx?.sessionManager.getSessionFile(); } catch { return undefined; } })() ?? "",
-		cwd, hook_event_name: event, permission_mode: PERMISSION_MODE[process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || ""] ?? "default",
+		cwd, hook_event_name: event, permission_mode: PERMISSION_MODE[liveMode ?? (process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "")] ?? "default",
 		...(DEPTH > 0 ? { agent_type: agentName } : {}),
 	});
 	async function fire(event: string, value: string | string[] | undefined, extra: Record<string, unknown>, ctx?: ExtensionContext, timeoutMs?: number): Promise<Outcome | null> {
@@ -12112,7 +12203,8 @@ export default function (pi: ExtensionAPI) {
 	// before ours: before a session exists, only remember the mode, and let
 	// session_start initialise with it.
 	let lastCtx: ExtensionContext | undefined;
-	pi.events.on("lets-code:mode", (data: unknown) => { mode = data as Mode; if (lastCtx) void init(lastCtx); });
+	// off: the mandate is dormant (mandate off, no mode entered): no role overrides
+	pi.events.on("lets-code:mode", (data: unknown) => { mode = (data as any)?.off ? undefined : data as Mode; if (lastCtx) void init(lastCtx); });
 
 	// The bash tool is replaced with one whose operations run sandboxed when
 	// the sandbox is up, and plain otherwise. Registered at load so the tool
@@ -18736,7 +18828,7 @@ case "$(printf '%s' "${SESSION_TAG}" | tr '[:upper:]' '[:lower:]')" in
 esac
 
 # optional features: mandate (modes/roles), subagents, sandbox, REA, metrics
-unset LETS_CODE_MANDATE_ON LETS_CODE_ORCHESTRATOR_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL LETS_CODE_REA_AGENT LETS_CODE_METRICS_ON
+unset LETS_CODE_MANDATE_ON LETS_CODE_ORCHESTRATOR_ON LETS_CODE_PLAN_ON LETS_CODE_SUBAGENTS_ON LETS_CODE_SANDBOX_ON LETS_CODE_SUBAGENT_DEPTH LETS_CODE_ROLE LETS_CODE_REA_PROVIDER LETS_CODE_REA_MODEL LETS_CODE_REA_AGENT LETS_CODE_METRICS_ON
 FEAT_DESC=""
 # footer: minimal by default; METRICS=true starts with the full one. The
 # size last picked with /metrics is where the next launch starts, ahead of
@@ -18774,7 +18866,14 @@ case "$(lc "${MANDATE}")" in
         export LETS_CODE_MANDATE_ON=1
         if [ -n "${MODE}" ]; then export LETS_CODE_MODE="${MODE}"; else unset LETS_CODE_MODE; fi
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }mandate: ${MODE:-auto}" ;;
-    *) unset LETS_CODE_MODE ;;
+    *)
+        unset LETS_CODE_MODE
+        # without the mandate, plan mode alone: dormant until /plan or
+        # ctrl+alt+p enters it (--no-mandate: none)
+        if [ "${NO_MANDATE}" != true ]; then
+            pi_write_mandate_extension
+            export LETS_CODE_PLAN_ON=1
+        fi ;;
 esac
 case "$(lc "${SUBAGENTS}")" in
     true|yes|1|on)

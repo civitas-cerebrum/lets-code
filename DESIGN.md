@@ -496,7 +496,11 @@ never holds the session up, and from then on the call's abort is ignored
 (the main session's Esc stops its own turn, not the runs; a run stops with
 its own stop: `/subagents stop`, `subagent({action: "stop"})`). The note it
 returns (`backgroundNote`) names each run's id and pid and the ways to
-reach it. `subagent({action: "status"})` lists the running runs with time,
+reach it. A workflow's agents start as its script goes, so its note names
+the workflow (`BgCall.name`) and whatever runs have started; its runs carry
+the call id (`RunMeta` tool "workflow"), so status tags them with the
+workflow, lists a workflow between agents, and `stop` takes the workflow's
+name. `subagent({action: "status"})` lists the running runs with time,
 turns, the last assistant text and `lastSteps`. Print and RPC mode, and
 calls at depth > 0, wait as before: there nothing would take a later
 report, and a child's turn must not end with its own children running.

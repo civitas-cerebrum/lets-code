@@ -730,7 +730,9 @@ When they finish, their report arrives as a message: it starts the
 orchestrator's next turn if the session is idle, or follows the current
 turn if it is busy. The orchestrator can check on them with
 `subagent({action: "status"})` (each run's time, turns, what it last said
-and its last steps), stop one with `subagent({action: "stop", run})`, or
+and its last steps, and which workflow a run belongs to), stop one with
+`subagent({action: "stop", run})` (a run id, agent name or workflow name),
+or
 message one without stopping it (`message({to: <pid>, text})`, see
 [Sessions and messages](#sessions-and-messages)); a subagent's reply to the orchestrator also starts
 its next turn. `{..., wait: <seconds>}` on a call waits that long for the

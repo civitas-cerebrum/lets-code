@@ -698,6 +698,22 @@ async function load(env = {}) {
 		for (let i = 0; i < 150 && reports().length === n3; i++) await new Promise((r) => setTimeout(r, 20));
 		const rep4 = reports().at(-1)?.[0]?.content ?? "";
 		t("stop all: running runs stopped, the queued task never started", [/Stopping 2 runs and 1 background call/.test(sa.content[0].text), reg().runs.some((r) => r.task === "hang queued 3"), /1 queued task was stopped before starting/.test(rep4), /background/.test(q4.content[0].text)], [true, false, true, true]);
+		// a workflow call in the background: its agents start as its script goes; the note, status and stop name it
+		{
+			const n5 = reports().length;
+			const worker = mod.discoverAgents(work, true).find((a) => a.name === "worker");
+			let go; const gate = new Promise((r) => { go = r; });
+			const wfCall = mod.detachable(undefined, "call-wf", async (sig) => { await gate; const r = await mod.runAgent(worker, "hang in the workflow", work, sig, undefined, { tool: "workflow", callId: "call-wf" }); return { text: `## workflow review — done\n${r.text}`, isError: false }; }, mod.backgroundAfter(tui), 0, "review");
+			const wn = (await wfCall).text;
+			t("workflow: the note names the workflow and how to stop it", [/workflow review/.test(wn), /run "review"/.test(wn), /the runs of this call/.test(wn)], [true, true, false]);
+			t("workflow: status lists it between agents", /- workflow review: running, between agents/.test((await h.tool.execute("call-wf1", { action: "status" }, undefined, undefined, tui)).content[0].text), true);
+			go();
+			let w1; for (let i = 0; i < 100 && !((w1 = reg().runs.find((r) => r.task === "hang in the workflow")) && w1.events.length > 1); i++) await new Promise((r) => setTimeout(r, 20));
+			t("workflow: status tags its run with the workflow", new RegExp(`- worker \\(run ${w1?.id}, pid \\d+, workflow review\\)`).test((await h.tool.execute("call-wf2", { action: "status" }, undefined, undefined, tui)).content[0].text), true);
+			const ws = await h.tool.execute("call-wf3", { action: "stop", run: "review" }, undefined, undefined, tui);
+			for (let i = 0; i < 150 && reports().length === n5; i++) await new Promise((r) => setTimeout(r, 20));
+			t("workflow: stop by its name stops its run; its report arrives", [/Stopping workflow review/.test(ws.content[0].text), w1?.status, /## workflow review/.test(reports().at(-1)?.[0]?.content ?? ""), mod.bgCalls().size], [true, "aborted", true, 0]);
+		}
 		// the main session ends (/new, /resume elsewhere): its background runs go, and no report is left for it
 		const n4 = reports().length, p4 = (reg().pending ?? []).length;
 		await h.tool.execute("call-r", { agent: "worker", task: "hang until new" }, undefined, undefined, tui);

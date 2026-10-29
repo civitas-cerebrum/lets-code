@@ -702,7 +702,11 @@ trusted. Calls: `{agent, task}`, `{tasks: [...]}` for parallel work (at most
 the same provider and guards, with its own context, and cannot start
 children of its own. A child thinks at `medium` unless its agent file sets
 `thinking:`; a level switched to in a session does not carry over. Output is
-capped at 50 KB per agent.
+capped at 50 KB per agent. A task gets 30 minutes unless its agent file sets
+`timeout:` (`LETS_CODE_SUBAGENT_TIMEOUT` changes the default, in seconds);
+a cut task's result names its last tool calls, e.g. `[cut at its 1800s
+budget — last: bash {"command":"npm test"}; not finished]`, so the next
+task can be narrowed to that obstacle instead of re-sent.
 
 An agent type can also bring its own environment. These fields are
 optional; unknown fields are ignored:
@@ -712,7 +716,7 @@ optional; unknown fields are ignored:
 | `agent_dir` | The child's `PI_CODING_AGENT_DIR`: its own `mcp.json`, skills and settings. Link models, auth and extensions into it to share them (as `~/.pi/agent/rea/agent` does). |
 | `skills` | Skill paths passed to the child as `--skill` (`a, b`, `[a, b]` or a `- a` list). |
 | `append_prompt` | A file appended to the child's system prompt after the agent's own body. |
-| `timeout` | Seconds before the child is stopped (1 to 86400; none by default). |
+| `timeout` | Seconds before a task is stopped (1 to 86400; default `LETS_CODE_SUBAGENT_TIMEOUT`, 1800; a large value is in effect none). |
 | `requires` | A path that must exist, otherwise the agent is hidden: not listed, not callable. |
 | `requires_env` | An environment variable that must be set (and not `0`), otherwise hidden. |
 

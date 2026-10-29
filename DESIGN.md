@@ -273,7 +273,14 @@ rpc --session <run>.pi.jsonl --provider lets-code --model <id> [--thinking]
 [--tools] --append-system-prompt <file>` sent `"Task: ..."` as its first RPC `prompt` with
 `LETS_CODE_SUBAGENT_DEPTH` and `LETS_CODE_ROLE` in its environment, parsed
 from `message_end` events; concurrency 2 by default (one GPU); depth 1 (a
-child registers no tool, so it pays nothing for it); 50 KB output cap.
+child registers no tool, so it pays nothing for it); 50 KB output cap. A
+task turn has a budget: the agent file's `timeout`, else
+`LETS_CODE_SUBAGENT_TIMEOUT` (1800 s; a fix-test-fail loop keeps every bash
+call short, so the agent guard's bash timeout never ends it). A cut turn's
+result names the child's last three tool calls from its run record
+(`runAgent` attaches them before resolving), so the orchestrator narrows the
+next task to that obstacle; the method says so, and the starter worker stops
+and reports a failure that survives three different fixes.
 
 **Subagent sessions (`/subagents`).** Each child writes a real pi session
 file (`--session`, created empty and 0600 first; pi writes its header into
@@ -386,11 +393,14 @@ boxes pass to the renderer; Ctrl+T calls `setHideThinkingBlock` only on its
 part read the state themselves: tool output from `ui.getToolsExpanded()`
 and pi's per-message expanded flag, hidden thinking from pi's setting
 (`pi.getSettings()` on pi 1.0, `settings.json` on 0.87, and the toggle
-key itself so the change shows at once). Keys whose effect is the child's
-go to the child: Esc (`abort`), the follow-up key (the next prompt is sent
-as `followUp`), the dequeue key (`clear_queue`, back into the editor),
-copy (the view catches up first). The bindings are read from
-`<agent dir>/keybindings.json` over pi's defaults.
+key itself so the change shows at once). Expansion (Ctrl+O) applies to
+completed tools only: a running tool keeps its live tail preview, so its
+output cannot outgrow the live widget, which is not scrollable. Keys
+whose effect is the child's go to the child: Esc (`abort`), the follow-up
+key (the next prompt is sent as `followUp`), the dequeue key
+(`clear_queue`, back into the editor), copy (the view catches up first).
+The bindings are read from `<agent dir>/keybindings.json` over pi's
+defaults.
 
 One writer: the child process owns its session file, and pi appends to
 whatever session it has open (a model or thinking change, a `!` record),
@@ -436,7 +446,20 @@ hook refuses it, so nothing lands in the main session), `/thinking
 change the open session (`IN_PLACE_DEFER`, ctrl+l, ctrl+x) are held with
 a note until the main session is idle, then run in the child's real
 session. Completed child messages are not added to the main session as
-custom messages in place (the view draws them). When the main session is
+custom messages in place (the view draws them). In place the TUI's session
+is still the main session, so its `input` hook sees the main session's
+own input too: messages typed into the main session while it compacted
+(pi keeps them in its compaction queue and submits them, as `interactive`
+input, when compaction ends) and other extensions' `sendUserMessage`.
+Routing all of that to the viewed child leaked the main session's queued
+messages into the child (#73). So in place a message typed for the child
+goes to it from the key hook (Enter, and the follow-up key as a
+follow-up), never through pi's submit, whose compaction queue would hold
+it for the main session; a slash text (a prompt template or skill) is pi's
+to submit and is marked there, and the `input` hook in place takes only
+that marked text; everything else is the main session's. The child's
+queue as drawn follows its own pi's `queue_update` events (by text match
+on `message_end` as a fallback). When the main session is
 idle the switch is the real one as before (no turn to abort). If pi's
 layout is not as expected the switch is deferred with a note (the last
 resort).

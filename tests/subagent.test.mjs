@@ -329,6 +329,25 @@ async function load(env = {}) {
 	const started = Date.now();
 	const slow = await on.run({ agent: "slow", task: "slow down" });
 	t("timeout stops the child", [slow.isError, /timed out after 1s/.test(slow.content[0].text), Date.now() - started < 8000], [true, true, true]);
+	t("a cut run says where it stopped", slow.content[0].text.includes('[cut at its 1s budget — last: bash {"command":"ls"}; not finished]'), true);
+	t("default task budget: 30 minutes", mod.SUBAGENT_TIMEOUT, 1800);
+	// an agent file without timeout: gets LETS_CODE_SUBAGENT_TIMEOUT; one with it keeps its own
+	writeFileSync(join(agentDir, "agents", "slow2.md"), "---\ndescription: times out later\ntimeout: 2\n---\nx\n");
+	const short = await load({ LETS_CODE_SUBAGENT_TIMEOUT: "1" });
+	t("env budget", short.mod.SUBAGENT_TIMEOUT, 1);
+	const dflt = await short.run({ agent: "worker", task: "slow without a timeout of its own" });
+	t("no timeout in the file: the default budget applies", [dflt.isError, /timed out after 1s/.test(dflt.content[0].text)], [true, true]);
+	const own = await short.run({ agent: "slow2", task: "slow with its own" });
+	t("a timeout in the file wins", /timed out after 2s[\s\S]*\[cut at its 2s budget/.test(own.content[0].text), true);
+	delete process.env.LETS_CODE_SUBAGENT_TIMEOUT;
+	rmSync(join(agentDir, "agents", "slow2.md"));
+	t("bad env budget: the default", (await load({ LETS_CODE_SUBAGENT_TIMEOUT: "abc" })).mod.SUBAGENT_TIMEOUT, 1800);
+	delete process.env.LETS_CODE_SUBAGENT_TIMEOUT;
+	const evs = ["read", "edit", "bash", "bash"].map((name, i) => ({ t: "tool", id: String(i), name, args: name === "edit" ? { path: "a.ts", text: "y".repeat(200) } : { command: `step ${i}` }, done: true, output: "", cut: 0, v: 0, at: 0 }));
+	const steps = mod.lastSteps({ events: [{ t: "note", text: "x", v: 0, at: 0 }, ...evs] });
+	t("last steps: the newest three tool calls, clipped", [steps.split("; ").length, steps.startsWith('edit {"path":"a.ts"'), steps.split("; ")[0].length <= 80, steps.endsWith('bash {"command":"step 3"}')], [3, true, true, true]);
+	t("no tool call before the cut", mod.render({ agent: "w", task: "x", text: "", exitCode: 124, stderr: "", turns: 0, input: 0, output: 0, timedOut: 5 }).includes("[cut at its 5s budget — last: no tool call; not finished]"), true);
+	t("method: a cut task is narrowed, not re-sent", /not retried by re-sending it/.test(mod.orchestration([])), true);
 	delete process.env.TEST_RE_ON;
 	rmSync(join(agentDir, "agents", "re.md")); rmSync(join(agentDir, "agents", "slow.md"));
 
@@ -800,6 +819,33 @@ async function load(env = {}) {
 	t("in place: shift+tab cycles the child's thinking level", termHandler("\x1b[Z")?.consume, true);
 	await wait(() => cmds().some((c) => c.type === "cycle_thinking_level"));
 	t("in place: shift+tab cycles the child's thinking level", cmds().some((c) => c.type === "cycle_thinking_level" && c.pid === pid), true);
+	// #73: in place the input hook is the main session's too; only what is typed for the child goes to it
+	const prompts = () => cmds().filter((c) => c.type === "prompt").map((c) => c.message);
+	t("in place: the main session's queued message (submitted by pi after compaction) stays the main session's", [await h.handlers.input({ text: "main's own queued", source: "interactive" }, { ui }), prompts().includes("main's own queued")], [undefined, false]);
+	t("in place: another extension's message stays the main session's", [await h.handlers.input({ text: "Execute the plan", source: "extension" }, { ui }), prompts().includes("Execute the plan")], [undefined, false]);
+	const hist = []; ed.addToHistory = (x) => hist.push(x);
+	editor = "hang for the child";
+	t("in place: Enter sends the typed message to the child itself, never through pi's submit", [termHandler("\r")?.consume, editor, hist], [true, "", ["hang for the child"]]);
+	await wait(() => prompts().includes("hang for the child") && r.status === "running");
+	t("in place: the typed message is the child's next turn", [prompts().includes("hang for the child"), r.status], [true, "running"]);
+	editor = "and later";
+	t("in place: alt+enter sends a follow-up to the child itself", [termHandler("\x1b\r")?.consume, editor], [true, ""]);
+	await wait(() => cmds().some((c) => c.message === "and later"));
+	t("in place: the follow-up is the child's, queued in the child", [cmds().some((c) => c.message === "and later" && c.streamingBehavior === "followUp"), mod.childOf(r).queued.map((q) => [q.text, q.kind])], [true, [["and later", "followUp"]]]);
+	editor = "/tpl go";
+	t("in place: a slash text is pi's to submit (a template or skill)", termHandler("\r"), undefined);
+	t("in place: the slash text typed for the child is taken by the input hook", [(await h.handlers.input({ text: "/tpl go", source: "interactive" }, { ui }))?.action, (await h.handlers.input({ text: "/tpl go", source: "interactive" }, { ui }))], ["handled", undefined]);
+	await wait(() => cmds().some((c) => c.message === "/tpl go"));
+	t("in place: the slash text went to the child", cmds().some((c) => c.message === "/tpl go"), true);
+	editor = "@fil"; ed.isShowingAutocomplete = () => true;
+	t("in place: Enter with pi's autocomplete open is the autocomplete's", termHandler("\r"), undefined);
+	ed.isShowingAutocomplete = () => false; editor = "";
+	// the child's queue follows pi's own (its queue_update), so an expanded or changed text leaves it too
+	mod.childOf(r).handle(JSON.stringify({ type: "queue_update", steering: ["expanded text"], followUp: [] }));
+	t("child queue: pi's queue_update is what is shown", mod.childOf(r).queued.map((q) => [q.text, q.kind]), [["expanded text", "steer"]]);
+	mod.childOf(r).handle(JSON.stringify({ type: "queue_update", steering: [], followUp: [] }));
+	t("child queue: emptied with pi's", mod.childOf(r).queued.length, 0);
+	mod.childOf(r).abort(true); await wait(() => r.status !== "running");
 	// back: pi's own containers again, with what the turn did meanwhile
 	await h.commands.subagents.handler("back", ctx());
 	t("back from in place: pi's containers restored, no switch", [doc.children[2] === chat, tui.children[1] === pending, tui.children[2] === statusC, reg().view.inplace, switched.length], [true, true, true, undefined, 0]);

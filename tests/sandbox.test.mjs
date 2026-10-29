@@ -69,6 +69,10 @@ const warnings = []; const warn = (m) => warnings.push(m);
 	await new Promise((r) => setTimeout(r, 100));
 	await h.commands.sandbox.handler("", h.ctx(work));
 	t("/sandbox reports off and the mode", /sandbox: off \(mode ask\)/.test(h.notices[h.notices.length - 1]), true);
+	h.listeners["lets-code:mode"]({ role: "auto", network: "on", off: true });
+	await new Promise((r) => setTimeout(r, 100));
+	await h.commands.sandbox.handler("", h.ctx(work));
+	t("a dormant mandate (off) is no mode", /\(mode/.test(h.notices[h.notices.length - 1]), false);
 	t("bash tool registered when pi is importable", h.tool() === null || h.tool().name === "bash", true);
 }
 // --- the mandate's mode event can arrive before this extension's session_start (it did, live: pi crashed)

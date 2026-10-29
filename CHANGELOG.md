@@ -16,7 +16,13 @@ model on your own hardware:
   on every tool call, with manifests per user and per project
 - `/plan` (and `ctrl+alt+p`) without the mandate too; a finished plan asks
   to execute, refine or stay, and executing returns to the previous mode;
-  Claude Code hooks see a runtime switch to plan as `permission_mode: plan`
+  Claude Code hooks see a runtime switch to plan as `permission_mode: plan`.
+  A subagent started in plan mode runs read-only (`readonly`, or its own
+  role if that writes nothing in the project), with the mandate off too
+- with the mandate on, Claude Code hooks now get `permission_mode: "auto"`
+  in the default mode (was `"default"`): the mode the mandate announces
+- security: untrusted projects' `.pi/agents` and `.pi/mandate.json` were
+  loaded, because pi's `isProjectTrusted` method was read as a boolean
 - subagents in their own pi sessions, switchable from the footer, with a
   30-minute task budget by default (`LETS_CODE_SUBAGENT_TIMEOUT`; a cut task
   reports its last tool calls), and the

@@ -21,13 +21,13 @@ let fail = 0, n = 0;
 const t = (name, got, want) => { n++; const ok = JSON.stringify(got) === JSON.stringify(want); if (!ok) { fail = 1; console.log(`FAIL ${name}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); } else console.log(`ok    ${name}`); };
 
 let loads = 0;
-async function load(env, { trusted = true, ui = true, answers = [], entries = [], editor } = {}) {
+async function load(env, { trusted = true, ui = true, answers = [], entries = [], branch, editor, tools } = {}) {
 	for (const k of ["LETS_CODE_MODE", "LETS_CODE_ROLE", "LETS_CODE_SUBAGENT_DEPTH"]) delete process.env[k];
 	Object.assign(process.env, env);
 	const f = join(agentDir, "extensions", `mandate-${loads++}.ts`); writeFileSync(f, src);
 	const mod = await import(pathToFileURL(f).href);
 	const handlers = {}, commands = {}, shortcuts = {}, emitted = [], notices = [], selects = [], appended = [];
-	let active = ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"];
+	let active = tools ? [...tools] : ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"];
 	const pi = {
 		on(ev, h) { handlers[ev] = h; return () => {}; },
 		registerCommand(name, o) { commands[name] = o; }, registerShortcut(k, o) { shortcuts[k] = o; },
@@ -37,8 +37,8 @@ async function load(env, { trusted = true, ui = true, answers = [], entries = []
 		appendEntry: (type, data) => appended.push([type, data]),
 	};
 	mod.default(pi);
-	const ctx = (cwd) => ({ cwd, hasUI: ui, isProjectTrusted: trusted, ui: { notify: (m) => notices.push(m), setStatus() {}, select: async (title) => { selects.push(title); return answers.shift() ?? "Deny"; }, editor: async (title, pre) => editor?.(title, pre), input: async () => undefined }, sessionManager: { getEntries: () => entries } });
-	return { mod, handlers, commands, shortcuts, emitted, notices, selects, appended, ctx, tools: () => active,
+	const ctx = (cwd) => ({ cwd, hasUI: ui, isProjectTrusted: trusted, ui: { notify: (m) => notices.push(m), setStatus() {}, select: async (title) => { selects.push(title); return answers.shift() ?? "Deny"; }, editor: async (title, pre) => editor?.(title, pre), input: async () => undefined }, sessionManager: { getEntries: () => entries, ...(branch ? { getBranch: () => branch } : {}) } });
+	return { mod, handlers, commands, shortcuts, emitted, notices, selects, appended, ctx, tools: () => active, addTool: (n) => { active.push(n); },
 		start: async (cwd) => handlers.session_start?.({ type: "session_start" }, ctx(cwd)),
 		call: async (cwd, toolName, input) => handlers.tool_call({ type: "tool_call", toolCallId: "x", toolName, input }, ctx(cwd)) };
 }
@@ -360,7 +360,7 @@ const blocked = (r) => r?.block === true;
 	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_PLAN_ON = "1";
 	const PLAN = "I read the code.\n\nPlan:\n1. Add x\n2. Test x";
 	const EXEC = "Execute the plan you wrote above, step by step. Run the tests after each step and report what changed.";
-	const end = (h, d, text) => h.handlers.agent_end({ type: "agent_end", messages: [{ role: "user", content: "go" }, { role: "assistant", content: [{ type: "text", text }] }] }, h.ctx(d));
+	const end = (h, d, text, stopReason = "stop") => h.handlers.agent_end({ type: "agent_end", messages: [{ role: "user", content: "go" }, { role: "assistant", content: [{ type: "text", text }], stopReason }] }, h.ctx(d));
 	const modes = (h) => h.emitted.filter(([c]) => c === "lets-code:mode").map(([, x]) => x);
 	const h = await load({}, { answers: ["Stay in plan mode", "Execute the plan"] }); const d = repo(); await h.start(d);
 	t("plan alone: /plan and ctrl+alt+p, no /mode or /orchestrator", [Object.keys(h.commands), "ctrl+alt+p" in h.shortcuts], [["plan"], true]);
@@ -372,6 +372,9 @@ const blocked = (r) => r?.block === true;
 	t("/plan: announced", modes(h).at(-1)?.role, "plan");
 	await end(h, d, "Still reading the code.");
 	t("no Plan: heading, no dialog", h.selects.length, 0);
+	for (const why of ["aborted", "error", "length"]) await end(h, d, "Plan:\n1. Add x\n2. Te", why);
+	t("an aborted, failed or cut-off plan: no dialog", h.selects.length, 0);
+	t("the live mode for the subagent tool", globalThis.__letsCodeMode?.(), "plan");
 	await end(h, d, PLAN);
 	t("a plan: asked what next", h.selects.length, 1);
 	t("Stay: still in plan", blocked(await h.call(d, "write", { path: join(d, "src/b.txt") })), true);
@@ -379,6 +382,7 @@ const blocked = (r) => r?.block === true;
 	t("the same plan is asked about once", h.selects.length, 1);
 	await end(h, d, `${PLAN}\n3. Docs`);
 	t("Execute: back to unrestricted", await h.call(d, "bash", { command: "npm install" }), undefined);
+	t("Execute: the live mode is unrestricted", globalThis.__letsCodeMode?.(), "");
 	t("Execute: tools restored", h.tools().includes("edit"), true);
 	t("Execute: announced as off", modes(h).at(-1)?.off, true);
 	t("Execute: the execute message as a followUp", h.emitted.at(-1), ["user", EXEC, { deliverAs: "followUp" }]);
@@ -391,10 +395,14 @@ const blocked = (r) => r?.block === true;
 	t("Refine: the edited plan as a followUp", r.emitted.at(-1), ["user", "Revise the plan:\n\nPlan:\n1. Add x\n2. Test x\n3. Also y", { deliverAs: "followUp" }]);
 	t("Refine: still in plan", blocked(await r.call(d, "write", { path: join(d, "src/b.txt") })), true);
 	// leaving by hand with a plan on the table: asked, Switch only sends nothing
-	const m = await load({}, { answers: ["Switch mode only"], entries: [{ type: "message", message: { role: "assistant", content: [{ type: "text", text: PLAN }] } }] }); await m.start(d);
+	const m = await load({}, { answers: ["Switch mode only"], entries: [{ type: "message", message: { role: "assistant", content: [{ type: "text", text: PLAN }], stopReason: "stop" } }] }); await m.start(d);
 	await m.commands.plan.handler("", m.ctx(d)); await m.commands.plan.handler("", m.ctx(d));
 	t("leaving by hand: asked once, nothing sent", [m.selects.length, m.emitted.filter(([c]) => c === "user").length], [1, 0]);
 	t("leaving by hand: unrestricted again", await m.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	const msg = (text) => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" } });
+	const br = await load({}, { entries: [msg(PLAN)], branch: [msg("No plan on this branch.")] }); await br.start(d);
+	await br.commands.plan.handler("", br.ctx(d)); await br.commands.plan.handler("", br.ctx(d));
+	t("leaving by hand: the current branch is read, not every entry", br.selects.length, 0);
 	t("leaving by hand: no prompt section", (() => { const s = {}; m.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), []);
 	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
 	t("plan alone, child: inert", Object.keys(c.handlers).length, 0);
@@ -408,6 +416,14 @@ const blocked = (r) => r?.block === true;
 	t("orchestrator leaves back to plan", [modes(o).at(-1)?.role, blocked(await o.call(d, "write", { path: join(d, "src/b.txt") }))], ["plan", true]);
 	await o.commands.plan.handler("", o.ctx(d));
 	t("plan leaves to unrestricted", [modes(o).at(-1)?.off, await o.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
+	// plan -> orchestrator -> plan again: no bouncing between the two on the way out
+	await o.commands.plan.handler("", o.ctx(d)); await o.commands.orchestrator.handler("", o.ctx(d)); await o.commands.plan.handler("", o.ctx(d));
+	t("back into plan from the orchestrator", modes(o).at(-1)?.role, "plan");
+	await o.commands.plan.handler("", o.ctx(d));
+	t("  then out: unrestricted, not the orchestrator", [modes(o).at(-1)?.off, await o.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
+	await o.commands.orchestrator.handler("", o.ctx(d)); await o.commands.plan.handler("", o.ctx(d)); await o.commands.orchestrator.handler("", o.ctx(d));
+	await o.commands.orchestrator.handler("", o.ctx(d));
+	t("orchestrator -> plan -> orchestrator, then out: unrestricted", [modes(o).at(-1)?.off, await o.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
 	delete process.env.LETS_CODE_ORCHESTRATOR_ON; delete process.env.LETS_CODE_PLAN_ON; process.env.LETS_CODE_MANDATE_ON = "1";
 }
 // --- mandate on: plan goes back to the mode it was entered from
@@ -417,13 +433,36 @@ const blocked = (r) => r?.block === true;
 	const role = () => h.emitted.filter(([c]) => c === "lets-code:mode").at(-1)?.[1]?.role;
 	await h.shortcuts["ctrl+alt+p"].handler(h.ctx(d));
 	t("mandate: ctrl+alt+p enters plan", role(), "plan");
-	await h.handlers.agent_end({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: PLAN }] }] }, h.ctx(d));
+	await h.handlers.agent_end({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: PLAN }], stopReason: "stop" }] }, h.ctx(d));
 	t("mandate: Execute goes back to ask, not auto", role(), "ask");
 	t("mandate: execute message sent", h.emitted.at(-1)?.[0], "user");
 	await h.commands.mode.handler("plan", h.ctx(d)); await h.commands.plan.handler("", h.ctx(d));
 	t("mandate: /mode plan then /plan: back to ask", role(), "ask");
 	const a = await load({ LETS_CODE_MODE: "plan" }); await a.start(d); await a.commands.plan.handler("", a.ctx(d));
 	t("mandate: started in plan, /plan leaves to the default", a.emitted.filter(([c]) => c === "lets-code:mode").at(-1)?.[1]?.role, "auto");
+	// the heading forms a model writes
+	const forms = { "## Plan": "## Plan\n1. a", "### Plan:": "### Plan:\n1. a", "**Plan**:": "**Plan**:\n1. a", "**Plan:**": "**Plan:**\n1. a", "**Plan** alone": "**Plan**\n1. a" };
+	for (const [name, text] of Object.entries(forms)) {
+		const f = await load({ LETS_CODE_MODE: "plan" }, { answers: ["Stay in plan mode"] }); await f.start(d);
+		await f.handlers.agent_end({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: `Read it.\n\n${text}` }], stopReason: "stop" }] }, f.ctx(d));
+		t(`a plan under "${name}" is asked about`, f.selects.length, 1);
+	}
+	const no = await load({ LETS_CODE_MODE: "plan" }); await no.start(d);
+	await no.handlers.agent_end({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "Planning to look at x next.\nThe plan is unclear." }], stopReason: "stop" }] }, no.ctx(d));
+	t("prose that mentions a plan: no dialog", no.selects.length, 0);
+}
+// --- tools across roles: each allowlist from the saved set; late tools survive
+{
+	const h = await load({ LETS_CODE_MODE: "auto" }, { tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent", "codemode"] }); const d = repo(); await h.start(d);
+	await h.commands.mode.handler("orchestrator", h.ctx(d));
+	t("orchestrator: no codemode", h.tools().includes("codemode"), false);
+	await h.commands.plan.handler("", h.ctx(d));
+	t("orchestrator -> plan: codemode back (plan allows it)", h.tools().includes("codemode"), true);
+	h.addTool("mcp__late__x");
+	await h.commands.mode.handler("developer", h.ctx(d));
+	t("plan -> developer: edit and write back", ["edit", "write"].every((x) => h.tools().includes(x)), true);
+	await h.commands.mode.handler("auto", h.ctx(d));
+	t("back to auto: everything from before, and the late tool", ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent", "codemode", "mcp__late__x"].every((x) => h.tools().includes(x)), true);
 }
 t("deny log written", readFileSync(process.env.LETS_CODE_MANDATE_LOG, "utf8").split("\n").filter((l) => l.includes('"deny"')).length > 5, true);
 

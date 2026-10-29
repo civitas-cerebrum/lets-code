@@ -234,9 +234,19 @@ nest. The approval works like Claude Code's: on `agent_end` in plan mode
 with a UI, if the last reply has a `Plan:` heading, one dialog per plan:
 execute (leave plan, keep the plan with `appendEntry("lets-code-plan")`,
 send the execute message as a follow-up), refine (the plan in the editor,
-sent back as the next message), or stay. The Claude Code adapter now takes
-`permission_mode` from the mode event when there is one, so hooks see a
-runtime `/plan` as `plan`.
+sent back as the next message), or stay; only after a reply that ended
+normally (`stopReason` "stop"), not an aborted or cut-off one. The Claude
+Code adapter now takes `permission_mode` from the mode event when there is
+one, so hooks see a runtime `/plan` as `plan`. Plan allows `subagent` and
+`expert`, so a child would have run unrestricted (dormant: its mandate
+returns early; on: it got the launch mode). The mandate now leaves the live
+mode on `globalThis.__letsCodeMode`, and the subagent tool starts a child
+of a plan-mode parent as `readonly` (or its file's role if that writes
+nothing in the project: plan, reviewer, researcher) with
+`LETS_CODE_MANDATE_ON=1`; other live modes reach the child the same way.
+An allowlist role now filters from the tools saved before the first one,
+so orchestrator -> plan keeps `codemode`, and leaving restores those plus
+any tool that became active meanwhile (late MCP or expert tools).
 
 The first live use (Haiku on the phone, "a simple chess game, start fresh")
 never reached a stage: `cd` was denied, the factory refused a folder that

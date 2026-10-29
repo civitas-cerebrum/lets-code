@@ -5206,7 +5206,8 @@ export default function (pi: ExtensionAPI) {
 	let role: Role = BUILTIN.roles.auto;
 	let allowedForSession = new Set<string>();   // "bash:<group>" | "external" | "mcp:<server>"
 	let cwd = process.cwd();
-	let savedTools: string[] | null = null;
+	let savedTools: string[] | null = null;   // the active tools before a role with an allowlist
+	let lastSet: string[] | null = null;      // what that allowlist left active
 
 	const log = (event: string, detail: Record<string, unknown>) => {
 		try { mkdirSync(dirname(LOG), { recursive: true }); appendFileSync(LOG, JSON.stringify({ t: Date.now(), role: roleName, event, ...detail }) + "\n"); } catch { /* never fatal */ }
@@ -5219,11 +5220,14 @@ export default function (pi: ExtensionAPI) {
 		if (!manifest.roles[name]) { warn(ctx, `mandate: unknown role '${name}', using '${manifest.default}'`); name = manifest.default ?? "auto"; }
 		const prev = roleName; roleName = name; role = roleFor(manifest, name);
 		// plan-like roles: drop tools outside the allowlist from the active set; restore on exit
+		// (from the saved set, so role -> role keeps what the next allows; tools
+		// that became active meanwhile, late MCP or expert tools, are kept too)
+		const late = () => (lastSet ? pi.getActiveTools().filter((t) => !lastSet!.includes(t)) : []);
 		if (role.tools) {
-			if (!savedTools) savedTools = pi.getActiveTools();
+			savedTools = savedTools ? [...new Set([...savedTools, ...late()])] : pi.getActiveTools();
 			const allowed = new Set(role.tools);
-			pi.setActiveTools(pi.getActiveTools().filter((t) => allowed.has(t)));
-		} else if (savedTools) { pi.setActiveTools(savedTools); savedTools = null; }
+			lastSet = savedTools.filter((t) => allowed.has(t)); pi.setActiveTools(lastSet);
+		} else if (savedTools) { pi.setActiveTools([...new Set([...savedTools, ...late()])]); savedTools = null; lastSet = null; }
 		if (ctx?.hasUI) ctx.ui.setStatus("mandate", role.bypass ? "mode: yolo" : `mode: ${role.label ?? name}`);
 		if (announce) { pi.events.emit("lets-code:mode", { role: name, network: role.network ?? "on", bypass: !!role.bypass, sandbox: role.sandbox ?? {}, ...(on ? {} : { off: true }) }); if (prev !== name) log("mode", { from: prev, to: name }); }
 	}
@@ -5247,7 +5251,10 @@ export default function (pi: ExtensionAPI) {
 	// into the orchestrator (a factory run, /orchestrator, /mode), and back out
 	function orchestrate(ctx: ExtensionContext | undefined, reason = ""): boolean {
 		if (on && roleName === "orchestrator") return false;
-		before = on ? roleName : ""; goTo(ctx, "orchestrator");
+		// back to an orchestrator plan was entered from: no pointer back to plan (no loop)
+		if (on && roleName === "plan" && planFrom === "orchestrator") planFrom = "";
+		else before = on ? roleName : "";
+		goTo(ctx, "orchestrator");
 		log("orchestrate", { reason, from: before || "off" });
 		if (reason && ctx?.hasUI) ctx.ui.notify(`mode: orchestrator (${reason}): experts make the changes; /orchestrator leaves it`, "info");
 		return true;
@@ -5258,7 +5265,10 @@ export default function (pi: ExtensionAPI) {
 	// into plan mode, and back to the mode it was entered from
 	function enterPlan(ctx: ExtensionContext | undefined): void {
 		if (on && roleName === "plan") return;
-		planFrom = on ? roleName : ""; goTo(ctx, "plan");
+		// back to a plan the orchestrator was entered from: likewise
+		if (on && roleName === "orchestrator" && before === "plan") before = "";
+		else planFrom = on ? roleName : "";
+		goTo(ctx, "plan");
 	}
 	function leavePlan(ctx: ExtensionContext | undefined): void {
 		const back = backFrom(planFrom, "plan"); planFrom = ""; goTo(ctx, back);
@@ -5326,6 +5336,9 @@ export default function (pi: ExtensionAPI) {
 
 	// --- commands and shortcuts (main session only; a subagent keeps its role)
 	if (subagentDepth > 0 || process.env.LETS_CODE_ROLE) return;
+	// the live mode for the subagent tool ("" unrestricted): a child started
+	// in plan mode runs read-only
+	(globalThis as any).__letsCodeMode = () => (on ? roleName : "");
 	if (ACTIVE || ORCHESTRATOR) {
 		// the factory module engages the orchestrator when a run starts or resumes
 		(globalThis as any).__letsCodeOrchestrate = (ctx: ExtensionContext | undefined, reason?: string) => orchestrate(ctx, reason);
@@ -5359,7 +5372,7 @@ export default function (pi: ExtensionAPI) {
 		// a finished plan: execute it, refine it, or stay (asked once per plan)
 		pi.on("agent_end", async (event: any, ctx) => {
 			if (!on || roleName !== "plan" || !ctx?.hasUI) return;
-			const plan = planOf(lastAssistantText(ctx, event?.messages));
+			const plan = planOf(lastAssistantText(ctx, event?.messages, true));
 			if (!plan || plan === askedPlan) return;
 			askedPlan = plan;
 			const choice = await ctx.ui.select("Plan ready. What next?", ["Execute the plan", "Refine the plan", "Stay in plan mode"]);
@@ -5397,24 +5410,27 @@ export default function (pi: ExtensionAPI) {
 	// leaving plan with a plan on the table: the plan to execute, or ""
 	async function leavePlanIfNeeded(ctx: ExtensionContext, next: string): Promise<string> {
 		if (!on || roleName !== "plan" || next === "plan" || !ctx.hasUI) return "";
-		const plan = planOf(lastAssistantText(ctx));
+		const plan = planOf(lastAssistantText(ctx, undefined, true));
 		if (!plan) return "";
 		const choice = await ctx.ui.select("A plan is on the table. Execute it now?", ["Execute the plan", "Switch mode only"]);
 		return choice === "Execute the plan" ? plan : "";
 	}
+	// "Plan:", "**Plan**:", "**Plan:**", "## Plan:", or a heading "## Plan" / "**Plan**" alone
 	function planOf(text: string): string {
-		const m = /(^|\n)\s*#*\s*\**Plan:/i.exec(text);
-		return m ? text.slice(m.index).trim() : "";
+		const at = [/(^|\n)[ \t]*(#{1,6}[ \t]*)?(\*\*|__)?Plan(\*\*|__)?[ \t]*:/i, /(^|\n)[ \t]*(#{1,6}[ \t]*(\*\*)?|\*\*)Plan(\*\*)?[ \t]*(?=\r?\n|$)/i]
+			.map((r) => r.exec(text)?.index ?? -1).filter((i) => i >= 0);
+		return at.length ? text.slice(Math.min(...at)).trim() : "";
 	}
 	function textOf(m: any): string {
 		const c = m?.content;
 		return typeof c === "string" ? c : Array.isArray(c) ? c.filter((x: any) => x?.type === "text").map((x: any) => x.text).join("\n") : "";
 	}
-	function lastAssistantText(ctx: ExtensionContext, messages?: any[]): string {
+	// finished: only a reply that ended normally (not aborted, cut off or failed)
+	function lastAssistantText(ctx: ExtensionContext, messages?: any[], finished = false): string {
 		try {
-			const list: any[] = Array.isArray(messages) ? messages
-				: ((ctx.sessionManager as any).getEntries?.() ?? (ctx.sessionManager as any).getBranch?.() ?? []).map((e: any) => e?.message);
-			for (let i = list.length - 1; i >= 0; i--) if (list[i]?.role === "assistant") return textOf(list[i]);
+			const sm = ctx.sessionManager as any;
+			const list: any[] = Array.isArray(messages) ? messages : ((sm.getBranch?.() ?? sm.getEntries?.() ?? []) as any[]).map((e: any) => e?.message);
+			for (let i = list.length - 1; i >= 0; i--) if (list[i]?.role === "assistant") return finished && list[i].stopReason !== "stop" ? "" : textOf(list[i]);
 		} catch { /* fall through */ }
 		return "";
 	}
@@ -6098,6 +6114,8 @@ async function childDialog(c: Child, ev: any): Promise<void> {
 }
 
 // also the runner of the Claude Code adapter's workflow agents
+// roles that write nothing in the project: what a child started in plan mode may keep
+const PLAN_SAFE = new Set(["readonly", "plan", "reviewer", "researcher"]);
 export function runAgent(agent: AgentDef, task: string, cwd: string, signal: AbortSignal | undefined, onProgress?: (line: string) => void, meta?: RunMeta): Promise<RunResult> {
 	const rec = newRun(agent, task, cwd, meta);
 	// the child's own session, next to its transcript: a real pi session file
@@ -6130,7 +6148,12 @@ export function runAgent(agent: AgentDef, task: string, cwd: string, signal: Abo
 	// an agent with a team (the tester and its specialists) starts those experts
 	// itself: one level more for it alone, its team named; they start nothing
 	if (agent.team?.length && agent.source === "user") { env.LETS_CODE_SUBAGENT_MAX_DEPTH = String(DEPTH + 2); env.LETS_CODE_EXPERT_TEAM = agent.team.join(","); }
-	const role = agent.role || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "";
+	// the parent's live mode (/plan, /mode at runtime) over the launch one; in
+	// plan mode a child runs read-only (its file's role if that is no wider),
+	// with its mandate on even where the parent's is dormant
+	const live: string | undefined = (() => { try { return (globalThis as any).__letsCodeMode?.(); } catch { return undefined; } })();
+	let role = agent.role || (live && live !== "orchestrator" ? live : "") || process.env.LETS_CODE_ROLE || process.env.LETS_CODE_MODE || "";
+	if (live === "plan") { role = PLAN_SAFE.has(agent.role ?? "") ? agent.role! : "readonly"; env.LETS_CODE_MANDATE_ON = "1"; }
 	if (role) env.LETS_CODE_ROLE = role;
 	if (agent.agentDir) env.PI_CODING_AGENT_DIR = agent.agentDir;
 	rec.spawn = { args, env, unset: [...(role ? [] : ["LETS_CODE_ROLE"]), ...(env.LETS_CODE_EXPERT_TEAM ? [] : ["LETS_CODE_EXPERT_TEAM"])], cwd };
@@ -11929,7 +11952,8 @@ export default function (pi: ExtensionAPI) {
 	// before ours: before a session exists, only remember the mode, and let
 	// session_start initialise with it.
 	let lastCtx: ExtensionContext | undefined;
-	pi.events.on("lets-code:mode", (data: unknown) => { mode = data as Mode; if (lastCtx) void init(lastCtx); });
+	// off: the mandate is dormant (mandate off, no mode entered): no role overrides
+	pi.events.on("lets-code:mode", (data: unknown) => { mode = (data as any)?.off ? undefined : data as Mode; if (lastCtx) void init(lastCtx); });
 
 	// The bash tool is replaced with one whose operations run sandboxed when
 	// the sandbox is up, and plain otherwise. Registered at load so the tool

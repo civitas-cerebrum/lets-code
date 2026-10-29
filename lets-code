@@ -5889,6 +5889,11 @@ export class Child {
 		let ev: any; try { ev = JSON.parse(line); } catch { return; }
 		if (ev?.type === "response") { const w = this.waiting.get(ev.id); if (w) { this.waiting.delete(ev.id); w(ev); } return; }
 		if (ev?.type === "extension_ui_request") { void childDialog(this, ev); return; }
+		// pi's own queue (what it holds, as it holds it): a text it expanded or a hook changed still leaves it
+		if (ev?.type === "queue_update" && Array.isArray(ev.steering) && Array.isArray(ev.followUp)) {
+			this.queued = [...ev.steering.map((text: unknown) => ({ text: String(text), kind: "steer" as const })), ...ev.followUp.map((text: unknown) => ({ text: String(text), kind: "followUp" as const }))];
+			notifyRuns(this.rec); return;
+		}
 		if (ev?.type === "message_end" && ev.message?.role === "user" && this.queued.length) {
 			const t = lastText(ev.message.content).trim(), i = this.queued.findIndex((q) => q.text.trim() === t);
 			if (i >= 0) this.queued.splice(i, 1);
@@ -6290,6 +6295,7 @@ interface ViewState {
 	nav?: boolean; sel?: number; confirm?: boolean;   // the footer navigator has the keys; its selected row
 	expanded?: boolean;                               // the navigator shows the whole list (from the short list's "more" row)
 	followUpNext?: boolean;               // the follow-up key was pressed: the next prompt is a follow-up
+	typed?: string;                       // in place: a slash text typed for the child, taken by the input hook
 	inplace?: { run: string; chat: any; pending: any; status: any };   // a child shown in place while the main session works
 	mainBusy?: boolean;                   // the main session's turn is running (agent_start .. agent_settled)
 	picker: boolean;
@@ -6668,7 +6674,10 @@ function setupSessions(pi: ExtensionAPI) {
 						// (the new state is known at once: pi may write its setting a moment later)
 						if (action(data, "app.thinking.toggle")) { const v = !hideThinking(); setTimeout(() => { hideMemo = { at: Date.now() + 2000, v }; repaint(); }, 0); return undefined; }
 						if (action(data, "app.tools.expand")) { setTimeout(repaint, 0); return undefined; }
-						if (action(data, "app.message.followUp")) { vs.followUpNext = true; setTimeout(() => { vs.followUpNext = false; }, 500); return undefined; }
+						if (action(data, "app.message.followUp")) {
+							if (vs.inplace && typedForChild(String(reg.ui?.getEditorText?.() ?? "").trim(), "followUp")) return { consume: true };
+							vs.followUpNext = true; setTimeout(() => { vs.followUpNext = false; }, 500); return undefined;
+						}
 						if (action(data, "app.message.dequeue")) {
 							const r = viewed(), c = r && (reg as any).children?.get(r.id);
 							if (!c?.queued?.length) return undefined;   // nothing queued: pi says so
@@ -6709,6 +6718,9 @@ function setupSessions(pi: ExtensionAPI) {
 							if (th) { try { reg.ui.setEditorText(""); } catch { /* keep going */ } void forward({ type: "set_thinking_level", level: th[1] }, `thinking ${th[1]}`); return { consume: true }; }
 							if (IN_PLACE_DEFER.test(text)) { vs.resubmit = text; command("refresh"); return { consume: true }; }
 						}
+						// in place, a message for the child goes to it from here: through pi's
+						// submit it is the main session's input (queued there while it compacts)
+						if (vs.inplace && typedForChild(text, "steer")) return { consume: true };
 						// /resume lists the sessions of the session that is open: from a
 						// child's, that would be the runs; it opens in the main session
 						if (/^\/resume$/.test(text) && !vs.resubmit) {
@@ -6758,22 +6770,50 @@ function setupSessions(pi: ExtensionAPI) {
 		// the main session ends (quit, /new, /resume elsewhere): its children go; our own switches and /reload keep them
 		if (!reg.switching && event?.reason !== "reload") killChildren();
 	});
+	// a message for the viewed child: a steer or follow-up while it works, else its next turn
+	const toChild = (r: RunRecord, text: string, kind: "steer" | "followUp", images?: unknown[]) => {
+		const c = childOf(r);
+		if (c.busy) void c.steer(text, kind, images).then((res) => { if (!res?.success) notify(`${r.agent}: ${res?.error ?? "the message was refused"}`, "error"); });
+		else {
+			if (!r.spawn) { notify("This run predates restartable subagents; it cannot go on.", "warning"); return; }
+			void c.prompt(text, { images }).then((x) => { if (x.exitCode !== 0 && !x.stopped && x.exitCode !== 130) notify(`${r.agent}: ${(x.stderr || "the turn failed").trim().slice(-200)}`, "error"); });
+		}
+		repaint();
+	};
+	// In place the TUI's session is the main session, so its input hook also
+	// sees the main session's own input: messages queued while it compacted
+	// (pi submits them when compaction ends), other extensions' messages. A
+	// message typed for the child goes to it from the key hook (it never
+	// enters pi's submit, whose compaction queue is the main session's); a
+	// slash text (a prompt template or skill) is marked there and taken here.
+	const typedForChild = (text: string, kind: "steer" | "followUp"): boolean => {
+		vs.typed = undefined;
+		if (!text) return false;
+		const ed = (reg as any).tui?.focusedComponent;
+		try { if (ed?.isShowingAutocomplete?.()) return false; } catch { /* as typed */ }
+		if (text.startsWith("/")) { vs.typed = text; return false; }   // pi's command, or a template the input hook takes
+		const r = viewed();
+		if (!r) return false;
+		try { ed?.addToHistory?.(text); } catch { /* no history */ }
+		try { reg.ui?.setEditorText?.(""); } catch { /* keep going */ }
+		toChild(r, text, kind);
+		return true;
+	};
 	// in a child's session, the editor talks to the child; this view's own command text never reaches the model
 	pi.on("input", (event: any) => {
 		const text = String(event?.text ?? "");
 		if (/^\/subagents(\s|$)/.test(text.trim())) return { action: "handled" };
 		if (!inChild()) return undefined;
+		if (vs.inplace) {   // the main session's own input, not the child's (see typedForChild)
+			if ((event?.source && event.source !== "interactive") || !vs.typed || text.trim() !== vs.typed) return undefined;
+			vs.typed = undefined;
+		}
 		const r = viewed();
 		if (!r) { notify("This subagent's run is not known here any more.", "warning"); return { action: "handled" }; }
 		if (!text.trim()) return { action: "handled" };
-		const c = childOf(r), images = Array.isArray(event?.images) && event.images.length ? event.images : undefined;
+		const images = Array.isArray(event?.images) && event.images.length ? event.images : undefined;
 		const kind = vs.followUpNext ? "followUp" : "steer"; vs.followUpNext = false;
-		if (c.busy) void c.steer(text, kind, images).then((res) => { if (!res?.success) notify(`${r.agent}: ${res?.error ?? "the message was refused"}`, "error"); });
-		else {
-			if (!r.spawn) { notify("This run predates restartable subagents; it cannot go on.", "warning"); return { action: "handled" }; }
-			void c.prompt(text, { images }).then((x) => { if (x.exitCode !== 0 && !x.stopped && x.exitCode !== 130) notify(`${r.agent}: ${(x.stderr || "the turn failed").trim().slice(-200)}`, "error"); });
-		}
-		repaint();
+		toChild(r, text, kind, images);
 		return { action: "handled" };
 	});
 	// ! and !! in a child's session run in the child (and land in its session);

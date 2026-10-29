@@ -5714,7 +5714,9 @@ export default function (pi: ExtensionAPI) {
 	const warn = (ctx: ExtensionContext | undefined, m: string) => { if (ctx?.hasUI) ctx.ui.notify(m, "warning"); log("warn", { m }); };
 
 	function apply(ctx: ExtensionContext | undefined, name: string, announce = true) {
-		// the orchestrator is the main session's: a child that would inherit it gets the default
+		// the orchestrator is the main session's: a child that would inherit it
+		// gets the default. A child in ask keeps ask's limits but never asks
+		// (decide refuses instead): it is not loosened to auto
 		if (name === "orchestrator" && subagentDepth > 0) name = manifest.default && manifest.default !== name ? manifest.default : "auto";
 		if (!manifest.roles[name]) { warn(ctx, `mandate: unknown role '${name}', using '${manifest.default}'`); name = manifest.default ?? "auto"; }
 		const prev = roleName; roleName = name; role = roleFor(manifest, name);
@@ -5780,6 +5782,9 @@ export default function (pi: ExtensionAPI) {
 		if (d === "allow") return undefined;
 		if (d === "deny") { log("deny", { key, what }); return { block: true, reason: short(`mandate(${roleName}): ${what} is not allowed in this mode.${why()}`) }; }
 		if (ok || allowedForSession.has(key)) return undefined;
+		// a subagent does not ask the user (its dialogs would reach the user
+		// past the orchestrator): what needs approval is refused, for its report
+		if (subagentDepth > 0) { log("deny", { key, what, why: "subagent" }); return { block: true, reason: short(`mandate(${roleName}): ${what} needs the user's approval, and a subagent does not ask the user: do without it, or name it in your report.`) }; }
 		if (!ctx.hasUI) { log("deny", { key, what, why: "no-ui" }); return { block: true, reason: short(`mandate(${roleName}): ${what} needs approval and no one can be asked in this mode.`) }; }
 		const choice = await ctx.ui.select(`mandate (${roleName}): ${what}\n\nAllow?`, ["Allow once", "Allow for this session", "Deny"]);
 		if (choice === "Allow for this session") allowedForSession.add(key);
@@ -12324,6 +12329,8 @@ export default function (pi: ExtensionAPI) {
 			if (!sessionAllowed.has(key)) {
 				const what = short(name === "Bash" ? String(ci.command ?? "") : String(ci.file_path ?? ci.path ?? JSON.stringify(ci)), 160);
 				if (!ctx.hasUI) return { block: true, reason: short(`${p.rule ? `Claude Code rule ${p.rule}` : hookAsk} needs approval and no one can be asked here.`) };
+				// a subagent does not ask the user (its dialog would reach them past the orchestrator)
+				if (DEPTH > 0) return { block: true, reason: short(`${p.rule ? `Claude Code rule ${p.rule}` : hookAsk} needs the user's approval, and a subagent does not ask the user: do without it, or name it in your report.`) };
 				const choice = await ctx.ui.select(`claude code: ${p.rule ? `rule ${p.rule}` : hookAsk} asks before\n${name}: ${what}\n\nAllow?`, ["Allow once", "Allow for this session", "Deny"]);
 				if (choice === "Allow for this session") sessionAllowed.add(key);
 				else if (choice !== "Allow once") return { block: true, reason: short(`The user did not approve ${name}: ${what}`) };

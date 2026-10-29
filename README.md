@@ -634,7 +634,10 @@ are on, the orchestrator mode is there, dormant until a run or
 `/orchestrator` starts it (`--no-mandate` turns it off). Plan mode is there
 with `MANDATE=false` as well: `/plan` and `ctrl+alt+p` enter it, leaving it
 returns to the unrestricted session (`--no-mandate` turns it off). A subagent never
-inherits it: a child that would gets the default mode. A denied
+inherits the orchestrator: a child that would gets the default mode. You
+talk to the main session only, so a subagent never asks you to approve
+anything: under `ask` (or a Claude Code `ask` rule) what would be asked
+about is refused, and the subagent reports that instead. A denied
 call costs the model one line under 200 characters; allowed calls cost
 nothing. Denials are logged to `~/.pi/agent/lets-code-mandate.log`.
 

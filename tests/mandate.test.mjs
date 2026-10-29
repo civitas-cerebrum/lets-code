@@ -328,6 +328,27 @@ const blocked = (r) => r?.block === true;
 	t("orchestrator child: gets the default role", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
 	t("orchestrator child: no orchestrator hook command", Object.keys(h.commands).length, 0);
 }
+// --- a child never asks the user: in ask mode what ask would ask about is refused
+{
+	const h = await load({ LETS_CODE_MODE: "ask", LETS_CODE_ROLE: "ask", LETS_CODE_SUBAGENT_DEPTH: "1" }, { answers: ["Allow once"] }); const d = repo(); await h.start(d);
+	const r = await h.call(d, "bash", { command: "npm install left-pad" });
+	t("ask child: what ask would ask about is refused, with no dialog (not loosened to auto)", [blocked(r), /does not ask the user/.test(r?.reason ?? ""), h.selects.length], [true, true, 0]);
+	t("ask child: the rest runs", await h.call(d, "bash", { command: "ls" }), undefined);
+	t("ask child: a write outside the project is refused too", blocked(await h.call(d, "write", { path: join(repo(), "x.txt") })), true);
+}
+{
+	// a role of the user's whose rule says ask: refused in a child, with no dialog
+	writeFileSync(join(agentDir, "mandate.json"), JSON.stringify({ roles: { careful: { bash: { "*": "allow", "package-install": "ask" } } } }));
+	const h = await load({ LETS_CODE_ROLE: "careful", LETS_CODE_SUBAGENT_DEPTH: "1" }, { answers: ["Allow once"] }); const d = repo(); await h.start(d);
+	const r = await h.call(d, "bash", { command: "npm install left-pad" });
+	t("child: an ask rule is refused without a dialog", [blocked(r), /does not ask the user/.test(r?.reason ?? ""), h.selects.length], [true, true, 0]);
+	t("child: the rest of its role still runs", await h.call(d, "bash", { command: "ls" }), undefined);
+	rmSync(join(agentDir, "mandate.json"));
+}
+{
+	const h = await load({ LETS_CODE_ROLE: "ask" }, { answers: ["Allow once"] }); const d = repo(); await h.start(d);
+	t("main session in ask: still asks the user", [await h.call(d, "bash", { command: "npm install left-pad" }), h.selects.length], [undefined, 1]);
+}
 // --- mandate off: the orchestrator alone, dormant until engaged
 {
 	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_ORCHESTRATOR_ON = "1";

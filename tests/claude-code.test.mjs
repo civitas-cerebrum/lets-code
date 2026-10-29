@@ -421,6 +421,11 @@ async function load(cwd, env = {}) {
 	t("child: no commands", Object.keys(x.commands), []);
 	await x.emit("session_start", { reason: "startup" }, x.ctx(null));
 	t("child: PreToolUse hooks apply", (await x.emit("tool_call", { toolName: "bash", toolCallId: "8", input: { command: "rm x" } }, x.ctx(null)))?.block, true);
+	{
+		const before = x.selects.length;
+		const r = await x.emit("tool_call", { toolName: "bash", toolCallId: "9", input: { command: "git push origin main" } }, x.ctx({ answer: "Allow once" }));
+		t("child: an ask rule is refused, with no dialog relayed to the user", [r?.block, /does not ask the user/.test(r?.reason ?? ""), x.selects.length - before], [true, true, 0]);
+	}
 	t("child: Stop hooks do not run as Stop", await x.emit("agent_before_settle", { outcome: "completed", continue: false, entries: [], context: { llmMessages: [] } }, x.ctx(null)), undefined);
 	rmSync(join(claude, "settings.json"));
 }

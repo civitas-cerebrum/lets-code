@@ -170,7 +170,9 @@ path scopes (symlink-resolved), bash command groups over a small shell lexer
 (operators, quotes, `sh -c`, `$(...)`, heredoc bodies as data, env/wrapper
 prefixes, redirection targets), MCP by server name, dispatch rights for the
 `subagent` tool. `ask` prompts through `ctx.ui.select` (once / session /
-deny) and blocks without a UI; denies are one line under 200 characters and
+deny) and blocks without a UI and in a subagent (the user talks to the main
+session only, so a child never puts a dialog in front of them; it does
+without, or names the refusal in its report); denies are one line under 200 characters and
 go to a JSONL log. The design is kernel-mandate's manifest idea made cheap
 for pi: no role tags in prompts (the role travels in the environment of the
 child process lets-code spawns), no multi-paragraph denials, and no second
@@ -224,6 +226,9 @@ the mandate leaves on `globalThis` (the two modules are loaded separately);
 the mode's prompt reaches the model on its next turn, so the run's result
 says it as well. It is the main session's role only: a child that would
 inherit it (`LETS_CODE_MODE` travels in the environment) gets the default.
+A child that inherits `ask` keeps its limits but never asks: what `ask`
+would ask about is refused (not loosened to `auto`); so are the Claude Code
+adapter's `ask` rules and hooks in a child.
 The mandate is off by default, so where the experts are on and the mandate
 is not, the launcher still writes the module with
 `LETS_CODE_ORCHESTRATOR_ON=1`: it enforces nothing and registers only

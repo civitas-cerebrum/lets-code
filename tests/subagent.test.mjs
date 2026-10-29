@@ -904,6 +904,33 @@ async function load(env = {}) {
 	await new Promise((r2) => setTimeout(r2, 150));
 	t("in place: a main-session level change is left alone and not passed on", [globalThis.__piLevel, r.stats?.thinkingLevel, cmds().filter((c) => c.type === "set_thinking_level" && c.pid === pid).length, reg().view.mainLevel], ["xhigh", "high", 0, undefined]);
 	globalThis.__piLevel = "minimal";
+	// #73: in place the input hook is the main session's too; only what is typed for the child goes to it
+	const prompts = () => cmds().filter((c) => c.type === "prompt").map((c) => c.message);
+	t("in place: the main session's queued message (submitted by pi after compaction) stays the main session's", [await h.handlers.input({ text: "main's own queued", source: "interactive" }, { ui }), prompts().includes("main's own queued")], [undefined, false]);
+	t("in place: another extension's message stays the main session's", [await h.handlers.input({ text: "Execute the plan", source: "extension" }, { ui }), prompts().includes("Execute the plan")], [undefined, false]);
+	const hist = []; ed.addToHistory = (x) => hist.push(x);
+	editor = "hang for the child";
+	t("in place: Enter sends the typed message to the child itself, never through pi's submit", [termHandler("\r")?.consume, editor, hist], [true, "", ["hang for the child"]]);
+	await wait(() => prompts().includes("hang for the child") && r.status === "running");
+	t("in place: the typed message is the child's next turn", [prompts().includes("hang for the child"), r.status], [true, "running"]);
+	editor = "and later";
+	t("in place: alt+enter sends a follow-up to the child itself", [termHandler("\x1b\r")?.consume, editor], [true, ""]);
+	await wait(() => cmds().some((c) => c.message === "and later"));
+	t("in place: the follow-up is the child's, queued in the child", [cmds().some((c) => c.message === "and later" && c.streamingBehavior === "followUp"), mod.childOf(r).queued.map((q) => [q.text, q.kind])], [true, [["and later", "followUp"]]]);
+	editor = "/tpl go";
+	t("in place: a slash text is pi's to submit (a template or skill)", termHandler("\r"), undefined);
+	t("in place: the slash text typed for the child is taken by the input hook", [(await h.handlers.input({ text: "/tpl go", source: "interactive" }, { ui }))?.action, (await h.handlers.input({ text: "/tpl go", source: "interactive" }, { ui }))], ["handled", undefined]);
+	await wait(() => cmds().some((c) => c.message === "/tpl go"));
+	t("in place: the slash text went to the child", cmds().some((c) => c.message === "/tpl go"), true);
+	editor = "@fil"; ed.isShowingAutocomplete = () => true;
+	t("in place: Enter with pi's autocomplete open is the autocomplete's", termHandler("\r"), undefined);
+	ed.isShowingAutocomplete = () => false; editor = "";
+	// the child's queue follows pi's own (its queue_update), so an expanded or changed text leaves it too
+	mod.childOf(r).handle(JSON.stringify({ type: "queue_update", steering: ["expanded text"], followUp: [] }));
+	t("child queue: pi's queue_update is what is shown", mod.childOf(r).queued.map((q) => [q.text, q.kind]), [["expanded text", "steer"]]);
+	mod.childOf(r).handle(JSON.stringify({ type: "queue_update", steering: [], followUp: [] }));
+	t("child queue: emptied with pi's", mod.childOf(r).queued.length, 0);
+	mod.childOf(r).abort(true); await wait(() => r.status !== "running");
 	// back: pi's own containers again, with what the turn did meanwhile
 	await h.commands.subagents.handler("back", ctx());
 	t("back from in place: pi's containers restored, no switch", [doc.children[2] === chat, tui.children[1] === pending, tui.children[2] === statusC, reg().view.inplace, switched.length], [true, true, true, undefined, 0]);

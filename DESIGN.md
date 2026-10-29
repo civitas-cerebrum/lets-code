@@ -121,6 +121,20 @@ md, markdown, rst, txt, org, adoc, tex, csv). Config files (json, yaml,
 toml, xml, ini, env, lock files) still count: a `package.json`, a CI
 workflow or a `tsconfig.json` can break a build.
 
+Nothing in the guard ends work on its own (#75). The one literal kill is the
+default bash timeout: pi stops the process tree and errors the call, and
+pi's bash tool tells the model there is no default, so a long build or test
+suite died at 300 s and the model never knew to pass a longer `timeout`.
+The prompt section now names the default, a call stopped by it gets a
+one-line hint to rerun with a larger timeout, and `LETS_CODE_BASH_TIMEOUT=0`
+turns it off. The wrap-up note is advice ("finish with a short summary if
+every requirement is covered by a test you ran; otherwise test what is
+missing"), never "make no further tool calls", and `LETS_CODE_WRAP_TURNS=0`
+turns it off. The firm stop that followed an ignored note fired on time
+alone, without re-checking that the tests still passed and with test-file
+edits not counting as work; it is opt-in (`LETS_CODE_FIRM_STOP=1`) and then
+needs the tests passing and no edit of any kind since the note.
+
 A hard thinking budget was once a fixed `samplingParams` value (half the
 output cap) for every level; Qwen3's template ignores the soft hint, so
 low, medium and high were the same configuration. pi's per-level budget is
@@ -464,7 +478,20 @@ hook refuses it, so nothing lands in the main session), `/thinking
 change the open session (`IN_PLACE_DEFER`, ctrl+l, ctrl+x) are held with
 a note until the main session is idle, then run in the child's real
 session. Completed child messages are not added to the main session as
-custom messages in place (the view draws them). When the main session is
+custom messages in place (the view draws them). In place the TUI's session
+is still the main session, so its `input` hook sees the main session's
+own input too: messages typed into the main session while it compacted
+(pi keeps them in its compaction queue and submits them, as `interactive`
+input, when compaction ends) and other extensions' `sendUserMessage`.
+Routing all of that to the viewed child leaked the main session's queued
+messages into the child (#73). So in place a message typed for the child
+goes to it from the key hook (Enter, and the follow-up key as a
+follow-up), never through pi's submit, whose compaction queue would hold
+it for the main session; a slash text (a prompt template or skill) is pi's
+to submit and is marked there, and the `input` hook in place takes only
+that marked text; everything else is the main session's. The child's
+queue as drawn follows its own pi's `queue_update` events (by text match
+on `message_end` as a fallback). When the main session is
 idle the switch is the real one as before (no turn to abort). If pi's
 layout is not as expected the switch is deferred with a note (the last
 resort).

@@ -3033,7 +3033,12 @@ pi_write_sessions_extension() {
 // text), an idle subagent without a turn (its next task reads it). A
 // message carries hops: one sent from a turn a message caused has hops + 1,
 // and a message with hops >= 1 never causes a turn, so two sessions cannot
-// answer each other forever. Then <id>.ack {seenAt} is written for the
+// answer each other forever. The exception is a main session's own
+// subagent (its registry entry's parent is this pid), whose message to its
+// orchestrator is like its report: it starts a turn when the main session is
+// idle and is a follow-up when it is busy, up to CHILD_HOPS hops (the
+// orchestrator asks, the subagent answers, it asks again: each answer is
+// one hop further). Then <id>.ack {seenAt} is written for the
 // sender and the message removed; an id once shown is never shown again.
 // While the main session shows a subagent's own session (/subagents), its
 // messages wait. An inbox left by an earlier process with the same pid is
@@ -3228,9 +3233,11 @@ export function frame(m: any, id: string): string {
 };
 export const hopsOf = (m: any) => { const h = Number(m?.hops); return Number.isInteger(h) && h > 0 ? h : 0; };
 
-export interface DrainOpts { busy: boolean; child: boolean; autoTurn?: boolean; seen?: Set<string>; onShow?: (m: any, triggered: boolean) => void };
+export interface DrainOpts { busy: boolean; child: boolean; autoTurn?: boolean; seen?: Set<string>; onShow?: (m: any, triggered: boolean) => void; ownChild?: (pid: number) => boolean };
+export const CHILD_HOPS = 4;
 // how a message enters the session (see the header)
-export function deliveryOf(o: DrainOpts, hops: number): { triggerTurn: boolean; deliverAs?: string } {
+export function deliveryOf(o: DrainOpts, hops: number, fromOwnChild = false): { triggerTurn: boolean; deliverAs?: string } {
+	if (fromOwnChild && !o.child && hops < CHILD_HOPS) return o.busy ? { triggerTurn: true, deliverAs: "followUp" } : { triggerTurn: true };
 	if (hops >= 1) return { triggerTurn: false };
 	if (o.busy) return { triggerTurn: true, deliverAs: o.child ? "steer" : "followUp" };
 	return { triggerTurn: !o.child && !!o.autoTurn };
@@ -3251,7 +3258,7 @@ export function drain(pi: { sendMessage: (...a: any[]) => void }, pid: number, o
 		let m: any;
 		try { m = statSync(f).size > FILE_MAX ? { from: {}, text: `[a message of ${statSync(f).size} bytes was over the size limit and is not shown]` } : readJson(f); } catch { m = undefined; }
 		if (!m || typeof m !== "object") { try { unlinkSync(f); } catch { /* gone */ } continue; }
-		const hops = hopsOf(m), opts = deliveryOf(o, hops);
+		const hops = hopsOf(m), opts = deliveryOf(o, hops, !!o.ownChild?.(Number(m?.from?.pid)));
 		try { pi.sendMessage({ customType: CUSTOM_TYPE, content: frame(m, id), display: true, details: { from: m.from, sentAt: m.sentAt, hops } }, opts); }
 		catch { break; }   // a stale pi (mid-switch): the next poll delivers it
 		o.seen?.add(id);
@@ -3335,7 +3342,8 @@ export function attach(pi: ExtensionAPI, o: { pid?: number; ppid?: number; depth
 		let b = busy;
 		try { if (typeof ctxRef?.isIdle === "function") b = !ctxRef.isIdle(); } catch { /* a stale ctx: the events' flag */ }
 		try {
-			drain(pi, pid, { busy: b, child: depth > 0, autoTurn, seen: st.seen, onShow: (m, triggered) => {
+			const own = (from: number) => Number.isInteger(from) && from > 0 && liveSessions().some((e) => e.pid === from && e.parentPid === pid);
+			drain(pi, pid, { busy: b, child: depth > 0, autoTurn, seen: st.seen, ownChild: own, onShow: (m, triggered) => {
 				// a turn this message starts or continues: what it sends is one hop further
 				if (triggered) st.causeHops = Math.max(st.causeHops ?? 0, hopsOf(m));
 				notify(m, triggered);
@@ -7013,6 +7021,35 @@ export function detachNote(names: string[]): string {
 	return `Still running in the background (the user opened a subagent's session, which ended this turn): ${names.join(", ") || "the runs of this call"}. Their reports follow in a message when they finish; do not start them again.`;
 }
 export const DELIVER_HEAD = "Reports of the subagent call that went on in the background:";
+// In the interactive main session a call does not hold the session up: it
+// returns after LETS_CODE_SUBAGENT_WAIT seconds (default 0, at once) or its
+// own wait, its runs go on, and their report arrives as a message (a
+// follow-up when the session is busy, else it starts a turn), so the user
+// and the orchestrator keep talking meanwhile. Print and RPC mode, and
+// subagents' own calls, still wait for the report (nothing would take it).
+export const BG_WAIT_S = Math.max(0, Number(process.env.LETS_CODE_SUBAGENT_WAIT ?? "0") || 0);
+export function backgroundAfter(ctx: any, wait?: unknown): number | undefined {
+	if (DEPTH > 0 || !isTui(ctx)) return undefined;
+	const w = Number(wait);
+	return Math.round(Math.min(3600, Math.max(0, wait === undefined || wait === null || !Number.isFinite(w) ? BG_WAIT_S : w)) * 1000);
+}
+export function backgroundNote(runs: RunRecord[]): string {
+	const who = runs.map((r) => `${r.agent} (run ${r.id}${childPid(r) ? `, pid ${childPid(r)}` : ""})`).join(", ") || "the runs of this call";
+	return `Running in the background; this session stays free: ${who}. Their report arrives as a message when they finish (it starts your next turn if you are idle). Meanwhile go on with other work or end your turn; do not wait, poll or start them again. subagent({action: "status"}) shows how each is doing; message({to: <pid>, text}) reaches one without stopping it (its reply comes back as a message); subagent({action: "stop", run}) stops one.`;
+}
+const childPid = (r: RunRecord): number | undefined => (registry() as any).children?.get?.(r.id)?.proc?.pid;
+// subagent({action: "status"}): the runs going on, with what each last said and did
+export function statusText(runs: RunRecord[], now = Date.now()): string {
+	const live = runs.filter((r) => r.status === "running");
+	if (!live.length) return "No subagent or expert is running.";
+	return live.map((r) => {
+		const said = [...r.events].reverse().find((e: any) => e.t === "assistant" && e.blocks?.some((b: any) => b.type === "text" && b.text?.trim())) as any;
+		const text = said ? said.blocks.filter((b: any) => b.type === "text").map((b: any) => b.text).join(" ").replace(/\s+/g, " ").trim() : "";
+		const steps = lastSteps(r);
+		const min = Math.floor((now - r.started) / 60000), sec = Math.floor((now - r.started) / 1000) % 60;
+		return `- ${r.agent} (run ${r.id}${childPid(r) ? `, pid ${childPid(r)}` : ""}): running ${min}m${String(sec).padStart(2, "0")}s, ${r.turns} turns. Task: ${r.task.replace(/\s+/g, " ").slice(0, 120)}${text ? `\n  last said: ${text.length > 300 ? `${text.slice(0, 299)}…` : text}` : ""}${steps ? `\n  last steps: ${steps}` : ""}`;
+	}).join("\n");
+}
 
 // quiet: a reply to a turn the user started in a child; it informs, it starts no turn
 interface Pending { home: string; text: string; isError: boolean; quiet?: boolean }
@@ -7060,13 +7097,16 @@ export function saveFooterOn(on: boolean, file = stateFile()): void {
 // session switch: work gets its own signal, aborted by the call's abort
 // unless that abort comes from a switch (reg.switching); then the call
 // returns detachNote at once and its result is delivered later.
-export function detachable(signal: AbortSignal | undefined, callId: string, work: (signal: AbortSignal, job: { detached: boolean }) => Promise<{ text: string; isError: boolean }>): Promise<{ text: string; isError: boolean }> {
+// With after (ms; see backgroundAfter) the call also detaches once that
+// long has passed, and from then on the call's abort no longer stops it.
+export function detachable(signal: AbortSignal | undefined, callId: string, work: (signal: AbortSignal, job: { detached: boolean }) => Promise<{ text: string; isError: boolean }>, after?: number): Promise<{ text: string; isError: boolean }> {
 	const reg = registry() as Reg, vs = viewState(reg);
 	const home = vs.current;   // the session this call runs in
 	const inner = new AbortController(), job = { detached: false };
 	return new Promise((resolve) => {
-		let settled = false;
+		let settled = false, timer: ReturnType<typeof setTimeout> | undefined;
 		const onAbort = () => {
+			if (job.detached) return;   // in the background: stopped by its own run's stop only
 			if (reg.switching && home && !settled) {
 				settled = true; job.detached = true;
 				const names = reg.runs.filter((r) => r.status === "running" && r.parent?.callId === callId).map((r) => r.agent);
@@ -7076,7 +7116,14 @@ export function detachable(signal: AbortSignal | undefined, callId: string, work
 			inner.abort();
 		};
 		if (signal?.aborted) inner.abort(); else signal?.addEventListener("abort", onAbort, { once: true });
+		if (after !== undefined && home && !signal?.aborted) timer = setTimeout(() => {
+			if (settled) return;
+			settled = true; job.detached = true;
+			signal?.removeEventListener("abort", onAbort);
+			resolve({ text: backgroundNote(reg.runs.filter((r) => r.status === "running" && r.parent?.callId === callId)), isError: false });
+		}, after);
 		const end = (r: { text: string; isError: boolean }) => {
+			if (timer) clearTimeout(timer);
 			signal?.removeEventListener("abort", onAbort);
 			if (!job.detached) { settled = true; resolve(r); return; }
 			(reg.pending ??= []).push({ home, text: `${DELIVER_HEAD}\n\n${r.text}`, isError: r.isError });
@@ -7753,6 +7800,9 @@ export default function (pi: ExtensionAPI) {
 			task: Type.Optional(Type.String({ description: "task (single)" })),
 			tasks: Type.Optional(Type.Array(Item, { description: "run in parallel" })),
 			chain: Type.Optional(Type.Array(Item, { description: "run in order" })),
+			action: Type.Optional(Type.String({ description: "run (default) | status | stop" })),
+			run: Type.Optional(Type.String({ description: "stop: the run id or agent name" })),
+			wait: Type.Optional(Type.Number({ description: "seconds to wait for the report before it goes on in the background (default 0)" })),
 		}),
 		async execute(_id, params: any, signal, onUpdate, ctx: ExtensionContext) {
 			const agents = discoverAgents(ctx.cwd, typeof (ctx as any).isProjectTrusted === "function" ? ctx.isProjectTrusted() : !!(ctx as any).isProjectTrusted);
@@ -7765,7 +7815,19 @@ export default function (pi: ExtensionAPI) {
 			let job = { detached: false };
 			const progress = (line: string) => { if (!job.detached) onUpdate?.({ content: [{ type: "text", text: line }] }); };
 			const detach = (work: (s: AbortSignal) => Promise<{ text: string; isError: boolean }>) =>
-				detachable(signal, _id, (s, j) => { job = j; return work(s); }).then((o) => ({ content: [{ type: "text" as const, text: o.text }], isError: o.isError }));
+				detachable(signal, _id, (s, j) => { job = j; return work(s); }, backgroundAfter(ctx, params.wait)).then((o) => ({ content: [{ type: "text" as const, text: o.text }], isError: o.isError }));
+			const reply = (text: string, isError = false) => ({ content: [{ type: "text" as const, text }], isError });
+			const action = String(params.action ?? "run").trim().toLowerCase() || "run";
+			if (action === "status") return reply(statusText(registry().runs));
+			if (action === "stop") {
+				const want = String(params.run ?? "").trim();
+				const live = registry().runs.filter((r) => r.status === "running");
+				const r = live.find((x) => x.id === want) ?? live.find((x) => x.agent === want);
+				if (!r) return reply(want ? `No running run "${want}". subagent({action: "status"}) lists them.` : "Give run: the run id or agent name.", true);
+				registry().stops.get(r.id)?.();
+				return reply(`Stopping ${r.agent} (run ${r.id}); its report arrives as a message.`);
+			}
+			if (action !== "run") return reply("action is run, status or stop.", true);
 			if (params.tasks?.length) {
 				if (params.tasks.length > MAX_PARALLEL) return { content: [{ type: "text" as const, text: `Too many parallel tasks (${params.tasks.length}); max ${MAX_PARALLEL}.` }], isError: true };
 				for (const t of params.tasks) if (!find(t.agent)) return missing(t.agent);
@@ -9832,7 +9894,7 @@ export default async function (pi: ExtensionAPI) {
 			}
 			if (engine) {
 				const mod = await import(pathToFileURL(join(HERE, `${engine.expert.runner}.ts`)).href);
-				const out = await sub.detachable(signal, _id, (sig: AbortSignal, j: { detached: boolean }) => mod.runExpert(asBrief(runs[0].brief)!, ctx, sig, (l: string) => { if (!j.detached) progress(l); }, _id));
+				const out = await sub.detachable(signal, _id, (sig: AbortSignal, j: { detached: boolean }) => mod.runExpert(asBrief(runs[0].brief)!, ctx, sig, (l: string) => { if (!j.detached) progress(l); }, _id), sub.backgroundAfter(ctx, params?.wait));
 				return text(out.text, out.isError);
 			}
 			// the call goes on when the user switches sessions mid-call (the subagents module's detachable)
@@ -9842,7 +9904,7 @@ export default async function (pi: ExtensionAPI) {
 				job = j;
 				const results = await sub.mapLimit(runs, sub.CONCURRENCY, (r: any, i: number) => sub.runAgent(find(r.name)!, renderBrief(find(r.name)!, asBrief(r.brief)!), ctx.cwd, sig, quiet, { tool: "expert", callId: _id, mode: runs.length > 1 ? "parallel" : "single", index: i, of: runs.length }));
 				return { text: results.map(sub.render).join("\n\n"), isError: results.every((r: any) => r.exitCode !== 0) };
-			});
+			}, sub.backgroundAfter(ctx, params?.wait));
 			const notes = [...new Set(runs.map((r) => r.name))].map((n) => noteOf(n).trim()).filter(Boolean);
 			return text(notes.length ? `${notes.join("\n")}\n\n${out.text}` : out.text, out.isError);
 		},
@@ -12220,7 +12282,7 @@ export default function (pi: ExtensionAPI) {
 			name: "workflow", label: "workflow",
 			description: "Run a project workflow script by name; without a name, lists them.",
 			parameters: Type.Object({ name: Type.Optional(Type.String()), args: Type.Optional(Type.String({ description: "input (JSON or text)" })) }),
-			async execute(_id: string, params: any, signal: AbortSignal | undefined, onUpdate: any) {
+			async execute(_id: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx?: any) {
 				if (!params?.name) {
 					const list = discoverWorkflows(cwd, trusted);
 					return { content: [{ type: "text" as const, text: list.map((w) => `- ${w.name}: ${w.description}`).join("\n") || "No workflows." }] };
@@ -12232,7 +12294,7 @@ export default function (pi: ExtensionAPI) {
 					job = j;
 					const r = await startWorkflow(params.name, params.args ?? "", sig, (line) => { if (!job.detached) onUpdate?.({ content: [{ type: "text", text: line }] }); });
 					return { text: r.text, isError: r.error };
-				});
+				}, sub.backgroundAfter(ctx));
 				return { content: [{ type: "text" as const, text: out.text }], isError: out.isError };
 			},
 		} as any);

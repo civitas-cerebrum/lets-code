@@ -489,6 +489,17 @@ only when the user switches mid-call), and when the runs end their report
 is sent to the session the call came from with `pi.sendMessage(...,
 { triggerTurn: true, deliverAs: "followUp" })`, held while another
 session is open. A plain abort (Esc) still stops the children.
+`detachable(..., after)` also detaches once `after` ms have passed
+(`backgroundAfter`: the call's `wait` or `LETS_CODE_SUBAGENT_WAIT`, default
+0), in the interactive main session only (`isTui`, depth 0): there a call
+never holds the session up, and from then on the call's abort is ignored
+(the main session's Esc stops its own turn, not the runs; a run stops with
+its own stop: `/subagents stop`, `subagent({action: "stop"})`). The note it
+returns (`backgroundNote`) names each run's id and pid and the ways to
+reach it. `subagent({action: "status"})` lists the running runs with time,
+turns, the last assistant text and `lastSteps`. Print and RPC mode, and
+calls at depth > 0, wait as before: there nothing would take a later
+report, and a child's turn must not end with its own children running.
 
 Switching while the main session works: the teardown above aborts the
 turn in flight (the model's reply, a running tool, queued messages, and
@@ -991,7 +1002,10 @@ the child's last assistant text (a follow-up would come after it and
 become the reply the parent reads). Idle main session: no turn
 (`triggerTurn: false`) and a notice; the user decides whether the agent
 acts on it. Unattended turns are opt-in with
-`LETS_CODE_SESSIONS_AUTOTURN=1`. Idle subagent: no turn (its next task
+`LETS_CODE_SESSIONS_AUTOTURN=1`, except from the session's own subagent
+(its registry entry's `parentPid` is this pid): that is the orchestrator's
+own run talking back, so it starts a turn when idle and is a follow-up when
+busy, below `CHILD_HOPS` (4) hops, which bounds an ask-answer exchange. Idle subagent: no turn (its next task
 reads it), since a turn the subagent tool did not start would confuse its
 run accounting. Loops: each message carries `hops`. While a run that a
 message started or continued is going, whatever the session sends has

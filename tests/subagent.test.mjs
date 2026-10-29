@@ -650,6 +650,37 @@ async function load(env = {}) {
 	await h.commands.subagents.handler("stop scout", ctxFor());
 	await call3;
 	t("/subagents stop <name> stops that run", f1.status, "aborted");
+	// in the interactive main session a call does not hold the session up: it returns at once, the runs go on
+	{
+		const tui = { cwd: work, isProjectTrusted: true, hasUI: true, ui };
+		const reports = () => h.sent.filter(([m]) => m?.customType === "lets-code-subagents" && m.content.startsWith(mod.DELIVER_HEAD));
+		const n0 = reports().length;
+		const acb = new AbortController();
+		const t0 = Date.now();
+		const bg = await h.tool.execute("call-g", { agent: "worker", task: "hang in the background" }, acb.signal, undefined, tui);
+		const g1 = reg().runs.find((r) => r.task === "hang in the background");
+		t("background: the call returns at once, not an error, naming the run and how to reach it", [Date.now() - t0 < 1000, bg.isError, /Running in the background/.test(bg.content[0].text), new RegExp(`worker \\(run ${g1?.id}, pid \\d+\\)`).test(bg.content[0].text), /action: "status"/.test(bg.content[0].text)], [true, false, true, true, true]);
+		acb.abort();   // the main session's turn ends or is stopped: the run goes on
+		await new Promise((r) => setTimeout(r, 150));
+		t("background: the main session's abort does not stop it", g1.status, "running");
+		const st = await h.tool.execute("call-h", { action: "status" }, undefined, undefined, tui);
+		t("status: the running run, what it last said", [new RegExp(`- worker \\(run ${g1.id}`).test(st.content[0].text), /running \d+m\d\ds/.test(st.content[0].text), /last said: working/.test(st.content[0].text)], [true, true, true]);
+		t("stop: an unknown run is an error", (await h.tool.execute("call-i", { action: "stop", run: "nobody" }, undefined, undefined, tui)).isError, true);
+		const sp = await h.tool.execute("call-j", { action: "stop", run: g1.id }, undefined, undefined, tui);
+		await new Promise((r) => setTimeout(r, 200));
+		t("stop: by run id, the run stops", [/Stopping worker/.test(sp.content[0].text), g1.status], [true, "aborted"]);
+		await new Promise((r) => setTimeout(r, 100));
+		t("background: its report arrives as a message that continues the main session", [reports().length - n0, reports().at(-1)?.[1]], [1, { triggerTurn: true, deliverAs: "followUp" }]);
+		// a call with wait: the report inline when it comes in time
+		const q = await h.tool.execute("call-k", { agent: "scout", task: "a quick look", wait: 10 }, undefined, undefined, tui);
+		t("wait: a run done within it reports inline", [/Result for: a quick look/.test(q.content[0].text), /background/.test(q.content[0].text)], [true, false]);
+		// a quick run in the background: its report follows as a message
+		const n1 = reports().length;
+		const q2 = await h.tool.execute("call-l", { agent: "scout", task: "another quick look" }, undefined, undefined, tui);
+		for (let i = 0; i < 100 && reports().length === n1; i++) await new Promise((r) => setTimeout(r, 20));
+		t("background: a quick run's result comes as the message", [/Running in the background/.test(q2.content[0].text), /Result for: another quick look/.test(reports().at(-1)?.[0]?.content ?? "")], [true, true]);
+		t("status: nothing running", (await h.tool.execute("call-m", { action: "status" }, undefined, undefined, tui)).content[0].text, "No subagent or expert is running.");
+	}
 	t("/subagents <unknown> says so", (await h.commands.subagents.handler("nobody", ctxFor()), /No run "nobody"/.test(notes.at(-1)?.[1] ?? "")), true);
 	// /subagents' completions never turn a bare /subagents into a subcommand
 	t("completions: none for /subagents and /subagents with a space", [mod.subcommandCompletions(""), mod.subcommandCompletions(" ")], [null, null]);

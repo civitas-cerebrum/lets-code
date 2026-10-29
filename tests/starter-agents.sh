@@ -7,7 +7,7 @@
 # once the user deleted it; an agent dir of the user's own agents gets none.
 set -eu
 export LC_ALL=C
-eval "$(sed -n '/^starter_reviewer() {/,/^}$/p; /^starter_worker() {/,/^}$/p; /^starter_general() {/,/^}$/p; /^starter_mark() {/,/^}$/p; /^STARTER_WORKER_V1=/p; /^write_default_agents() {/,/^}$/p' "$(dirname "$0")/../lets-code")"
+eval "$(sed -n '/^starter_reviewer() {/,/^}$/p; /^starter_worker() {/,/^}$/p; /^starter_general() {/,/^}$/p; /^starter_mark() {/,/^}$/p; /^STARTER_WORKER_V1=/p; /^starter_worker_v2() {/p; /^write_default_agents() {/,/^}$/p' "$(dirname "$0")/../lets-code")"
 log() { :; }
 work="$(mktemp -d "${TMPDIR:-/tmp}/starter-test.XXXXXX")"; trap 'rm -rf "${work}"' EXIT
 fail=0
@@ -26,7 +26,8 @@ t "general: in the marker"         "$(grep -cx general "${d}/.lets-code-starters
 write_default_agents
 t "second launch: nothing more"    "$(ls -A "${d}" | tr '\n' ' ')" ".lets-code-starters general.md reviewer.md scout.md worker.md "
 old="$(sed 's/^role: reviewer$/role: readonly/' "${d}/reviewer.md")"
-oldw="$(sed "s|^description: .*|description: ${STARTER_WORKER_V1}|" "${d}/worker.md")"
+t "worker: stops after three failed fixes" "$(grep -c '^If the same failure survives three different fixes' "${d}/worker.md")" 1
+oldw="$(starter_worker_v2 | sed "s|^description: .*|description: ${STARTER_WORKER_V1}|")"
 
 # an earlier version's three starters, untouched: reviewer and worker are
 # updated, general is added
@@ -36,7 +37,7 @@ write_default_agents
 t "old reviewer: moved to reviewer" "$(role "${d}/reviewer.md")" reviewer
 t "old reviewer: otherwise the same" "$(sed 's/^role: reviewer$/role: readonly/' "${d}/reviewer.md")" "${old}"
 t "old worker: new description"    "$(desc "${d}/worker.md")" "Makes a delegated change and tests it"
-t "old worker: otherwise the same" "$(sed "s|^description: .*|description: ${STARTER_WORKER_V1}|" "${d}/worker.md")" "${oldw}"
+t "old worker: now the current one" "$(cat "${d}/worker.md")" "$(starter_worker)"
 t "old install: general added"     "$(ls "${d}" | tr '\n' ' '):$(cat "${d}/scout.md")" "general.md reviewer.md scout.md worker.md :mine"
 # the user deletes it: it stays deleted
 rm "${d}/general.md"; write_default_agents
@@ -44,6 +45,13 @@ t "deleted general: not re-added"  "$(ls "${d}" | tr '\n' ' ')" "reviewer.md sco
 # taking "general" out of the marker brings it back
 sed -i.bak '/^general$/d' "${d}/.lets-code-starters"; rm -f "${d}/.lets-code-starters.bak"; write_default_agents
 t "marker line removed: back"      "$(ls "${d}" | tr '\n' ' ')" "general.md reviewer.md scout.md worker.md "
+
+# the previous worker (no stop-after-three-fixes lines), untouched: updated
+PI_AGENT_DIR="${work}/b2"; d="${PI_AGENT_DIR}/agents"; mkdir -p "${d}"
+starter_worker_v2 > "${d}/worker.md"; write_default_agents
+t "previous worker: gets the stop lines" "$(cat "${d}/worker.md")" "$(starter_worker)"
+printf '%s\nAlso lint.\n' "$(starter_worker_v2)" > "${d}/worker.md"; write_default_agents
+t "edited previous worker: left alone" "$(tail -n 1 "${d}/worker.md")" "Also lint."
 
 # edited ones are the user's
 PI_AGENT_DIR="${work}/c"; d="${PI_AGENT_DIR}/agents"; mkdir -p "${d}"

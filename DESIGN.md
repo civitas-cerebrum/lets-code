@@ -259,7 +259,14 @@ rpc --session <run>.pi.jsonl --provider lets-code --model <id> [--thinking]
 [--tools] --append-system-prompt <file>` sent `"Task: ..."` as its first RPC `prompt` with
 `LETS_CODE_SUBAGENT_DEPTH` and `LETS_CODE_ROLE` in its environment, parsed
 from `message_end` events; concurrency 2 by default (one GPU); depth 1 (a
-child registers no tool, so it pays nothing for it); 50 KB output cap.
+child registers no tool, so it pays nothing for it); 50 KB output cap. A
+task turn has a budget: the agent file's `timeout`, else
+`LETS_CODE_SUBAGENT_TIMEOUT` (1800 s; a fix-test-fail loop keeps every bash
+call short, so the agent guard's bash timeout never ends it). A cut turn's
+result names the child's last three tool calls from its run record
+(`runAgent` attaches them before resolving), so the orchestrator narrows the
+next task to that obstacle; the method says so, and the starter worker stops
+and reports a failure that survives three different fixes.
 
 **Subagent sessions (`/subagents`).** Each child writes a real pi session
 file (`--session`, created empty and 0600 first; pi writes its header into

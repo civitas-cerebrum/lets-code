@@ -240,6 +240,22 @@ as well. Read-only bash had holes that matter once nothing else may write:
 writes under every deny-by-default role (plan too); `cd`, `pushd` and
 `popd` count as read-only (what follows them is judged on its own).
 
+**Asking for a mode, and the /mode menu.** The main session's model has a
+`mode` tool (`{to, reason}`): the user sees the switch and the reason in a
+dialog and confirms or declines; without a UI it is refused. It stays
+active in every role (apply adds it to an allowlist, tool_call lets it
+through), since it is the way out of plan. Its targets are the menu's
+modes minus bypass roles: `yolo` stays the user's pick. A confirmed switch
+from plan runs no plan (the model goes on in the same turn); pi takes the
+new active tools on the next request, but the role's prompt section only on
+the next turn, so the result carries the new role's prompt. A refused call
+now points the model at the tool rather than at `/mode`. `/mode` without
+arguments is a menu (`ui.select`) of the cycle, the default and the user's
+own roles (built-in subagent roles are taken by name only), each with its
+`description`; with the mandate off it is there too, listing `off` and the
+dormant modes the launch has (plan, orchestrator). Subagents register
+neither.
+
 **Plan mode, always there.** `/plan` lived below the mandate's on switch, and
 the mandate is off by default, so a plain launch had no plan mode. Now the
 launcher writes the module with `LETS_CODE_PLAN_ON=1` whenever the mandate

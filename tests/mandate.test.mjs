@@ -4,7 +4,8 @@
 // drives tool_call against throwaway directories. Needs Node >= 22.6.
 //
 //   tests/mandate.test.mjs [path/to/lets-code/mandate.ts]
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, realpathSync, rmSync, existsSync, symlinkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -16,6 +17,18 @@ process.env.PI_CODING_AGENT_DIR = agentDir;
 process.env.LETS_CODE_MANDATE_ON = "1";
 process.env.LETS_CODE_MANDATE_LOG = join(work, "mandate.log");
 const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
+// typebox comes from the pi host; point the temp copies at pi's own, or a stub (CI)
+{
+	let piRoot = "";
+	try { piRoot = join(execFileSync("npm", ["root", "-g"], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim(), "@earendil-works", "pi-coding-agent"); } catch { /* no npm */ }
+	const tb = piRoot ? [join(piRoot, "node_modules", "typebox"), join(piRoot, "..", "..", "typebox")].find((p) => existsSync(p)) : undefined;
+	const nm = join(agentDir, "extensions", "node_modules", "typebox"); mkdirSync(nm, { recursive: true });
+	if (tb) { rmSync(nm, { recursive: true }); symlinkSync(tb, nm); }
+	else {
+		writeFileSync(join(nm, "package.json"), JSON.stringify({ name: "typebox", type: "module", main: "index.js" }));
+		writeFileSync(join(nm, "index.js"), "export const Type = { Object: (p, o) => ({ type: 'object', properties: p, ...o }), String: (o) => ({ type: 'string', ...o }), Number: (o) => ({ type: 'number', ...o }), Boolean: (o) => ({ type: 'boolean', ...o }), Array: (i, o) => ({ type: 'array', items: i, ...o }), Optional: (x) => ({ ...x, optional: true }) };\n");
+	}
+}
 
 let fail = 0, n = 0;
 const t = (name, got, want) => { n++; const ok = JSON.stringify(got) === JSON.stringify(want); if (!ok) { fail = 1; console.log(`FAIL ${name}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); } else console.log(`ok    ${name}`); };
@@ -26,19 +39,19 @@ async function load(env, { trusted = true, ui = true, answers = [], entries = []
 	Object.assign(process.env, env);
 	const f = join(agentDir, "extensions", `mandate-${loads++}.ts`); writeFileSync(f, src);
 	const mod = await import(pathToFileURL(f).href);
-	const handlers = {}, commands = {}, shortcuts = {}, emitted = [], notices = [], selects = [], appended = [];
+	const handlers = {}, commands = {}, shortcuts = {}, emitted = [], notices = [], selects = [], appended = [], toolDefs = {}, options = [];
 	let active = tools ? [...tools] : ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"];
 	const pi = {
 		on(ev, h) { handlers[ev] = h; return () => {}; },
-		registerCommand(name, o) { commands[name] = o; }, registerShortcut(k, o) { shortcuts[k] = o; },
+		registerCommand(name, o) { commands[name] = o; }, registerShortcut(k, o) { shortcuts[k] = o; }, registerTool(d) { toolDefs[d.name] = d; },
 		getActiveTools: () => [...active], setActiveTools: (l) => { active = [...l]; },
 		events: { emit: (c, d) => emitted.push([c, d]), on: () => () => {} },
 		sendUserMessage: (m, o) => emitted.push(["user", m, o]),
 		appendEntry: (type, data) => appended.push([type, data]),
 	};
 	mod.default(pi);
-	const ctx = (cwd) => ({ cwd, hasUI: ui, isProjectTrusted: trusted, ui: { notify: (m) => notices.push(m), setStatus() {}, select: async (title) => { selects.push(title); return answers.shift() ?? "Deny"; }, editor: async (title, pre) => editor?.(title, pre), input: async () => undefined }, sessionManager: { getEntries: () => entries, ...(branch ? { getBranch: () => branch } : {}) } });
-	return { mod, handlers, commands, shortcuts, emitted, notices, selects, appended, ctx, tools: () => active, addTool: (n) => { active.push(n); },
+	const ctx = (cwd) => ({ cwd, hasUI: ui, isProjectTrusted: trusted, ui: { notify: (m) => notices.push(m), setStatus() {}, select: async (title, opts) => { selects.push(title); options.push(opts); const a = answers.shift(); return typeof a === "function" ? a(opts) : a ?? "Deny"; }, editor: async (title, pre) => editor?.(title, pre), input: async () => undefined }, sessionManager: { getEntries: () => entries, ...(branch ? { getBranch: () => branch } : {}) } });
+	return { mod, handlers, commands, shortcuts, emitted, notices, selects, appended, toolDefs, options, ctx, tools: () => active, addTool: (n) => { active.push(n); },
 		start: async (cwd) => handlers.session_start?.({ type: "session_start" }, ctx(cwd)),
 		call: async (cwd, toolName, input) => handlers.tool_call({ type: "tool_call", toolCallId: "x", toolName, input }, ctx(cwd)) };
 }
@@ -357,7 +370,7 @@ const blocked = (r) => r?.block === true;
 	t("dormant: write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
 	t("dormant: any bash", await h.call(d, "bash", { command: "rm -rf build && npm install" }), undefined);
 	t("dormant: no prompt section", prompt(), []);
-	t("dormant: only /orchestrator", Object.keys(h.commands), ["orchestrator"]);
+	t("dormant: only /orchestrator and /mode", Object.keys(h.commands), ["orchestrator", "mode"]);
 	t("dormant: tools untouched", h.tools().includes("edit"), true);
 	t("dormant: a factory run engages it", globalThis.__letsCodeOrchestrate(h.ctx(d), "software factory run"), true);
 	t("engaged: write blocked", blocked(await h.call(d, "write", { path: join(d, "src/b.txt") })), true);
@@ -384,7 +397,7 @@ const blocked = (r) => r?.block === true;
 	const end = (h, d, text, stopReason = "stop") => h.handlers.agent_end({ type: "agent_end", messages: [{ role: "user", content: "go" }, { role: "assistant", content: [{ type: "text", text }], stopReason }] }, h.ctx(d));
 	const modes = (h) => h.emitted.filter(([c]) => c === "lets-code:mode").map(([, x]) => x);
 	const h = await load({}, { answers: ["Stay in plan mode", "Execute the plan"] }); const d = repo(); await h.start(d);
-	t("plan alone: /plan and ctrl+alt+p, no /mode or /orchestrator", [Object.keys(h.commands), "ctrl+alt+p" in h.shortcuts], [["plan"], true]);
+	t("plan alone: /plan, /mode and ctrl+alt+p, no /orchestrator", [Object.keys(h.commands), "ctrl+alt+p" in h.shortcuts], [["plan", "mode"], true]);
 	t("plan alone: dormant, write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
 	t("plan alone: dormant, tools untouched", h.tools().includes("edit"), true);
 	await h.commands.plan.handler("", h.ctx(d));
@@ -430,7 +443,7 @@ const blocked = (r) => r?.block === true;
 	// with the orchestrator too: each goes back to where it came from
 	process.env.LETS_CODE_ORCHESTRATOR_ON = "1";
 	const o = await load({}); await o.start(d);
-	t("plan and orchestrator: both commands", Object.keys(o.commands).sort(), ["orchestrator", "plan"]);
+	t("plan and orchestrator: both commands", Object.keys(o.commands).sort(), ["mode", "orchestrator", "plan"]);
 	await o.commands.plan.handler("", o.ctx(d)); await o.commands.orchestrator.handler("", o.ctx(d));
 	t("plan -> orchestrator", modes(o).at(-1)?.role, "orchestrator");
 	await o.commands.orchestrator.handler("", o.ctx(d));
@@ -446,6 +459,47 @@ const blocked = (r) => r?.block === true;
 	await o.commands.orchestrator.handler("", o.ctx(d));
 	t("orchestrator -> plan -> orchestrator, then out: unrestricted", [modes(o).at(-1)?.off, await o.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
 	delete process.env.LETS_CODE_ORCHESTRATOR_ON; delete process.env.LETS_CODE_PLAN_ON; process.env.LETS_CODE_MANDATE_ON = "1";
+}
+// --- the /mode menu and the agent's mode tool
+{
+	const pick = (name) => (opts) => opts.find((o) => o.slice(2).startsWith(`${name} — `));
+	const run = (h, d, input) => h.toolDefs.mode.execute("m1", input, undefined, undefined, h.ctx(d));
+	const text = (r) => r.content[0].text;
+	const modes = (h) => h.emitted.filter(([c]) => c === "lets-code:mode").map(([, x]) => x);
+	// mandate on: the menu lists the modes, the current one marked; a pick switches
+	const h = await load({}, { answers: [pick("ask")], tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent", "mode"] }); const d = repo(); await h.start(d);
+	await h.commands.mode.handler("", h.ctx(d));
+	t("/mode menu: the modes with a line each, the current marked", h.options[0], ["● auto — everything runs; only protected paths are refused", "  ask — confirms sudo, recursive deletes, installs and writes outside the project", "  plan — read-only: explores, then writes a numbered plan you approve", "  orchestrator — plans and hands every change to experts and subagents; changes no file itself", "  yolo — no rails at all"]);
+	t("/mode menu: a pick switches", modes(h).at(-1)?.role, "ask");
+	// the agent asks: out of plan once the changes are approved
+	await h.commands.mode.handler("plan", h.ctx(d));
+	t("mode tool: stays active in plan", h.tools().includes("mode"), true);
+	t("mode tool: not refused in plan", await h.call(d, "mode", { to: "ask", reason: "x" }), undefined);
+	t("plan: a refused write points at the mode tool", /mode tool/.test((await h.call(d, "write", { path: join(d, "src/b.txt") }))?.reason ?? ""), true);
+	const h2 = await load({}, { answers: ["Stay in plan", "Switch to auto", "Switch to orchestrator"], tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "mode"] }); await h2.start(d);
+	await h2.commands.mode.handler("plan", h2.ctx(d));
+	const no = await run(h2, d, { to: "auto", reason: "You approved the change." });
+	t("mode tool: the user sees the switch and the reason", h2.selects.at(-1), "The agent asks to switch mode: plan → auto\nYou approved the change.");
+	t("mode tool: declined, still plan", [/kept plan mode/.test(text(no)), blocked(await h2.call(d, "write", { path: join(d, "src/b.txt") }))], [true, true]);
+	const yes = await run(h2, d, { to: "auto", reason: "You approved the change." });
+	t("mode tool: confirmed, out of plan, writing open, no plan run", [/^Mode is now auto/.test(text(yes)), /Writing is open again/.test(text(yes)), await h2.call(d, "write", { path: join(d, "src/b.txt") }), h2.tools().includes("edit"), h2.emitted.filter(([c]) => c === "user").length], [true, true, undefined, true, 0]);
+	const o = await run(h2, d, { to: "orchestrator", reason: "A long, multi-part task." });
+	t("mode tool: the new role's prompt in the result", [/Orchestrator mode/.test(text(o)), modes(h2).at(-1)?.role], [true, "orchestrator"]);
+	t("mode tool: yolo is the user's to pick", [(await run(h2, d, { to: "yolo", reason: "faster" })).isError, h2.selects.length], [true, 3]);
+	t("mode tool: an unknown mode", (await run(h2, d, { to: "nope", reason: "" })).isError, true);
+	t("mode tool: the mode it is in", text(await run(h2, d, { to: "orchestrator", reason: "" })), "The session is in orchestrator mode already.");
+	const nu = await load({}, { ui: false }); await nu.start(d);
+	t("mode tool: no UI, refused", (await run(nu, d, { to: "plan", reason: "" })).isError, true);
+	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
+	t("mode tool: none in a subagent", "mode" in c.toolDefs, false);
+	// mandate off: the menu has off and the dormant modes there are
+	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_PLAN_ON = "1";
+	const f = await load({}, { answers: [pick("plan"), "Switch to off"] }); await f.start(d);
+	await f.commands.mode.handler("", f.ctx(d));
+	t("mandate off: the menu is off and plan", f.options[0], ["● off — no mode: nothing is enforced", "  plan — read-only: explores, then writes a numbered plan you approve"]);
+	t("mandate off: a pick enters plan", blocked(await f.call(d, "write", { path: join(d, "src/b.txt") })), true);
+	t("mandate off: the tool asks back to off", [text(await run(f, d, { to: "off", reason: "Approved." })).startsWith("Mode is now off"), await f.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
+	delete process.env.LETS_CODE_PLAN_ON; process.env.LETS_CODE_MANDATE_ON = "1";
 }
 // --- mandate on: plan goes back to the mode it was entered from
 {

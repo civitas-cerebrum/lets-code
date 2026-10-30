@@ -240,8 +240,9 @@ DEFAULT_THINKING="medium"
 
 VERBOSE=false
 LOG_PREFIX="[lets-code]"
-log()         { echo "${LOG_PREFIX} ${1}"; }
-log_verbose() { if [ "${VERBOSE}" = "true" ]; then echo "${LOG_PREFIX} ${1}"; fi; }
+# LC_LOG_FD: 2 in a print or JSON launch, so stdout is pi's answer alone
+log()         { echo "${LOG_PREFIX} ${1}" >&"${LC_LOG_FD:-1}"; }
+log_verbose() { if [ "${VERBOSE}" = "true" ]; then echo "${LOG_PREFIX} ${1}" >&"${LC_LOG_FD:-1}"; fi; }
 log_error()   { echo "${LOG_PREFIX} ERROR: ${1}" >&2; }
 
 # ------------------------------------------------------------------ probing
@@ -11368,7 +11369,7 @@ say it was sent, not seen. A notification you can check with
   was killed.
 MD
     for f in "${t}"/ref/*.md; do
-        sed "s|@@T@@|${t}|g" "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
+        sed "s|@@T@@|${t}|g" "${f}" > "${f}.$$.tmp" && mv "${f}.$$.tmp" "${f}"
     done
     chmod 755 "${t}/bin/probe" "${t}/bin/ui" "${t}/bin/setup"
     chmod 644 "${t}/bin/uitext.py" "${t}"/ref/*.md
@@ -12979,7 +12980,7 @@ if not isinstance(doc, dict): doc = {}
 servers = doc.get("mcpServers") if isinstance(doc.get("mcpServers"), dict) else {}
 servers.update(json.load(open(os.path.join(d, ".mcp-import.json"))))
 doc["mcpServers"] = servers
-tmp = target + ".tmp"
+tmp = "%s.%d.tmp" % (target, os.getpid())
 with open(tmp, "w") as f: json.dump(doc, f, indent=2); f.write("\n")
 os.chmod(tmp, 0o600); os.replace(tmp, target)
 os.unlink(os.path.join(d, ".mcp-import.json"))
@@ -13068,7 +13069,7 @@ env.setdefault("REA_MCP_INPUT_SCHEMA_PROFILE", "compact")
 servers["rea"] = {"type": "stdio", "command": "node", "args": [entry, "mcp"], "env": env,
                   "description": "REA: reverse engineering of binaries, apps, packages, firmware and websites"}
 doc["mcpServers"] = servers
-tmp = target + ".tmp"
+tmp = "%s.%d.tmp" % (target, os.getpid())
 with open(tmp, "w") as f: json.dump(doc, f, indent=2); f.write("\n")
 os.chmod(tmp, 0o600); os.replace(tmp, target)
 PY
@@ -13171,7 +13172,7 @@ pi_write_tester() {
     # what the browser half left here before it became ui-tester
     rm -rf "${d}/bin" "${d}/setup" "${d}/prompt.md"
     for f in api-web.md api-mobile.md bugs.md composition.md method.md; do rm -f "${d}/ref/${f}"; done
-    cat > "${d}/ref/strategy.md.tmp" <<'LC_EOF'
+    cat > "${d}/ref/strategy.md.$$.tmp" <<'LC_EOF'
 <!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
 # Test strategy: basis, risk, levels, types, the plan
 
@@ -13260,7 +13261,7 @@ When the suite is slow, say what you ran instead and what that leaves out.
 - Note every way the test environment differs from where the software
   really runs (OS, versions, data size, network, permissions).
 LC_EOF
-    cat > "${d}/ref/techniques.md.tmp" <<'LC_EOF'
+    cat > "${d}/ref/techniques.md.$$.tmp" <<'LC_EOF'
 <!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
 # Test design techniques and oracles
 
@@ -13359,7 +13360,7 @@ code coverage where the project has a tool (`pytest --cov`, `c8`, `go test
 -cover`): look at the changed lines' branches that no test reaches. Never a
 goal by itself: a covered line can still be unchecked.
 LC_EOF
-    cat > "${d}/ref/workflows.md.tmp" <<'LC_EOF'
+    cat > "${d}/ref/workflows.md.$$.tmp" <<'LC_EOF'
 <!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
 # Workflows
 
@@ -13434,7 +13435,7 @@ cause; test each hypothesis with the cheapest targeted rerun; fix one
 representative per cluster (W5), rerun the cluster. Never delete a test to
 get green; a test that tests nothing anymore is a finding of its own.
 LC_EOF
-    cat > "${d}/ref/terminal.md.tmp" <<'LC_EOF'
+    cat > "${d}/ref/terminal.md.$$.tmp" <<'LC_EOF'
 <!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
 # Testing command-line programs and terminal UIs
 
@@ -13493,7 +13494,7 @@ tmux kill-session -t qa1                     # always, at the end
   program's non-interactive mode if it has one.
 Use a session name of your own and kill it at the end, also on failure.
 LC_EOF
-    cat > "${d}/ref/nonfunctional.md.tmp" <<'LC_EOF'
+    cat > "${d}/ref/nonfunctional.md.$$.tmp" <<'LC_EOF'
 <!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
 # Non-functional checks (smoke level unless the brief asks for more)
 
@@ -13545,7 +13546,7 @@ mapping), time zones (`TZ=Pacific/Kiritimati`, `TZ=America/St_Johns`).
 Consistent wording and keys, clear errors that say what to do, no dead
 ends, undo or confirm for destructive actions, help that matches behaviour.
 LC_EOF
-    cat > "${d}/ref/team.md.tmp" <<'LC_EOF'
+    cat > "${d}/ref/team.md.$$.tmp" <<'LC_EOF'
 <!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
 # Your team: when to dispatch, the briefs, the results
 
@@ -13596,7 +13597,7 @@ tests yourself when the verdict hangs on it. Merge its findings with yours,
 dedupe (same place, same behaviour), renumber into your T<n> list, and keep
 its evidence paths. The verdict is yours.
 LC_EOF
-    cat > "${d}/ref/reporting.md.tmp" <<'LC_EOF'
+    cat > "${d}/ref/reporting.md.$$.tmp" <<'LC_EOF'
 <!-- Written by lets-code (tester); regenerated on launch, edits are overwritten. -->
 # Evidence, bug reports, the final message
 
@@ -13647,9 +13648,9 @@ When the brief gives a report format (a pipeline that parses it: a
 `VERDICT:` line first, finding lines `T<n> | blocker|major|minor|nit |
 where | title`), follow it exactly and put the rest under its headings.
 LC_EOF
-    for f in "${d}"/ref/*.md.tmp; do
+    for f in "${d}"/ref/*.md.$$.tmp; do
         sed "s|@@D@@|${d}|g" "${f}" > "${f}.s" && rm -f "${f}"
-        if cmp -s "${f}.s" "${f%.tmp}"; then rm -f "${f}.s"; else mv "${f}.s" "${f%.tmp}"; fi
+        if cmp -s "${f}.s" "${f%.$$.tmp}"; then rm -f "${f}.s"; else mv "${f}.s" "${f%.$$.tmp}"; fi
     done
     # the expert; a user's own agent of that name is left alone
     if [ -e "${af}" ] && ! grep -q '^# Written by lets-code' "${af}" 2>/dev/null; then return 0; fi
@@ -14639,7 +14640,7 @@ try {
 JS
     # the helpers' and references' own paths
     for f in "${t}/prompt.md" "${t}"/ref/*.md; do
-        sed "s|@@T@@|${t}|g" "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
+        sed "s|@@T@@|${t}|g" "${f}" > "${f}.$$.tmp" && mv "${f}.$$.tmp" "${f}"
     done
     chmod 644 "${t}/prompt.md" "${t}"/ref/*.md "${t}/bin/peek.mjs"
 }
@@ -14934,7 +14935,7 @@ fi
 SH
     chmod 755 "${j}/bin/scratch-copy"
     for f in "${j}/prompt.md" "${j}"/ref/*.md; do
-        sed "s|@@J@@|${j}|g" "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
+        sed "s|@@J@@|${j}|g" "${f}" > "${f}.$$.tmp" && mv "${f}.$$.tmp" "${f}"
     done
     chmod 644 "${j}/prompt.md" "${j}"/ref/*.md
     judge_write_agent
@@ -16028,7 +16029,7 @@ function pack(name, o) {
 	}
 	if (own.some((f) => f.text.includes("@@D@@")))
 		out.push(`    for f in ${own.filter((f) => f.text.includes("@@D@@")).map((f) => `"\${d}/${f.rel}"`).join(" ")}; do`,
-			`        sed "s|@@D@@|\${d}|g" "\${f}" > "\${f}.tmp" && cat "\${f}.tmp" > "\${f}" && rm -f "\${f}.tmp"`, "    done");
+			`        sed "s|@@D@@|\${d}|g" "\${f}" > "\${f}.$$.tmp" && cat "\${f}.$$.tmp" > "\${f}" && rm -f "\${f}.$$.tmp"`, "    done");
 	out.push("    # the expert; a user's own agent of that name is left alone",
 		`    if [ -e "\${af}" ] && ! grep -q '^# Written by lets-code' "\${af}" 2>/dev/null; then return 0; fi`,
 		`    tmp="$(mktemp "\${af}.XXXXXX")" || return 0`,
@@ -16283,7 +16284,7 @@ JS
     chmod 755 "${d}/bin/expert-lint" "${d}/bin/expert-new" "${d}/bin/route-check"
     # the paths: this agent dir's
     for f in "${d}/prompt.md" "${d}"/ref/*.md; do
-        sed -e "s|@@EB@@|${d}|g" -e "s|@@AGENT@@|${PI_AGENT_DIR}|g" "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
+        sed -e "s|@@EB@@|${d}|g" -e "s|@@AGENT@@|${PI_AGENT_DIR}|g" "${f}" > "${f}.$$.tmp" && mv "${f}.$$.tmp" "${f}"
     done
     chmod 644 "${d}/prompt.md" "${d}"/ref/*.md
     # the expert; a user's own agent of that name is left alone (EB_AGENT stays empty)
@@ -17685,7 +17686,7 @@ if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
 LC_EOF
     chmod 755 "${d}/bin/web"
-    cat > "${d}/setup.tmp" <<'LC_EOF'
+    cat > "${d}/setup.$$.tmp" <<'LC_EOF'
 #!/usr/bin/env bash
 # Written by lets-code (researcher); regenerated on launch, edits are overwritten.
 # setup [--no-install]: the researcher's headed browser. Installs the pinned
@@ -17738,7 +17739,7 @@ if [ "$(uname -s)" = Linux ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && ! c
 fi
 exit 0
 LC_EOF
-    sed "s|@@PINS@@|${RESEARCHER_PINS}|" "${d}/setup.tmp" > "${d}/setup" && rm -f "${d}/setup.tmp"; chmod 755 "${d}/setup"
+    sed "s|@@PINS@@|${RESEARCHER_PINS}|" "${d}/setup.$$.tmp" > "${d}/setup.$$" && rm -f "${d}/setup.$$.tmp" && chmod 755 "${d}/setup.$$" && mv "${d}/setup.$$" "${d}/setup"
     cat > "${d}/ref/method.md" <<'LC_EOF'
 # Gathering: queries, fetch order, primary sources
 
@@ -19302,6 +19303,21 @@ while [ $# -gt 0 ]; do
         *)          PASSTHROUGH+=("$1"); shift ;;
     esac
 done
+# pi's print or JSON mode (-p, --print, --mode text|json): its stdout is
+# the answer, so lets-code's own lines go to stderr
+lc_print_mode() {
+    local a i=0 want=1
+    for a in "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"; do
+        i=$((i + 1))
+        case "${a}" in
+            -p|--print|--mode=json|--mode=text) want=0 ;;
+            --mode=rpc) return 1 ;;
+            --mode) case "${PASSTHROUGH[${i}]:-}" in rpc) return 1 ;; json|text) want=0 ;; esac ;;
+        esac
+    done
+    return "${want}"
+}
+if lc_print_mode; then LC_LOG_FD=2; fi
 
 harness_gate "${HARNESS}"
 
@@ -19787,7 +19803,7 @@ try: s = json.load(open(p))
 except Exception: s = {}
 e = s.get("experts") if isinstance(s.get("experts"), dict) else {}
 e["ui-tester"] = True; s["experts"] = e
-tmp = p + ".tmp"
+tmp = "%s.%d.tmp" % (p, os.getpid())
 with open(tmp, "w") as f: json.dump(s, f, indent=2); f.write("\n")
 os.chmod(tmp, 0o600); os.replace(tmp, p)
 PY
@@ -19806,7 +19822,7 @@ if not isinstance(s, dict): s = {}
 e = s.get("experts") if isinstance(s.get("experts"), dict) else {}
 if sys.argv[1] in e: sys.exit(1)
 e[sys.argv[1]] = True; s["experts"] = e
-tmp = p + ".tmp"
+tmp = "%s.%d.tmp" % (p, os.getpid())
 with open(tmp, "w") as f: json.dump(s, f, indent=2); f.write("\n")
 os.chmod(tmp, 0o600); os.replace(tmp, p)
 PY
@@ -19962,13 +19978,29 @@ banner() {
         [ -z "${CC_SUMMARY}" ] || printf '  %s%s%s\n' "${d}" "${CC_SUMMARY}" "${r}"
         printf '  %s%s%s\n' "${d}" "${signoffs[$(( RANDOM % ${#signoffs[@]} ))]}" "${r}"
     else
-        log "${line1} · ${line2}${CC_SUMMARY:+ · ${CC_SUMMARY}}"
+        # not a terminal: stderr, so print and JSON mode's stdout is pi's alone
+        log "${line1} · ${line2}${CC_SUMMARY:+ · ${CC_SUMMARY}}" >&2
     fi
 }
 if [ "${VERBOSE}" = true ]; then
     log "connecting: ${PRESET:+preset ${PRESET}  }${BASE_URL}  harness: ${HARNESS}  model: ${MODEL}  context: ${CONTEXT}  output cap: ${OUTPUT_CAP}  vision: ${VISION}  thinking: ${THINKING_DESC}  api: ${API}  ${MG_DESC}  ${GG_DESC}  ${AG_DESC}  grounding guard is $( [ "${LETS_CODE_GROUNDING_ON:-}" = 1 ] && echo on || echo off )${FEAT_DESC:+  ${FEAT_DESC}}${SESSION_DESC:+  ${SESSION_DESC}}"
 fi
 banner
+# Print and JSON mode read piped stdin to its end before the prompt goes
+# out: a caller that leaves stdin an open pipe it never writes (a subprocess
+# spawner's default) would hang pi before any request. Such a stdin gets
+# LETS_CODE_STDIN_WAIT seconds (default 3) to bring data or close; then pi
+# starts with it closed. Piped input (cat f | lets-code -p ...) is kept.
+lc_stdin_idle() {  # true: stdin is a pipe or socket with nothing on it, still open
+    [ -t 0 ] && return 1
+    [ -p /dev/stdin ] || [ -S /dev/stdin ] || return 1
+    lc_print_mode || return 1
+    ! python3 -c 'import select,sys; sys.exit(0 if select.select([0],[],[],float(sys.argv[1]))[0] else 1)' "${LETS_CODE_STDIN_WAIT:-3}" 2>/dev/null
+}
+if lc_stdin_idle; then
+    log "note: stdin is an open pipe with no input after ${LETS_CODE_STDIN_WAIT:-3}s; starting without it (pass </dev/null to skip the wait)" >&2
+    exec </dev/null
+fi
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
     mem_guard_exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"
 else

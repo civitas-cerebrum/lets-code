@@ -643,6 +643,15 @@ and to enter `orchestrator` for large or long work, where experts and
 subagents do the work and the session's context stays small. A refused
 call points it there as well. It never gets `yolo` (that one is yours to
 pick), and a subagent has no `mode` tool.
+
+To let it switch without asking, pick "switch without asking from now on"
+in that dialog, or the last line of the `/mode` menu (the same line turns
+asking back on). The choice is remembered in
+`~/.pi/agent/lets-code-state.json` (`modeSwitch`);
+`LETS_CODE_MODE_SWITCH=auto|ask` decides for one launch. A switch made
+without asking still shows a notice with the model's reason, and `yolo`
+stays yours either way. That includes leaving plan mode: once you approve
+a change in the conversation, the model leaves plan and makes it.
 Starting or resuming a software factory run (`/factory`, or the
 `software-factory` expert) switches the session into `orchestrator` and keeps
 it there until you leave it with `/orchestrator` (back to the mode you came

@@ -254,7 +254,11 @@ arguments is a menu (`ui.select`) of the cycle, the default and the user's
 own roles (built-in subagent roles are taken by name only), each with its
 `description`; with the mandate off it is there too, listing `off` and the
 dormant modes the launch has (plan, orchestrator). Subagents register
-neither.
+neither. The user can let the model switch without asking (`modeSwitch`
+"auto" in lets-code-state.json, from the dialog's third choice or the
+menu's last line; `LETS_CODE_MODE_SWITCH` for one launch): then the tool
+switches at once, needs no UI, and notifies the user with the reason;
+bypass roles stay out of its reach either way.
 
 **Plan mode, always there.** `/plan` lived below the mandate's on switch, and
 the mandate is off by default, so a plain launch had no plan mode. Now the

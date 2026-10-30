@@ -8820,6 +8820,12 @@ async function step(L: Ledger, deps: Deps): Promise<boolean> {
 		if (!st && ok && stage === "plan" && /^\s*1[.)]\s+\S/m.test(text) && /^\s*2[.)]\s+\S/m.test(text)) st = "PLAN";
 		if (!st && ok && stage === "build" && (await snapshot(L, deps))) st = "DONE";
 		entry.verdict = st ? (said ? st : `${st} (no STATUS line)`) : ok ? "NO STATUS" : "FAILED";
+		// the developer built at the plan stage (STATUS: DONE, the work tree changed):
+		// the build is there, so on to the reviews, which judge it
+		if (stage === "plan" && st === "DONE" && (await snapshot(L, deps))) {
+			L.plan = bodyOf(text, "STATUS"); L.claim = L.plan; entry.verdict = "DONE (built at the plan stage)";
+			entry.summary = short(`built without a plan checkpoint: ${(await snapshot(L, deps)) || ""}`); L.stage = next("build"); return true;
+		}
 		if (stage === "plan" && st === "PLAN") { L.plan = bodyOf(text, "STATUS"); entry.summary = short(L.plan.split("\n").find((l) => /^\s*1[.)]/.test(l)) ?? L.plan); L.stage = "build"; L.waiting = "plan"; return true; }
 		if (stage === "build" && st === "DONE") {
 			L.claim = bodyOf(text, "STATUS"); const stat = await snapshot(L, deps); entry.summary = stat || "no change in the work tree";
@@ -9053,7 +9059,7 @@ export const DECISIONS: Record<Waiting, Decision["action"][]> = { criteria: ["ap
 const GO: Partial<Record<Waiting, Decision["action"]>> = { result: "commit", stuck: "more", blocked: "retry" };
 // what a checkpoint takes now: no further fix round once the rounds are used
 // a blocked run goes to the final approval as it is only once something was built
-export const built = (L?: Ledger): boolean => !!L && L.entries.some((e) => e.stage === "build" && /^DONE/.test(e.verdict));
+export const built = (L?: Ledger): boolean => !!L && L.entries.some((e) => (e.stage === "build" || e.stage === "plan") && /^DONE/.test(e.verdict));
 export const decisionsAt = (kind: Waiting, L?: Ledger): Decision["action"][] => (kind === "stuck" && L && L.rounds >= MAX_FIX_ROUNDS ? ["final", "stop"] : kind === "blocked" && L && !built(L) ? ["retry", "stop"] : DECISIONS[kind]);
 export function decisionFor(kind: Waiting, said: string, text?: string, L?: Ledger): Decision | string {
 	const a = said.trim().toLowerCase(); const ok = decisionsAt(kind, L);

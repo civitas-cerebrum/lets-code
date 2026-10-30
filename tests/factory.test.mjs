@@ -232,6 +232,15 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("no STATUS, a plan without steps: blocked", [L4.entries.find((e) => e.stage === "plan").verdict, L4.status], ["NO STATUS", "stopped"]);
 	const r5 = makeRepo("blocked-said"); const f5 = fakeDeps({ ...OK, build: [({ cwd }) => { writeFileSync(join(cwd, "feature.txt"), "x\n"); return { text: "STATUS: BLOCKED\nneed a key", exitCode: 0, input: 1, output: 1, seconds: 1 }; }] }, { decisions: { blocked: { action: "stop" } } });
 	const L5 = await F.startRun(opts(r5), f5);
+	// the developer built at the plan stage
+	const builtAtPlan = ({ cwd }) => { writeFileSync(join(cwd, "feature.txt"), "feature\n"); return { text: "Done, wrote feature.txt.\nSTATUS: DONE", exitCode: 0, input: 1, output: 1, seconds: 1 }; };
+	const r6 = makeRepo("built-at-plan"); const f6 = fakeDeps({ ...OK, plan: [builtAtPlan] });
+	const L6 = await F.startRun(opts(r6), f6);
+	t("DONE at the plan stage with a change: on to the reviews, no build stage", [L6.status, L6.entries.find((e) => e.stage === "plan").verdict, f6.calls.some((c) => c.meta.stage === "build"), f6.calls.some((c) => c.meta.stage === "expert-review")], ["done", "DONE (built at the plan stage)", false, true]);
+	t("DONE at the plan stage: no plan checkpoint asked", f6.asked.includes("plan"), false);
+	const r7 = makeRepo("done-at-plan-nochange"); const f7 = fakeDeps({ ...OK, plan: ["STATUS: DONE\nall good"] }, { decisions: { blocked: { action: "stop" } } });
+	const L7 = await F.startRun(opts(r7), f7);
+	t("DONE at the plan stage without a change: blocked", [L7.status, f7.calls.some((c) => c.meta.stage === "expert-review")], ["stopped", false]);
 	t("STATUS: BLOCKED said, even with a change: blocked", [L5.entries.find((e) => e.stage === "build").verdict, L5.status], ["BLOCKED", "stopped"]);
 }
 

@@ -109,15 +109,16 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 // ------------------------------------------------------------------ stage briefs sized to the model's window
 {
 	const cb = F.contextBudget;
-	const B = (w, files, lines, steps) => ({ window: w, files, lines, steps });
-	t("budget: 32k window, 8k cap", cb(32768, 8192), B(32768, 2, 619, 6));
-	t("budget: 128k window", cb(131072, 32768), B(131072, 10, 3076, 12));
-	t("budget: 1M window: capped", cb(1000000, 32000), B(1000000, 15, 6000, 12));
-	t("budget: no cap given: a quarter of the window", cb(32768), B(32768, 2, 619, 6));
-	t("budget: a cap as large as the window: a quarter instead", cb(32768, 40000), B(32768, 2, 619, 6));
-	t("budget: a window too small for room: the floor", cb(8192, 4096), B(8192, 1, 150, 3));
-	t("budget: shrink halves the reading", cb(32768, 8192, 1), B(32768, 1, 309, 6));
-	t("budget: shrink never below the floor", cb(32768, 8192, 3), B(32768, 1, 150, 6));
+	const B = (w, files, lines, steps, write) => ({ window: w, files, lines, steps, write });
+	t("budget: 32k window, 8k cap", cb(32768, 8192), B(32768, 2, 619, 6, 409));
+	t("budget: 128k window", cb(131072, 32768), B(131072, 10, 3076, 12, 1600));
+	t("budget: 1M window: capped", cb(1000000, 32000), B(1000000, 15, 6000, 12, 1600));
+	t("budget: no cap given: a quarter of the window", cb(32768), B(32768, 2, 619, 6, 409));
+	t("budget: a cap as large as the window: a quarter instead", cb(32768, 40000), B(32768, 2, 619, 6, 409));
+	t("budget: a window too small for room: the floor", cb(8192, 4096), B(8192, 1, 150, 3, 204));
+	t("budget: shrink halves the reading", cb(32768, 8192, 1), B(32768, 1, 309, 6, 409));
+	t("budget: shrink never below the floor", cb(32768, 8192, 3), B(32768, 1, 150, 6, 409));
+	t("budget: the write limit follows the reply cap, not the window", [cb(32768, 2000).write, cb(262144, 4096).write, cb(32768, 8192, 2).write], [100, 204, 409]);
 	t("budget: no window, no budget", [cb(0, 8192), cb(undefined), cb(-5), cb("x")], [null, null, null, null]);
 	// sized: each stage told its part
 	const repo = makeRepo("budget"); const fd = fakeDeps({ ...OK, build: [build()] });
@@ -125,6 +126,8 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	const brief = (stage) => fd.calls.find((c) => c.meta.stage === stage)?.brief.context_budget ?? "";
 	t("budget: the run keeps the window", [L.window, L.outCap, L.shrink], [32768, 8192, undefined]);
 	t("budget: the plan in steps that fit, a split named past the step count", [/Plan the build in steps of at most 2 files changed and about 619 lines read each/.test(brief("plan")), /more than 6 such steps, say so at the top of the plan/.test(brief("plan"))], [true, true]);
+	t("budget: the plan and the build told to write in parts", [/One reply holds about 409 lines: write a larger file in parts/.test(brief("plan")), /One reply holds about 409 lines/.test(brief("build"))], [true, true]);
+	t("budget: the reviewers not told about writing", /One reply holds/.test(brief("expert-review")), false);
 	t("budget: the build a step at a time", /Build the plan one step at a time, reading only what the current step needs: about 619 lines/.test(brief("build")), true);
 	t("budget: the reviewers and the judge read the change file by file", ["expert-review", "design-review", "judge"].map((s) => brief(s).includes(`git -C ${L.work} diff ${L.base} -- <file>`)), [true, true, true]);
 	t("budget: nothing cut when nothing ran short", [/already cut/.test(brief("build")), L.entries.some((e) => e.short)], [false, false]);
@@ -152,6 +155,30 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	const r6 = makeRepo("allshort"); const fd6 = fakeDeps(Object.fromEntries(Object.entries({ ...OK, build: [build()] }).map(([k, v]) => [k, v.map(all)])));
 	const L6 = await F.startRun(opts(r6, { window: 32768, outCap: 8192 }), fd6);
 	t("ran short at every stage: the shrink stops at 3", [L6.shrink, L6.entries.filter((e) => e.short).length >= 4], [3, true]);
+	// a developer reply cut at the reply limit: continued from the work tree, not blocked
+	const cutOnce = [() => ({ text: "half a reply", exitCode: 0, input: 10, output: 8000, seconds: 3, cut: true }), build()];
+	const r7 = makeRepo("cut"); const fd7 = fakeDeps({ ...OK, build: cutOnce });
+	const L7 = await F.startRun(opts(r7, { window: 32768, outCap: 8192 }), fd7);
+	const builds7 = fd7.calls.filter((c) => c.meta.stage === "build");
+	t("cut build: continued once, then done", [L7.status, builds7.length, L7.entries.find((e) => e.stage === "build").continued], ["done", 2, 1]);
+	t("cut build: the continuation says where it stopped, from the work tree", [/cut off at the reply limit\. The work tree keeps every file you wrote/.test(builds7[1].brief.continue), builds7[1].brief.continue.endsWith("half a reply"), "continue" in builds7[0].brief], [true, true, false]);
+	t("cut build: tokens and time of both replies counted", [L7.entries.find((e) => e.stage === "build").output_tokens, L7.entries.find((e) => e.stage === "build").seconds], [8050, 5]);
+	const cutPlan = [() => ({ text: "1. a", exitCode: 0, input: 1, output: 1, seconds: 1, cut: true }), PLAN];
+	const r8 = makeRepo("cutplan"); const fd8 = fakeDeps({ ...OK, plan: cutPlan, build: [build()] });
+	const L8 = await F.startRun(opts(r8), fd8);
+	const plans8 = fd8.calls.filter((c) => c.meta.stage === "plan");
+	t("cut plan: asked again, shorter, and goes on", [L8.status, plans8.length, /Reply again with the whole plan, shorter/.test(plans8[1].brief.continue)], ["done", 2, true]);
+	// negative: cut every time: two continuations, then the run blocks as before
+	const always = () => ({ text: "cut again", exitCode: 0, input: 1, output: 1, seconds: 1, cut: true });
+	const r9 = makeRepo("cutalways"); const fd9 = fakeDeps({ ...OK, build: [always] }, { decisions: { stuck: { action: "stop" }, blocked: { action: "stop" } } });
+	const L9 = await F.startRun(opts(r9), fd9);
+	t("cut every time: continued at most MAX_CONTINUES, then blocked", [fd9.calls.filter((c) => c.meta.stage === "build").length, F.MAX_CONTINUES, L9.entries.find((e) => e.stage === "build").continued, L9.status], [3, 2, 2, "stopped"]);
+	// negative: a reviewer's cut reply is not continued
+	const r10 = makeRepo("cutreview"); const fd10 = fakeDeps({ ...OK, build: [build()], "expert-review": [() => ({ text: "VERDICT: APPROVE\n## Findings\nnone", exitCode: 0, input: 1, output: 1, seconds: 1, cut: true })] });
+	await F.startRun(opts(r10), fd10);
+	t("a reviewer's cut reply: not continued", fd10.calls.filter((c) => c.meta.stage === "expert-review").length, 1);
+	// negative: an uncut reply is never continued
+	t("no cut: one build call", fd.calls.filter((c) => c.meta.stage === "build").length, 1);
 }
 
 // ------------------------------------------------------------------ the happy path

@@ -5467,16 +5467,19 @@ export function readModeSwitch(): "ask" | "auto" {
 // A step's share of a fresh context, from the model's window: the window
 // less the reply budget (the output cap, else a quarter) and about 6k of
 // system prompt and tools; 40% of the rest is for reading, about 12 tokens a
-// line. shrink halves it once per stage of a run that ran short. The same
-// in the mandate and factory modules (a test keeps them equal).
-export interface Budget { window: number; files: number; lines: number; steps: number }
+// line. shrink halves it once per stage of a run that ran short. write: the
+// lines one reply can hold, 60% of the reply budget (thinking and the call
+// take the rest): a reply cut at the limit loses its tool call. The same in
+// the mandate and factory modules (the tests pin both to the same numbers).
+export interface Budget { window: number; files: number; lines: number; steps: number; write: number }
 export function contextBudget(window?: number, outCap?: number, shrink = 0): Budget | null {
 	if (!(Number(window) > 0)) return null;
 	const w = Number(window), out = Number(outCap) > 0 && Number(outCap) < w ? Number(outCap) : Math.floor(w / 4);
+	const write = Math.max(100, Math.min(1600, Math.floor(out * 0.6 / 12)));
 	const usable = w - out - 6000;
-	if (usable <= 2000) return { window: w, files: 1, lines: 150, steps: 3 };
+	if (usable <= 2000) return { window: w, files: 1, lines: 150, steps: 3, write };
 	const lines = Math.max(150, Math.min(6000, Math.floor(usable * 0.4 / 12 / 2 ** Math.max(0, shrink))));
-	return { window: w, files: Math.max(1, Math.min(15, Math.round(lines / 300))), lines, steps: Math.max(3, Math.min(12, Math.floor(usable * 0.5 / 1500))) };
+	return { window: w, files: Math.max(1, Math.min(15, Math.round(lines / 300))), lines, steps: Math.max(3, Math.min(12, Math.floor(usable * 0.5 / 1500))), write };
 }
 // a run that ran short of its context: compacted, or a request at 80% of the window
 export const ranShort = (peak?: number, compactions?: number, window?: number): boolean => (compactions ?? 0) > 0 || (Number(window) > 0 && (peak ?? 0) >= 0.8 * Number(window));
@@ -5814,10 +5817,17 @@ export default function (pi: ExtensionAPI) {
 	// steps, each for a fresh context), and carried out by it
 	const PLAN_FOR_ORCHESTRATION = " Write the plan for orchestration: each numbered step one self-contained task for one expert, small enough for a fresh context: software-factory for any code change (its goal, acceptance criteria and test command), researcher for an open question, a subagent (general) for setup. Say who does each step and how its delivery is reviewed. Once the user approves, ask to switch to orchestration with the mode tool (not auto) and dispatch the steps there, unless the change is a few lines.";
 	// the model's window (and output cap), from pi's model: the plan's steps are sized to it
-	let window = 0, outCap = 0;
-	const seeModel = (ctx: any) => { const m = ctx?.model; if (Number(m?.contextWindow) > 0) { window = Number(m.contextWindow); outCap = Number(m.maxTokens) || 0; } };
-	const sized = () => { const b = contextBudget(window, outCap); return b ? ` Size each step to the model's context (${b.window} tokens): at most ${b.files} file${b.files === 1 ? "" : "s"} changed and about ${b.lines} lines read per step, and at most ${b.steps} steps in one plan; more work is a follow-up plan.` : ""; };
-	const promptOf = (name: string) => (manifest.roles[name]?.prompt ?? "") + (name === "plan" && canOrchestrate() ? PLAN_FOR_ORCHESTRATION + sized() : "");
+	let window = 0, outCap = 0, ui = true;
+	const seeModel = (ctx: any) => { if (ctx && typeof ctx.hasUI === "boolean") ui = ctx.hasUI; const m = ctx?.model; if (Number(m?.contextWindow) > 0) { window = Number(m.contextWindow); outCap = Number(m.maxTokens) || 0; } };
+	const sized = () => { const b = contextBudget(window, outCap); return b ? ` Size each step to the model's context (${b.window} tokens): at most ${b.files} file${b.files === 1 ? "" : "s"} changed and about ${b.lines} lines read per step, and at most ${b.steps} steps in one plan; more work is a follow-up plan. One reply holds about ${b.write} lines: a step that writes more says to write it in parts (the file's first part, then the rest by edits).` : ""; };
+	// orchestration: its own replies are cut at the limit too (a ticket pasted whole is lost),
+	// and without a UI no one answers: it agrees the ticket itself
+	const orchestrating = () => {
+		const b = contextBudget(window, outCap);
+		return (b ? ` Your replies are cut at about ${b.write} lines: keep each ticket and decision short, and point at files instead of pasting them.` : "")
+			+ (ui ? "" : " No one can be asked in this session: agree the ticket yourself from the request, and decide what you would ask about.");
+	};
+	const promptOf = (name: string) => (manifest.roles[name]?.prompt ?? "") + (name === "plan" && canOrchestrate() ? PLAN_FOR_ORCHESTRATION + sized() : "") + (name === "orchestration" ? orchestrating() : "");
 	function reload(ctx: ExtensionContext | undefined) {
 		try { manifest = loadManifest(cwd, typeof (ctx as any)?.isProjectTrusted === "function" ? ctx!.isProjectTrusted() : !!(ctx as any)?.isProjectTrusted, (m) => warn(ctx, m)); }
 		catch (e) { // a broken manifest fails closed: built-in roles only, and the strictest mode that still works
@@ -6300,7 +6310,7 @@ export function discoverAgents(cwd: string, trusted: boolean): AgentDef[] {
 	return [...out.values()];
 }
 
-interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number; timedOut?: number; stopped?: boolean; lastSteps?: string; peak?: number; compactions?: number; window?: number }
+interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number; timedOut?: number; stopped?: boolean; lastSteps?: string; peak?: number; compactions?: number; window?: number; cut?: boolean }
 
 // ------------------------------------------------------------ run transcripts
 // Each child's JSON event stream is also kept as a transcript: the live part
@@ -6936,7 +6946,7 @@ export function runAgent(agent: AgentDef, task: string, cwd: string, signal: Abo
 	return childOf(rec).prompt(`Task: ${task}`, { first: true, signal, timeout: agent.timeout ?? SUBAGENT_TIMEOUT, onProgress })
 		.then((r) => {
 			if (r.timedOut) r.lastSteps = lastSteps(rec);
-			r.peak = rec.peak; r.compactions = rec.compactions;
+			r.peak = rec.peak; r.compactions = rec.compactions; r.cut = endedCut(rec);
 			r.window = rec.stats?.contextWindow || rec.stats?.contextUsage?.contextWindow || undefined;
 			return r;
 		});
@@ -6961,6 +6971,11 @@ export const lastSteps = (rec: RunRecord, n = 3): string =>
 		const s = `${e.name}${a && a !== "{}" ? ` ${a}` : ""}`.replace(/\s+/g, " ");
 		return s.length > 80 ? `${s.slice(0, 79)}…` : s;
 	}).join("; ");
+// its last reply was cut at the reply limit (it ended mid-answer)
+export function endedCut(rec: RunRecord): boolean {
+	for (let i = rec.events.length - 1; i >= 0; i--) { const e: any = rec.events[i]; if (e.t === "assistant") return e.stop === "length"; }
+	return false;
+}
 // a run that ran short of its context says so, for the caller's next steps
 export function shortNote(r: { peak?: number; compactions?: number; window?: number }): string {
 	const c = r.compactions ?? 0, w = Number(r.window) || 0, pct = w && r.peak ? Math.round((r.peak / w) * 100) : 0;
@@ -8483,20 +8498,24 @@ export const factoryRoot = () => join(process.env.PI_CODING_AGENT_DIR || join(ho
 // A step's share of a fresh context, from the model's window: the window
 // less the reply budget (the output cap, else a quarter) and about 6k of
 // system prompt and tools; 40% of the rest is for reading, about 12 tokens a
-// line. shrink halves it once per stage of a run that ran short. The same
-// in the mandate and factory modules (a test keeps them equal).
-export interface Budget { window: number; files: number; lines: number; steps: number }
+// line. shrink halves it once per stage of a run that ran short. write: the
+// lines one reply can hold, 60% of the reply budget (thinking and the call
+// take the rest): a reply cut at the limit loses its tool call. The same in
+// the mandate and factory modules (the tests pin both to the same numbers).
+export interface Budget { window: number; files: number; lines: number; steps: number; write: number }
 export function contextBudget(window?: number, outCap?: number, shrink = 0): Budget | null {
 	if (!(Number(window) > 0)) return null;
 	const w = Number(window), out = Number(outCap) > 0 && Number(outCap) < w ? Number(outCap) : Math.floor(w / 4);
+	const write = Math.max(100, Math.min(1600, Math.floor(out * 0.6 / 12)));
 	const usable = w - out - 6000;
-	if (usable <= 2000) return { window: w, files: 1, lines: 150, steps: 3 };
+	if (usable <= 2000) return { window: w, files: 1, lines: 150, steps: 3, write };
 	const lines = Math.max(150, Math.min(6000, Math.floor(usable * 0.4 / 12 / 2 ** Math.max(0, shrink))));
-	return { window: w, files: Math.max(1, Math.min(15, Math.round(lines / 300))), lines, steps: Math.max(3, Math.min(12, Math.floor(usable * 0.5 / 1500))) };
+	return { window: w, files: Math.max(1, Math.min(15, Math.round(lines / 300))), lines, steps: Math.max(3, Math.min(12, Math.floor(usable * 0.5 / 1500))), write };
 }
 // a run that ran short of its context: compacted, or a request at 80% of the window
 export const ranShort = (peak?: number, compactions?: number, window?: number): boolean => (compactions ?? 0) > 0 || (Number(window) > 0 && (peak ?? 0) >= 0.8 * Number(window));
 export const MAX_FIX_ROUNDS = 5;
+export const MAX_CONTINUES = 2;   // a developer reply cut at the reply limit is continued at most this often
 export const SUITE_TIMEOUT_MS = 10 * 60 * 1000;
 
 export type Stage = "intake" | "plan" | "build" | "expert-review" | "design-review" | "test" | "judge" | "regression" | "done";
@@ -8511,6 +8530,7 @@ export interface Entry {
 	verdict: string; summary: string; findings?: string[];
 	input: number; output_tokens: number; seconds: number; started: number; ended: number;
 	short?: boolean;   // the stage ran short of its context
+	continued?: number;   // replies cut at the limit that were continued
 }
 export interface Ledger {
 	v: 1; id: string; created: number; updated: number;
@@ -8532,7 +8552,7 @@ export interface Ledger {
 	commit: string;
 	entries: Entry[];
 }
-export interface Dispatched { text: string; exitCode: number; input: number; output: number; seconds: number; peak?: number; compactions?: number; window?: number }
+export interface Dispatched { text: string; exitCode: number; input: number; output: number; seconds: number; peak?: number; compactions?: number; window?: number; cut?: boolean }
 export interface Decision { action: "approve" | "edit" | "stop" | "more" | "final" | "retry" | "commit" | "keep"; text?: string; by?: string }
 export interface Deps {
 	dispatch(expert: string, brief: Record<string, string>, cwd: string, meta: { stage: Stage; round: number; runId: string }): Promise<Dispatched>;
@@ -8670,8 +8690,9 @@ export function budgetFor(stage: Stage, L: Ledger): string {
 	const head = `Your context is about ${b.window} tokens.`;
 	const cut = L.shrink ? " An earlier stage of this run ran short of context: these sizes are already cut to fit." : "";
 	const f = `${b.files} file${b.files === 1 ? "" : "s"}`;
-	if (stage === "plan") return `${head} Plan the build in steps of at most ${f} changed and about ${b.lines} lines read each. If the ticket needs more than ${b.steps} such steps, say so at the top of the plan, with how to split it into smaller tickets.${cut}`;
-	if (stage === "build") return `${head} Build the plan one step at a time, reading only what the current step needs: about ${b.lines} lines at a time, the parts of a file you change, not whole large files.${cut}`;
+	const write = `One reply holds about ${b.write} lines: write a larger file in parts (its first part, then the rest by edits), never whole in one call.`;
+	if (stage === "plan") return `${head} Plan the build in steps of at most ${f} changed and about ${b.lines} lines read each. If the ticket needs more than ${b.steps} such steps, say so at the top of the plan, with how to split it into smaller tickets. ${write}${cut}`;
+	if (stage === "build") return `${head} Build the plan one step at a time, reading only what the current step needs: about ${b.lines} lines at a time, the parts of a file you change, not whole large files. ${write}${cut}`;
 	return `${head} Read the change file by file (\`git -C ${L.work} diff ${L.base} -- <file>\`) and only the code around each hunk, about ${b.lines} lines at a time, never the whole diff at once.${cut}`;
 }
 
@@ -8691,8 +8712,25 @@ async function stageRun(L: Ledger, deps: Deps, stage: Stage): Promise<{ text: st
 	let r: Dispatched;
 	try { r = await deps.dispatch(expert, brief, L.work, { stage, round: L.rounds, runId: L.id }); }
 	catch (e) { r = { text: `dispatch failed: ${e instanceof Error ? e.message : String(e)}`, exitCode: 1, input: 0, output: 0, seconds: 0 }; }
+	// the developer's reply cut at the reply limit: a fresh reply goes on from
+	// the work tree (what it wrote is kept), in smaller parts, instead of the
+	// run blocking on the missing STATUS line
+	let continued = 0;
+	while (r.cut && (stage === "plan" || stage === "build") && continued < MAX_CONTINUES) {
+		continued++;
+		deps.progress?.(`factory ${L.id}: ${stage} reply cut at the reply limit: continuing (${continued}/${MAX_CONTINUES})`);
+		const tail = r.text.trim().slice(-600);
+		const more = { ...brief, continue: stage === "build"
+			? `Your previous reply was cut off at the reply limit. The work tree keeps every file you wrote; check what is there and go on from where it stopped, in smaller parts (a file's first part, then the rest by edits), and end with your STATUS line. It ended with:\n${tail}`
+			: `Your previous reply was cut off at the reply limit. Reply again with the whole plan, shorter, ending with your STATUS line. It ended with:\n${tail}` };
+		let m: Dispatched;
+		try { m = await deps.dispatch(expert, more, L.work, { stage, round: L.rounds, runId: L.id }); }
+		catch (e) { m = { text: `dispatch failed: ${e instanceof Error ? e.message : String(e)}`, exitCode: 1, input: 0, output: 0, seconds: 0 }; }
+		r = { ...m, input: r.input + m.input, output: r.output + m.output, seconds: r.seconds + m.seconds,
+			peak: Math.max(r.peak ?? 0, m.peak ?? 0) || undefined, compactions: (r.compactions ?? 0) + (m.compactions ?? 0) || undefined };
+	}
 	const out = artifact(L, `${String(n).padStart(2, "0")}-${stage}.out.md`, r.text);
-	const entry: Entry = { stage, round: L.rounds, expert, brief: briefFile, output: out, verdict: "", summary: "", input: r.input, output_tokens: r.output, seconds: r.seconds, started, ended: now() };
+	const entry: Entry = { stage, round: L.rounds, expert, brief: briefFile, output: out, verdict: "", summary: "", input: r.input, output_tokens: r.output, seconds: r.seconds, started, ended: now(), ...(continued ? { continued } : {}) };
 	// ran short of its context: the stages after it get smaller sizes
 	if (ranShort(r.peak, r.compactions, r.window || L.window)) {
 		L.shrink = Math.min(3, (L.shrink ?? 0) + 1); entry.short = true;
@@ -9012,7 +9050,7 @@ export async function sessionDeps(ctx: any, signal?: AbortSignal, progress?: (l:
 			const s = find(expert); if (!s) return { text: `The ${expert} expert is not usable here.`, exitCode: 127, input: 0, output: 0, seconds: 0 };
 			const t0 = Date.now(); const i = PIPELINE.indexOf(meta.stage);
 			const r = await sub.runAgent(s, exp.renderBrief(s, brief), cwd, signal, progress, { tool: "factory", callId: callId ?? meta.runId, mode: "chain", index: i, of: PIPELINE.length });
-			return { text: r.text ?? "", exitCode: r.exitCode ?? 1, input: r.input ?? 0, output: r.output ?? 0, seconds: (Date.now() - t0) / 1000, peak: r.peak, compactions: r.compactions, window: r.window };
+			return { text: r.text ?? "", exitCode: r.exitCode ?? 1, input: r.input ?? 0, output: r.output ?? 0, seconds: (Date.now() - t0) / 1000, peak: r.peak, compactions: r.compactions, window: r.window, cut: r.cut };
 		},
 		exec: shellExec,
 		checkpoint: dialogs(ctx?.hasUI ? ctx.ui : undefined),

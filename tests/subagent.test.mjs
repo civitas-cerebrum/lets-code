@@ -512,6 +512,14 @@ async function load(env = {}) {
 	mod.recordEvent(k, { type: "compaction_start", reason: "threshold" }); mod.recordEvent(k, { type: "compaction_start" });
 	t("context: compactions counted, and noted", [k.compactions, k.events.at(-1).text], [2, "compacting the context (threshold)"]);
 	t("context: a message without usage leaves it", (mod.recordEvent(k, { type: "message_end", message: { role: "assistant", content: "c", stopReason: "stop" } }), k.peak), 10800);
+	const cutRun = mod.newRun({ name: "w" }, "t", work);
+	t("cut: no reply yet: not cut", mod.endedCut(cutRun), false);
+	mod.recordEvent(cutRun, { type: "message_end", message: { role: "assistant", content: "part", stopReason: "length" } });
+	t("cut: the last reply stopped at the length limit", mod.endedCut(cutRun), true);
+	mod.recordEvent(cutRun, { type: "tool_execution_start", toolCallId: "x1", toolName: "read", args: {} });
+	t("cut: a tool event after it does not hide it", mod.endedCut(cutRun), true);
+	mod.recordEvent(cutRun, { type: "message_end", message: { role: "assistant", content: "done", stopReason: "stop" } });
+	t("cut: a later reply that ended normally: not cut", mod.endedCut(cutRun), false);
 	const R = (x) => ({ agent: "w", task: "x", text: "done", exitCode: 0, stderr: "", turns: 1, input: 1, output: 1, ...x });
 	t("short note: compacted", mod.shortNote({ compactions: 2, window: 32768, peak: 16384 }), "\n\n[context: this run ran short, reaching 50% of its 32768-token window, compacted 2×: give what is left in smaller steps]");
 	t("short note: at 85% of the window", mod.shortNote({ peak: 27853, window: 32768 }), "\n\n[context: this run ran short, reaching 85% of its 32768-token window: give what is left in smaller steps]");

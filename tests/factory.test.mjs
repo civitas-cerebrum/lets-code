@@ -198,6 +198,18 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	const r15 = makeRepo("ask-failed"); const fd15 = fakeDeps({ ...OK, build: [build()], "expert-review": [() => ({ text: "boom", exitCode: 1, input: 1, output: 1, seconds: 1 })] }, { decisions: { blocked: { action: "stop" } } });
 	const L15 = await F.startRun(opts(r15), fd15);
 	t("a failed review run: not asked again", [fd15.calls.filter((c) => c.meta.stage === "expert-review").length, L15.entries.find((e) => e.stage === "expert-review").verdict], [1, "FAILED"]);
+	// blocked after the build: decision final takes the build to the final approval, and it is committed
+	const r16 = makeRepo("final-blocked"); const fd16 = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { blocked: { action: "final", by: "the orchestrator" } } });
+	const L16 = await F.startRun(opts(r16), fd16);
+	t("blocked after the build, final: committed on the run branch, marked unreviewed", [L16.status, !!L16.commit, L16.unreviewed, L16.entries.some((e) => e.verdict === "FINAL AS IT IS" && /expert-review and the stages after it did not run/.test(e.summary))], ["done", true, true, true]);
+	t("blocked after the build, final: the later stages did not run", fd16.calls.some((c) => c.meta.stage === "design-review" || c.meta.stage === "judge"), false);
+	t("blocked after the build: final is offered", F.decisionsAt("blocked", { ...L16, waiting: "blocked" }), ["retry", "final", "stop"]);
+	// negative: blocked before anything was built: final is not offered, and refused
+	const r17 = makeRepo("final-early"); const fd17 = fakeDeps({ ...OK, plan: ["I would add a file."] }, { decisions: { blocked: { action: "stop" } } });
+	const L17 = await F.startRun(opts(r17), fd17);
+	t("blocked before a build: final not offered", F.decisionsAt("blocked", L17), ["retry", "stop"]);
+	t("blocked before a build: final refused", typeof F.decisionFor("blocked", "final", undefined, L17), "string");
+	t("blocked after a build: final accepted", F.decisionFor("blocked", "final", undefined, L16), { action: "final", text: undefined, by: "the orchestrator" });
 	t("hasVerdict: the line, the judge's heading, neither", [F.hasVerdict("expert-review", "VERDICT: REVISE\nx"), F.hasVerdict("judge", "## Verdict\nREJECT C1"), F.hasVerdict("design-review", "all good"), F.hasVerdict("judge", "VERDICT is coming")], [true, true, false, false]);
 	// negative: an uncut reply is never continued
 	t("no cut: one build call", fd.calls.filter((c) => c.meta.stage === "build").length, 1);

@@ -5534,7 +5534,7 @@ const BUILTIN: Manifest = {
 		orchestration: {
 			label: "orchestration", description: "plans and hands every change to experts and subagents, has every delivery reviewed; changes no file itself", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "subagent", "expert", "list_mcp_resources", "read_mcp_resource"],
 			write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: ["*", "!worker"], network: "on",
-			prompt: "Orchestration mode (software factory): you plan and orchestrate; experts and subagents do the work. You change no file yourself: edit and write are off and bash runs read-only commands. Never ask the user to run a command for you: hand it to a subagent (general) or an expert. Code is written only through software-factory, however small the change: never hand writing code to a subagent; general is for setup chores (moving or backing up files). You never test or verify a delivery yourself, not even by reading its diff: every delivery is reviewed, and you act on the verdict (APPROVE: go on; REVISE: back to the one who did it, with the findings). A software-factory run comes reviewed (its reviewers, tester and acceptance judge): take its verdict. Anything else (setup a subagent did, a change made outside a run) goes to expert-reviewer, and to design-reviewer for structure. When a run's result says it ran short of context, give the remaining steps in smaller parts. Read the code and agree with the user on the ticket: the goal, numbered acceptance criteria, the test command, constraints. Hand each part to the one for it: a ticket to software-factory (developer, reviewers, tester, acceptance judge, with the user's approvals; it works inside one git repo, and a new or empty folder becomes one), setup outside that repo (moving or backing up old files) to a subagent first, an open question to researcher, a review of an existing change to expert-reviewer or design-reviewer. Split large work into tickets and run them one at a time. A run you start pauses at its checkpoints and hands them to you: decide them yourself and go on with resume and decision (the developer's plan against the criteria: approve, or edit it; a further fix round; the commit on the run's branch). Ask the user first only for a significant design decision: a new dependency or service, an architecture or data-model choice the ticket left open, a change of scope, anything destructive or hard to undo. When a run is blocked, read its ledger and artifacts (lets-code-factory/<id>/ in the agent dir), then retry, or sharpen the ticket and start a new run; never patch its worktree. Merging or pushing a run's branch is the user's. Report stage summaries, findings and what the user must decide.",
+			prompt: "Orchestration mode (software factory): you plan and orchestrate; experts and subagents do the work. You change no file yourself: edit and write are off and bash runs read-only commands. Never ask the user to run a command for you: hand it to a subagent (general) or an expert. Code is written only through software-factory, however small the change: never hand writing code to a subagent; general is for setup chores (moving or backing up files). You never test or verify a delivery yourself, not even by reading its diff: every delivery is reviewed, and you act on the verdict (APPROVE: go on; REVISE: back to the one who did it, with the findings). A software-factory run comes reviewed (its reviewers, tester and acceptance judge): take its verdict. Anything else (setup a subagent did, a change made outside a run) goes to expert-reviewer, and to design-reviewer for structure. When a run's result says it ran short of context, give the remaining steps in smaller parts. Read the code and agree with the user on the ticket: the goal, numbered acceptance criteria, the test command, constraints. Hand each part to the one for it: a ticket to software-factory (developer, reviewers, tester, acceptance judge, with the user's approvals; it works inside one git repo, and a new or empty folder becomes one), setup outside that repo (moving or backing up old files) to a subagent first, an open question to researcher, a review of an existing change to expert-reviewer or design-reviewer. Split large work into tickets and run them one at a time. A run you start pauses at its checkpoints and hands them to you: decide them yourself and go on with resume and decision (the developer's plan against the criteria: approve, or edit it; a further fix round; the commit on the run's branch). Ask the user first only for a significant design decision: a new dependency or service, an architecture or data-model choice the ticket left open, a change of scope, anything destructive or hard to undo. When a run is blocked, read its ledger and artifacts (lets-code-factory/<id>/ in the agent dir), then retry, or sharpen the ticket and start a new run; never patch its worktree. A run blocked after its build (a review that gives no verdict, a stage that keeps failing to report) goes to the final approval as it is with decision final, and you commit it: stopping it loses the work. Merging or pushing a run's branch is the user's. Report stage summaries, findings and what the user must decide.",
 		},
 		// read-only without the planning instructions: for scouts and reviewers
 		readonly: { label: "readonly", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "list_mcp_resources", "read_mcp_resource"], write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: [], network: "off" },
@@ -8543,6 +8543,7 @@ export interface Ledger {
 	criteria: string[]; plan: string; claim: string;
 	window?: number; outCap?: number;              // the model's context window and output cap: stage briefs are sized to it
 	shrink?: number;                               // stages that ran short of context so far: each halves the sizes (at most 3)
+	unreviewed?: boolean;                          // taken to the final approval from a blocked stage, its later stages not run
 	findings: Partial<Record<Stage, Finding[]>>;   // each review stage's open findings, from its last verdict
 	sent: Record<string, string[]>;                // finding ids already sent to the developer, per stage
 	fixing: { stage: Stage; findings: Finding[] } | null;   // what the next build fixes, and where to go on
@@ -8851,7 +8852,16 @@ async function applyDecision(L: Ledger, d: Decision, deps: Deps): Promise<void> 
 	if (d.action === "stop") { L.status = "stopped"; L.stoppedAt = kind; L.note = `${d.by ?? "the user"} stopped it at the ${kind} checkpoint`; return; }
 	if (kind === "criteria") { if (d.text !== undefined) L.criteria = criteriaFromText(d.text); if (!L.criteria.length) { L.waiting = "criteria"; L.note = "no criteria: write at least one"; } return; }
 	if (kind === "plan") { if (d.text !== undefined && d.text.trim()) L.plan = d.text.trim(); return; }
-	if (kind === "blocked") return;   // retry: the stage runs again
+	// final: what was built goes to the final approval as it is (a later stage
+	// that blocks, a review with no verdict, must not lose a finished build);
+	// retry: the stage runs again
+	if (kind === "blocked") {
+		if (d.action === "final" && built(L)) {
+			const from = L.stage, t = (deps.now ?? Date.now)(); L.stage = "done"; L.unreviewed = true;
+			L.entries.push({ stage: from, round: L.rounds, verdict: "FINAL AS IT IS", summary: `${d.by ?? "the user"} took the build to the final approval; ${from} and the stages after it did not run`, input: 0, output_tokens: 0, seconds: 0, started: t, ended: t });
+		}
+		return;
+	}
 	if (kind === "stuck") {
 		const p = L.pending; L.pending = null;
 		if (d.action === "final") { L.stage = "done"; return; }
@@ -9030,19 +9040,21 @@ export function dialogs(ui: any | undefined): Deps["checkpoint"] {
 			const c = await ui.select(`Factory ${L.id}: ${L.note}\n\n${formatFindings(L.pending?.findings ?? [])}`, opts);
 			return { action: c === "One more fix round" ? "more" : c === "Go to the final approval as it is" ? "final" : "stop" };
 		}
-		const c = await ui.select(`Factory ${L.id}: ${L.note}`, ["Retry the stage", "Stop"]);
-		return { action: c === "Retry the stage" ? "retry" : "stop" };
+		const c = await ui.select(`Factory ${L.id}: ${L.note}`, ["Retry the stage", ...(built(L) ? ["Go to the final approval as it is"] : []), "Stop"]);
+		return { action: c === "Retry the stage" ? "retry" : c === "Go to the final approval as it is" ? "final" : "stop" };
 	};
 }
 // A run the orchestrator started: each checkpoint pauses the run and goes
 // back to it (the main session's model) with what to decide; it goes on with a
 // resume and its decision, and asks the user only what needs the user. The
 // criteria it wrote into the ticket are confirmed for it.
-export const DECISIONS: Record<Waiting, Decision["action"][]> = { criteria: ["approve", "edit", "stop"], plan: ["approve", "edit", "stop"], result: ["commit", "keep", "stop"], stuck: ["more", "final", "stop"], blocked: ["retry", "stop"] };
+export const DECISIONS: Record<Waiting, Decision["action"][]> = { criteria: ["approve", "edit", "stop"], plan: ["approve", "edit", "stop"], result: ["commit", "keep", "stop"], stuck: ["more", "final", "stop"], blocked: ["retry", "final", "stop"] };
 // "approve" reads as the checkpoint's go-ahead wherever it has another name
 const GO: Partial<Record<Waiting, Decision["action"]>> = { result: "commit", stuck: "more", blocked: "retry" };
 // what a checkpoint takes now: no further fix round once the rounds are used
-export const decisionsAt = (kind: Waiting, L?: Ledger): Decision["action"][] => (kind === "stuck" && L && L.rounds >= MAX_FIX_ROUNDS ? ["final", "stop"] : DECISIONS[kind]);
+// a blocked run goes to the final approval as it is only once something was built
+export const built = (L?: Ledger): boolean => !!L && L.entries.some((e) => e.stage === "build" && /^DONE/.test(e.verdict));
+export const decisionsAt = (kind: Waiting, L?: Ledger): Decision["action"][] => (kind === "stuck" && L && L.rounds >= MAX_FIX_ROUNDS ? ["final", "stop"] : kind === "blocked" && L && !built(L) ? ["retry", "stop"] : DECISIONS[kind]);
 export function decisionFor(kind: Waiting, said: string, text?: string, L?: Ledger): Decision | string {
 	const a = said.trim().toLowerCase(); const ok = decisionsAt(kind, L);
 	const action = (a === "approve" && GO[kind] && ok.includes(GO[kind]!) ? GO[kind] : a) as Decision["action"];

@@ -5420,7 +5420,7 @@ pi_write_mandate_extension() {
 // fields it sets win); a project's may only tighten it.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { existsSync, readFileSync, appendFileSync, mkdirSync, realpathSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
@@ -5454,24 +5454,10 @@ const ORCHESTRATOR = !ACTIVE && process.env.LETS_CODE_ORCHESTRATOR_ON === "1";
 const PLAN = !ACTIVE && process.env.LETS_CODE_PLAN_ON === "1";
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const LOG = process.env.LETS_CODE_MANDATE_LOG || join(AGENT_DIR, "lets-code-mandate.log");
-// the model's mode switches: asked first ("ask", the default) or made at
-// once ("auto"). Picked in /mode or the switch dialog and remembered in
-// lets-code-state.json (modeSwitch); LETS_CODE_MODE_SWITCH decides for one launch
-const STATE = process.env.LETS_CODE_METRICS_SAVE || process.env.LETS_CODE_STATE_FILE || join(AGENT_DIR, "lets-code-state.json");
-export function readModeSwitch(file = STATE): "ask" | "auto" {
-	const env = process.env.LETS_CODE_MODE_SWITCH;
-	if (env === "auto" || env === "ask") return env;
-	try { return JSON.parse(readFileSync(file, "utf8"))?.modeSwitch === "auto" ? "auto" : "ask"; } catch { return "ask"; }
-}
-export function saveModeSwitch(v: "ask" | "auto", file = STATE): void {
-	let doc: any = {};
-	try { doc = JSON.parse(readFileSync(file, "utf8")); } catch { /* missing or unreadable: start over */ }
-	if (!doc || typeof doc !== "object" || Array.isArray(doc)) doc = {};
-	if (doc.modeSwitch === v) return;
-	doc.modeSwitch = v;
-	const tmp = `${file}.${process.pid}.tmp`;
-	writeFileSync(tmp, JSON.stringify(doc, null, 2) + "\n", { mode: 0o600 });
-	renameSync(tmp, file);
+// the model's mode switches: made at once ("auto", the default) or asked
+// first ("ask", LETS_CODE_MODE_SWITCH=ask)
+export function readModeSwitch(): "ask" | "auto" {
+	return process.env.LETS_CODE_MODE_SWITCH === "ask" ? "ask" : "auto";
 }
 const PROTECTED = [".git/", ".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519"];
 
@@ -5985,16 +5971,8 @@ export default function (pi: ExtensionAPI) {
 			const list = menu();
 			if (!want) {
 				const line = (m: string) => `${m === current() ? "●" : " "} ${m} — ${describe(m)}`;
-				const sw = readModeSwitch();
-				const toggle = `  the model's switches: ${sw === "auto" ? "made without asking" : "asked first"} (enter: ${sw === "auto" ? "ask first" : "switch without asking"})`;
-				if (!ctx.hasUI) { console.log([...list.map(line), toggle].join("\n")); return; }
-				const pick = await ctx.ui.select(`Mode (now ${current()})`, [...list.map(line), toggle]);
-				if (pick === toggle) {
-					const next = sw === "auto" ? "ask" : "auto";
-					try { saveModeSwitch(next); } catch (e) { ctx.ui.notify(`could not save: ${(e as Error).message}`, "warning"); return; }
-					ctx.ui.notify(next === "auto" ? "The model now switches modes without asking (you see each switch; never yolo)." : "The model asks before it switches modes.", "info");
-					return;
-				}
+				if (!ctx.hasUI) { console.log(list.map(line).join("\n")); return; }
+				const pick = await ctx.ui.select(`Mode (now ${current()})`, list.map(line));
 				const i = pick === undefined ? -1 : list.map(line).indexOf(pick);
 				if (i < 0 || list[i] === current()) return;
 				await switchTo(ctx, list[i]);
@@ -6004,13 +5982,14 @@ export default function (pi: ExtensionAPI) {
 			await switchTo(ctx, want);
 		},
 	});
-	// the agent asks to switch (the user confirms): out of plan once the user
-	// approved the changes, into plan before risky work, into the orchestrator
-	// for large or long work. A mode without rails is the user's to pick
+	// the agent switches and the user sees it (LETS_CODE_MODE_SWITCH=ask: asked
+	// first): out of plan once the user approved the changes, into plan before
+	// risky work, into the orchestrator for large or long work. A mode without
+	// rails is the user's to pick
 	pi.registerTool({
 		name: "mode", label: "mode",
-		description: "Ask the user to switch this session's mode; they confirm or decline (or let you switch at once). Ask to leave plan mode once the user has approved the changes; to enter plan mode before a risky or unclear change; to enter orchestrator mode (if listed) for large or long-horizon work, where experts and subagents do the work and your context stays small. Do not ask again after a decline.",
-		promptSnippet: "mode: ask the user to switch mode (leave plan once changes are approved; orchestrator for large, long work)",
+		description: "Switch this session's mode; the user sees each switch with your reason (or, if set to ask first, confirms or declines). Switch to leave plan mode once the user has approved the changes; to enter plan mode before a risky or unclear change; to enter orchestrator mode (if listed) for large or long-horizon work, where experts and subagents do the work and your context stays small. Do not ask again after a decline.",
+		promptSnippet: "mode: switch mode (leave plan once changes are approved; orchestrator for large, long work)",
 		parameters: Type.Object({
 			to: Type.String({ description: "the mode to switch to" }),
 			reason: Type.String({ description: "one sentence the user sees: why" }),
@@ -6025,14 +6004,13 @@ export default function (pi: ExtensionAPI) {
 			const auto = readModeSwitch() === "auto";
 			if (!auto) {
 				if (!ctx?.hasUI) return reply("No one can confirm a mode switch here: go on in this mode.", true);
-				const yes = `Switch to ${to}`, always = `Switch to ${to}, and switch without asking from now on`;
-				const pick = await ctx.ui.select(`The agent asks to switch mode: ${cur} → ${to}${reason ? `\n${reason}` : ""}`, [yes, always, `Stay in ${cur}`]);
-				if (pick !== yes && pick !== always) { log("mode-ask", { to, answer: "no" }); return reply(`The user kept ${cur} mode: go on within it, and do not ask again.`); }
-				if (pick === always) { try { saveModeSwitch("auto"); } catch { /* this switch still goes ahead */ } }
-				log("mode-ask", { to, answer: pick === always ? "always" : "yes" });
+				const yes = `Switch to ${to}`;
+				const pick = await ctx.ui.select(`The agent asks to switch mode: ${cur} → ${to}${reason ? `\n${reason}` : ""}`, [yes, `Stay in ${cur}`]);
+				if (pick !== yes) { log("mode-ask", { to, answer: "no" }); return reply(`The user kept ${cur} mode: go on within it, and do not ask again.`); }
+				log("mode-ask", { to, answer: "yes" });
 			} else log("mode-ask", { to, answer: "auto" });
 			await switchTo(ctx, to, true);
-			if (auto && ctx?.hasUI) ctx.ui.notify(`The model switched mode: ${cur} → ${current()}${reason ? ` (${reason})` : ""}. /mode switches back, or makes it ask first.`, "info");
+			if (auto && ctx?.hasUI) ctx.ui.notify(`The model switched mode: ${cur} → ${current()}${reason ? ` (${reason})` : ""}. /mode switches back.`, "info");
 			const r = to === OFF ? undefined : manifest.roles[to];
 			return reply(`Mode is now ${current()}: ${describe(current())}.${r?.prompt && on ? ` ${r.prompt}` : ""}${cur === "plan" && to !== "plan" ? " Writing is open again: go on with the approved changes." : ""}`);
 		},

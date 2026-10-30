@@ -636,22 +636,15 @@ Switch with `/mode` (a menu of the modes there are, each with a line on
 what it does, the current one marked), `/mode <name>`, `/plan`,
 `/orchestrator`, `alt+m` (cycle) or `ctrl+alt+p`.
 
-The model can ask too, with its `mode` tool: you see the switch it wants
-and why, and confirm or decline. It asks to leave plan mode once you have
-approved the changes, to enter plan mode before a risky or unclear change,
-and to enter `orchestrator` for large or long work, where experts and
-subagents do the work and the session's context stays small. A refused
-call points it there as well. It never gets `yolo` (that one is yours to
-pick), and a subagent has no `mode` tool.
-
-To let it switch without asking, pick "switch without asking from now on"
-in that dialog, or the last line of the `/mode` menu (the same line turns
-asking back on). The choice is remembered in
-`~/.pi/agent/lets-code-state.json` (`modeSwitch`);
-`LETS_CODE_MODE_SWITCH=auto|ask` decides for one launch. A switch made
-without asking still shows a notice with the model's reason, and `yolo`
-stays yours either way. That includes leaving plan mode: once you approve
-a change in the conversation, the model leaves plan and makes it.
+The model switches too, with its `mode` tool, and you see a notice with
+each switch and its reason (`/mode` switches back). It leaves plan mode
+once you have approved the changes in the conversation, enters plan mode
+before a risky or unclear change, and enters `orchestrator` for large or
+long work, where experts and subagents do the work and the session's
+context stays small. A refused call points it there as well. It never
+gets `yolo` (that one is yours to pick), and a subagent has no `mode`
+tool. To confirm or decline each switch instead, launch with
+`LETS_CODE_MODE_SWITCH=ask`.
 Starting or resuming a software factory run (`/factory`, or the
 `software-factory` expert) switches the session into `orchestrator` and keeps
 it there until you leave it with `/orchestrator` (back to the mode you came
@@ -1754,7 +1747,7 @@ child too.
 | Model does not see images, or does not think | The launch banner says `sees images` and `thinking <level>` when they are on (`--verbose` shows each probe). Pin `VISION=true` / `REASONING=true` if a probe was inconclusive. |
 | pi says provider `lets-code` is unknown | Re-run `lets-code`; it re-registers on every launch. |
 | `sandbox: not active` on the launch line | Install `bubblewrap` and `socat` (Linux), or run the `npm install` the message names. |
-| A call was refused with `mandate(...)` | The current mode forbids it. The model may ask to switch (confirm or decline); `/mode` picks another mode, `/mode auto` lifts the rails for the session, or tighten/loosen the role in `~/.pi/agent/mandate.json`. |
+| A call was refused with `mandate(...)` | The current mode forbids it. The model may switch mode itself (you see it); `/mode` picks another mode, `/mode auto` lifts the rails for the session, or tighten/loosen the role in `~/.pi/agent/mandate.json`. |
 
 </details>
 

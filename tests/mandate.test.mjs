@@ -469,17 +469,19 @@ const blocked = (r) => r?.block === true;
 	// mandate on: the menu lists the modes, the current one marked; a pick switches
 	const h = await load({}, { answers: [pick("ask")], tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent", "mode"] }); const d = repo(); await h.start(d);
 	await h.commands.mode.handler("", h.ctx(d));
-	t("/mode menu: the modes with a line each, the current marked", h.options[0], ["● auto — everything runs; only protected paths are refused", "  ask — confirms sudo, recursive deletes, installs and writes outside the project", "  plan — read-only: explores, then writes a numbered plan you approve", "  orchestrator — plans and hands every change to experts and subagents; changes no file itself", "  yolo — no rails at all", "  the model's switches: asked first (enter: switch without asking)"]);
+	t("/mode menu: the modes with a line each, the current marked", h.options[0], ["● auto — everything runs; only protected paths are refused", "  ask — confirms sudo, recursive deletes, installs and writes outside the project", "  plan — read-only: explores, then writes a numbered plan you approve", "  orchestrator — plans and hands every change to experts and subagents; changes no file itself", "  yolo — no rails at all"]);
 	t("/mode menu: a pick switches", modes(h).at(-1)?.role, "ask");
 	// the agent asks: out of plan once the changes are approved
 	await h.commands.mode.handler("plan", h.ctx(d));
 	t("mode tool: stays active in plan", h.tools().includes("mode"), true);
 	t("mode tool: not refused in plan", await h.call(d, "mode", { to: "ask", reason: "x" }), undefined);
 	t("plan: a refused write points at the mode tool", /mode tool/.test((await h.call(d, "write", { path: join(d, "src/b.txt") }))?.reason ?? ""), true);
+	// asked first (LETS_CODE_MODE_SWITCH=ask): the user confirms or declines
+	process.env.LETS_CODE_MODE_SWITCH = "ask";
 	const h2 = await load({}, { answers: ["Stay in plan", "Switch to auto", "Switch to orchestrator"], tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "mode"] }); await h2.start(d);
 	await h2.commands.mode.handler("plan", h2.ctx(d));
 	const no = await run(h2, d, { to: "auto", reason: "You approved the change." });
-	t("mode tool: the user sees the switch and the reason", h2.selects.at(-1), "The agent asks to switch mode: plan → auto\nYou approved the change.");
+	t("mode tool: the user sees the switch and the reason", [h2.selects.at(-1), h2.options.at(-1)], ["The agent asks to switch mode: plan → auto\nYou approved the change.", ["Switch to auto", "Stay in plan"]]);
 	t("mode tool: declined, still plan", [/kept plan mode/.test(text(no)), blocked(await h2.call(d, "write", { path: join(d, "src/b.txt") }))], [true, true]);
 	const yes = await run(h2, d, { to: "auto", reason: "You approved the change." });
 	t("mode tool: confirmed, out of plan, writing open, no plan run", [/^Mode is now auto/.test(text(yes)), /Writing is open again/.test(text(yes)), await h2.call(d, "write", { path: join(d, "src/b.txt") }), h2.tools().includes("edit"), h2.emitted.filter(([c]) => c === "user").length], [true, true, undefined, true, 0]);
@@ -490,23 +492,18 @@ const blocked = (r) => r?.block === true;
 	t("mode tool: the mode it is in", text(await run(h2, d, { to: "orchestrator", reason: "" })), "The session is in orchestrator mode already.");
 	const nu = await load({}, { ui: false }); await nu.start(d);
 	t("mode tool: no UI, refused", (await run(nu, d, { to: "plan", reason: "" })).isError, true);
+	delete process.env.LETS_CODE_MODE_SWITCH;
 	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
 	t("mode tool: none in a subagent", "mode" in c.toolDefs, false);
 	// mandate off: the menu has off and the dormant modes there are
 	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_PLAN_ON = "1";
 	const f = await load({}, { answers: [pick("plan"), "Switch to off"] }); await f.start(d);
 	await f.commands.mode.handler("", f.ctx(d));
-	t("mandate off: the menu is off and plan", f.options[0], ["● off — no mode: nothing is enforced", "  plan — read-only: explores, then writes a numbered plan you approve", "  the model's switches: asked first (enter: switch without asking)"]);
+	t("mandate off: the menu is off and plan", f.options[0], ["● off — no mode: nothing is enforced", "  plan — read-only: explores, then writes a numbered plan you approve"]);
 	t("mandate off: a pick enters plan", blocked(await f.call(d, "write", { path: join(d, "src/b.txt") })), true);
 	t("mandate off: the tool asks back to off", [text(await run(f, d, { to: "off", reason: "Approved." })).startsWith("Mode is now off"), await f.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
 	delete process.env.LETS_CODE_PLAN_ON; process.env.LETS_CODE_MANDATE_ON = "1";
-	// the model's switches without asking: from the dialog, or the menu's toggle; remembered
-	const stateF = join(agentDir, "lets-code-state.json");
-	const saved = () => { try { return JSON.parse(readFileSync(stateF, "utf8")).modeSwitch; } catch { return undefined; } };
-	const a = await load({}, { answers: [(opts) => opts[1]] }); await a.start(d);
-	await a.commands.mode.handler("plan", a.ctx(d));
-	const al = await run(a, d, { to: "auto", reason: "Approved." });
-	t("dialog: 'switch without asking from now on' switches and is remembered", [/^Mode is now auto/.test(text(al)), saved(), a.options.at(-1)?.length], [true, "auto", 3]);
+	// the default: the model switches without asking, and the user is told
 	const b = await load({}, { ui: true }); await b.start(d);
 	await b.commands.mode.handler("plan", b.ctx(d));
 	const n0 = b.selects.length;
@@ -515,14 +512,7 @@ const blocked = (r) => r?.block === true;
 	t("without asking: still never yolo", (await run(b, d, { to: "yolo", reason: "" })).isError, true);
 	const nu2 = await load({}, { ui: false }); await nu2.start(d);
 	t("without asking: no UI needed", text(await run(nu2, d, { to: "plan", reason: "" })).startsWith("Mode is now plan"), true);
-	const g = await load({}, { answers: [(opts) => opts.at(-1)] }); await g.start(d);
-	await g.commands.mode.handler("", g.ctx(d));
-	t("menu: the toggle line says it, and a pick turns asking back on", [g.options[0].at(-1), saved()], ["  the model's switches: made without asking (enter: ask first)", "ask"]);
-	const e = await load({ LETS_CODE_MODE_SWITCH: "auto" }); await e.start(d);
-	await e.commands.mode.handler("plan", e.ctx(d));
-	const ne = e.selects.length;
-	t("LETS_CODE_MODE_SWITCH=auto: for this launch, nothing saved", [text(await run(e, d, { to: "auto", reason: "" })).startsWith("Mode is now auto"), e.selects.length - ne, saved()], [true, 0, "ask"]);
-	delete process.env.LETS_CODE_MODE_SWITCH;
+	t("without asking: nothing saved", existsSync(join(agentDir, "lets-code-state.json")) && /modeSwitch/.test(readFileSync(join(agentDir, "lets-code-state.json"), "utf8")), false);
 }
 // --- mandate on: plan goes back to the mode it was entered from
 {

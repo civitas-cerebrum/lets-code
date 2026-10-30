@@ -181,6 +181,26 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("no cut: one build call", fd.calls.filter((c) => c.meta.stage === "build").length, 1);
 }
 
+// ------------------------------------------------------------------ no STATUS line (small models drop it)
+{
+	const noStatusBuild = ({ cwd }) => { writeFileSync(join(cwd, "feature.txt"), "feature\n"); return { text: "I wrote feature.txt and the tests pass.", exitCode: 0, input: 1, output: 1, seconds: 1 }; };
+	const r1 = makeRepo("nostatus-build"); const f1 = fakeDeps({ ...OK, build: [noStatusBuild] });
+	const L1 = await F.startRun(opts(r1), f1);
+	t("no STATUS, a build that changed the work tree: on to the reviews", [L1.status, L1.entries.find((e) => e.stage === "build").verdict, f1.calls.some((c) => c.meta.stage === "expert-review")], ["done", "DONE (no STATUS line)", true]);
+	const r2 = makeRepo("nostatus-nochange"); const f2 = fakeDeps({ ...OK, build: [() => ({ text: "Thinking about it.", exitCode: 0, input: 1, output: 1, seconds: 1 })] }, { decisions: { blocked: { action: "stop" } } });
+	const L2 = await F.startRun(opts(r2), f2);
+	t("no STATUS, no change: blocked as before, no review", [L2.entries.find((e) => e.stage === "build").verdict, f2.calls.some((c) => c.meta.stage === "expert-review"), L2.status], ["NO STATUS", false, "stopped"]);
+	const r3 = makeRepo("nostatus-plan"); const f3 = fakeDeps({ ...OK, plan: ["Here is how:\n1. add feature.txt\n2. test it"], build: [build()] });
+	const L3 = await F.startRun(opts(r3), f3);
+	t("no STATUS, a numbered plan: a plan", [L3.entries.find((e) => e.stage === "plan").verdict, L3.status], ["PLAN (no STATUS line)", "done"]);
+	const r4 = makeRepo("nostatus-prose"); const f4 = fakeDeps({ ...OK, plan: ["I would add a file and test it."] }, { decisions: { blocked: { action: "stop" } } });
+	const L4 = await F.startRun(opts(r4), f4);
+	t("no STATUS, a plan without steps: blocked", [L4.entries.find((e) => e.stage === "plan").verdict, L4.status], ["NO STATUS", "stopped"]);
+	const r5 = makeRepo("blocked-said"); const f5 = fakeDeps({ ...OK, build: [({ cwd }) => { writeFileSync(join(cwd, "feature.txt"), "x\n"); return { text: "STATUS: BLOCKED\nneed a key", exitCode: 0, input: 1, output: 1, seconds: 1 }; }] }, { decisions: { blocked: { action: "stop" } } });
+	const L5 = await F.startRun(opts(r5), f5);
+	t("STATUS: BLOCKED said, even with a change: blocked", [L5.entries.find((e) => e.stage === "build").verdict, L5.status], ["BLOCKED", "stopped"]);
+}
+
 // ------------------------------------------------------------------ the happy path
 {
 	const repo = makeRepo("happy"); const statusBefore = git(repo, "status", "--porcelain"); const head = git(repo, "rev-parse", "HEAD");
@@ -246,6 +266,12 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 		let err3 = ""; try { await F.startRun({ ticket, repo: join(work, "broken"), root, howToRun: "make test ((" }, fakeDeps(OK)); } catch (e) { err3 = e.message; }
 		t("new: a test command that does not parse stops the start", /test command \(how_to_run\) is not a shell command that parses/.test(err3), true);
 		t("new: a subshell is a command, not a remark", (await F.shellCommand("(cd src && make test)", "x", fakeDeps(OK), work)), "(cd src && make test)");
+		t("new: a test command in prose: the command in its backticks", await F.shellCommand("Run the unit tests: `python3 -m unittest -v` from the repo root", "x", fakeDeps(OK), work), "python3 -m unittest -v");
+		t("new: prose with a remark span first: the span that is a command", await F.shellCommand("Use `the test file` then run `python3 -m pytest -q`", "x", fakeDeps(OK), work), "python3 -m pytest -q");
+		let err4 = ""; try { await F.shellCommand("Run the tests the usual way, with `pytest ((` maybe", "x", fakeDeps(OK), work); } catch (e) { err4 = e.message; }
+		t("new: prose whose spans do not parse: still refused", /is not a shell command that parses/.test(err4), true);
+		let err5 = ""; try { await F.shellCommand("Run the unit tests from the repo root", "x", fakeDeps(OK), work); } catch (e) { err5 = e.message; }
+		t("new: prose without a command: still refused", /is not a shell command that parses/.test(err5), true);
 		t("new: a folder with files that is not a repo is refused, untouched", [/not a git repository, and has files/.test(err), existsSync(join(full, ".git"))], [true, false]);
 	} finally { for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); }
 }

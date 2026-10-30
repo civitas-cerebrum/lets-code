@@ -8803,8 +8803,12 @@ async function step(L: Ledger, deps: Deps): Promise<boolean> {
 	L.entries.push(entry);
 	if (stage === "plan" || stage === "build") {
 		// no STATUS line: a plan with its "## Plan" heading is a plan, a report with "## Changes" a build
+		// (small models drop the line): a numbered plan is a plan, and a build
+		// that changed the work tree goes on to the reviews, which judge it
 		const said = lineValue(text, "STATUS");
-		const st = said ?? (ok && stage === "plan" && /^#{1,3}\s*Plan\b/im.test(text) ? "PLAN" : ok && stage === "build" && /^#{1,3}\s*Changes\b/im.test(text) ? "DONE" : null);
+		let st = said ?? (ok && stage === "plan" && /^#{1,3}\s*Plan\b/im.test(text) ? "PLAN" : ok && stage === "build" && /^#{1,3}\s*Changes\b/im.test(text) ? "DONE" : null);
+		if (!st && ok && stage === "plan" && /^\s*1[.)]\s+\S/m.test(text) && /^\s*2[.)]\s+\S/m.test(text)) st = "PLAN";
+		if (!st && ok && stage === "build" && (await snapshot(L, deps))) st = "DONE";
 		entry.verdict = st ? (said ? st : `${st} (no STATUS line)`) : ok ? "NO STATUS" : "FAILED";
 		if (stage === "plan" && st === "PLAN") { L.plan = bodyOf(text, "STATUS"); entry.summary = short(L.plan.split("\n").find((l) => /^\s*1[.)]/.test(l)) ?? L.plan); L.stage = "build"; L.waiting = "plan"; return true; }
 		if (stage === "build" && st === "DONE") {
@@ -8924,10 +8928,16 @@ export async function prepareRepo(target: string, deps: Deps): Promise<string[]>
 // remark is dropped; a command that still does not parse stops the start.
 const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 export async function shellCommand(cmd: string, what: string, deps: Deps, cwd: string): Promise<string> {
-	const parses = async (c: string) => (await deps.exec(`bash -n -c ${sq(c)}`, cwd)).code === 0;
+	// a command parses and starts with a program there is (or a path, a subshell, an
+	// assignment): prose like "Run the tests from the root" parses as bash too
+	const program = async (c: string) => { const w = c.trim().split(/\s+/)[0] ?? ""; return /^[({]|=|\//.test(w) || (await deps.exec(`command -v ${sq(w)}`, cwd)).code === 0; };
+	const parses = async (c: string) => (await deps.exec(`bash -n -c ${sq(c)}`, cwd)).code === 0 && (await program(c));
 	if (!cmd.trim() || (await parses(cmd))) return cmd.trim();
 	const bare = cmd.replace(/\s+\([^()]*\)\s*$/, "").trim();
 	if (bare !== cmd.trim() && (await parses(bare))) return bare;
+	// prose around it ("Run `python3 -m unittest -v` in the repo root"): the
+	// first quoted span that parses and names a program
+	for (const m of cmd.matchAll(/`([^`\n]+)`/g)) { const c = m[1].trim(); if (await parses(c)) return c; }
 	throw new Error(`the ${what} is not a shell command that parses: ${short(cmd, 200)}`);
 }
 export interface StartOpts { ticket: string; repo: string; howToRun?: string; start?: string; constraints?: string; conventions?: string; tester?: "auto" | "on" | "off"; criteria?: string[]; root?: string; id?: string; window?: number; outCap?: number }
@@ -10122,7 +10132,11 @@ export default async function (pi: ExtensionAPI) {
 				return why ? text(why, true) : text(`The ${params.name} expert is enabled.${noteOf(params.name)}`);
 			}
 			if (action !== "run") return text(`action is list, enable or run. ${listText()}`, true);
-			const runs: { name: string; brief: unknown }[] = Array.isArray(params.runs) && params.runs.length ? params.runs : params.name ? [{ name: params.name, brief: params.brief }] : [];
+			// no name, but a brief that only the factory takes (a run to resume, or a
+			// ticket): small models drop the name on a resume
+			const factoryBrief = (b: any) => !!b && typeof b === "object" && (typeof b.resume === "string" || typeof b.ticket === "string") && !!find("software-factory");
+			const name = params.name || (factoryBrief(params.brief) ? "software-factory" : "");
+			const runs: { name: string; brief: unknown }[] = Array.isArray(params.runs) && params.runs.length ? params.runs : name ? [{ name, brief: params.brief }] : [];
 			if (runs.some((r) => !r || typeof r.name !== "string")) return text("Each of runs is {name, brief}.", true);
 			if (!runs.length) return text(`Give {name, brief} or runs:[{name, brief}]. ${listText()}`, true);
 			if (runs.length > sub.MAX_PARALLEL) return text(`Too many parallel runs (${runs.length}); max ${sub.MAX_PARALLEL}.`, true);

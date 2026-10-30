@@ -69,7 +69,7 @@ it, not a Claude Code clone. Where it stands:
   so a session never overflows. The guards catch what a small model gets
   wrong: a `reset --hard`, an untested refactor, a bash call that never
   returns, a fact guessed instead of looked up.
-- **Modes as policy, not prompts.** `plan`, `ask`, `orchestrator` and roles
+- **Modes as policy, not prompts.** `plan`, `ask`, `orchestration` and roles
   for subagents are enforced on every tool call, with zero tokens on
   allowed calls. Claude Code's permission rules and `.claude/` hooks keep
   working here through the adapter.
@@ -156,8 +156,8 @@ lets-code --no-git-guard          # you know what you're doing
 | `--no-session-tag` | Send no session tag with model requests |
 | `--metrics` / `--no-metrics` | Start this launch with the full / minimal footer (`/metrics` switches inside pi, and the size picked there is where later sessions start) |
 | `--metrics-log <file>` | Append the footer's numbers to `<file>` as JSON lines, also without a UI (see [Metrics log](#metrics-log)) |
-| `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `orchestrator`, `yolo` or a role of yours (`--no-mandate` also turns off `/plan` and the orchestrator mode a factory run switches to) |
-| `--orchestrator` | Start in orchestrator mode (`--mandate orchestrator`): the session plans and hands the work to experts, and changes no file itself |
+| `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `orchestration`, `yolo` or a role of yours (`--no-mandate` also turns off `/plan` and the orchestration mode a factory run switches to) |
+| `--orchestration` | Start in orchestration mode (`--mandate orchestration`): the session plans and hands the work to experts, has every delivery reviewed, and changes no file itself (`--orchestrator`, the old name, still works) |
 | `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
 | `--experts` / `--no-experts` | The `expert` tool (on by default, needs subagents; see [Experts](#experts)) |
 | `--core-memory` / `--no-core-memory` | The `memory` tool and the entries lets-code adds on its own (on by default; see [Core memory](#core-memory)) |
@@ -628,32 +628,38 @@ such as `readonly`, `reviewer` and `developer`, are for subagents):
 |---|---|
 | `auto` | Nothing. Guards as always, no prompts. The default. |
 | `ask` | `sudo`, recursive deletes, package installs, `curl \| sh` and writes outside the project are confirmed first: allow once, allow for the session, or deny. |
-| `plan` | Edit and write are off, bash is read-only, and the model is told to end with a numbered `Plan:`. When it does, you choose: execute the plan (back to the mode you came from, and the plan is kept in the session), refine it (edit it and send it back), or stay. Leaving plan mode by hand offers to execute it too. |
-| `orchestrator` | The software factory's mode. The session plans with you and orchestrates: it reads the code, agrees the ticket and its acceptance criteria with you, and hands every change to experts: code goes through `software-factory` however small, `general` does setup chores and checks, `researcher` open questions; the `worker` subagent is off. It decides the factory's checkpoints (criteria, plan, fix rounds, the commit on the run's branch) and asks you only for significant design decisions. Edit and write are off, bash is read-only (tests are the experts' job too) and MCP is denied. A blocked run is retried, or sharpened into a new ticket, never patched by hand; merging or pushing a run's branch is yours. |
+| `plan` | Edit and write are off, bash is read-only, and the model is told to end with a numbered `Plan:`. Where orchestration is there (the experts on), the plan is written for it: each step a self-contained task for one expert, small enough for a fresh context, with who does it and how it is reviewed. When the plan is ready, you choose: execute it with orchestration (the first choice where it is there: the session switches to `orchestration` and hands the steps out; leaving goes back to the mode plan was entered from), execute it here (back to the mode you came from), refine it (edit it and send it back), or stay. The plan is kept in the session either way. Leaving plan mode by hand offers to execute it too. |
+| `orchestration` | The software factory's mode (it was called `orchestrator`; the old name is still taken). The session plans with you and orchestrates: it reads the code, agrees the ticket and its acceptance criteria with you, and hands every change to experts: code goes through `software-factory` however small, `general` does setup chores, `researcher` open questions; the `worker` subagent is off. It never tests or verifies a delivery itself, not even by reading the diff: a factory run comes reviewed (its reviewers, tester and acceptance judge), anything else goes to `expert-reviewer` (and `design-reviewer` for structure), and it acts on the verdict. It decides the factory's checkpoints (criteria, plan, fix rounds, the commit on the run's branch) and asks you only for significant design decisions. Edit and write are off, bash is read-only (tests are the experts' job too) and MCP is denied. A blocked run is retried, or sharpened into a new ticket, never patched by hand; merging or pushing a run's branch is yours. |
 | `yolo` | The mandate steps aside (the git and memory guards stay unless launched without them). |
 
 Switch with `/mode` (a menu of the modes there are, each with a line on
 what it does, the current one marked), `/mode <name>`, `/plan`,
-`/orchestrator`, `alt+m` (cycle) or `ctrl+alt+p`.
+`/orchestration`, `alt+m` (cycle) or `ctrl+alt+p`.
 
-The model switches too, with its `mode` tool, and you see a notice with
-each switch and its reason (`/mode` switches back). It leaves plan mode
-once you have approved the changes in the conversation, enters plan mode
-before a risky or unclear change, and enters `orchestrator` for large or
-long work, where experts and subagents do the work and the session's
-context stays small. A refused call points it there as well. It never
-gets `yolo` (that one is yours to pick), and a subagent has no `mode`
-tool. To confirm or decline each switch instead, launch with
-`LETS_CODE_MODE_SWITCH=ask`.
+The model can ask too, with its `mode` tool: you see the switch it wants
+and why, and confirm or decline. It asks to enter plan mode first when a
+task looks medium or large (several files or steps, a feature, a refactor,
+a migration) or is risky or unclear; to leave plan mode once you have
+approved the changes (to `orchestration` to carry out a plan, `auto` for a
+change of a few lines); and to enter `orchestration` for large or long
+work, where experts and subagents do the work and the session's context
+stays small. A refused
+call points it there as well. It never gets `yolo` (that one is yours to
+pick), and a subagent has no `mode` tool. `LETS_CODE_MODE_SWITCH=auto`
+lets it switch without asking for one launch; you still see a notice with
+each switch and its reason.
 Starting or resuming a software factory run (`/factory`, or the
-`software-factory` expert) switches the session into `orchestrator` and keeps
-it there until you leave it with `/orchestrator` (back to the mode you came
+`software-factory` expert) switches the session into `orchestration` and keeps
+it there until you leave it with `/orchestration` (back to the mode you came
 from) or `/mode`. That works with `MANDATE=false` too: wherever the experts
-are on, the orchestrator mode is there, dormant until a run or
-`/orchestrator` starts it (`--no-mandate` turns it off). Plan mode is there
+are on, the orchestration mode is there, dormant until a run or
+`/orchestration` starts it (`--no-mandate` turns it off). Plan mode is there
 with `MANDATE=false` as well: `/plan` and `ctrl+alt+p` enter it, leaving it
-returns to the unrestricted session (`--no-mandate` turns it off). A subagent never
-inherits the orchestrator: a child that would gets the default mode. You
+returns to the unrestricted session (`--no-mandate` turns it off). There
+`/mode` lists `yolo` (the unrestricted session), `auto` (the built-in
+rails, taken up for the session) and the dormant modes; the model may ask
+for `auto`, never `yolo`. A subagent never
+inherits orchestration: a child that would gets the default mode. You
 talk to the main session only, so a subagent never asks you to approve
 anything: under `ask` (or a Claude Code `ask` rule) what would be asked
 about is refused, and the subagent reports that instead. A denied
@@ -1747,7 +1753,7 @@ child too.
 | Model does not see images, or does not think | The launch banner says `sees images` and `thinking <level>` when they are on (`--verbose` shows each probe). Pin `VISION=true` / `REASONING=true` if a probe was inconclusive. |
 | pi says provider `lets-code` is unknown | Re-run `lets-code`; it re-registers on every launch. |
 | `sandbox: not active` on the launch line | Install `bubblewrap` and `socat` (Linux), or run the `npm install` the message names. |
-| A call was refused with `mandate(...)` | The current mode forbids it. The model may switch mode itself (you see it); `/mode` picks another mode, `/mode auto` lifts the rails for the session, or tighten/loosen the role in `~/.pi/agent/mandate.json`. |
+| A call was refused with `mandate(...)` | The current mode forbids it. The model may ask to switch (confirm or decline); `/mode` picks another mode, `/mode auto` lifts the rails for the session, or tighten/loosen the role in `~/.pi/agent/mandate.json`. |
 
 </details>
 

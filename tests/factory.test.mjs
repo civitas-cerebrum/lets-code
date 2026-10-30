@@ -127,7 +127,7 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("budget: the run keeps the window", [L.window, L.outCap, L.shrink], [32768, 8192, undefined]);
 	t("budget: the plan in steps that fit, a split named past the step count", [/Plan the build in steps of at most 2 files changed and about 619 lines read each/.test(brief("plan")), /more than 6 such steps, say so at the top of the plan/.test(brief("plan"))], [true, true]);
 	t("budget: the plan and the build told to write in parts", [/One reply holds about 409 lines: write a larger file in parts/.test(brief("plan")), /One reply holds about 409 lines/.test(brief("build"))], [true, true]);
-	t("budget: the reviewers not told about writing", /One reply holds/.test(brief("expert-review")), false);
+	t("budget: the reviewers, tester and judge start with the verdict", ["expert-review", "design-review", "judge"].map((x) => /start your final reply with the verdict line, then one line per finding/.test(brief(x))), [true, true, true]);
 	t("budget: the build a step at a time", /Build the plan one step at a time, reading only what the current step needs: about 619 lines/.test(brief("build")), true);
 	t("budget: the reviewers and the judge read the change file by file", ["expert-review", "design-review", "judge"].map((s) => brief(s).includes(`git -C ${L.work} diff ${L.base} -- <file>`)), [true, true, true]);
 	t("budget: nothing cut when nothing ran short", [/already cut/.test(brief("build")), L.entries.some((e) => e.short)], [false, false]);
@@ -176,7 +176,29 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	// negative: a reviewer's cut reply is not continued
 	const r10 = makeRepo("cutreview"); const fd10 = fakeDeps({ ...OK, build: [build()], "expert-review": [() => ({ text: "VERDICT: APPROVE\n## Findings\nnone", exitCode: 0, input: 1, output: 1, seconds: 1, cut: true })] });
 	await F.startRun(opts(r10), fd10);
-	t("a reviewer's cut reply: not continued", fd10.calls.filter((c) => c.meta.stage === "expert-review").length, 1);
+	t("a reviewer's cut reply that has its verdict: not asked again", fd10.calls.filter((c) => c.meta.stage === "expert-review").length, 1);
+	// a review reply without its verdict (cut off, or left out): asked again, verdict first
+	const noVerdict = (cut) => () => ({ text: "I checked C1 and C2 and ran the suite; looking at the parser n", exitCode: 0, input: 1, output: 1, seconds: 1, cut });
+	const r11 = makeRepo("ask-cut-review"); const fd11 = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(true), "VERDICT: APPROVE\n## Findings\nnone"] });
+	const L11 = await F.startRun(opts(r11, { window: 32768, outCap: 8192 }), fd11);
+	const rv11 = fd11.calls.filter((c) => c.meta.stage === "expert-review");
+	t("review cut without its verdict: asked again, then on", [L11.status, rv11.length, L11.entries.find((e) => e.stage === "expert-review").continued, L11.entries.find((e) => e.stage === "expert-review").verdict], ["done", 2, 1, "APPROVE"]);
+	t("review asked again: verdict first, briefly, and why", [/ended without its verdict \(cut off at the reply limit\)/.test(rv11[1].brief.continue), /the verdict line first, then one line per finding/.test(rv11[1].brief.continue)], [true, true]);
+	const r12 = makeRepo("ask-leftout"); const fd12 = fakeDeps({ ...OK, build: [build()], "design-review": [noVerdict(false), "VERDICT: APPROVE\n## Findings\nnone"] });
+	const L12 = await F.startRun(opts(r12), fd12);
+	t("design review with the verdict left out (not cut): asked again", [L12.status, fd12.calls.filter((c) => c.meta.stage === "design-review").length, /ended without its verdict\. Check only/.test(fd12.calls.filter((c) => c.meta.stage === "design-review")[1].brief.continue)], ["done", 2, true]);
+	const r13 = makeRepo("ask-judge"); const fd13 = fakeDeps({ ...OK, build: [build()], judge: [noVerdict(false), "## Verdict\nACCEPT all pass\n## Criteria\nC1: PASS x\nC2: PASS y"] });
+	const L13 = await F.startRun(opts(r13), fd13);
+	t("judge without its verdict: asked again", [L13.status, fd13.calls.filter((c) => c.meta.stage === "judge").length], ["done", 2]);
+	// negative: never a verdict: at most MAX_CONTINUES more, then blocked as before
+	const r14 = makeRepo("ask-never"); const fd14 = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { blocked: { action: "stop" } } });
+	const L14 = await F.startRun(opts(r14), fd14);
+	t("never a verdict: asked again twice, then blocked", [fd14.calls.filter((c) => c.meta.stage === "expert-review").length, L14.entries.find((e) => e.stage === "expert-review").verdict, L14.status], [3, "NO VERDICT", "stopped"]);
+	// negative: a reviewer whose run failed is not asked again (that is a failure, not a missing line)
+	const r15 = makeRepo("ask-failed"); const fd15 = fakeDeps({ ...OK, build: [build()], "expert-review": [() => ({ text: "boom", exitCode: 1, input: 1, output: 1, seconds: 1 })] }, { decisions: { blocked: { action: "stop" } } });
+	const L15 = await F.startRun(opts(r15), fd15);
+	t("a failed review run: not asked again", [fd15.calls.filter((c) => c.meta.stage === "expert-review").length, L15.entries.find((e) => e.stage === "expert-review").verdict], [1, "FAILED"]);
+	t("hasVerdict: the line, the judge's heading, neither", [F.hasVerdict("expert-review", "VERDICT: REVISE\nx"), F.hasVerdict("judge", "## Verdict\nREJECT C1"), F.hasVerdict("design-review", "all good"), F.hasVerdict("judge", "VERDICT is coming")], [true, true, false, false]);
 	// negative: an uncut reply is never continued
 	t("no cut: one build call", fd.calls.filter((c) => c.meta.stage === "build").length, 1);
 }
@@ -374,7 +396,7 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	const fd = fakeDeps({ ...OK, build: ["STATUS: BLOCKED\n## Notes\nneeds npm install", build()] }, { decisions: { blocked: { action: "retry" } } });
 	const L = await F.startRun(opts(repo), fd);
 	t("blocked: the user is asked, the stage runs again", [fd.asked.includes("blocked"), L.status, fd.calls.filter((c) => c.meta.stage === "build").length], [true, "done", 2]);
-	const repo2 = makeRepo("noverdict");
+	const repo2 = makeRepo("ask-noverdict");
 	const fd2 = fakeDeps({ ...OK, "expert-review": ["looks good to me"] }, { decisions: { blocked: { action: "stop" } } });
 	const L2 = await F.startRun(opts(repo2), fd2);
 	t("no verdict line: blocked, then stopped", [L2.status, L2.entries.at(-1).verdict, fd2.asked.at(-1)], ["stopped", "NO VERDICT", "blocked"]);

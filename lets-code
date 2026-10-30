@@ -8683,6 +8683,10 @@ export function briefFor(stage: Stage, L: Ledger): Record<string, string> {
 	for (const k of Object.keys(b)) if (!b[k]) delete b[k];
 	return b;
 }
+// a review, test or judge reply that carries its verdict
+export function hasVerdict(stage: Stage, text: string): boolean {
+	return stage === "judge" ? parseJudge(text).verdict != null : lineValue(text, "VERDICT") != null;
+}
 // what each stage is told about its context: the developer plans and builds in
 // steps that fit, the reviewers, tester and judge read the change in parts
 export function budgetFor(stage: Stage, L: Ledger): string {
@@ -8693,7 +8697,7 @@ export function budgetFor(stage: Stage, L: Ledger): string {
 	const write = `One reply holds about ${b.write} lines: write a larger file in parts (its first part, then the rest by edits), never whole in one call.`;
 	if (stage === "plan") return `${head} Plan the build in steps of at most ${f} changed and about ${b.lines} lines read each. If the ticket needs more than ${b.steps} such steps, say so at the top of the plan, with how to split it into smaller tickets. ${write}${cut}`;
 	if (stage === "build") return `${head} Build the plan one step at a time, reading only what the current step needs: about ${b.lines} lines at a time, the parts of a file you change, not whole large files. ${write}${cut}`;
-	return `${head} Read the change file by file (\`git -C ${L.work} diff ${L.base} -- <file>\`) and only the code around each hunk, about ${b.lines} lines at a time, never the whole diff at once.${cut}`;
+	return `${head} Read the change file by file (\`git -C ${L.work} diff ${L.base} -- <file>\`) and only the code around each hunk, about ${b.lines} lines at a time, never the whole diff at once. One reply holds about ${b.write} lines: start your final reply with the verdict line, then one line per finding.${cut}`;
 }
 
 // ------------------------------------------------------------------ the engine
@@ -8714,15 +8718,20 @@ async function stageRun(L: Ledger, deps: Deps, stage: Stage): Promise<{ text: st
 	catch (e) { r = { text: `dispatch failed: ${e instanceof Error ? e.message : String(e)}`, exitCode: 1, input: 0, output: 0, seconds: 0 }; }
 	// the developer's reply cut at the reply limit: a fresh reply goes on from
 	// the work tree (what it wrote is kept), in smaller parts, instead of the
-	// run blocking on the missing STATUS line
+	// run blocking on the missing STATUS line. A review, test or judge reply
+	// without its verdict (cut off, or left out): asked again, verdict first
+	const dev = stage === "plan" || stage === "build";
+	const again = (x: Dispatched) => x.exitCode === 0 && (dev ? !!x.cut : !hasVerdict(stage, x.text));
 	let continued = 0;
-	while (r.cut && (stage === "plan" || stage === "build") && continued < MAX_CONTINUES) {
+	while (again(r) && continued < MAX_CONTINUES) {
 		continued++;
-		deps.progress?.(`factory ${L.id}: ${stage} reply cut at the reply limit: continuing (${continued}/${MAX_CONTINUES})`);
+		deps.progress?.(`factory ${L.id}: ${stage} reply ${dev ? "cut at the reply limit" : "without its verdict"}: asking again (${continued}/${MAX_CONTINUES})`);
 		const tail = r.text.trim().slice(-600);
 		const more = { ...brief, continue: stage === "build"
 			? `Your previous reply was cut off at the reply limit. The work tree keeps every file you wrote; check what is there and go on from where it stopped, in smaller parts (a file's first part, then the rest by edits), and end with your STATUS line. It ended with:\n${tail}`
-			: `Your previous reply was cut off at the reply limit. Reply again with the whole plan, shorter, ending with your STATUS line. It ended with:\n${tail}` };
+			: stage === "plan"
+			? `Your previous reply was cut off at the reply limit. Reply again with the whole plan, shorter, ending with your STATUS line. It ended with:\n${tail}`
+			: `Your previous reply ended without its verdict${r.cut ? " (cut off at the reply limit)" : ""}. Check only what you need, then reply briefly: the verdict line first, then one line per finding, nothing else. It ended with:\n${tail}` };
 		let m: Dispatched;
 		try { m = await deps.dispatch(expert, more, L.work, { stage, round: L.rounds, runId: L.id }); }
 		catch (e) { m = { text: `dispatch failed: ${e instanceof Error ? e.message : String(e)}`, exitCode: 1, input: 0, output: 0, seconds: 0 }; }

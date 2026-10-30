@@ -567,6 +567,43 @@ const blocked = (r) => r?.block === true;
 	t("mode tool: out of plan to orchestration for a plan, auto only for a few lines", /to orchestration, if listed, to carry out a plan; auto for a change of a few lines/.test(def.description), true);
 	t("mode tool: still asks, the user decides", /they confirm or decline/.test(def.description), true);
 }
+// --- the plan's steps sized to the model's window
+{
+	const { mod } = await load({});
+	const cb = mod.contextBudget;
+	const B = (w, files, lines, steps) => ({ window: w, files, lines, steps });
+	t("budget: 32k window, 8k cap", cb(32768, 8192), B(32768, 2, 619, 6));
+	t("budget: 128k window", cb(131072, 32768), B(131072, 10, 3076, 12));
+	t("budget: 1M window: capped", cb(1000000, 32000), B(1000000, 15, 6000, 12));
+	t("budget: no cap given: a quarter of the window", cb(32768), B(32768, 2, 619, 6));
+	t("budget: a cap as large as the window: a quarter instead", cb(32768, 40000), B(32768, 2, 619, 6));
+	t("budget: a window too small for room: the floor", cb(8192, 4096), B(8192, 1, 150, 3));
+	t("budget: shrink halves the reading", cb(32768, 8192, 1), B(32768, 1, 309, 6));
+	t("budget: shrink never below the floor", cb(32768, 8192, 3), B(32768, 1, 150, 6));
+	t("budget: no window, no budget", [cb(0, 8192), cb(undefined), cb(-5), cb("x")], [null, null, null, null]);
+	t("ran short: compacted", mod.ranShort(1000, 1, 32768), true);
+	t("ran short: a request at 80% of the window", mod.ranShort(27000, 0, 32768), true);
+	t("ran short: not at 60%, not compacted", mod.ranShort(20000, 0, 32768), false);
+	t("ran short: no window, not compacted: no", mod.ranShort(900000, 0, undefined), false);
+	const d = repo();
+	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_PLAN_ON = "1"; process.env.LETS_CODE_ORCHESTRATOR_ON = "1";
+	process.env.LETS_CODE_EXPERTS_ON = "1"; process.env.LETS_CODE_SUBAGENTS_ON = "1";
+	const sec = (h, ctx) => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }, ctx); return s.lets_code_mandate ?? ""; };
+	const h = await load({}); await h.start(d); await h.commands.plan.handler("", h.ctx(d));
+	t("plan, 32k model: steps sized to it", sec(h, { model: { contextWindow: 32768, maxTokens: 8192 } }).includes("Size each step to the model's context (32768 tokens): at most 2 files changed and about 619 lines read per step, and at most 6 steps in one plan"), true);
+	t("plan, 1M model: larger steps", /\(1000000 tokens\): at most 15 files changed and about 6000 lines/.test(sec(h, { model: { contextWindow: 1000000, maxTokens: 32000 } })), true);
+	t("plan, a 1-file budget: 'file', not 'files'", /at most 1 file changed/.test(sec(h, { model: { contextWindow: 8192, maxTokens: 4096 } })), true);
+	const u = await load({}); await u.start(d); await u.commands.plan.handler("", u.ctx(d));
+	t("plan, the window unknown: no sizes", /Size each step/.test(sec(u, {})), false);
+	delete process.env.LETS_CODE_EXPERTS_ON;
+	const n = await load({}); await n.start(d); await n.commands.plan.handler("", n.ctx(d));
+	t("plan, experts off: no sizes either", /Size each step/.test(sec(n, { model: { contextWindow: 32768, maxTokens: 8192 } })), false);
+	process.env.LETS_CODE_EXPERTS_ON = "1";
+	const o = await load({}); await o.start(d); await o.commands.orchestration.handler("", o.ctx(d));
+	t("orchestration: no step sizes outside plan, told to split after a short run", [/Size each step/.test(sec(o, { model: { contextWindow: 32768 } })), /ran short of context, give the remaining steps in smaller parts/.test(sec(o, {}))], [false, true]);
+	delete process.env.LETS_CODE_EXPERTS_ON; delete process.env.LETS_CODE_SUBAGENTS_ON; delete process.env.LETS_CODE_ORCHESTRATOR_ON; delete process.env.LETS_CODE_PLAN_ON;
+	process.env.LETS_CODE_MANDATE_ON = "1";
+}
 // --- the /mode menu and the agent's mode tool
 {
 	const pick = (name) => (opts) => opts.find((o) => o.slice(2).startsWith(`${name} — `));

@@ -106,6 +106,54 @@ const OK = { plan: [PLAN], build: [build()], "expert-review": ["VERDICT: APPROVE
 const root = join(agentDir, "lets-code-factory");
 const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md"), "utf8"), repo, howToRun: "grep -q ok src/a.txt", root, ...extra });
 
+// ------------------------------------------------------------------ stage briefs sized to the model's window
+{
+	const cb = F.contextBudget;
+	const B = (w, files, lines, steps) => ({ window: w, files, lines, steps });
+	t("budget: 32k window, 8k cap", cb(32768, 8192), B(32768, 2, 619, 6));
+	t("budget: 128k window", cb(131072, 32768), B(131072, 10, 3076, 12));
+	t("budget: 1M window: capped", cb(1000000, 32000), B(1000000, 15, 6000, 12));
+	t("budget: no cap given: a quarter of the window", cb(32768), B(32768, 2, 619, 6));
+	t("budget: a cap as large as the window: a quarter instead", cb(32768, 40000), B(32768, 2, 619, 6));
+	t("budget: a window too small for room: the floor", cb(8192, 4096), B(8192, 1, 150, 3));
+	t("budget: shrink halves the reading", cb(32768, 8192, 1), B(32768, 1, 309, 6));
+	t("budget: shrink never below the floor", cb(32768, 8192, 3), B(32768, 1, 150, 6));
+	t("budget: no window, no budget", [cb(0, 8192), cb(undefined), cb(-5), cb("x")], [null, null, null, null]);
+	// sized: each stage told its part
+	const repo = makeRepo("budget"); const fd = fakeDeps({ ...OK, build: [build()] });
+	const L = await F.startRun(opts(repo, { window: 32768, outCap: 8192 }), fd);
+	const brief = (stage) => fd.calls.find((c) => c.meta.stage === stage)?.brief.context_budget ?? "";
+	t("budget: the run keeps the window", [L.window, L.outCap, L.shrink], [32768, 8192, undefined]);
+	t("budget: the plan in steps that fit, a split named past the step count", [/Plan the build in steps of at most 2 files changed and about 619 lines read each/.test(brief("plan")), /more than 6 such steps, say so at the top of the plan/.test(brief("plan"))], [true, true]);
+	t("budget: the build a step at a time", /Build the plan one step at a time, reading only what the current step needs: about 619 lines/.test(brief("build")), true);
+	t("budget: the reviewers and the judge read the change file by file", ["expert-review", "design-review", "judge"].map((s) => brief(s).includes(`git -C ${L.work} diff ${L.base} -- <file>`)), [true, true, true]);
+	t("budget: nothing cut when nothing ran short", [/already cut/.test(brief("build")), L.entries.some((e) => e.short)], [false, false]);
+	// not sized: no window given
+	const r2 = makeRepo("nobudget"); const fd2 = fakeDeps({ ...OK, build: [build()] });
+	const L2 = await F.startRun(opts(r2), fd2);
+	t("no window: no context_budget in any brief", [L2.window, fd2.calls.some((c) => "context_budget" in c.brief)], [undefined, false]);
+	t("no window: a shrink alone adds no sizes", F.budgetFor("build", { ...L2, shrink: 1 }), "");
+	// a stage that ran short: the stages after it get smaller sizes, and say why
+	const r3 = makeRepo("short"); const fd3 = fakeDeps({ ...OK, plan: [() => ({ text: PLAN, exitCode: 0, input: 1, output: 1, seconds: 1, compactions: 1 })], build: [build()] });
+	const L3 = await F.startRun(opts(r3, { window: 32768, outCap: 8192 }), fd3);
+	const b3 = (stage) => fd3.calls.find((c) => c.meta.stage === stage)?.brief.context_budget ?? "";
+	t("ran short: the plan stage marked, the run shrunk once", [L3.entries.find((e) => e.stage === "plan").short, L3.shrink], [true, 1]);
+	t("ran short: the build after it is cut and says so", [/about 309 lines/.test(b3("build")), /An earlier stage of this run ran short of context/.test(b3("build"))], [true, true]);
+	t("ran short: the plan before it was not", /about 619 lines/.test(b3("plan")), true);
+	// at 80% of the window without compacting counts; 60% does not
+	const r4 = makeRepo("peak"); const fd4 = fakeDeps({ ...OK, build: [({ cwd }) => ({ ...build()({ cwd }), peak: 27000, window: 32768 })] });
+	const L4 = await F.startRun(opts(r4, { window: 32768, outCap: 8192 }), fd4);
+	t("ran short: a request at 80% of the window", [L4.entries.find((e) => e.stage === "build").short, L4.shrink], [true, 1]);
+	const r5 = makeRepo("roomy"); const fd5 = fakeDeps({ ...OK, build: [({ cwd }) => ({ ...build()({ cwd }), peak: 20000, window: 32768 })] });
+	const L5 = await F.startRun(opts(r5, { window: 32768, outCap: 8192 }), fd5);
+	t("room left (60%): no shrink", [L5.entries.find((e) => e.stage === "build").short, L5.shrink], [undefined, undefined]);
+	// every stage short: the shrink stops at 3
+	const all = (x) => typeof x === "function" ? (a) => ({ ...x(a), compactions: 1 }) : () => ({ text: x, exitCode: 0, input: 1, output: 1, seconds: 1, compactions: 1 });
+	const r6 = makeRepo("allshort"); const fd6 = fakeDeps(Object.fromEntries(Object.entries({ ...OK, build: [build()] }).map(([k, v]) => [k, v.map(all)])));
+	const L6 = await F.startRun(opts(r6, { window: 32768, outCap: 8192 }), fd6);
+	t("ran short at every stage: the shrink stops at 3", [L6.shrink, L6.entries.filter((e) => e.short).length >= 4], [3, true]);
+}
+
 // ------------------------------------------------------------------ the happy path
 {
 	const repo = makeRepo("happy"); const statusBefore = git(repo, "status", "--porcelain"); const head = git(repo, "rev-parse", "HEAD");

@@ -5464,6 +5464,22 @@ const LOG = process.env.LETS_CODE_MANDATE_LOG || join(AGENT_DIR, "lets-code-mand
 export function readModeSwitch(): "ask" | "auto" {
 	return process.env.LETS_CODE_MODE_SWITCH === "auto" ? "auto" : "ask";
 }
+// A step's share of a fresh context, from the model's window: the window
+// less the reply budget (the output cap, else a quarter) and about 6k of
+// system prompt and tools; 40% of the rest is for reading, about 12 tokens a
+// line. shrink halves it once per stage of a run that ran short. The same
+// in the mandate and factory modules (a test keeps them equal).
+export interface Budget { window: number; files: number; lines: number; steps: number }
+export function contextBudget(window?: number, outCap?: number, shrink = 0): Budget | null {
+	if (!(Number(window) > 0)) return null;
+	const w = Number(window), out = Number(outCap) > 0 && Number(outCap) < w ? Number(outCap) : Math.floor(w / 4);
+	const usable = w - out - 6000;
+	if (usable <= 2000) return { window: w, files: 1, lines: 150, steps: 3 };
+	const lines = Math.max(150, Math.min(6000, Math.floor(usable * 0.4 / 12 / 2 ** Math.max(0, shrink))));
+	return { window: w, files: Math.max(1, Math.min(15, Math.round(lines / 300))), lines, steps: Math.max(3, Math.min(12, Math.floor(usable * 0.5 / 1500))) };
+}
+// a run that ran short of its context: compacted, or a request at 80% of the window
+export const ranShort = (peak?: number, compactions?: number, window?: number): boolean => (compactions ?? 0) > 0 || (Number(window) > 0 && (peak ?? 0) >= 0.8 * Number(window));
 const PROTECTED = [".git/", ".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519"];
 
 // Built-in command groups. A simple command is matched against each group's
@@ -5515,7 +5531,7 @@ const BUILTIN: Manifest = {
 		orchestration: {
 			label: "orchestration", description: "plans and hands every change to experts and subagents, has every delivery reviewed; changes no file itself", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "subagent", "expert", "list_mcp_resources", "read_mcp_resource"],
 			write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: ["*", "!worker"], network: "on",
-			prompt: "Orchestration mode (software factory): you plan and orchestrate; experts and subagents do the work. You change no file yourself: edit and write are off and bash runs read-only commands. Never ask the user to run a command for you: hand it to a subagent (general) or an expert. Code is written only through software-factory, however small the change: never hand writing code to a subagent; general is for setup chores (moving or backing up files). You never test or verify a delivery yourself, not even by reading its diff: every delivery is reviewed, and you act on the verdict (APPROVE: go on; REVISE: back to the one who did it, with the findings). A software-factory run comes reviewed (its reviewers, tester and acceptance judge): take its verdict. Anything else (setup a subagent did, a change made outside a run) goes to expert-reviewer, and to design-reviewer for structure. Read the code and agree with the user on the ticket: the goal, numbered acceptance criteria, the test command, constraints. Hand each part to the one for it: a ticket to software-factory (developer, reviewers, tester, acceptance judge, with the user's approvals; it works inside one git repo, and a new or empty folder becomes one), setup outside that repo (moving or backing up old files) to a subagent first, an open question to researcher, a review of an existing change to expert-reviewer or design-reviewer. Split large work into tickets and run them one at a time. A run you start pauses at its checkpoints and hands them to you: decide them yourself and go on with resume and decision (the developer's plan against the criteria: approve, or edit it; a further fix round; the commit on the run's branch). Ask the user first only for a significant design decision: a new dependency or service, an architecture or data-model choice the ticket left open, a change of scope, anything destructive or hard to undo. When a run is blocked, read its ledger and artifacts (lets-code-factory/<id>/ in the agent dir), then retry, or sharpen the ticket and start a new run; never patch its worktree. Merging or pushing a run's branch is the user's. Report stage summaries, findings and what the user must decide.",
+			prompt: "Orchestration mode (software factory): you plan and orchestrate; experts and subagents do the work. You change no file yourself: edit and write are off and bash runs read-only commands. Never ask the user to run a command for you: hand it to a subagent (general) or an expert. Code is written only through software-factory, however small the change: never hand writing code to a subagent; general is for setup chores (moving or backing up files). You never test or verify a delivery yourself, not even by reading its diff: every delivery is reviewed, and you act on the verdict (APPROVE: go on; REVISE: back to the one who did it, with the findings). A software-factory run comes reviewed (its reviewers, tester and acceptance judge): take its verdict. Anything else (setup a subagent did, a change made outside a run) goes to expert-reviewer, and to design-reviewer for structure. When a run's result says it ran short of context, give the remaining steps in smaller parts. Read the code and agree with the user on the ticket: the goal, numbered acceptance criteria, the test command, constraints. Hand each part to the one for it: a ticket to software-factory (developer, reviewers, tester, acceptance judge, with the user's approvals; it works inside one git repo, and a new or empty folder becomes one), setup outside that repo (moving or backing up old files) to a subagent first, an open question to researcher, a review of an existing change to expert-reviewer or design-reviewer. Split large work into tickets and run them one at a time. A run you start pauses at its checkpoints and hands them to you: decide them yourself and go on with resume and decision (the developer's plan against the criteria: approve, or edit it; a further fix round; the commit on the run's branch). Ask the user first only for a significant design decision: a new dependency or service, an architecture or data-model choice the ticket left open, a change of scope, anything destructive or hard to undo. When a run is blocked, read its ledger and artifacts (lets-code-factory/<id>/ in the agent dir), then retry, or sharpen the ticket and start a new run; never patch its worktree. Merging or pushing a run's branch is the user's. Report stage summaries, findings and what the user must decide.",
 		},
 		// read-only without the planning instructions: for scouts and reviewers
 		readonly: { label: "readonly", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "list_mcp_resources", "read_mcp_resource"], write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: [], network: "off" },
@@ -5797,7 +5813,11 @@ export default function (pi: ExtensionAPI) {
 	// plan mode with orchestration there: the plan is written for it (small
 	// steps, each for a fresh context), and carried out by it
 	const PLAN_FOR_ORCHESTRATION = " Write the plan for orchestration: each numbered step one self-contained task for one expert, small enough for a fresh context: software-factory for any code change (its goal, acceptance criteria and test command), researcher for an open question, a subagent (general) for setup. Say who does each step and how its delivery is reviewed. Once the user approves, ask to switch to orchestration with the mode tool (not auto) and dispatch the steps there, unless the change is a few lines.";
-	const promptOf = (name: string) => (manifest.roles[name]?.prompt ?? "") + (name === "plan" && canOrchestrate() ? PLAN_FOR_ORCHESTRATION : "");
+	// the model's window (and output cap), from pi's model: the plan's steps are sized to it
+	let window = 0, outCap = 0;
+	const seeModel = (ctx: any) => { const m = ctx?.model; if (Number(m?.contextWindow) > 0) { window = Number(m.contextWindow); outCap = Number(m.maxTokens) || 0; } };
+	const sized = () => { const b = contextBudget(window, outCap); return b ? ` Size each step to the model's context (${b.window} tokens): at most ${b.files} file${b.files === 1 ? "" : "s"} changed and about ${b.lines} lines read per step, and at most ${b.steps} steps in one plan; more work is a follow-up plan.` : ""; };
+	const promptOf = (name: string) => (manifest.roles[name]?.prompt ?? "") + (name === "plan" && canOrchestrate() ? PLAN_FOR_ORCHESTRATION + sized() : "");
 	function reload(ctx: ExtensionContext | undefined) {
 		try { manifest = loadManifest(cwd, typeof (ctx as any)?.isProjectTrusted === "function" ? ctx!.isProjectTrusted() : !!(ctx as any)?.isProjectTrusted, (m) => warn(ctx, m)); }
 		catch (e) { // a broken manifest fails closed: built-in roles only, and the strictest mode that still works
@@ -5862,10 +5882,11 @@ export default function (pi: ExtensionAPI) {
 		return { block: true, reason: short(`mandate(${roleName}): the user did not approve: ${what}`) };
 	}
 
-	pi.on("session_start", async (_e, ctx) => { cwd = ctx.cwd; allowedForSession = new Set(); askedPlan = ""; reload(ctx); });
+	pi.on("session_start", async (_e, ctx) => { cwd = ctx.cwd; allowedForSession = new Set(); askedPlan = ""; seeModel(ctx); reload(ctx); });
 	pi.on("project_trust", async (_e, ctx) => reload(ctx));
 
-	pi.on("before_agent_start", async (event: any) => {
+	pi.on("before_agent_start", async (event: any, ctx: any) => {
+		seeModel(ctx);
 		const sections = event?.systemPromptOptions?.sections;
 		if (sections && typeof sections === "object") { if (on && role.prompt && !role.bypass) sections.lets_code_mandate = promptOf(roleName); else delete sections.lets_code_mandate; }
 		return undefined;
@@ -6279,7 +6300,7 @@ export function discoverAgents(cwd: string, trusted: boolean): AgentDef[] {
 	return [...out.values()];
 }
 
-interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number; timedOut?: number; stopped?: boolean; lastSteps?: string }
+interface RunResult { agent: string; task: string; text: string; exitCode: number; stderr: string; turns: number; input: number; output: number; step?: number; timedOut?: number; stopped?: boolean; lastSteps?: string; peak?: number; compactions?: number; window?: number }
 
 // ------------------------------------------------------------ run transcripts
 // Each child's JSON event stream is also kept as a transcript: the live part
@@ -6309,6 +6330,8 @@ export interface RunMeta { tool?: string; callId?: string; mode?: "single" | "pa
 export interface RunRecord {
 	v: 1; id: string; agent: string; kind: "subagent" | "expert"; task: string; cwd: string; session: string;
 	started: number; ended?: number; status: RunStatus; exitCode?: number; turns: number; input: number; output: number; live?: number;
+	peak?: number;          // the largest context of one request (its prompt and reply), tokens
+	compactions?: number;   // how often its context was compacted
 	parent?: RunMeta; events: RunEvent[]; dropped: number; final?: string; ver: number; seenTask?: boolean;
 	sessionFile?: string;   // the child's own pi session file
 	spawn?: Spawn;          // how its process starts (again): args, environment, folder
@@ -6494,7 +6517,11 @@ export function recordEvent(rec: RunRecord, ev: any, now = Date.now()): boolean 
 				if (m.errorMessage && (m.stopReason === "error" || m.stopReason === "aborted")) a.error = clipText(String(m.errorMessage), 2000);
 				a.v++;
 				rec.turns++; rec.live = 0;
-				const u = m.usage; if (u) { rec.input += u.input || 0; rec.output += u.output || 0; }
+				const u = m.usage; if (u) {
+					rec.input += u.input || 0; rec.output += u.output || 0;
+					const used = (u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0) + (u.output || 0);
+					if (used > (rec.peak ?? 0)) rec.peak = used;
+				}
 			} else if (m.role === "user") {
 				// the first user message is the task (already the first event)
 				const text = blocksOf(m.content).filter((b) => b.type === "text").map((b) => b.text).join("\n");
@@ -6520,6 +6547,7 @@ export function recordEvent(rec: RunRecord, ev: any, now = Date.now()): boolean 
 			push({ t: "note", text: `retrying (attempt ${ev.attempt ?? "?"}/${ev.maxAttempts ?? "?"}): ${clipText(String(ev.errorMessage ?? ""), 300)}`, error: true, v: 0, at: now });
 			break;
 		case "compaction_start":
+			rec.compactions = (rec.compactions ?? 0) + 1;
 			push({ t: "note", text: `compacting the context (${ev.reason ?? "threshold"})`, v: 0, at: now });
 			break;
 		default:
@@ -6906,7 +6934,12 @@ export function runAgent(agent: AgentDef, task: string, cwd: string, signal: Abo
 	rec.home = vs && !isChildSession(vs.current) ? vs.current || vs.home || undefined : vs?.home || undefined;
 	addRun(rec); saveRun(rec, true); notifyRuns(rec);
 	return childOf(rec).prompt(`Task: ${task}`, { first: true, signal, timeout: agent.timeout ?? SUBAGENT_TIMEOUT, onProgress })
-		.then((r) => { if (r.timedOut) r.lastSteps = lastSteps(rec); return r; });
+		.then((r) => {
+			if (r.timedOut) r.lastSteps = lastSteps(rec);
+			r.peak = rec.peak; r.compactions = rec.compactions;
+			r.window = rec.stats?.contextWindow || rec.stats?.contextUsage?.contextWindow || undefined;
+			return r;
+		});
 }
 // a turn the user started in a run's own session: its reply goes to the main
 // session too (one line of where it comes from, then the reply), held while
@@ -6928,12 +6961,18 @@ export const lastSteps = (rec: RunRecord, n = 3): string =>
 		const s = `${e.name}${a && a !== "{}" ? ` ${a}` : ""}`.replace(/\s+/g, " ");
 		return s.length > 80 ? `${s.slice(0, 79)}…` : s;
 	}).join("; ");
+// a run that ran short of its context says so, for the caller's next steps
+export function shortNote(r: { peak?: number; compactions?: number; window?: number }): string {
+	const c = r.compactions ?? 0, w = Number(r.window) || 0, pct = w && r.peak ? Math.round((r.peak / w) * 100) : 0;
+	if (!(c > 0 || (w && (r.peak ?? 0) >= 0.8 * w))) return "";
+	return `\n\n[context: this run ran short${pct ? `, reaching ${pct}% of its ${w}-token window` : ""}${c ? `, compacted ${c}×` : ""}: give what is left in smaller steps]`;
+}
 export function render(r: RunResult): string {
 	const status = r.stopped ? "stopped by the user" : r.timedOut ? `timed out after ${r.timedOut}s` : r.exitCode === 0 ? "done" : `exit ${r.exitCode}`;
 	const head = `## ${r.agent}${r.step ? ` (step ${r.step})` : ""} — ${status}, ${r.turns} turn${r.turns === 1 ? "" : "s"}, ↑${r.input} ↓${r.output}`;
 	const body = r.text.trim() || (r.stderr.trim() ? `(no output; stderr: ${r.stderr.trim().slice(-800)})` : "(no output)");
 	const cut = r.timedOut ? `\n\n[cut at its ${r.timedOut}s budget — last: ${r.lastSteps || "no tool call"}; not finished]` : "";
-	return `${head}\n${cap(body)}${cut}`;
+	return `${head}\n${cap(body)}${cut}${shortNote(r)}`;
 }
 // with a signal, items not started by the time it is aborted are left out (undefined)
 export async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) => Promise<R>, signal?: AbortSignal): Promise<R[]> {
@@ -8441,6 +8480,22 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const active = () => process.env.LETS_CODE_EXPERTS_ON === "1" && process.env.LETS_CODE_SUBAGENTS_ON === "1" && !(Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") > 0);
 export const factoryRoot = () => join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "lets-code-factory");
+// A step's share of a fresh context, from the model's window: the window
+// less the reply budget (the output cap, else a quarter) and about 6k of
+// system prompt and tools; 40% of the rest is for reading, about 12 tokens a
+// line. shrink halves it once per stage of a run that ran short. The same
+// in the mandate and factory modules (a test keeps them equal).
+export interface Budget { window: number; files: number; lines: number; steps: number }
+export function contextBudget(window?: number, outCap?: number, shrink = 0): Budget | null {
+	if (!(Number(window) > 0)) return null;
+	const w = Number(window), out = Number(outCap) > 0 && Number(outCap) < w ? Number(outCap) : Math.floor(w / 4);
+	const usable = w - out - 6000;
+	if (usable <= 2000) return { window: w, files: 1, lines: 150, steps: 3 };
+	const lines = Math.max(150, Math.min(6000, Math.floor(usable * 0.4 / 12 / 2 ** Math.max(0, shrink))));
+	return { window: w, files: Math.max(1, Math.min(15, Math.round(lines / 300))), lines, steps: Math.max(3, Math.min(12, Math.floor(usable * 0.5 / 1500))) };
+}
+// a run that ran short of its context: compacted, or a request at 80% of the window
+export const ranShort = (peak?: number, compactions?: number, window?: number): boolean => (compactions ?? 0) > 0 || (Number(window) > 0 && (peak ?? 0) >= 0.8 * Number(window));
 export const MAX_FIX_ROUNDS = 5;
 export const SUITE_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -8455,6 +8510,7 @@ export interface Entry {
 	stage: Stage; round: number; expert?: string; brief?: string; output?: string;
 	verdict: string; summary: string; findings?: string[];
 	input: number; output_tokens: number; seconds: number; started: number; ended: number;
+	short?: boolean;   // the stage ran short of its context
 }
 export interface Ledger {
 	v: 1; id: string; created: number; updated: number;
@@ -8465,6 +8521,8 @@ export interface Ledger {
 	stoppedAt?: Waiting | null;                    // the checkpoint a stop came from: a resume asks it again
 	stage: Stage; rounds: number;
 	criteria: string[]; plan: string; claim: string;
+	window?: number; outCap?: number;              // the model's context window and output cap: stage briefs are sized to it
+	shrink?: number;                               // stages that ran short of context so far: each halves the sizes (at most 3)
 	findings: Partial<Record<Stage, Finding[]>>;   // each review stage's open findings, from its last verdict
 	sent: Record<string, string[]>;                // finding ids already sent to the developer, per stage
 	fixing: { stage: Stage; findings: Finding[] } | null;   // what the next build fixes, and where to go on
@@ -8474,7 +8532,7 @@ export interface Ledger {
 	commit: string;
 	entries: Entry[];
 }
-export interface Dispatched { text: string; exitCode: number; input: number; output: number; seconds: number }
+export interface Dispatched { text: string; exitCode: number; input: number; output: number; seconds: number; peak?: number; compactions?: number; window?: number }
 export interface Decision { action: "approve" | "edit" | "stop" | "more" | "final" | "retry" | "commit" | "keep"; text?: string; by?: string }
 export interface Deps {
 	dispatch(expert: string, brief: Record<string, string>, cwd: string, meta: { stage: Stage; round: number; runId: string }): Promise<Dispatched>;
@@ -8601,8 +8659,20 @@ export function briefFor(stage: Stage, L: Ledger): Record<string, string> {
 	} else if (stage === "judge") {
 		Object.assign(b, { criteria, artifact: where, claim: L.claim, how_to_run: L.howToRun, constraints: L.constraints });
 	}
+	const budget = budgetFor(stage, L); if (budget) b.context_budget = budget;
 	for (const k of Object.keys(b)) if (!b[k]) delete b[k];
 	return b;
+}
+// what each stage is told about its context: the developer plans and builds in
+// steps that fit, the reviewers, tester and judge read the change in parts
+export function budgetFor(stage: Stage, L: Ledger): string {
+	const b = contextBudget(L.window, L.outCap, L.shrink ?? 0); if (!b) return "";
+	const head = `Your context is about ${b.window} tokens.`;
+	const cut = L.shrink ? " An earlier stage of this run ran short of context: these sizes are already cut to fit." : "";
+	const f = `${b.files} file${b.files === 1 ? "" : "s"}`;
+	if (stage === "plan") return `${head} Plan the build in steps of at most ${f} changed and about ${b.lines} lines read each. If the ticket needs more than ${b.steps} such steps, say so at the top of the plan, with how to split it into smaller tickets.${cut}`;
+	if (stage === "build") return `${head} Build the plan one step at a time, reading only what the current step needs: about ${b.lines} lines at a time, the parts of a file you change, not whole large files.${cut}`;
+	return `${head} Read the change file by file (\`git -C ${L.work} diff ${L.base} -- <file>\`) and only the code around each hunk, about ${b.lines} lines at a time, never the whole diff at once.${cut}`;
 }
 
 // ------------------------------------------------------------------ the engine
@@ -8623,6 +8693,11 @@ async function stageRun(L: Ledger, deps: Deps, stage: Stage): Promise<{ text: st
 	catch (e) { r = { text: `dispatch failed: ${e instanceof Error ? e.message : String(e)}`, exitCode: 1, input: 0, output: 0, seconds: 0 }; }
 	const out = artifact(L, `${String(n).padStart(2, "0")}-${stage}.out.md`, r.text);
 	const entry: Entry = { stage, round: L.rounds, expert, brief: briefFile, output: out, verdict: "", summary: "", input: r.input, output_tokens: r.output, seconds: r.seconds, started, ended: now() };
+	// ran short of its context: the stages after it get smaller sizes
+	if (ranShort(r.peak, r.compactions, r.window || L.window)) {
+		L.shrink = Math.min(3, (L.shrink ?? 0) + 1); entry.short = true;
+		deps.progress?.(`factory ${L.id}: ${stage} ran short of context${r.compactions ? ` (compacted ${r.compactions}×)` : ""}: smaller steps from here`);
+	}
 	return { text: r.text, ok: r.exitCode === 0, entry };
 }
 // The change, staged afresh from the base each time (new files staged so
@@ -8817,7 +8892,7 @@ export async function shellCommand(cmd: string, what: string, deps: Deps, cwd: s
 	if (bare !== cmd.trim() && (await parses(bare))) return bare;
 	throw new Error(`the ${what} is not a shell command that parses: ${short(cmd, 200)}`);
 }
-export interface StartOpts { ticket: string; repo: string; howToRun?: string; start?: string; constraints?: string; conventions?: string; tester?: "auto" | "on" | "off"; criteria?: string[]; root?: string; id?: string }
+export interface StartOpts { ticket: string; repo: string; howToRun?: string; start?: string; constraints?: string; conventions?: string; tester?: "auto" | "on" | "off"; criteria?: string[]; root?: string; id?: string; window?: number; outCap?: number }
 // a new run: its dir, its worktree and branch from the repo's HEAD, its ledger
 export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 	const now = (deps.now ?? Date.now)(); const root = o.root ?? factoryRoot();
@@ -8835,7 +8910,8 @@ export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 	const add = await deps.exec(`git worktree add -q -b ${branch} ${JSON.stringify(work)} ${base}`, repo);
 	if (add.code !== 0) throw new Error(`git worktree add failed: ${short(add.out, 300)}`);
 	const L: Ledger = { v: 1, id, created: now, updated: now, repo, base, branch, work, dir, ticket: o.ticket.trim(), howToRun, start: startCmd, constraints: o.constraints ?? "", conventions: o.conventions ?? "",
-		tester: o.tester ?? "auto", status: "running", waiting: null, note: "", stage: "intake", rounds: 0, criteria: o.criteria ?? [], plan: "", claim: "", findings: {}, sent: {}, fixing: null, pending: null, baseline: null, commit: "", entries: [] };
+		tester: o.tester ?? "auto", status: "running", waiting: null, note: "", stage: "intake", rounds: 0, criteria: o.criteria ?? [], plan: "", claim: "", findings: {}, sent: {}, fixing: null, pending: null, baseline: null, commit: "", entries: [],
+		...(Number(o.window) > 0 ? { window: Number(o.window), ...(Number(o.outCap) > 0 ? { outCap: Number(o.outCap) } : {}) } : {}) };
 	writeFileSync(join(dir, "ticket.md"), L.ticket + "\n", { mode: 0o600 });
 	if (prepared.length) L.entries.push({ stage: "intake", round: 0, verdict: "new project", summary: `${repo}: ${prepared.join(", ")}`, input: 0, output_tokens: 0, seconds: 0, started: now, ended: now });
 	saveLedger(L, now);
@@ -8936,7 +9012,7 @@ export async function sessionDeps(ctx: any, signal?: AbortSignal, progress?: (l:
 			const s = find(expert); if (!s) return { text: `The ${expert} expert is not usable here.`, exitCode: 127, input: 0, output: 0, seconds: 0 };
 			const t0 = Date.now(); const i = PIPELINE.indexOf(meta.stage);
 			const r = await sub.runAgent(s, exp.renderBrief(s, brief), cwd, signal, progress, { tool: "factory", callId: callId ?? meta.runId, mode: "chain", index: i, of: PIPELINE.length });
-			return { text: r.text ?? "", exitCode: r.exitCode ?? 1, input: r.input ?? 0, output: r.output ?? 0, seconds: (Date.now() - t0) / 1000 };
+			return { text: r.text ?? "", exitCode: r.exitCode ?? 1, input: r.input ?? 0, output: r.output ?? 0, seconds: (Date.now() - t0) / 1000, peak: r.peak, compactions: r.compactions, window: r.window };
 		},
 		exec: shellExec,
 		checkpoint: dialogs(ctx?.hasUI ? ctx.ui : undefined),
@@ -9026,7 +9102,7 @@ export async function runExpert(brief: Record<string, unknown>, ctx: any, signal
 		else {
 			// a path with the model's remark after it: "/x/chess (empty; becomes a repo)"
 			const repo = v("repo").split("\n")[0].replace(/\s+\([^()]*\)\s*$/, "").trim();
-			L = await startRun({ ticket, repo: resolve(cwd, repo || "."), howToRun, start: v("start"), constraints }, deps);
+			L = await startRun({ ticket, repo: resolve(cwd, repo || "."), howToRun, start: v("start"), constraints, window: ctx?.model?.contextWindow, outCap: ctx?.model?.maxTokens }, deps);
 		}
 		return { text: report(L, true) + now, isError: false };
 	} catch (e) { return { text: `The software factory could not run: ${e instanceof Error ? e.message : String(e)}`, isError: true }; }
@@ -9072,7 +9148,7 @@ export default function (pi: ExtensionAPI) {
 				if (vs) vs.mainBusy = true;
 				let L: Ledger;
 				try {
-					L = verb === "resume" ? await resumeRun(arg, deps) : await startRun({ ticket: readFileSync(file, "utf8"), repo: ctx.cwd, howToRun: rest.join(" ") }, deps);
+					L = verb === "resume" ? await resumeRun(arg, deps) : await startRun({ ticket: readFileSync(file, "utf8"), repo: ctx.cwd, howToRun: rest.join(" "), window: ctx?.model?.contextWindow, outCap: ctx?.model?.maxTokens }, deps);
 				} finally { if (vs && !was) vs.mainBusy = false; }
 				if (ctx.hasUI) ctx.ui.setStatus("factory", undefined);
 				say(report(L));

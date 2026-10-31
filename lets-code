@@ -8581,6 +8581,7 @@ export interface Ledger {
 	window?: number; outCap?: number;              // the model's context window and output cap: stage briefs are sized to it
 	shrink?: number;                               // stages that ran short of context so far: each halves the sizes (at most 3)
 	unreviewed?: boolean;                          // taken to the final approval from a blocked stage, its later stages not run
+	patch?: string;                                // a fingerprint of the change after the last build: a fix round must change it
 	findings: Partial<Record<Stage, Finding[]>>;   // each review stage's open findings, from its last verdict
 	sent: Record<string, string[]>;                // finding ids already sent to the developer, per stage
 	fixing: { stage: Stage; findings: Finding[] } | null;   // what the next build fixes, and where to go on
@@ -8764,13 +8765,19 @@ async function stageRun(L: Ledger, deps: Deps, stage: Stage): Promise<{ text: st
 	// run blocking on the missing STATUS line. A review, test or judge reply
 	// without its verdict (cut off, or left out): asked again, verdict first
 	const dev = stage === "plan" || stage === "build";
-	const again = (x: Dispatched) => x.exitCode === 0 && (dev ? !!x.cut : !hasVerdict(stage, x.text));
+	// a fix round that changed nothing (small models report DONE, or nothing, without touching the findings)
+	// (one that says STATUS may be disputing a finding: the reviews judge that)
+	const unchanged = async (x: Dispatched) => stage === "build" && !!L.fixing && !!L.patch && x.exitCode === 0 && !x.cut && lineValue(x.text, "STATUS") === null && (await changeId(L, deps)) === L.patch;
+	const again = async (x: Dispatched) => x.exitCode === 0 && (dev ? !!x.cut || (await unchanged(x)) : !hasVerdict(stage, x.text));
 	let continued = 0;
-	while (again(r) && continued < MAX_CONTINUES) {
+	while ((await again(r)) && continued < MAX_CONTINUES) {
 		continued++;
-		deps.progress?.(`factory ${L.id}: ${stage} reply ${dev ? "cut at the reply limit" : "without its verdict"}: asking again (${continued}/${MAX_CONTINUES})`);
+		const idle = dev && !r.cut;
+		deps.progress?.(`factory ${L.id}: ${stage} reply ${idle ? "changed nothing for the findings" : dev ? "cut at the reply limit" : "without its verdict"}: asking again (${continued}/${MAX_CONTINUES})`);
 		const tail = r.text.trim().slice(-600);
-		const more = { ...brief, continue: stage === "build"
+		const more = { ...brief, continue: idle
+			? `Your previous reply changed nothing in the work tree, and the findings below are still open. Fix them now: edit the files, run the test command, then end with your STATUS line. It ended with:\n${tail}`
+			: stage === "build"
 			? `Your previous reply was cut off at the reply limit. The work tree keeps every file you wrote; check what is there and go on from where it stopped, in smaller parts (a file's first part, then the rest by edits), and end with your STATUS line. It ended with:\n${tail}`
 			: stage === "plan"
 			? `Your previous reply was cut off at the reply limit. Reply again with the whole plan, shorter, ending with your STATUS line. It ended with:\n${tail}`
@@ -8806,6 +8813,13 @@ async function snapshot(L: Ledger, deps: Deps): Promise<string> {
 	mkdirSync(join(L.dir, "artifacts"), { recursive: true }); writeFileSync(diffPath(L), d.out, { mode: 0o600 });
 	const stat = await deps.exec(`git diff --shortstat ${L.base}`, L.work);
 	return stat.out.trim();
+}
+// a fingerprint of the change as it stands (the diff against the base)
+export async function changeId(L: Ledger, deps: Deps): Promise<string> {
+	await snapshot(L, deps);
+	let d = ""; try { d = readFileSync(diffPath(L), "utf8"); } catch { /* no diff yet */ }
+	let h = 5381; for (let i = 0; i < d.length; i++) h = ((h * 33) ^ d.charCodeAt(i)) >>> 0;
+	return `${d.length}:${h.toString(16)}`;
 }
 // a failed stage's findings go back to the developer, unless one of them was sent before
 function fixRound(L: Ledger, stage: Stage, toFix: Finding[], force = false): void {
@@ -8871,7 +8885,7 @@ async function step(L: Ledger, deps: Deps): Promise<boolean> {
 		}
 		if (stage === "plan" && st === "PLAN") { L.plan = bodyOf(text, "STATUS"); entry.summary = short(L.plan.split("\n").find((l) => /^\s*1[.)]/.test(l)) ?? L.plan); L.stage = "build"; L.waiting = "plan"; return true; }
 		if (stage === "build" && st === "DONE") {
-			L.claim = bodyOf(text, "STATUS"); const stat = await snapshot(L, deps); entry.summary = stat || "no change in the work tree";
+			L.claim = bodyOf(text, "STATUS"); const stat = await snapshot(L, deps); entry.summary = stat || "no change in the work tree"; L.patch = await changeId(L, deps);
 			if (!stat) { blocked(L, "the developer reported DONE but the work tree has no change"); return true; }
 			if (L.fixing) { L.stage = L.fixing.stage; L.fixing = null; L.fixNote = ""; } else L.stage = next(stage);
 			return true;

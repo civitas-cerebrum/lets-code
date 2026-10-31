@@ -235,6 +235,26 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("blocked before a build: final not offered", F.decisionsAt("blocked", L17), ["retry", "stop"]);
 	t("blocked before a build: final refused", typeof F.decisionFor("blocked", "final", undefined, L17), "string");
 	t("blocked after a build: final accepted", F.decisionFor("blocked", "final", undefined, L16), { action: "final", text: undefined, by: "the orchestrator" });
+	// a fix round that changes nothing is sent back to the findings
+	const revise = "VERDICT: REVISE\n## Findings\nR1 | major | feature.txt | confirmed | the content is wrong";
+	const idleFix = () => ({ text: "I looked at the findings.", exitCode: 0, input: 1, output: 1, seconds: 1 });
+	const disputeFix = () => ({ text: "STATUS: DONE\nR1 is wrong: the content is as the ticket says; no change.", exitCode: 0, input: 1, output: 1, seconds: 1 });
+	const r18 = makeRepo("idle-fix"); const fd18 = fakeDeps({ ...OK, build: [build(), idleFix, build("fixed\n")], "expert-review": [revise, "VERDICT: APPROVE\n## Findings\nnone"] });
+	const L18 = await F.startRun(opts(r18), fd18);
+	const b18 = fd18.calls.filter((c) => c.meta.stage === "build");
+	t("fix round that changed nothing: sent back, then fixed and on", [L18.status, b18.length, /changed nothing in the work tree, and the findings below are still open/.test(b18[2].brief.continue ?? ""), L18.entries.filter((e) => e.stage === "build")[1].continued], ["done", 3, true, 1]);
+	const r19 = makeRepo("real-fix"); const fd19 = fakeDeps({ ...OK, build: [build(), build("fixed\n")], "expert-review": [revise, "VERDICT: APPROVE\n## Findings\nnone"] });
+	const L19 = await F.startRun(opts(r19), fd19);
+	t("fix round that changed the work tree: not sent back", [L19.status, fd19.calls.filter((c) => c.meta.stage === "build").length], ["done", 2]);
+	const r22 = makeRepo("dispute-fix"); const fd22 = fakeDeps({ ...OK, build: [build(), disputeFix], "expert-review": [revise, "VERDICT: APPROVE\n## Findings\nnone"] });
+	const L22 = await F.startRun(opts(r22), fd22);
+	t("fix round that says STATUS DONE without a change (disputing a finding): not sent back, the reviews judge it", [L22.status, fd22.calls.filter((c) => c.meta.stage === "build").length], ["done", 2]);
+	const r20 = makeRepo("first-build"); const fd20 = fakeDeps({ ...OK, build: [build()] });
+	const L20 = await F.startRun(opts(r20), fd20);
+	t("the first build is never sent back for no change, and its fingerprint is kept", [fd20.calls.filter((c) => c.meta.stage === "build").length, /^\d+:[0-9a-f]+$/.test(L20.patch ?? "")], [1, true]);
+	const r21 = makeRepo("idle-always"); const fd21 = fakeDeps({ ...OK, build: [build(), idleFix], "expert-review": [revise] }, { decisions: { stuck: { action: "stop" } } });
+	const L21 = await F.startRun(opts(r21), fd21);
+	t("fix round that never changes anything: sent back twice, then on as before (stuck on the repeat)", [fd21.calls.filter((c) => c.meta.stage === "build").length, L21.status], [4, "stopped"]);
 	t("hasVerdict: the line, the judge's heading, neither", [F.hasVerdict("expert-review", "VERDICT: REVISE\nx"), F.hasVerdict("judge", "## Verdict\nREJECT C1"), F.hasVerdict("design-review", "all good"), F.hasVerdict("judge", "VERDICT is coming")], [true, true, false, false]);
 	// negative: an uncut reply is never continued
 	t("no cut: one build call", fd.calls.filter((c) => c.meta.stage === "build").length, 1);

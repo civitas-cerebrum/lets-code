@@ -125,6 +125,16 @@ cat > "${work}/pw.xml" <<'X'
 X
 t "password masked"             "$(ut dump "${work}/pw.xml" | grep -c hunter22 || true)" 0
 
+# The helpers below run in Termux on Android, here against fakes on an
+# isolated PATH of links to this system's commands. In Git Bash those are
+# copies (ln -s copies), which start without the msys-2.0.dll beside the
+# originals, and env -i leaves a native python without SYSTEMROOT: none of
+# it can run there, so on Windows the test ends with the writer and uitext.py.
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
+    echo "skip  probe, setup and ui against fakes: skipped on Windows: the isolated PATH of copied Git Bash commands (and env -i) cannot run there; these helpers run on Android"
+    exit "${fail}" ;;
+esac
+
 # ------------------------------------------- an isolated PATH for the fakes
 iso="${work}/iso"; mkdir -p "${iso}"
 for c in bash sh sed grep awk tr tail head cat mktemp rm python3 dirname sleep wc printf env cut mkdir chmod; do   # no timeout, as on macOS

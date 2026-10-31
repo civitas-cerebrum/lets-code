@@ -19099,6 +19099,10 @@ run_setup() {  # run_setup [full|granular]
     have_python || missing="${missing} python3"
     if [ -n "${missing}" ]; then
         log_error "missing prerequisites:${missing} — install them and re-run setup."
+        if on_windows; then
+            log_error "on Windows lets-code needs Git for Windows (its Git Bash), Node.js and Python 3:"
+            log_error "  winget install Git.Git OpenJS.NodeJS.LTS Python.Python.3.13   (then open a new terminal)"
+        fi
         exit 1
     fi
 
@@ -19262,7 +19266,18 @@ run_setup() {  # run_setup [full|granular]
     log "saved ${CONFIG_FILE}"
 
     # 7. register as a command: install + make executable + ensure PATH
-    local self target
+    # (Windows: npm install -g put lets-code.cmd, .ps1 and the Git Bash
+    # shim on PATH already; a copy in ~/.local/bin would be one cmd and
+    # PowerShell cannot run)
+    local self target reply
+    if on_windows; then
+        echo ""
+        if command -v lets-code >/dev/null 2>&1; then
+            log "command: lets-code (npm's shims run it from cmd, PowerShell and Git Bash)"
+        else
+            log "lets-code is reached through npm on Windows: npm install -g @civitas-cerebrum/lets-code puts it on PATH for cmd, PowerShell and Git Bash."
+        fi
+    else
     self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
     echo ""
     echo "Where should the 'lets-code' command be installed?"
@@ -19314,6 +19329,7 @@ run_setup() {  # run_setup [full|granular]
     else
         log "command will be available in a fresh shell."
     fi
+    fi   # (not on Windows)
 
     # 8. live test
     echo ""
@@ -19419,7 +19435,10 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
 # just-installed command isn't tab-completable there. A child process cannot
 # refresh the parent — but we can hand the user a fresh login shell instead.
 offer_fresh_shell() {
-    if [ -t 0 ]; then
+    if on_windows; then
+        # no login shell to hand over: cmd, PowerShell or Windows Terminal started this
+        echo "Note: open a new terminal if 'lets-code' is not found yet."
+    elif [ -t 0 ]; then
         printf "Open a refreshed shell now so 'lets-code' + tab-completion work immediately? [Y/n] "
         read -r reply
         case "${reply}" in
@@ -19499,8 +19518,8 @@ claude_remote() {
     state="${LETS_CODE_CLAUDE_STATE:-${PI_AGENT_DIR}/lets-code-claude}"
     pi_write_claude_extension
     if ! err="$(PI_CODING_AGENT_DIR="${PI_AGENT_DIR}" LETS_CODE_CLAUDE_PORT="${port}" LETS_CODE_CLAUDE_MODELS="${CLAUDE_MODELS:-${CLAUDE_DEFAULT_MODELS}}" node -e '
-        import(process.argv[1]).then((m) => m.ensureProxy()).then((e) => { if (e) { console.log(e); process.exit(1); } })' \
-        "${LC_EXT_ROOT}/claude/index.ts" 2>&1)"; then
+        import(require("node:url").pathToFileURL(process.argv[1]).href).then((m) => m.ensureProxy()).then((e) => { if (e) { console.log(e); process.exit(1); } })' \
+        "$(native_path "${LC_EXT_ROOT}/claude/index.ts")" 2>&1)"; then
         log_error "${err}"; exit 1
     fi
     log "the Claude proxy is running on 127.0.0.1:${port} (log: ${state}/proxy.log); it keeps running until this machine restarts"
@@ -19724,12 +19743,29 @@ run_update() {  # run_update [--snapshot]
     esac
     command -v curl    >/dev/null || { log_error "curl not found."; exit 1; }
     have_python || { log_error "python3 not found."; exit 1; }
-    self="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$0")"
+    # (forward slashes on Windows, C:/x: bash's dirname splits only at /)
+    self="$(python3 -c 'import os, sys; p = os.path.realpath(sys.argv[1]); print(p.replace(os.sep, "/") if os.name == "nt" else p)' "$0")"
+    # Windows: the update runs from a copy (below), started with the script it updates
+    local upcopy=""
+    if on_windows && [ -n "${LC_UPDATE_FROM:-}" ]; then
+        self="${LC_UPDATE_FROM}"; upcopy="${LC_UPDATE_COPY:-}"
+        unset LC_UPDATE_FROM LC_UPDATE_COPY
+        trap '[ -z "${upcopy}" ] || rm -f "${upcopy}"' EXIT
+    fi
     dir="$(dirname "${self}")"
 
     if [ -e "${dir}/.git" ] && [ -f "${dir}/package.json" ]; then
         log_error "${self} is a git checkout — update it with: git -C ${dir} pull"
         exit 1
+    fi
+
+    # On Windows a file a process holds open cannot be replaced, and this
+    # bash holds the script open while it runs: the update goes on in a copy
+    # in TMPDIR, which leaves the script (and npm's package directory) free
+    if on_windows && [ -z "${upcopy}" ]; then
+        upcopy="$(mktemp "${TMPDIR:-/tmp}/lets-code-update-run.XXXXXX")" && cp "$0" "${upcopy}" \
+            || { rm -f "${upcopy}"; log_error "could not copy ${self} to ${TMPDIR:-/tmp} to run the update from."; exit 1; }
+        LC_UPDATE_FROM="${self}" LC_UPDATE_COPY="${upcopy}" exec "${BASH:-bash}" "${upcopy}" update ${1:+"$1"}
     fi
 
     case "${self}" in
@@ -19744,7 +19780,7 @@ run_update() {  # run_update [--snapshot]
     esac
 
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/lets-code-update.XXXXXX")"
-    trap 'rm -rf "${tmp}"' EXIT
+    trap 'rm -rf "${tmp}"; [ -z "${upcopy}" ] || rm -f "${upcopy}"' EXIT
     if [ "${mode}" = release ]; then
         if ! json="$(curl -sfL --max-time 30 "${UPDATE_REGISTRY}/$(printf '%s' "${UPDATE_PACKAGE}" | sed 's|/|%2f|')/latest")"; then
             log_error "no release of ${UPDATE_PACKAGE} found on ${UPDATE_REGISTRY} — get the latest main instead with: lets-code update --snapshot"
@@ -19769,7 +19805,9 @@ h.update(open(sys.argv[1], "rb").read())
 sys.exit(0 if base64.b64encode(h.digest()).decode() == want else 1)
 PY
         fi
-        tar -xzf "${tmp}/pkg.tgz" -C "${tmp}" package/lets-code || { log_error "the package has no lets-code script."; exit 1; }
+        # (Windows: Git's tar reads the C: of C:/x as a remote host without --force-local)
+        local tar_local=""; on_windows && tar_local="--force-local"
+        tar ${tar_local} -xzf "${tmp}/pkg.tgz" -C "${tmp}" package/lets-code || { log_error "the package has no lets-code script."; exit 1; }
         mv "${tmp}/package/lets-code" "${tmp}/new"
     else
         if ! json="$(curl -sfL --max-time 30 -H "Accept: application/vnd.github+json" "${UPDATE_GITHUB_API}/repos/${UPDATE_REPO}/commits/main")"; then
@@ -19794,11 +19832,12 @@ PY
     python3 - "${tmp}/new" "${new_version}" <<'PY'
 import re, sys
 p, v = sys.argv[1], sys.argv[2]
-s = open(p).read()
+s = open(p, encoding="utf-8").read()
 s, n = re.subn(r'(?m)^LETS_CODE_VERSION=.*$', 'LETS_CODE_VERSION="%s"' % v, s, count=1)
 if n == 0:  # a version from before the stamp existed
     s = s.replace("\nset -eu\n", '\nset -eu\nLETS_CODE_VERSION="%s"\n' % v, 1)
-open(p, "w").write(s)
+with open(p, "w", encoding="utf-8", newline="\n") as f:   # a bash script: "\n" line ends everywhere
+    f.write(s)
 PY
     if cmp -s "${tmp}/new" "${self}"; then
         log "already up to date (${new_version})."
@@ -20358,7 +20397,7 @@ export PI_SKIP_VERSION_CHECK=1
 case "${BASE_URL}" in
     https://*)
         if [ -n "${CA_FOUND}" ]; then
-            export NODE_EXTRA_CA_CERTS="${CA_FOUND}"
+            NODE_EXTRA_CA_CERTS="$(native_path "${CA_FOUND}")"; export NODE_EXTRA_CA_CERTS   # node reads it: C:/x on Windows
         elif [ "${INSECURE}" = true ]; then
             export NODE_TLS_REJECT_UNAUTHORIZED=0
         fi ;;
@@ -20442,7 +20481,7 @@ FEAT_DESC=""
 # size last picked with /metrics is where the next launch starts, ahead of
 # METRICS= in the config; --metrics / --no-metrics / LETS_CODE_METRICS decide
 # for their launch without changing it.
-export LETS_CODE_METRICS_SAVE="${PI_AGENT_DIR}/lets-code-state.json"
+LETS_CODE_METRICS_SAVE="$(native_path "${PI_AGENT_DIR}/lets-code-state.json")"; export LETS_CODE_METRICS_SAVE
 if [ -z "${METRICS_PINNED:-}" ]; then
     case "$(LC_STATE="${LETS_CODE_METRICS_SAVE}" python3 -c 'import json,os
 try: v = json.load(open(os.environ["LC_STATE"])).get("metrics")
@@ -20460,7 +20499,12 @@ esac
 # metrics log: JSON lines from the footer extension (and from subagents, which
 # inherit it); an absolute path, so a child in another directory writes the same file
 if [ -n "${METRICS_LOG}" ]; then
-    case "${METRICS_LOG}" in /*) ;; *) METRICS_LOG="${PWD}/${METRICS_LOG}" ;; esac
+    case "${METRICS_LOG}" in
+        /*) ;;
+        [A-Za-z]:[\\/]*) on_windows || METRICS_LOG="${PWD}/${METRICS_LOG}" ;;   # C:\x, C:/x: absolute on Windows
+        *) METRICS_LOG="${PWD}/${METRICS_LOG}" ;;
+    esac
+    METRICS_LOG="$(native_path "${METRICS_LOG}")"   # node writes it: C:/x on Windows
     export LETS_CODE_METRICS_LOG="${METRICS_LOG}"
     FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }metrics log: ${METRICS_LOG}"
 else
@@ -20564,7 +20608,7 @@ case "$(lc "${EXPERTS}")" in
             on_termux && write_termux_agent
             pi_write_expert_builder   # files only, every platform
             # route-check (the builder's helper) starts sessions with this launcher
-            LETS_CODE_LAUNCHER="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"; export LETS_CODE_LAUNCHER
+            LETS_CODE_LAUNCHER="$(native_path "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")")"; export LETS_CODE_LAUNCHER
             if [ "$(lc_expert_remembered reverse-engineer)" = true ]; then
                 pi_write_rea on
                 [ -z "${REA_NOTE}" ] || log "note: rea: ${REA_NOTE}"
@@ -20614,7 +20658,7 @@ unset LETS_CODE_SESSIONS_ON
 case "$(lc "${SESSIONS}")" in
     true|yes|1|on)
         pi_write_sessions_extension
-        LETS_CODE_SESSIONS_DIR="${LETS_CODE_SESSIONS_DIR:-${PI_AGENT_DIR}/lets-code-sessions}"
+        LETS_CODE_SESSIONS_DIR="$(native_path "${LETS_CODE_SESSIONS_DIR:-${PI_AGENT_DIR}/lets-code-sessions}")"
         export LETS_CODE_SESSIONS_ON=1 LETS_CODE_SESSIONS_DIR
         FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }sessions: on" ;;
 esac
@@ -20633,11 +20677,19 @@ case "$(lc "${CLAUDE_CODE}")" in
             FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }${CC_SUMMARY:-claude code: nothing here}"
         fi ;;
 esac
+SB_UNAVAILABLE=""
 case "$(lc "${SANDBOX}")" in
     true|yes|1|on)
         pi_write_sandbox_extension
-        export LETS_CODE_SANDBOX_ON=1
-        FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }sandbox: on${SB_NOTE:+ (${SB_NOTE})}" ;;
+        # the writer says so with SB_UNAVAILABLE=1 (Windows: sandbox-runtime
+        # confines with bubblewrap or Seatbelt, and Windows has neither)
+        if on_windows || [ "${SB_UNAVAILABLE:-}" = 1 ]; then
+            SB_UNAVAILABLE=1
+            FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }sandbox: unavailable (${SB_NOTE:-no sandbox on Windows})"
+        else
+            export LETS_CODE_SANDBOX_ON=1
+            FEAT_DESC="${FEAT_DESC:+${FEAT_DESC}  }sandbox: on${SB_NOTE:+ (${SB_NOTE})}"
+        fi ;;
 esac
 
 # The launch banner: what is running where, in two lines on a terminal
@@ -20670,6 +20722,8 @@ banner() {
     done
     [ "${VISION}" = true ] && extras=" · vision"
     extras="${extras} · ${guards} guard$([ "${guards}" = 1 ] || echo s) · ${exts} extension$([ "${exts}" = 1 ] || echo s)"
+    # SANDBOX=true on Windows: asked for, and not there (see the sandbox case above)
+    [ -z "${SB_UNAVAILABLE:-}" ] || extras="${extras} · sandbox unavailable"
     # a model discovered from the server, not pinned, is marked (auto)
     local auto=""
     [ "${MODEL_SOURCE}" = auto ] && auto=" (auto)"
@@ -20710,11 +20764,47 @@ lc_stdin_idle() {  # true: stdin is a pipe or socket with nothing on it, still o
     [ -t 0 ] && return 1
     [ -p /dev/stdin ] || [ -S /dev/stdin ] || return 1
     lc_print_mode || return 1
+    if on_windows; then
+        # Windows python's select takes sockets only (on a pipe it raises,
+        # which read as idle would drop piped input); bash's read -t 0 asks
+        # Git Bash's select, which knows pipes: true once data or EOF is there
+        local lc_n lc_i=0
+        lc_n="$(awk -v w="${LETS_CODE_STDIN_WAIT:-3}" 'BEGIN { printf "%d", w * 10 }')"
+        while [ "${lc_i}" -lt "${lc_n:-30}" ]; do
+            read -r -t 0 && return 1
+            sleep 0.1; lc_i=$((lc_i + 1))
+        done
+        read -r -t 0 && return 1
+        return 0
+    fi
     ! python3 -c 'import select,sys; sys.exit(0 if select.select([0],[],[],float(sys.argv[1]))[0] else 1)' "${LETS_CODE_STDIN_WAIT:-3}" 2>/dev/null
 }
 if lc_stdin_idle; then
     log "note: stdin is an open pipe with no input after ${LETS_CODE_STDIN_WAIT:-3}s; starting without it (pass </dev/null to skip the wait)" >&2
     exec </dev/null
+fi
+# On Windows the arguments reach pi, a native program, as typed: Git Bash
+# would rewrite each one that looks like a path of its own, so the prompt of
+# `lets-code -p "/review this"` would arrive as "C:/Program Files/Git/review
+# this". An argument that names an existing file or directory in Git Bash's
+# form (/c/x, /tmp/x) is given its Windows form here instead. pi's own
+# children (its bash tool) should be converted again: LETS_CODE_ARGCONV_SET=1
+# tells the extension to drop the two settings at load, restoring the values
+# they had before (LETS_CODE_ARGCONV_PRIOR_EXCL, _PRIOR_NOPATHCONV: set only
+# when there were such values).
+if on_windows; then
+    unset LETS_CODE_ARGCONV_PRIOR_EXCL LETS_CODE_ARGCONV_PRIOR_NOPATHCONV
+    [ -z "${MSYS2_ARG_CONV_EXCL+x}" ] || export LETS_CODE_ARGCONV_PRIOR_EXCL="${MSYS2_ARG_CONV_EXCL}"
+    [ -z "${MSYS_NO_PATHCONV+x}" ] || export LETS_CODE_ARGCONV_PRIOR_NOPATHCONV="${MSYS_NO_PATHCONV}"
+    lc_i=0
+    while [ "${lc_i}" -lt ${#PASSTHROUGH[@]} ]; do
+        case "${PASSTHROUGH[${lc_i}]}" in
+            /?*) if [ -e "${PASSTHROUGH[${lc_i}]}" ]; then PASSTHROUGH[${lc_i}]="$(native_path "${PASSTHROUGH[${lc_i}]}")"; fi ;;
+        esac
+        lc_i=$((lc_i + 1))
+    done
+    unset lc_i
+    export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 LETS_CODE_ARGCONV_SET=1
 fi
 if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
     mem_guard_exec pi --provider "${PROVIDER_ID}" --model "${MODEL}"

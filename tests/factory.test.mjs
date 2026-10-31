@@ -127,6 +127,10 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("budget: the run keeps the window", [L.window, L.outCap, L.shrink], [32768, 8192, undefined]);
 	t("budget: the plan in steps that fit, a split named past the step count", [/Plan the build in steps of at most 2 files changed and about 619 lines read each/.test(brief("plan")), /more than 6 such steps, say so at the top of the plan/.test(brief("plan"))], [true, true]);
 	t("budget: the plan and the build told to write in parts", [/One reply holds about 409 lines: write a larger file in parts/.test(brief("plan")), /One reply holds about 409 lines/.test(brief("build"))], [true, true]);
+	const tst = fakeDeps({ ...OK, build: [build()] }, { available: () => true }); const rt = makeRepo("tester-ticket");
+	await F.startRun(opts(rt, { tester: "on" }), tst);
+	const tgoal = tst.calls.find((c) => c.meta.stage === "test")?.brief.goal ?? "";
+	t("tester: the goal carries the ticket and the every-example rule", [/Ticket \(Check every example and rule in the ticket too/.test(tgoal), tgoal.includes(readFileSync(join(rt, "TICKET.md"), "utf8").trim().split("\n")[0])], [true, true]);
 	t("budget: the reviewers, tester and judge start with the verdict", ["expert-review", "design-review", "judge"].map((x) => /start your final reply with the verdict line, then one line per finding/.test(brief(x))), [true, true, true]);
 	t("budget: the build a step at a time", /Build the plan one step at a time, reading only what the current step needs: about 619 lines/.test(brief("build")), true);
 	t("budget: the reviewers and the judge read the change file by file", ["expert-review", "design-review", "judge"].map((s) => brief(s).includes(`git -C ${L.work} diff ${L.base} -- <file>`)), [true, true, true]);
@@ -190,6 +194,11 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	const r13 = makeRepo("ask-judge"); const fd13 = fakeDeps({ ...OK, build: [build()], judge: [noVerdict(false), "## Verdict\nACCEPT all pass\n## Criteria\nC1: PASS x\nC2: PASS y"] });
 	const L13 = await F.startRun(opts(r13), fd13);
 	t("judge without its verdict: asked again", [L13.status, fd13.calls.filter((c) => c.meta.stage === "judge").length], ["done", 2]);
+	const r13b = makeRepo("judge-never"); const fd13b = fakeDeps({ ...OK, build: [build()], judge: [noVerdict(false)] }, { decisions: { blocked: { action: "stop" } } });
+	const L13b = await F.startRun(opts(r13b), fd13b);
+	t("judge never a verdict, the suite passes: blocked, not waved through by the developer's suite", [L13b.entries.find((e) => e.stage === "judge").verdict, L13b.status, L13b.unreviewed], ["NO VERDICT", "stopped", undefined]);
+	const jb = fd13b.calls.find((c) => c.meta.stage === "judge").brief, tb = fd13b.calls.find((c) => c.meta.stage === "test")?.brief;
+	t("judge: given the ticket, told to check its every example", [/Check every example and rule in the ticket too/.test(jb.ticket), jb.ticket.includes(readFileSync(join(r13b, "TICKET.md"), "utf8").trim().split("\n")[0]), /A failing example of the ticket is a failing criterion/.test(jb.ticket)], [true, true, true]);
 	// never a verdict: asked again twice, then the suite decides
 	const r14 = makeRepo("ask-never"); const fd14 = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { blocked: { action: "stop" } } });
 	const L14 = await F.startRun(opts(r14), fd14);

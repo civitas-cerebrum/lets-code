@@ -8713,10 +8713,10 @@ export function briefFor(stage: Stage, L: Ledger): Record<string, string> {
 	} else if (stage === "design-review") {
 		Object.assign(b, { diff: where, context, conventions: L.conventions, previous_findings: prev(stage), constraints: L.constraints });
 	} else if (stage === "test") {
-		Object.assign(b, { target: L.work, goal: `Verify the change for this ticket end to end, and find what it breaks. The change: ${where}\n\nCriteria:\n${criteria}`, how_to_run: [L.howToRun && `Tests: ${L.howToRun}`, L.start && `Start the app: ${L.start}`].filter(Boolean).join("\n"), constraints: keep,
+		Object.assign(b, { target: L.work, goal: `Verify the change for this ticket end to end, and find what it breaks. The change: ${where}\n\nCriteria:\n${criteria}\n\nTicket (Check every example and rule in the ticket too, not only the numbered criteria: they may leave some out.):\n${L.ticket}`, how_to_run: [L.howToRun && `Tests: ${L.howToRun}`, L.start && `Start the app: ${L.start}`].filter(Boolean).join("\n"), constraints: keep,
 			report: `Start your final message with the line VERDICT: APPROVE (nothing the change causes fails) or VERDICT: REVISE, then your usual headings; in Findings, one line per failure: T<n> | blocker|major|minor|nit | where | title.${prev(stage) ? `\nRe-check these earlier failures, keeping their ids:\n${prev(stage)}` : ""}` });
 	} else if (stage === "judge") {
-		Object.assign(b, { criteria, artifact: where, claim: L.claim, how_to_run: L.howToRun, constraints: L.constraints });
+		Object.assign(b, { criteria, ticket: `Check every example and rule in the ticket too, not only the numbered criteria: they may leave some out. A failing example of the ticket is a failing criterion.\n\n${L.ticket}`, artifact: where, claim: L.claim, how_to_run: L.howToRun, constraints: L.constraints });
 	}
 	const budget = budgetFor(stage, L); if (budget) b.context_budget = budget;
 	for (const k of Object.keys(b)) if (!b[k]) delete b[k];
@@ -8896,7 +8896,9 @@ async function step(L: Ledger, deps: Deps): Promise<boolean> {
 	// the reply limit every time): the suite decides, so a finished build is not
 	// lost to a reviewer that cannot report. It passes: on, marked unreviewed;
 	// it fails: a fix round with its output
-	if (ok && L.howToRun) {
+	// (not for the judge: it is the check against the criteria, and the
+	// developer's own suite is what it is there to check)
+	if (ok && L.howToRun && stage !== "judge") {
 		const r = await deps.exec(L.howToRun, L.work, SUITE_TIMEOUT_MS);
 		if (r.code === 0 || ranNoTests(r.code, r.out)) {
 			const none = r.code !== 0;

@@ -15,7 +15,8 @@ import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 
 const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/factory.ts");
-const work = realpathSync(mkdtempSync(join(tmpdir(), "factory-test-")));
+// on Windows the long names (C:\Users\runneradmin, not RUNNER~1), as git prints them
+const work = (process.platform === "win32" ? realpathSync.native : realpathSync)(mkdtempSync(join(tmpdir(), "factory-test-")));
 process.on("exit", () => rmSync(work, { recursive: true, force: true }));
 const agentDir = join(work, "agent"); mkdirSync(join(agentDir, "extensions"), { recursive: true });
 process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -352,7 +353,7 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("happy: the work tree is clean", git(L.work, "status", "--porcelain"), "");
 	t("happy: the user's checkout untouched", [git(repo, "status", "--porcelain"), git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "--abbrev-ref", "HEAD")], [statusBefore, head, "main"]);
 	t("happy: baseline and regression", [L.baseline.code, L.entries.at(-1).verdict], [0, "PASS"]);
-	t("happy: the developer is told the ticket's repo is its worktree", [fd.calls[0].brief.workspace.includes(px(L.work)), fd.calls[0].brief.workspace.includes(`${px(repo)} (branch`), fd.calls[2].brief.diff.includes(`worktree of ${repo}`)], [true, true, true]);
+	t("happy: the developer is told the ticket's repo is its worktree", [fd.calls[0].brief.workspace.includes(px(L.work)), fd.calls[0].brief.workspace.includes(`${px(repo)} (branch`), fd.calls[2].brief.diff.includes(`worktree of ${px(repo)}`)], [true, true, true]);
 	t("happy: plan mode, then build with the plan", [fd.calls[0].brief.mode, fd.calls[1].brief.mode, fd.calls[1].brief.plan], ["plan", "build", "## Plan\n1. add feature.txt (C1)\n## Tests\n## Risks\nnone"]);
 	t("happy: reviewers get the diff and the criteria", [fd.calls[2].brief.diff.includes(L.base), fd.calls[2].brief.criteria], [true, "C1. feature.txt exists\nC2. a.txt still says ok"]);
 	t("happy: the judge gets the developer's report as the claim", fd.calls[4].brief.claim.startsWith("## Changes"), true);
@@ -377,7 +378,7 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 		t("new: git has no identity here", (await F.shellExec("git var GIT_AUTHOR_IDENT", work)).code !== 0, true);
 		const fd = fakeDeps({ ...OK, judge: ["## Verdict\nACCEPT\n## Criteria\nC1: PASS x"] });
 		const L = await F.startRun({ ticket, repo: fresh, root }, fd);
-		t("new: a folder that did not exist becomes the project", [L.status, existsSync(join(fresh, ".git")), L.repo], ["done", true, fresh]);
+		t("new: a folder that did not exist becomes the project", [L.status, existsSync(join(fresh, ".git")), L.repo], ["done", true, px(fresh)]);   // as git names it: with "/" on Windows
 		t("new: the log says so", [L.entries[0].verdict, /created .*made it a git repo, added an empty first commit/.test(L.entries[0].summary)], ["new project", true]);
 		t("new: the base is the empty first commit", [git(fresh, "rev-list", "--count", "HEAD"), git(fresh, "ls-tree", "HEAD")], ["1", ""]);
 		t("new: committed with the factory's identity", [L.commit.length >= 40, git(L.work, "log", "-1", "--format=%an <%ae>")], [true, "lets-code factory <factory@lets-code.invalid>"]);

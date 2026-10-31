@@ -1051,7 +1051,14 @@ import * as lcwFs from "node:fs";
 import * as lcwOs from "node:os";
 import * as lcwPath from "node:path";
 function lcwIsWin() { return process.platform === "win32"; }
-function lcwHome() { return lcwIsWin() ? lcwOs.homedir() : (process.env.HOME || lcwOs.homedir()); }
+// The home dir: $HOME when set, as Git Bash reads ~ (lets-code exports it on
+// Windows too, in the C:/Users/x form, and keeps one set in Git Bash); else
+// node's (USERPROFILE on Windows).
+function lcwHome() {
+	const h = process.env.HOME;
+	if (!lcwIsWin()) return h || lcwOs.homedir();
+	return h && !h.startsWith("~") ? lcwPath.resolve(lcwNative(h)) : lcwOs.homedir();
+}
 // The bash to run a script with: Git Bash on Windows, found as pi finds it
 // (settings.json shellPath, then Git for Windows, then bash.exe on PATH that
 // is not WSL's); "bash" elsewhere.
@@ -1088,7 +1095,7 @@ function lcwGitRoot() {
 // Git's root. Anything else, and every path off Windows, is returned as is.
 function lcwNative(p) {
 	if (!lcwIsWin() || typeof p !== "string" || !p) return p;
-	if (p === "~" || /^~[\\/]/.test(p)) return lcwPath.join(lcwOs.homedir(), p.slice(1));
+	if (p === "~" || /^~[\\/]/.test(p)) return lcwPath.join(lcwHome(), p.slice(1));
 	const m = /^\/([a-zA-Z])(\/.*)?$/.exec(p);
 	if (m) return m[1].toUpperCase() + ":" + (m[2] || "/").replace(/\//g, "\\");
 	if (/^\/tmp(\/|$)/.test(p)) return lcwPath.join(lcwOs.tmpdir(), p.slice(4));
@@ -10117,15 +10124,38 @@ export async function resumeRun(id: string, deps: Deps, root = factoryRoot()): P
 // ------------------------------------------------------------------ in a session
 // out: what it printed, stdout and stderr together (a suite's whole story);
 // stdout: its standard output alone. Run with Git Bash on Windows; the
-// timeout stops its whole tree (its process group; taskkill /T on Windows)
+// timeout stops its whole tree (its process group; on Windows its Git Bash
+// process group, then taskkill /T)
+let shellSeq = 0;   // (not Math.random: a run id draws on it)
 export function shellExec(cmd: string, cwd: string, timeoutMs = 120000): Promise<{ code: number; out: string; stdout: string }> {
 	return new Promise((res) => {
-		let out = "", stdout = ""; const child = spawn(lcwBash(), ["-c", cmd], lcwSpawnOpts({ cwd, stdio: ["ignore", "pipe", "pipe"], detached: true }));
-		const timer = setTimeout(() => lcwKillTree(child.pid, "SIGKILL"), timeoutMs); timer.unref?.();
+		// On Windows taskkill /T misses what Git Bash forked (a forked process's
+		// Windows parent is gone; `cmd &` outlives it, holding the pipes). The
+		// bash, started from a native program, leads its own process group
+		// there: it notes its pid, and the group is killed with Git Bash's kill.
+		const pidFile = lcwIsWin() ? join(lcwOs.tmpdir(), `lets-code-sh-${process.pid}-${Date.now()}-${++shellSeq}.pid`) : "";
+		const line = pidFile ? `{ echo $$ > '${lcwPosix(pidFile)}'; } 2>/dev/null; ${cmd}` : cmd;
+		let out = "", stdout = "", done = false, exitCode: number | null = null;
+		const finish = (r: { code: number; out: string; stdout: string }) => {
+			if (done) return; done = true; clearTimeout(timer);
+			if (pidFile) try { lcwFs.unlinkSync(pidFile); } catch { /* not written */ }
+			res(r);
+		};
+		const child = spawn(lcwBash(), ["-c", line], lcwSpawnOpts({ cwd, stdio: ["ignore", "pipe", "pipe"], detached: true }));
+		const timer = setTimeout(() => {
+			if (pidFile) try {
+				const g = lcwFs.readFileSync(pidFile, "utf8").trim();
+				if (/^\d+$/.test(g)) lcwCp.spawnSync(lcwBash(), ["-c", `kill -9 -- -${g} ${g}`], { stdio: "ignore", windowsHide: true });
+			} catch { /* no pid noted: taskkill alone */ }
+			lcwKillTree(child.pid, "SIGKILL");
+			// what nothing could stop and still holds the pipes does not hold the result
+			if (lcwIsWin()) setTimeout(() => { child.stdout?.destroy(); child.stderr?.destroy(); finish({ code: exitCode ?? 1, out, stdout }); }, 3000).unref?.();
+		}, timeoutMs); timer.unref?.();
 		const add = (d: Buffer) => { out += d.toString(); if (out.length > 200000) out = out.slice(-100000); };
 		child.stdout.on("data", (d: Buffer) => { add(d); stdout += d.toString(); if (stdout.length > 200000) stdout = stdout.slice(-100000); }); child.stderr.on("data", add);
-		child.on("error", (e) => { clearTimeout(timer); res({ code: 127, out: e.message, stdout: "" }); });
-		child.on("close", (code) => { clearTimeout(timer); res({ code: code ?? 1, out, stdout }); });
+		child.on("error", (e) => finish({ code: 127, out: e.message, stdout: "" }));
+		child.on("exit", (code) => { exitCode = code ?? 1; });
+		child.on("close", (code) => finish({ code: code ?? 1, out, stdout }));
 	});
 }
 // the checkpoints as dialogs; no UI: null (the run pauses)
@@ -10400,7 +10430,7 @@ pi_write_core_memory_extension() {
 // (searched on request) so the live store stays small.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -10448,17 +10478,20 @@ export function looksSecret(s: string): boolean { return SECRET_RES.some((re) =>
 // hash of the full path, so two "app" folders do not share.
 const aliases = new Map<string, string>();   // a worktree -> its main checkout
 export function projectRoot(cwd: string): string {
-	let d = resolve(cwd);
+	// on Windows one spelling per folder (the long names, not C:\Users\RUNNER~1;
+	// the one git writes in a worktree's .git), so a project has one store
+	const canon = (x: string) => { if (!lcwIsWin()) return x; try { return realpathSync.native(x); } catch { return x; } };
+	let d = canon(resolve(cwd));
 	for (;;) {
 		const g = join(d, ".git");
 		if (existsSync(g)) {
 			try {
 				const m = statSync(g).isFile() ? /^gitdir:\s*(.+?)[\\/]\.git[\\/]worktrees[\\/][^\\/\s]+[\\/]?\s*$/.exec(readFileSync(g, "utf8")) : null;
-				if (m) { const main = resolve(d, m[1]); if (main !== d) aliases.set(d, main); return main; }
+				if (m) { const main = canon(resolve(d, m[1])); if (main !== d) aliases.set(d, main); return main; }
 			} catch { /* unreadable: the folder stands on its own */ }
 			return d;
 		}
-		const p = dirname(d); if (p === d) return resolve(cwd); d = p;
+		const p = dirname(d); if (p === d) return canon(resolve(cwd)); d = p;
 	}
 }
 // on Windows paths compare without case or separator (C:\x and c:/X are one)
@@ -10478,9 +10511,10 @@ export function normRef(ref: string, root: string): string {
 	if (/^(run|factory):\S+$/.test(r)) return r;
 	if (r.startsWith("session:")) r = r.slice(8);
 	const m = /^(.*?)(:\d+(?:-\d+)?)?$/.exec(r)!; let p = m[1], line = m[2] ?? "";
-	if (p.startsWith("~/") || (lcwIsWin() && p.startsWith("~\\"))) p = join(homedir(), p.slice(2));
+	if (p.startsWith("~/") || (lcwIsWin() && p.startsWith("~\\"))) p = join(lcwHome(), p.slice(2));
 	p = lcwNative(p);   // on Windows a Git Bash path (/c/x, /tmp/x) as Windows names it
 	if (!isAbsolute(p) && root) p = resolve(root, p);
+	else if (lcwIsWin() && isAbsolute(p)) p = resolve(p);   // one separator on Windows (C:\x/y is C:\x\y)
 	return `${unalias(p)}${line}`;
 }
 export function refKeys(ref: string): string[] {
@@ -10564,7 +10598,8 @@ export class Store {
 	search(query: string, opts: { kind?: string; archive?: boolean } = {}): Entry[] {
 		const terms = oneLine(query).toLowerCase().split(" ").filter(Boolean);
 		const pool = opts.archive ? [...this.entries, ...readLines(this.archiveFile).entries] : this.entries;
-		const hit = (e: Entry, t: string) => e.gist.toLowerCase().includes(t) || e.refs.some((r) => r.toLowerCase().includes(t)) || e.kind === t || day(e.t).startsWith(t) || day(e.u).startsWith(t) || e.id === t || `#${e.id}` === t;
+		// a path term on Windows matches with either separator (src/a.ts finds C:\p\src\a.ts)
+		const hit = (e: Entry, t: string) => e.gist.toLowerCase().includes(t) || e.refs.some((r) => r.toLowerCase().includes(t) || (lcwIsWin() && lcwKey(r).includes(lcwKey(t)))) || e.kind === t || day(e.t).startsWith(t) || day(e.u).startsWith(t) || e.id === t || `#${e.id}` === t;
 		return pool.filter((e) => (!opts.kind || e.kind === opts.kind) && terms.every((t) => hit(e, t))).sort((a, b) => b.u - a.u);
 	}
 	line(e: Entry, withId = true): string {
@@ -10574,8 +10609,9 @@ export class Store {
 	showRef(r: string): string {
 		if (/^(run|factory):/.test(r)) return r;
 		const p = r.replace(/:\d+(?:-\d+)?$/, ""), line = r.slice(p.length);
-		if (this.root && under(p, this.root)) return relative(this.root, p) + line;
-		const h = homedir(); return (under(p, h) ? `~${p.slice(h.length)}` : p) + line;
+		// shown with "/" on Windows too (src/a.ts, ~/x), as the model and the user type them
+		if (this.root && under(p, this.root)) return lcwPosix(relative(this.root, p)) + line;
+		const h = lcwHome(); return (under(p, h) ? lcwPosix(`~${p.slice(h.length)}`) : p) + line;
 	}
 	render(now = Date.now()): string {
 		const head = [`# Core memory: ${this.label()} (lets-code)`,
@@ -10869,7 +10905,7 @@ export default function (pi: ExtensionAPI) {
 	const dim = (t: string) => (process.env.NO_COLOR ? t : `\x1b[2m${t}\x1b[22m`);   // intensity only: a selected row keeps the theme's colour
 	const cut = (t: string, n: number) => { const cs = [...t]; return cs.length > n ? `${cs.slice(0, Math.max(0, n - 1)).join("")}…` : t; };
 	const padTo = (t: string, n: number) => { const cs = [...t]; return cs.length >= n ? cs.slice(0, n).join("") : t + " ".repeat(n - cs.length); };
-	const home = (p: string) => { const h = homedir(); return under(p, h) ? `~${p.slice(h.length)}` : p; };
+	const home = (p: string) => { const h = lcwHome(); return under(p, h) ? `~${p.slice(h.length)}` : p; };
 	const author = (b: By) => (b === "harness" ? "lets-code" : b === "user" ? "you" : "the model");
 	interface Row { s: Store; e: Entry }
 	function refSummary(refs: string[]): string {

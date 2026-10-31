@@ -33,6 +33,9 @@ async function load() {
 	return { mod, handlers, commands, listeners, notices, status, tool: () => tool, ctx };
 }
 const warnings = []; const warn = (m) => warnings.push(m);
+// on Windows the runtime is never there: the module says it is unavailable, and /sandbox says so before the mode
+const W = process.platform === "win32";
+const OFF = W ? "sandbox: off \\(not available on Windows: bash commands are NOT confined\\)" : "sandbox: off";
 
 // --- pure config merging
 {
@@ -59,16 +62,18 @@ const warnings = []; const warn = (m) => warnings.push(m);
 }
 
 // --- without the runtime installed: warns once, bash tool is the plain one, /sandbox says off
+// (on Windows: warns that it is unavailable, without an install hint)
 {
 	const h = await load();
 	await new Promise((r) => setTimeout(r, 300));     // tool registration is async (imports pi)
 	await h.handlers.session_start({ type: "session_start" }, h.ctx(work));
-	t("runtime missing: warned with install hint", h.notices.some((m) => /not active/.test(m) && /npm install/.test(m)), true);
+	if (W) t("runtime missing (Windows): warned unavailable, no install hint", [h.notices.some((m) => /not available on Windows/.test(m) && /NOT confined/.test(m)), h.notices.some((m) => /npm install/.test(m))], [true, false]);
+	else t("runtime missing: warned with install hint", h.notices.some((m) => /not active/.test(m) && /npm install/.test(m)), true);
 	t("runtime missing: user_bash untouched", h.handlers.user_bash({}), undefined);
 	t("mode event re-initialises (still off)", (() => { h.listeners["lets-code:mode"]({ role: "ask", network: "on" }); return true; })(), true);
 	await new Promise((r) => setTimeout(r, 100));
 	await h.commands.sandbox.handler("", h.ctx(work));
-	t("/sandbox reports off and the mode", /sandbox: off \(mode ask\)/.test(h.notices[h.notices.length - 1]), true);
+	t("/sandbox reports off and the mode", new RegExp(`^${OFF} \\(mode ask\\)`).test(h.notices[h.notices.length - 1]), true);
 	h.listeners["lets-code:mode"]({ role: "auto", network: "on", off: true });
 	await new Promise((r) => setTimeout(r, 100));
 	await h.commands.sandbox.handler("", h.ctx(work));
@@ -83,7 +88,7 @@ const warnings = []; const warn = (m) => warnings.push(m);
 	t("mode before session_start: no crash", threw, null);
 	const ctx = { cwd: work, hasUI: false, ui: { notify() {}, setStatus() { throw new Error("no UI here"); } } };
 	await h.handlers.session_start({ type: "session_start" }, ctx);
-	t("session_start then uses the remembered mode (yolo: off, no UI touched)", (await h.commands.sandbox.handler("", { ...h.ctx(work) }), /sandbox: off \(mode yolo\)/.test(h.notices[h.notices.length - 1])), true);
+	t("session_start then uses the remembered mode (yolo: off, no UI touched)", (await h.commands.sandbox.handler("", { ...h.ctx(work) }), new RegExp(`^${OFF} \\(mode yolo\\)`).test(h.notices[h.notices.length - 1])), true);
 	const unhandled = []; const on = (e) => unhandled.push(String(e)); process.on("unhandledRejection", on);
 	h.listeners["lets-code:mode"]({ role: "ask", network: "on" }); h.listeners["lets-code:mode"]({ role: "plan", network: "off" });
 	await new Promise((r) => setTimeout(r, 300)); process.off("unhandledRejection", on);

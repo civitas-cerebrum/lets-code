@@ -10,7 +10,7 @@
 //   tests/claude-code.test.mjs [path/to/lets-code/claude-code.ts]
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, realpathSync, rmSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/claude-code.ts");
@@ -65,14 +65,16 @@ t("matcher: Task matches the subagent tool (Agent alias)", m.matcherMatches("Tas
 
 // --- tool arguments both ways
 {
-	const cwd = "/p";
+	// absolute paths as pi has them: /p here, C:\p on Windows
+	const N = (x) => (process.platform === "win32" ? "C:" + x.replace(/\//g, "\\") : x);
+	const cwd = N("/p");
 	t("to Claude: bash (timeout s -> ms)", m.toClaudeInput("bash", { command: "ls", timeout: 5 }, cwd), { command: "ls", timeout: 5000, description: "" });
-	t("to Claude: read", m.toClaudeInput("read", { path: "a.txt", offset: 3 }, cwd), { file_path: "/p/a.txt", offset: 3 });
-	t("to Claude: write", m.toClaudeInput("write", { path: "/x/b", content: "hi" }, cwd), { file_path: "/x/b", content: "hi" });
-	t("to Claude: edit", m.toClaudeInput("edit", { path: "c.ts", edits: [{ oldText: "a", newText: "b" }] }, cwd), { file_path: "/p/c.ts", old_string: "a", new_string: "b", replace_all: false });
+	t("to Claude: read", m.toClaudeInput("read", { path: "a.txt", offset: 3 }, cwd), { file_path: N("/p/a.txt"), offset: 3 });
+	t("to Claude: write", m.toClaudeInput("write", { path: N("/x/b"), content: "hi" }, cwd), { file_path: N("/x/b"), content: "hi" });
+	t("to Claude: edit", m.toClaudeInput("edit", { path: "c.ts", edits: [{ oldText: "a", newText: "b" }] }, cwd), { file_path: N("/p/c.ts"), old_string: "a", new_string: "b", replace_all: false });
 	t("to Claude: edit with several edits", m.toClaudeInput("edit", { path: "c", edits: [{ oldText: "a", newText: "b" }, { oldText: "c", newText: "d" }] }, cwd).edits, [{ old_string: "a", new_string: "b" }, { old_string: "c", new_string: "d" }]);
 	t("to Claude: grep", m.toClaudeInput("grep", { pattern: "x", ignoreCase: true, limit: 5 }, cwd), { pattern: "x", "-i": true, head_limit: 5, output_mode: "content" });
-	t("to Claude: find is Glob", [m.claudeToolName("find"), m.toClaudeInput("find", { pattern: "*.ts", path: "src" }, cwd)], ["Glob", { pattern: "*.ts", path: "/p/src" }]);
+	t("to Claude: find is Glob", [m.claudeToolName("find"), m.toClaudeInput("find", { pattern: "*.ts", path: "src" }, cwd)], ["Glob", { pattern: "*.ts", path: N("/p/src") }]);
 	t("to Claude: subagent is Agent", [m.claudeToolName("subagent"), m.toClaudeInput("subagent", { agent: "scout", task: "look" }, cwd)], ["Agent", { subagent_type: "scout", prompt: "look", description: "" }]);
 	t("back to pi: bash", m.fromClaudeInput("bash", { command: "ls -la", timeout: 2000 }, { command: "ls" }), { command: "ls -la", timeout: 2 });
 	t("back to pi: read", m.fromClaudeInput("read", { file_path: "/q" }, { path: "a", limit: 2 }), { path: "/q", limit: 2 });
@@ -108,7 +110,8 @@ t("matcher: Task matches the subagent tool (Agent alias)", m.matcherMatches("Tas
 	const r = await m.runHook({ event: "PreToolUse", matcher: "", type: "command", command: `cat > got.json; echo "$CLAUDE_PROJECT_DIR" > dir.txt; echo blocked >&2; exit 2`, scope: "user" }, { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "rm x" } }, { cwd: proj });
 	t("runHook: exit code and stderr", [r.code, r.stderr.trim()], [2, "blocked"]);
 	t("runHook: stdin JSON", JSON.parse(readFileSync(join(proj, "got.json"), "utf8")).tool_input, { command: "rm x" });
-	t("runHook: runs in the project dir with CLAUDE_PROJECT_DIR", readFileSync(join(proj, "dir.txt"), "utf8").trim(), proj);
+	// (with "/" on Windows, where the hook runs in Git Bash: C:/x)
+	t("runHook: runs in the project dir with CLAUDE_PROJECT_DIR", readFileSync(join(proj, "dir.txt"), "utf8").trim(), process.platform === "win32" ? proj.replace(/\\/g, "/") : proj);
 	const slow = await m.runHook({ event: "Stop", type: "command", command: "sleep 5", scope: "user" }, {}, { cwd: proj, timeoutMs: 200 });
 	t("runHook: timeout", slow.timedOut, true);
 }
@@ -152,7 +155,9 @@ t("matcher: Task matches the subagent tool (Agent alias)", m.matcherMatches("Tas
 	t("Read(./secrets/**) covers Read and Grep below it", [m.permissionCheck(s, "Read", { file_path: join(proj, "secrets", "a", "k.pem") }, proj).decision, m.permissionCheck(s, "Grep", { path: join(proj, "secrets") }, proj).decision, m.permissionCheck(s, "Read", { file_path: join(proj, "src", "a") }, proj).decision], ["deny", "deny", "none"]);
 	const rules = (list) => ({ allow: [], ask: [], deny: list.map((r) => m.parseRule(r, proj)) });
 	t("Edit(.env) at any depth, for Write too", [m.permissionCheck(rules(["Edit(.env)"]), "Write", { file_path: join(proj, "a", ".env") }, proj).decision, m.permissionCheck(rules(["Edit(.env)"]), "Edit", { file_path: join(proj, "a", ".envrc") }, proj).decision], ["deny", "none"]);
-	t("//absolute and ~/ paths", [m.permissionCheck(rules(["Read(//etc/**)"]), "Read", { file_path: "/etc/passwd" }, proj).decision, m.permissionCheck(rules(["Read(~/.ssh/**)"]), "Read", { file_path: join(HOME, ".ssh", "id") }, proj).decision], ["deny", "deny"]);
+	// //abs is the POSIX form, which Claude Code on Windows matches too: //c/etc/** covers C:\etc\passwd
+	const [absRule, absPath] = process.platform === "win32" ? ["Read(//c/etc/**)", "C:\\etc\\passwd"] : ["Read(//etc/**)", "/etc/passwd"];
+	t("//absolute and ~/ paths", [m.permissionCheck(rules([absRule]), "Read", { file_path: absPath }, proj).decision, m.permissionCheck(rules(["Read(~/.ssh/**)"]), "Read", { file_path: join(HOME, ".ssh", "id") }, proj).decision], ["deny", "deny"]);
 	t("/path is relative to the settings' project", m.permissionCheck(rules(["Edit(/build/**)"]), "Edit", { file_path: join(proj, "build", "x.js") }, proj).decision, "deny");
 	t("mcp rules: server, server__*, one tool, dashes", [m.permissionCheck(rules(["mcp__my-srv"]), "mcp__my_srv__q", {}, proj).decision, m.permissionCheck(rules(["mcp__s__*"]), "mcp__s__q", {}, proj).decision, m.permissionCheck(rules(["mcp__s__q"]), "mcp__s__r", {}, proj).decision], ["deny", "deny", "none"]);
 	t("Agent(name) and Task(name)", [m.permissionCheck(rules(["Agent(worker)"]), "Agent", { subagent_type: "worker" }, proj).decision, m.permissionCheck(rules(["Task(scout)"]), "Agent", { tasks: [{ agent: "scout" }] }, proj).decision], ["deny", "deny"]);
@@ -238,7 +243,7 @@ t("matcher: Task matches the subagent tool (Agent alias)", m.matcherMatches("Tas
 	w(join(proj, "CLAUDE.md"), "pkg @../AGENTS.md"); w(join(proj, "CLAUDE.local.md"), "local");
 	w(join(proj, ".claude", "rules", "style.md"), "rule"); w(join(proj, ".claude", "rules", "scoped.md"), "---\npaths: src/**\n---\nscoped");
 	const existing = [{ path: join(root, "AGENTS.md"), content: "agents" }, { path: join(proj, "CLAUDE.md"), content: "pkg @../AGENTS.md" }];
-	const names = (l) => l.map((f) => f.path.replace(work + "/", ""));
+	const names = (l) => l.map((f) => relative(work, f.path).split(sep).join("/"));
 	const files = m.claudeContextFiles(proj, existing, false);
 	t("context: Claude's files in place, imports after their file (4 hops), each once", names(files), ["home/.claude/CLAUDE.md", "home/.claude/extra.md", "mem/AGENTS.md", "mem/CLAUDE.md", "mem/docs/a.md", "mem/docs/b.md", "mem/docs/c.md", "mem/docs/d.md", "mem/pkg/CLAUDE.md", "mem/pkg/CLAUDE.local.md", "mem/pkg/.claude/rules/style.md"]);
 	t("context: an import outside the project needs trust", names(m.claudeContextFiles(proj, existing, true)).includes("outside.md"), true);
@@ -335,12 +340,12 @@ async function load(cwd, env = {}) {
 }
 {
 	const proj = join(work, "live"); mkdirSync(proj);
-	const log = join(proj, "hook.log");
+	const log = join(proj, "hook.log"), logSh = log.replace(/\\/g, "/");   // the hook runs in Git Bash on Windows: C:/x, not C:\x
 	w(join(claude, "settings.json"), JSON.stringify({ hooks: { SessionStart: [{ matcher: "startup", hooks: [{ type: "command", command: "echo 'session context'" }] }] } }));
 	w(join(proj, ".claude", "settings.json"), JSON.stringify({
 		permissions: { deny: ["Read(./private/**)", "WebFetch"], ask: ["Bash(git push *)"], allow: ["Bash(ls *)"] },
 		hooks: {
-			PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: `cat >> ${log}; echo >> ${log}`}] },
+			PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: `cat >> ${logSh}; echo >> ${logSh}`}] },
 				{ matcher: "Bash", hooks: [{ type: "command", command: `node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);if(/^rm /.test(j.tool_input.command)){console.error("rm is not allowed here");process.exit(2)}if(j.tool_input.command==="ls")console.log(JSON.stringify({hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:"ls -1"}}}))})'` }] }],
 			PostToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"formatted\"}}'" }] }],
 			UserPromptSubmit: [{ hooks: [{ type: "command", command: `node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);if(/secret/.test(j.prompt)){console.error("no secrets");process.exit(2)}console.log("ticket ABC-1")})'` }] }],
@@ -466,7 +471,8 @@ async function load(cwd, env = {}) {
 // C:/Users/x/proj, node names them C:\Users\x\proj; path rules match the
 // POSIX form without case; hooks run with Git Bash, not sh
 {
-	t("off Windows: a folder's entry by its exact key", [m.folderEntries({ "/a/B": 1, "/a/b": 2 }, "/a/B"), m.shell()], [[1], "sh"]);
+	if (process.platform === "win32") t("Windows: a folder's entries without case, hooks with Git Bash", [m.folderEntries({ "/a/B": 1, "/a/b": 2 }, "/a/B"), /bash/i.test(m.shell())], [[1, 2], true]);
+	else t("off Windows: a folder's entry by its exact key", [m.folderEntries({ "/a/B": 1, "/a/b": 2 }, "/a/B"), m.shell()], [[1], "sh"]);
 	const real = process.platform;
 	Object.defineProperty(process, "platform", { value: "win32" });
 	try {

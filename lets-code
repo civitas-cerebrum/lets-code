@@ -200,6 +200,84 @@
 set -eu
 (set -o pipefail) 2>/dev/null && set -o pipefail   # pipefail is bash 4+; keep 3.2 alive
 
+# ------------------------------------------------------------------ windows
+# On Windows lets-code runs in Git Bash (Git for Windows), the bash pi's own
+# bash tool uses; pi, node, python and git are native Windows programs. Two
+# things make that work everywhere below:
+# - Paths are kept in the C:/Users/x form (cygpath -m), which bash, node,
+#   python and git all read: HOME (the profile directory, the one node's
+#   os.homedir() returns) and TMPDIR are set so here, and with them every
+#   path built on them (the agent dir, the config dir, mktemp). A path that
+#   comes from bash itself ($PWD, $0, dirname) goes through native_path
+#   before a native program or a file a native program reads gets it.
+# - python3 is the real interpreter found once (python3, python or py -3;
+#   the Microsoft Store stub named python3 is no interpreter), run with UTF-8
+#   I/O and with "\n" line ends on stdout and in the text files it writes, so
+#   "$(python3 ...)" never carries a "\r" and a file it writes reads the same
+#   as elsewhere.
+# LC_WIN is also the switch the rest of the script asks with on_windows.
+LC_WIN=false
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) LC_WIN=true ;; esac
+on_windows() { [ "${LC_WIN}" = true ]; }
+native_path() {  # native_path <path>: the path as a native program reads it (C:/Users/x on Windows; unchanged elsewhere)
+    if on_windows && [ -n "${1:-}" ]; then cygpath -m -- "$1" 2>/dev/null || printf '%s\n' "$1"; else printf '%s\n' "${1:-}"; fi
+}
+have_python() {  # true when python3 runs (on Windows: a real interpreter was found)
+    if on_windows; then [ -n "${LC_PY:-}" ]; else command -v python3 >/dev/null 2>&1; fi
+}
+if on_windows; then
+    HOME="$(cygpath -m -- "${USERPROFILE:-${HOME}}")"; export HOME
+    TMPDIR="$(cygpath -m -- "${TEMP:-${TMP:-${TMPDIR:-/tmp}}}")"; export TMPDIR
+    export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
+    # the Git Bash pi and lets-code's modules run scripts with: Git's
+    # bin/bash.exe (it sets up Git's PATH), as pi finds it
+    LETS_CODE_BASH="$(cygpath -m -- /)/bin/bash.exe"
+    [ -f "${LETS_CODE_BASH}" ] || LETS_CODE_BASH="$(cygpath -m -- "$(command -v bash)")"
+    export LETS_CODE_BASH
+    LC_PY=""
+    for lc_c in python3 python "py -3"; do
+        # shellcheck disable=SC2086
+        if ${lc_c} -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then LC_PY="${lc_c}"; break; fi
+    done
+    LC_WIN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lets-code/windows"
+    if [ -n "${LC_PY}" ]; then
+        mkdir -p "${LC_WIN_DIR}/py" "${LC_WIN_DIR}/bin" 2>/dev/null || true
+        lc_site="$(cat <<'PY'
+# Written by lets-code: its own python3 runs write "\n" line ends, as on Linux and macOS.
+import builtins, io, sys
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(newline="\n")
+    except Exception:
+        pass
+_lc_open = io.open
+def _lc_lf_open(file, mode="r", buffering=-1, encoding=None, errors=None, newline=None, *a, **k):
+    if newline is None and "b" not in mode and any(c in mode for c in "wax+"):
+        newline = "\n"
+    return _lc_open(file, mode, buffering, encoding, errors, newline, *a, **k)
+builtins.open = io.open = _lc_lf_open
+PY
+)"
+        [ "$(cat "${LC_WIN_DIR}/py/sitecustomize.py" 2>/dev/null)" = "${lc_site}" ] \
+            || printf '%s\n' "${lc_site}" > "${LC_WIN_DIR}/py/sitecustomize.py" 2>/dev/null || true
+        LC_PY_SITE="$(cygpath -w -- "${LC_WIN_DIR}/py")"
+        # shellcheck disable=SC2086
+        python3() { PYTHONPATH="${LC_PY_SITE}${PYTHONPATH:+;${PYTHONPATH}}" ${LC_PY} "$@"; }
+        # what pi runs (its bash tool, the experts' helpers) finds a working
+        # python3 too when the one on PATH is the Store stub or missing; a
+        # plain one, with none of the line-end setup above
+        if [ "${LC_PY}" != python3 ]; then
+            lc_shim="$(printf '#!/bin/sh\n# Written by lets-code: python3 for Git Bash, which has none.\nexec %s "$@"\n' "${LC_PY}")"
+            [ "$(cat "${LC_WIN_DIR}/bin/python3" 2>/dev/null)" = "${lc_shim}" ] \
+                || printf '%s\n' "${lc_shim}" > "${LC_WIN_DIR}/bin/python3" 2>/dev/null || true
+            case ":${PATH}:" in *":$(cygpath -u -- "${LC_WIN_DIR}/bin"):"*) ;; *) PATH="$(cygpath -u -- "${LC_WIN_DIR}/bin"):${PATH}" ;; esac
+        fi
+    else
+        python3() { echo "[lets-code] ERROR: Python 3 is not installed (on Windows: winget install Python.Python.3.13, then open a new terminal)." >&2; return 127; }
+    fi
+    unset lc_c lc_site lc_shim
+fi
+
 # Stamped by the publish workflow (the release tag) and by `update --snapshot`
 # (main-<commit>); "dev" in a checkout.
 LETS_CODE_VERSION="dev"
@@ -920,6 +998,158 @@ lc_ext_module() {
     mkdir -p "${LC_MOD_DIR}"
     lc_written "${LC_EXT_ROOT}/index.ts" || pi_write_lets_code_extension
     case " ${LC_ACTIVE} " in *" $1 "*) ;; *) LC_ACTIVE="${LC_ACTIVE:+${LC_ACTIVE} }$1" ;; esac
+}
+
+# lc_ts_platform: prints the platform helpers a module appends to its source
+# (`lc_ts_platform >> "${tmp}"` after its heredoc), so each module stays one
+# self-contained file, as the tests load them. Plain JavaScript (valid in a
+# .ts module and in an .mjs one), every name prefixed lcw, nothing run at
+# load: function declarations are hoisted, so the module's own code above
+# can call them. On Linux and macOS each does what the code did before.
+lc_ts_platform() {
+    cat <<'TS'
+
+// ---- lets-code platform helpers (appended by lets-code; the same in every module) ----
+// pi on Windows is a native Windows program while its bash tool is Git Bash,
+// so: scripts run with Git Bash, never a bare "bash" (on PATH that can be
+// WSL's System32\bash.exe, or nothing); npm commands are .cmd shims node
+// cannot spawn without a shell; a process tree is stopped with taskkill (no
+// process groups, no signals: any signal terminates at once); paths a
+// command line names in Git Bash's form (/c/Users/x, /tmp, ~) are mapped to
+// Windows ones before they are compared; and paths compare without case.
+import * as lcwCp from "node:child_process";
+import * as lcwFs from "node:fs";
+import * as lcwOs from "node:os";
+import * as lcwPath from "node:path";
+function lcwIsWin() { return process.platform === "win32"; }
+function lcwHome() { return lcwIsWin() ? lcwOs.homedir() : (process.env.HOME || lcwOs.homedir()); }
+// The bash to run a script with: Git Bash on Windows, found as pi finds it
+// (settings.json shellPath, then Git for Windows, then bash.exe on PATH that
+// is not WSL's); "bash" elsewhere.
+function lcwBash() {
+	if (!lcwIsWin()) return "bash";
+	const g = globalThis;
+	if (typeof g.__lcwBash === "string") return g.__lcwBash;
+	const env = process.env, c = [];
+	try {
+		const dir = env.PI_CODING_AGENT_DIR || lcwPath.join(lcwOs.homedir(), ".pi", "agent");
+		const s = JSON.parse(lcwFs.readFileSync(lcwPath.join(dir, "settings.json"), "utf8"));
+		if (s && typeof s.shellPath === "string" && s.shellPath) c.push(s.shellPath);
+	} catch {}
+	if (env.LETS_CODE_BASH) c.push(env.LETS_CODE_BASH);
+	for (const v of ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]) if (env[v]) c.push(lcwPath.join(env[v], "Git", "bin", "bash.exe"));
+	if (env.LOCALAPPDATA) c.push(lcwPath.join(env.LOCALAPPDATA, "Programs", "Git", "bin", "bash.exe"));
+	try {
+		const r = lcwCp.spawnSync("where", ["bash.exe"], { encoding: "utf8", windowsHide: true });
+		for (const l of String(r.stdout || "").split(/\r?\n/)) if (l.trim() && !/\\(system32|windowsapps)\\/i.test(l)) c.push(l.trim());
+	} catch {}
+	g.__lcwBash = c.find((f) => { try { return lcwFs.statSync(f).isFile(); } catch { return false; } }) || "bash.exe";
+	return g.__lcwBash;
+}
+// Git for Windows' root (where Git Bash's / is), or "" when not known.
+function lcwGitRoot() {
+	if (!lcwIsWin()) return "";
+	const b = lcwBash(), d = lcwPath.dirname(b);
+	if (!lcwPath.isAbsolute(b)) return "";
+	const up = lcwPath.basename(d).toLowerCase() === "bin" ? lcwPath.dirname(d) : d;
+	return lcwPath.basename(up).toLowerCase() === "usr" ? lcwPath.dirname(up) : up;
+}
+// A path as a native Windows program reads it, from Git Bash's form:
+// /c/x -> C:\x, /tmp/x -> the temp dir, ~/x -> the home dir, /usr/x -> under
+// Git's root. Anything else, and every path off Windows, is returned as is.
+function lcwNative(p) {
+	if (!lcwIsWin() || typeof p !== "string" || !p) return p;
+	if (p === "~" || /^~[\\/]/.test(p)) return lcwPath.join(lcwOs.homedir(), p.slice(1));
+	const m = /^\/([a-zA-Z])(\/.*)?$/.exec(p);
+	if (m) return m[1].toUpperCase() + ":" + (m[2] || "/").replace(/\//g, "\\");
+	if (/^\/tmp(\/|$)/.test(p)) return lcwPath.join(lcwOs.tmpdir(), p.slice(4));
+	if (p.startsWith("/") && !p.startsWith("//")) { const r = lcwGitRoot(); if (r) return lcwPath.join(r, p); }
+	return p;
+}
+// A path with forward slashes, for a command line Git Bash runs (it would
+// read the backslashes of C:\x as escapes): C:\x -> C:/x. Unchanged off Windows.
+function lcwPosix(p) { return lcwIsWin() && typeof p === "string" ? p.replace(/\\/g, "/") : p; }
+// A key to compare paths by: case and separators folded on Windows.
+function lcwKey(p) { return lcwIsWin() && typeof p === "string" ? p.replace(/\//g, "\\").toLowerCase() : p; }
+function lcwSamePath(a, b) { return lcwKey(a) === lcwKey(b); }
+// true when <p> is <dir> or below it (by lcwKey).
+function lcwUnder(p, dir) {
+	const a = lcwKey(p), d = lcwKey(dir).replace(/[\\/]+$/, "");
+	return a === d || a.startsWith(d + (lcwIsWin() ? "\\" : "/"));
+}
+// A program's name as a command line names it, without directory or a
+// Windows extension: C:\Git\usr\bin\bash.exe -> bash, git.EXE -> git.
+function lcwProg(x) { return String(x).replace(/^.*[\\/]/, "").replace(/\.(exe|cmd|bat|com)$/i, "").toLowerCase(); }
+// Spawn options: windowsHide always; detached (for a process group to stop)
+// only off Windows, where it would open a console window instead.
+function lcwSpawnOpts(o) { const r = Object.assign({ windowsHide: true }, o || {}); if (lcwIsWin()) delete r.detached; return r; }
+// Stops <pid> and everything it started: its process group (when it was
+// spawned detached) or the pid off Windows, taskkill /T /F on Windows.
+function lcwKillTree(pid, signal) {
+	if (!pid) return;
+	if (lcwIsWin()) { try { lcwCp.spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }); } catch {} return; }
+	try { process.kill(-pid, signal || "SIGTERM"); } catch { try { process.kill(pid, signal || "SIGTERM"); } catch {} }
+}
+// How to spawn a program by name with no shell: [command, ...leading args].
+// Off Windows that is the name. On Windows a .exe on PATH is run as is, an
+// npm .cmd shim as node and the script it runs (so arguments pass untouched),
+// and another .cmd/.bat through cmd.exe.
+function lcwCommand(name) {
+	if (!lcwIsWin() || /[\\/]/.test(name) && /\.(exe|com)$/i.test(name)) return [name];
+	let hits = [];
+	if (/[\\/]/.test(name)) hits = [name];
+	else try { hits = String(lcwCp.spawnSync("where", [name], { encoding: "utf8", windowsHide: true }).stdout || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean); } catch {}
+	const exe = hits.find((h) => /\.(exe|com)$/i.test(h));
+	if (exe) return [exe];
+	const cmd = hits.find((h) => /\.(cmd|bat)$/i.test(h));
+	if (!cmd) return [name];
+	try {
+		const m = /"%~?dp0%?\\([^"]+?\.[cm]?js)"/i.exec(lcwFs.readFileSync(cmd, "utf8"));
+		if (m) return [process.execPath, lcwPath.join(lcwPath.dirname(cmd), m[1])];
+	} catch {}
+	return [process.env.ComSpec || "cmd.exe", "/d", "/s", "/c", cmd];
+}
+// How to start pi itself: inside pi, the same node and pi script this
+// process runs (LETS_CODE_PI overrides, as a JSON array or a path); else pi
+// found as lcwCommand finds it.
+function lcwPi() {
+	const o = process.env.LETS_CODE_PI;
+	if (o) { try { const a = JSON.parse(o); if (Array.isArray(a) && a.length) return a.map(String); } catch {} return [o]; }
+	if (!lcwIsWin()) return ["pi"];
+	const a = process.argv[1] || "";
+	if (/pi-coding-agent[\\/]/i.test(a) && lcwFs.existsSync(a)) return [process.execPath, a];
+	return lcwCommand("pi");
+}
+// Replaces <dst> with <src> (a rename): on Windows a file held open by
+// another process (an editor, an indexer, antivirus) refuses a rename for a
+// moment, so it is retried, then the content copied over.
+function lcwRename(src, dst) {
+	for (let i = 0; ; i++) {
+		try { lcwFs.renameSync(src, dst); return; } catch (e) {
+			const code = e && e.code;
+			if (!lcwIsWin() || !["EPERM", "EBUSY", "EACCES"].includes(code)) throw e;
+			if (i < 5) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40 * (i + 1)); continue; }
+			lcwFs.copyFileSync(src, dst); try { lcwFs.unlinkSync(src); } catch {}
+			return;
+		}
+	}
+}
+// true when a directory's mode keeps others out. Windows has no such bits
+// (stat always shows group and other write); the profile's ACL is what keeps
+// a directory under it private there.
+function lcwPrivateDir(st) {
+	if (lcwIsWin()) return true;
+	return (st.mode & 0o022) === 0 && (typeof process.getuid !== "function" || st.uid === process.getuid());
+}
+// The name of a local socket to listen on: the path off Windows, a named
+// pipe derived from it on Windows (which has no socket files).
+function lcwSocket(p) {
+	if (!lcwIsWin()) return p;
+	let h = 0;
+	for (const ch of lcwKey(p)) h = (Math.imul(h, 31) + ch.charCodeAt(0)) | 0;
+	return "\\\\.\\pipe\\lets-code-" + (h >>> 0).toString(16) + "-" + lcwPath.basename(p).replace(/[^\w.-]/g, "_");
+}
+TS
 }
 
 # Every launch moves what earlier versions wrote into the one extension,
@@ -5471,7 +5701,7 @@ flag_check() {
     case " ${PI_FLAGS} " in *" ${f} "*) return 0 ;; esac
     # a value given to a flag that takes none (--orchestrator=1): the flag itself
     case " ${LC_FLAGS} " in *" ${f} "*) log_error "unknown flag $1: did you mean ${f}? (it takes no value)"; return 1 ;; esac
-    command -v python3 >/dev/null 2>&1 || return 0
+    have_python || return 0
     # shellcheck disable=SC2046
     near="$(python3 -c '
 import sys
@@ -18866,7 +19096,7 @@ run_setup() {  # run_setup [full|granular]
     # 1. prerequisites
     local missing=""
     command -v curl    >/dev/null || missing="${missing} curl"
-    command -v python3 >/dev/null || missing="${missing} python3"
+    have_python || missing="${missing} python3"
     if [ -n "${missing}" ]; then
         log_error "missing prerequisites:${missing} — install them and re-run setup."
         exit 1
@@ -19336,7 +19566,7 @@ list_presets() {
 run_preset_setup() {  # run_preset_setup [<name>]
     local name="$1" file endpoints token ca="" model reply why
     command -v curl    >/dev/null || { log_error "curl not found."; exit 1; }
-    command -v python3 >/dev/null || { log_error "python3 not found."; exit 1; }
+    have_python || { log_error "python3 not found."; exit 1; }
     echo ""
     echo "lets-code setup preset — save another backend (server, token, model)"
     echo "under a name, launched with  lets-code --<name>. Guards and optional"
@@ -19493,7 +19723,7 @@ run_update() {  # run_update [--snapshot]
         *) log_error "usage: lets-code update [--snapshot]"; exit 1 ;;
     esac
     command -v curl    >/dev/null || { log_error "curl not found."; exit 1; }
-    command -v python3 >/dev/null || { log_error "python3 not found."; exit 1; }
+    have_python || { log_error "python3 not found."; exit 1; }
     self="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$0")"
     dir="$(dirname "${self}")"
 
@@ -19503,7 +19733,7 @@ run_update() {  # run_update [--snapshot]
     fi
 
     case "${self}" in
-        */node_modules/*)
+        */node_modules/*|*\\node_modules\\*)
             command -v npm >/dev/null || { log_error "lets-code was installed by npm, but npm is not on PATH."; exit 1; }
             local spec="${UPDATE_PACKAGE}@latest"
             [ "${mode}" = snapshot ] && spec="github:${UPDATE_REPO}"
@@ -19887,7 +20117,7 @@ fi
 
 ensure_pi || exit 1
 command -v curl    >/dev/null || { log_error "curl not found."; exit 1; }
-command -v python3 >/dev/null || { log_error "python3 not found."; exit 1; }
+have_python || { log_error "python3 not found."; exit 1; }
 ensure_pi_tools
 
 CA_FOUND=""

@@ -65,7 +65,7 @@ t "agent: requires the install"    "$([ -e "${PI_AGENT_DIR}/$(sed -n 's/^require
 t "agent: pi's tools"              "$(sed -n 's/^tools: //p' "${af}")" "bash, read, edit, write, grep, find, ls"
 t "agent: timeout 3600"            "$(grep '^timeout:' "${af}")" "timeout: 3600"
 t "agent: an expert"               "$(sed -n 's/^expert: //p' "${af}")" true
-t "agent: not on Termux"           "$(sed -n 's/^platform: //p' "${af}")" "linux, darwin"
+t "agent: not on Termux"           "$(sed -n 's/^platform: //p' "${af}")" "linux, darwin, win32"
 t "agent: its setup script"        "$([ -x "${PI_AGENT_DIR}/$(sed -n 's/^setup: //p' "${af}")" ] && echo yes)" yes
 t "agent: use_for fits the line"   "$([ "$(sed -n 's/^use_for: //p' "${af}" | wc -c)" -le 101 ] && echo yes)" yes
 t "agent: keywords fit"            "$([ "$(sed -n 's/^keywords: //p' "${af}" | wc -c)" -le 41 ] && echo yes)" yes

@@ -5078,7 +5078,7 @@ const BURST_TURNS = Math.max(1, Number(process.env.LETS_CODE_BURST_TURNS) || 3);
 const MAX_BURSTS = Math.max(0, Number(process.env.LETS_CODE_MAX_BURSTS ?? 8));
 const REPLAY_RAW = (process.env.LETS_CODE_THINKING_REPLAY ?? "").trim();
 const REPLAY = REPLAY_RAW === "" || REPLAY_RAW === "all" ? Infinity : Math.max(0, Number(REPLAY_RAW) || 0);
-const LOG = process.env.LETS_CODE_AGENT_GUARD_LOG ?? "";
+const LOG = lcwNative(process.env.LETS_CODE_AGENT_GUARD_LOG ?? "");
 const MAX_LENGTH_NUDGES = 3;
 const TEST_REMIND_EDITS = 3;
 const MAX_TEST_REMINDERS = 5;
@@ -5096,7 +5096,8 @@ const REVIEW_MODE = (process.env.LETS_CODE_FINAL_REVIEW ?? "auto").trim().toLowe
 const REVIEW_OFF = ["0", "off", "false", "no"].includes(REVIEW_MODE);
 const REVIEW_ALWAYS = ["on", "1", "true", "yes", "always"].includes(REVIEW_MODE);
 // a bash command that executes code, as opposed to reading or listing files
-const EXEC_RE = /(^|[\s;&|(])(python3?|pytest|node|npm|npx|pnpm|yarn|bun|deno|go|cargo|make|ruby|rspec|java|mvn|gradle|dotnet|php|perl|bash|sh|\.\/[\w.\/-]+)(\s|$)/;
+// (Windows forms too: py, python.exe, pwsh/powershell, cmd /c, .\x.exe)
+const EXEC_RE = /(^|[\s;&|(])((python3?|py|pytest|node|npm|npx|pnpm|yarn|bun|deno|go|cargo|make|ruby|rspec|java|mvn|gradle|dotnet|php|perl|bash|sh|pwsh|powershell|cmd)(\.exe)?|\.[\/\\][\w.\/\\-]+)(\s|$)/;
 const FAILURE_RE = /\b(FAIL(ED)?|MISMATCH|AssertionError|SyntaxError|IndentationError|Traceback \(most recent call last\))\b/;
 const TEST_PATH_RE = /(^|[\/_.-])tests?([\/_.-]|$)/i;
 // documentation or text files: editing them is not a source change the verify nudge should chase
@@ -5657,6 +5658,7 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
@@ -5780,13 +5782,25 @@ ensure_pi() {
 ensure_pi_tools() {
     [ -z "${PI_OFFLINE:-}" ] || return 0
     local missing="" bin="${PI_AGENT_DIR}/bin"
-    { [ -x "${bin}/fd" ] || command -v fd >/dev/null 2>&1 || command -v fdfind >/dev/null 2>&1; } || missing="fd"
-    { [ -x "${bin}/rg" ] || command -v rg >/dev/null 2>&1; } || missing="${missing:+${missing} }rg"
+    # (on Windows pi's downloads are fd.exe and rg.exe)
+    { [ -x "${bin}/fd" ] || [ -f "${bin}/fd.exe" ] || command -v fd >/dev/null 2>&1 || command -v fdfind >/dev/null 2>&1; } || missing="fd"
+    { [ -x "${bin}/rg" ] || [ -f "${bin}/rg.exe" ] || command -v rg >/dev/null 2>&1; } || missing="${missing:+${missing} }rg"
     [ -n "${missing}" ] || return 0
     command -v node >/dev/null 2>&1 || return 0
-    local pi_bin pkg mod
-    pi_bin="$(node -p 'require("fs").realpathSync(process.argv[1])' "$(command -v pi)" 2>/dev/null)" || pi_bin=""
-    pkg="${pi_bin%/dist/*}"
+    local pi_bin="" pkg="" mod
+    if on_windows; then
+        # npm's pi on Windows is a shell shim, not a symlink into the package:
+        # the package sits in npm's global node_modules, next to the shim or
+        # where npm root -g says (made a C:/ path, the form node reads)
+        pkg="$(dirname "$(command -v pi 2>/dev/null || echo .)")/node_modules/@earendil-works/pi-coding-agent"
+        [ -f "${pkg}/dist/utils/tools-manager.js" ] \
+            || pkg="$(npm root -g 2>/dev/null | tr -d '\r')/@earendil-works/pi-coding-agent"
+        pkg="$(native_path "${pkg}")"
+        [ ! -f "${pkg}/dist/utils/tools-manager.js" ] || pi_bin="${pkg}"
+    else
+        pi_bin="$(node -p 'require("fs").realpathSync(process.argv[1])' "$(command -v pi)" 2>/dev/null)" || pi_bin=""
+        pkg="${pi_bin%/dist/*}"
+    fi
     mod="${pkg}/dist/utils/tools-manager.js"
     if [ -z "${pi_bin}" ] || [ ! -f "${mod}" ]; then
         log "note: pi will download its file-search helpers (${missing}) on first start."
@@ -5796,7 +5810,8 @@ ensure_pi_tools() {
     # shellcheck disable=SC2016
     PI_CODING_AGENT_DIR="${PI_AGENT_DIR}" node --input-type=module -e '
         const [mod, ...tools] = process.argv.slice(1);
-        const { ensureTool } = await import(mod);
+        const { pathToFileURL } = await import("node:url");   // a C:\ path is no import specifier
+        const { ensureTool } = await import(pathToFileURL(mod).href);
         let ok = true;
         for (const t of tools) {
             const p = await ensureTool(t, (s) => { if (s.type === "warning") { console.log("[lets-code] " + s.message); ok = false; } });
@@ -5842,7 +5857,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { existsSync, readFileSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep, posix, win32 } from "node:path";
 
 type Decision = "allow" | "ask" | "deny";
 interface Role {
@@ -5876,8 +5891,8 @@ export const modeName = (n: string) => (n === "orchestrator" ? "orchestration" :
 // With the mandate off, plan mode too (LETS_CODE_PLAN_ON, set unless
 // --no-mandate): dormant until /plan or ctrl+alt+p enters it.
 const PLAN = !ACTIVE && process.env.LETS_CODE_PLAN_ON === "1";
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-const LOG = process.env.LETS_CODE_MANDATE_LOG || join(AGENT_DIR, "lets-code-mandate.log");
+const AGENT_DIR = lcwNative(process.env.PI_CODING_AGENT_DIR) || join(lcwHome(), ".pi", "agent");
+const LOG = lcwNative(process.env.LETS_CODE_MANDATE_LOG) || join(AGENT_DIR, "lets-code-mandate.log");
 // the model's mode switches: asked first ("ask", the default) or made at
 // once ("auto", LETS_CODE_MODE_SWITCH=auto, for one launch)
 export function readModeSwitch(): "ask" | "auto" {
@@ -5959,11 +5974,15 @@ const GROUPS: Record<string, RegExp[]> = {
 		/^(node|python3?|ruby|go|cargo|rustc|java|gcc|clang|make|cmake|tsc|deno|bun)\s+(--version|-v|-V|version)(\s|$)/,
 	],
 	"git-write": [/^git\s+(add|commit|push|pull|fetch|merge|rebase|cherry-pick|revert|reset|checkout|switch|restore|stash|tag|rm|mv|clean|am|apply)(\s|$)/],
-	build: [/^(npm|pnpm|yarn|bun)\s+(run|test|t|start|build|exec|x)(\s|$)/, /^(npx|pnpx|bunx)\s/, /^(make|cmake|cargo|go|mvn|gradle|dotnet|tsc|pytest|python3?\s+-m\s+(pytest|unittest)|jest|vitest|mocha|node\s|deno\s|ruby\s|php\s|swift\s)/],
-	"package-install": [/^(npm|pnpm|yarn|bun)\s+(i|install|add|ci|link|uninstall|remove|rm|update|up)(\s|$)/, /^(pip|pip3|pipx|uv|poetry|conda)\s+(install|add|uninstall|remove|sync)(\s|$)/,
-		/^uv\s+(pip\s+(install|sync|uninstall)|tool\s+install)(\s|$)/, /^(\S*\/)?(python[\d.]*|py)\s+(-\S+\s+)*-m\s+(pip\s+(install|uninstall)|ensurepip)(\s|$)/, /^(\S*\/)?pip[\d.]*\s+(install|uninstall)(\s|$)/, /^(apt|apt-get|dnf|yum|pacman|apk|zypper|brew|port|snap|flatpak|gem|cargo\s+install|go\s+install|nix-env)(\s|$)/],
+	build: [/^(npm|pnpm|yarn|bun)(\.cmd)?\s+(run|test|t|start|build|exec|x)(\s|$)/, /^(npx|pnpx|bunx)(\.cmd)?\s/, /^(make|cmake|cargo|go|mvn|gradle|dotnet|tsc|pytest|python3?\s+-m\s+(pytest|unittest)|jest|vitest|mocha|node\s|deno\s|ruby\s|php\s|swift\s)/,
+		/^((py|python3?)(\.exe)?\s+(-\S+\s+)*-m\s+(pytest|unittest)|node\.exe\s)/],   // Windows forms (py -3 -m pytest, node.exe)
+	"package-install": [/^(npm|pnpm|yarn|bun)(\.cmd)?\s+(i|install|add|ci|link|uninstall|remove|rm|update|up)(\s|$)/, /^(pip|pip3|pipx|uv|poetry|conda)(\.exe)?\s+(install|add|uninstall|remove|sync)(\s|$)/,
+		/^uv\s+(pip\s+(install|sync|uninstall)|tool\s+install)(\s|$)/, /^(\S*[\/\\])?(python[\d.]*|py)(\.exe)?\s+(-\S+\s+)*-m\s+(pip\s+(install|uninstall)|ensurepip)(\s|$)/, /^(\S*[\/\\])?pip[\d.]*(\.exe)?\s+(install|uninstall)(\s|$)/, /^(apt|apt-get|dnf|yum|pacman|apk|zypper|brew|port|snap|flatpak|gem|cargo\s+install|go\s+install|nix-env|winget|choco|scoop)(\s|$)/],
 	privileged: [/^(sudo|doas|su|pkexec|runuser|setpriv|chroot)(\s|$)/, /^(systemctl|service|reboot|shutdown|halt|poweroff|mount|umount|modprobe|insmod|iptables|nft|ufw|useradd|usermod|passwd|chown|chgrp)(\s|$)/],
-	destructive: [/^rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\s|$)/, /^(rm|rmdir|shred|unlink)\s+.*(\s|^)(\/|~|\.\.|\*|\.git)(\s|$)/, /^(dd|mkfs|fdisk|parted|wipefs)(\s|$)/, /^git\s+(push\s+.*(-f|--force|--delete|--mirror)|branch\s+-D|reset\s+--hard|clean\s+-[a-zA-Z]*[fxd]|stash\s+(drop|clear))(\s|$)/, /^(truncate|:>|>\s*\/dev\/sd)/, /^(find|fd)\s+.*(-delete|-exec\s+rm)/, /^(chmod|chown)\s+(-R\s+)?(777|000)\s/],
+	destructive: [/^rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\s|$)/, /^(rm|rmdir|shred|unlink)\s+.*(\s|^)(\/|~|\.\.|\*|\.git)(\s|$)/, /^(dd|mkfs|fdisk|parted|wipefs)(\s|$)/, /^git\s+(push\s+.*(-f|--force|--delete|--mirror)|branch\s+-D|reset\s+--hard|clean\s+-[a-zA-Z]*[fxd]|stash\s+(drop|clear))(\s|$)/, /^(truncate|:>|>\s*\/dev\/sd)/, /^(find|fd)\s+.*(-delete|-exec\s+rm)/, /^(chmod|chown)\s+(-R\s+)?(777|000)\s/,
+		// Windows: rd /s, del /s (also through cmd /c), Remove-Item -Recurse (also through powershell)
+		/^(rd|rmdir|del|erase)\s+(.*\s)?\/s(\s|$)/i, /^cmd(\.exe)?\s+\/[ck]\s+.*\b(rd|rmdir|del|erase)\s+(.*\s)?\/s\b/i,
+		/^(Remove-Item|ri)\s+(.*\s)?-r(ecurse)?\b/i, /^(pwsh|powershell)(\.exe)?\s.*\b(Remove-Item|ri|rm|rmdir|del)\s+(.*\s)?-r(ecurse)?\b/i],
 	"network-exec": [/^(curl|wget|fetch)\b.*\|\s*(sh|bash|zsh|python3?|node|perl)(\s|$)/, /^(sh|bash|zsh)\s+<\(\s*(curl|wget)/, /^(nc|ncat|netcat|telnet|nmap|masscan|socat)(\s|$)/, /^ssh\s/, /^scp\s/, /^rsync\s.*:/],
 };
 // readonly commands with an option or script that writes or runs something:
@@ -6092,34 +6111,41 @@ export function loadManifest(cwd: string, trusted: boolean, warn: (m: string) =>
 
 // ------------------------------------------------------------------ paths
 function expandHome(p: string): string { return p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p; }
+// Paths are resolved by the platform's rules (path.win32 on Windows), and on
+// Windows compared without case and matched against globs with "/" (globs
+// are written with "/", Windows paths have "\"); unchanged elsewhere.
+const P = () => (lcwIsWin() ? win32 : posix);
+const fold = (p: string) => (lcwIsWin() ? p.replace(/\\/g, "/").toLowerCase() : p);
 function globToRe(g: string): RegExp {
 	const esc = g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\u0000/g, ".*");
 	return new RegExp(`^${esc}$`);
 }
-function canonical(p: string, cwd: string): string {
-	let abs = isAbsolute(p) ? p : resolve(cwd, expandHome(p));
+export function canonical(p: string, cwd: string): string {
+	// on Windows a bash command names paths as Git Bash does: /c/x, /tmp/x, ~/x
+	const { dirname, isAbsolute, join, resolve } = P();
+	p = lcwNative(p); cwd = lcwNative(cwd);
+	let abs = isAbsolute(p) ? (lcwIsWin() ? resolve(p) : p) : resolve(cwd, expandHome(p));
 	abs = expandHome(abs);
 	// resolve the deepest existing ancestor so symlinks cannot leave the scope
 	let probe = abs; const rest: string[] = [];
-	while (!existsSync(probe) && dirname(probe) !== probe) { rest.unshift(probe.slice(dirname(probe).length + 1)); probe = dirname(probe); }
+	while (!existsSync(probe) && dirname(probe) !== probe) { rest.unshift(probe.slice(dirname(probe).length).replace(/^[\\/]+/, "")); probe = dirname(probe); }
 	try { probe = realpathSync(probe); } catch { /* keep */ }
 	return rest.length ? join(probe, ...rest) : probe;
 }
-function inScope(path: string, scopes: string[] | undefined, cwd: string): boolean {
+export function inScope(path: string, scopes: string[] | undefined, cwd: string): boolean {
 	if (!scopes) return true;
 	const c = canonical(path, cwd);
 	for (const s of scopes) {
 		if (s === "*" || s === "/") return true;
-		if (/[*?]/.test(s)) { if (globToRe(canonical(s.replace(/[*?].*$/, "") , cwd) + s.slice(s.search(/[*?]/))).test(c) || globToRe(s).test(c)) return true; continue; }
-		const base = canonical(s, cwd);
-		if (c === base || c.startsWith(base.endsWith(sep) ? base : base + sep)) return true;
+		if (/[*?]/.test(s)) { if (globToRe(fold(canonical(s.replace(/[*?].*$/, "") , cwd) + s.slice(s.search(/[*?]/)))).test(fold(c)) || globToRe(fold(s)).test(fold(c))) return true; continue; }
+		if (lcwUnder(c, canonical(s, cwd))) return true;
 	}
 	return false;
 }
-function isProtected(path: string, role: Role, cwd: string): boolean {
-	const c = canonical(path, cwd); const name = c.split(sep).pop() ?? "";
-	for (const p of [...PROTECTED, ...(role.protected ?? [])]) {
-		if (p.endsWith("/")) { if (c.split(sep).includes(p.slice(0, -1))) return true; continue; }
+export function isProtected(path: string, role: Role, cwd: string): boolean {
+	const c = canonical(path, cwd), parts = c.split(P().sep).map(fold); const name = parts[parts.length - 1] ?? "";
+	for (const p of [...PROTECTED, ...(role.protected ?? [])].map(fold)) {
+		if (p.endsWith("/")) { if (parts.includes(p.slice(0, -1))) return true; continue; }
 		if (/[*?]/.test(p)) { if (globToRe(p).test(name)) return true; continue; }
 		if (name === p) return true;
 	}
@@ -6210,7 +6236,7 @@ export function redirectTargets(line: string): string[] {
 	// heredoc bodies are data, and so is quoted text with a ">" in it
 	// ("score > 100", a script's "# a -> b"): only the command lines count
 	const cmd = splitCommands(line).map((c) => c.replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, (q) => (q.includes(">") ? "''" : q))).join("; ");
-	for (const m of cmd.matchAll(/(?:^|[^<>])(?:\d?>>?|&>|>\|)\s*("[^"]*"|'[^']*'|[^\s;&|)]+)/g)) if (!/^&\d/.test(m[1]) && m[1] !== "/dev/null") out.push(m[1].replace(/^['"]|['"]$/g, ""));
+	for (const m of cmd.matchAll(/(?:^|[^<>])(?:\d?>>?|&>|>\|)\s*("[^"]*"|'[^']*'|[^\s;&|)]+)/g)) if (!/^&\d/.test(m[1]) && m[1] !== "/dev/null" && !(lcwIsWin() && /^nul$/i.test(m[1]))) out.push(m[1].replace(/^['"]|['"]$/g, ""));
 	// only where a command starts (line start, after ; & | ( or sudo/env/command):
 	// "npm install left-pad" is a package install, not install(1) writing "left-pad"
 	for (const m of cmd.matchAll(/(?:^|[;&|(]|\b(?:sudo|env|command|exec|time|nice)\s)\s*(?:tee|touch|mkdir|cp|mv|install|ln|rsync)\s+(?:-[a-zA-Z]+\s+)*(.*?)(?=$|[;&|])/g)) for (const a of m[1].split(/\s+/)) if (a && !a.startsWith("-")) out.push(a.replace(/^['"]|['"]$/g, ""));
@@ -6606,6 +6632,7 @@ export default function (pi: ExtensionAPI) {
 	}
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
@@ -6680,11 +6707,11 @@ export const CONCURRENCY = Math.max(1, Number(process.env.LETS_CODE_SUBAGENT_CON
 export const SUBAGENT_TIMEOUT = Math.max(1, Number(process.env.LETS_CODE_SUBAGENT_TIMEOUT ?? "1800") || 1800);
 export const MAX_PARALLEL = 8;
 const OUTPUT_CAP = 50 * 1024;
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+const AGENT_DIR = lcwNative(process.env.PI_CODING_AGENT_DIR) || join(lcwHome(), ".pi", "agent");
 const MODEL = process.env.LETS_CODE_MODEL || "";
 const CLAUDE = process.env.LETS_CODE_CLAUDE_CODE_ON === "1";
 const EXPERTS = process.env.LETS_CODE_EXPERTS_ON === "1";
-const claudeDir = () => process.env.CLAUDE_CONFIG_DIR || join(process.env.HOME || homedir(), ".claude");
+const claudeDir = () => lcwNative(process.env.CLAUDE_CONFIG_DIR) || join(lcwHome(), ".claude");
 // Claude Code's tool names -> pi's; Task/Agent go too (a child starts no children)
 export const CLAUDE_TOOLS: Record<string, string> = { Bash: "bash", Read: "read", Write: "write", Edit: "edit", MultiEdit: "edit", NotebookEdit: "edit", Grep: "grep", Glob: "find", LS: "ls" };
 const PI_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -6715,8 +6742,9 @@ export const MAX_TIMEOUT = 24 * 3600;
 // the agent dir, or absolute under one of the roots. null = outside them.
 export function agentPath(p: string, roots: string[]): string | null {
 	if (!p || /[\0\r\n]/.test(p)) return null;
+	p = lcwNative(p);
 	const abs = isAbsolute(p) ? resolve(p) : resolve(AGENT_DIR, p);
-	return roots.some((r) => { const root = resolve(r); return abs === root || abs.startsWith(root.endsWith(sep) ? root : root + sep); }) ? abs : null;
+	return roots.some((r) => lcwUnder(abs, resolve(r))) ? abs : null;
 }
 
 // null when the file is not a usable agent: bad name, a field that does not
@@ -6736,7 +6764,7 @@ export function parseAgentFile(text: string, file: string, source: "user" | "pro
 			if (block && /^\s+\S/.test(line)) fm[block] = [fm[block], line.trim()].filter(Boolean).join(" ");   // a folded (>) or literal (|) block
 		}
 	}
-	const name = (fm.name || file.replace(/^.*\//, "").replace(/\.md$/, "")).trim();
+	const name = (fm.name || basename(file, ".md")).trim();
 	if (!/^[A-Za-z0-9][\w.-]*$/.test(name)) return null;
 	const list = (v?: string) => v ? v.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean) : undefined;
 	const roots = [AGENT_DIR, ...(source === "project" && projectRoot ? [projectRoot] : [])];
@@ -6805,7 +6833,7 @@ export function discoverAgents(cwd: string, trusted: boolean): AgentDef[] {
 	if (CLAUDE) {   // after pi's: the nearest .claude/agents up to the git root, then the user's
 		if (process.env.LETS_CODE_CLAUDE_TRUST === "1") {
 			let d = resolve(cwd);
-			while (true) { if (resolve(d, ".claude") !== resolve(claudeDir())) scan(join(d, ".claude", "agents"), "project", true); if (existsSync(join(d, ".git")) || dirname(d) === d) break; d = dirname(d); }
+			while (true) { if (!lcwSamePath(resolve(d, ".claude"), resolve(claudeDir()))) scan(join(d, ".claude", "agents"), "project", true); if (existsSync(join(d, ".git")) || dirname(d) === d) break; d = dirname(d); }
 		}
 		if (process.env.LETS_CODE_CLAUDE_SCOPE === "all") scan(join(claudeDir(), "agents"), "user", true);
 	}
@@ -7088,7 +7116,7 @@ export function saveRun(rec: RunRecord, force = false, now = Date.now()): boolea
 		mkdirSync(dir, { recursive: true, mode: 0o700 });
 		const f = join(dir, `${rec.id}.json`), tmp = `${f}.${process.pid}.tmp`;
 		writeFileSync(tmp, JSON.stringify(rec), { mode: 0o600 });
-		renameSync(tmp, f);
+		lcwRename(tmp, f);
 		if (rec.status !== "running") reg.saved.delete(rec.id);
 		return true;
 	} catch { return false; }
@@ -7187,7 +7215,8 @@ export class Child {
 		const env: Record<string, string | undefined> = { ...process.env, ...s.env };
 		for (const k of s.unset ?? []) delete env[k];
 		let p: ReturnType<typeof spawn>;
-		try { p = spawn("pi", s.args, { cwd: s.cwd, env: env as NodeJS.ProcessEnv, stdio: ["pipe", "pipe", "pipe"] }); }
+		const [cmd, ...pre] = lcwPi();   // pi itself (on Windows: node and pi's script, not the pi.cmd shim)
+		try { p = spawn(cmd, [...pre, ...s.args], lcwSpawnOpts({ cwd: s.cwd, env: env as NodeJS.ProcessEnv, stdio: ["pipe", "pipe", "pipe"] })); }
 		catch (e) { this.stderr = e instanceof Error ? e.message : String(e); return false; }
 		this.proc = p; this.buf = ""; this.stderr = "";
 		p.stdout!.setEncoding("utf8");
@@ -7353,13 +7382,19 @@ export class Child {
 		this.waiting.clear();
 		if (this.turn) { const r = this.turn.r; r.exitCode = r.timedOut ? code || 124 : code || 1; r.stderr = this.stderr; this.endTurn(); }
 	}
-	// close its input (pi's orderly exit), then the signals
+	// close its input (pi's orderly exit), then the signals. On Windows any
+	// signal is a hard stop of pi alone (its commands would run on): after the
+	// same grace, the whole tree goes (taskkill /T)
 	kill(now = false): void {
 		const p = this.proc; if (!p) return;
 		if (this.idle) { clearTimeout(this.idle); this.idle = undefined; }
 		try { p.stdin?.end(); } catch { /* gone */ }
-		const term = setTimeout(() => { try { p.kill("SIGTERM"); } catch { /* gone */ } }, now ? 0 : 2000); (term as any).unref?.();
-		const hard = setTimeout(() => { try { p.kill("SIGKILL"); } catch { /* gone */ } }, now ? 3000 : 5000); (hard as any).unref?.();
+		const stop = (sig: NodeJS.Signals) => {
+			if (!lcwIsWin()) { try { p.kill(sig); } catch { /* gone */ } return; }
+			if (p.exitCode === null && p.signalCode === null) lcwKillTree(p.pid);
+		};
+		const term = setTimeout(() => stop("SIGTERM"), now ? 0 : 2000); (term as any).unref?.();
+		const hard = setTimeout(() => stop("SIGKILL"), now ? 3000 : 5000); (hard as any).unref?.();
 	}
 }
 type ChildReg = Registry & { children?: Map<string, Child>; exitHook?: boolean; ui?: any };
@@ -7371,7 +7406,7 @@ export function childOf(rec: RunRecord): Child {
 	else if (c.rec !== rec && !c.busy) c.rec = rec;   // the same run, read again from disk
 	if (!reg.exitHook) {   // pi quits: no child outlives it
 		reg.exitHook = true;
-		process.once("exit", () => { for (const x of (registry() as ChildReg).children?.values() ?? []) { try { x.proc?.kill("SIGTERM"); } catch { /* gone */ } } });
+		process.once("exit", () => { for (const x of (registry() as ChildReg).children?.values() ?? []) { try { if (lcwIsWin() && x.alive) lcwKillTree(x.proc?.pid); else x.proc?.kill("SIGTERM"); } catch { /* gone */ } } });
 	}
 	return c;
 }
@@ -7656,7 +7691,7 @@ export function pickRun(runs: RunRecord[], arg: string, ordered: (r: RunRecord[]
 }
 // a child's own session file, or the copy the TUI opens of it (under the runs dir)
 export function isChildSession(p: string): boolean {
-	return !!p && p.startsWith(`${runsRoot()}${sep}`) && /\.(pi|view)\.jsonl$/.test(p);
+	return !!p && !lcwSamePath(p, runsRoot()) && lcwUnder(p, runsRoot()) && /\.(pi|view)\.jsonl$/.test(p);
 }
 // commands that read the session itself (see the key hook in a child's session)
 export const READS_SESSION = /^\/(copy|export|share|session)(\s|$)/;
@@ -7736,7 +7771,7 @@ export function viewState(reg = registry()): ViewState {
 	return (r.view ??= { home: "", homeId: "", current: "", picker: false, footer: readFooterOn() });
 }
 // /subagents toggle: remembered in lets-code-state.json (key subagentsFooter), as /metrics is
-export const stateFile = () => process.env.LETS_CODE_METRICS_SAVE || process.env.LETS_CODE_STATE_FILE || join(AGENT_DIR, "lets-code-state.json");
+export const stateFile = () => lcwNative(process.env.LETS_CODE_METRICS_SAVE || process.env.LETS_CODE_STATE_FILE) || join(AGENT_DIR, "lets-code-state.json");
 export function readFooterOn(file = stateFile()): boolean {
 	try { return JSON.parse(readFileSync(file, "utf8"))?.subagentsFooter === true; } catch { return false; }
 }
@@ -7748,7 +7783,7 @@ export function saveFooterOn(on: boolean, file = stateFile()): void {
 	doc.subagentsFooter = on;
 	const tmp = `${file}.${process.pid}.tmp`;
 	writeFileSync(tmp, JSON.stringify(doc, null, 2) + "\n", { mode: 0o600 });
-	renameSync(tmp, file);
+	lcwRename(tmp, file);
 }
 
 // A call (subagent, expert, workflow) whose children should outlive a
@@ -8565,6 +8600,7 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
     pi_write_subagent_view_extension "${dir}"
@@ -8996,7 +9032,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const active = () => process.env.LETS_CODE_EXPERTS_ON === "1" && process.env.LETS_CODE_SUBAGENTS_ON === "1" && !(Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") > 0);
-export const factoryRoot = () => join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "lets-code-factory");
+export const factoryRoot = () => join(lcwNative(process.env.PI_CODING_AGENT_DIR) || join(lcwHome(), ".pi", "agent"), "lets-code-factory");
 // A step's share of a fresh context, from the model's window: the window
 // less the reply budget (the output cap, else a quarter) and about 6k of
 // system prompt and tools; 40% of the rest is for reading, about 12 tokens a
@@ -9019,6 +9055,15 @@ export const ranShort = (peak?: number, compactions?: number, window?: number): 
 export const MAX_FIX_ROUNDS = 5;
 export const MAX_CONTINUES = 2;   // a developer reply cut at the reply limit is continued at most this often
 export const SUITE_TIMEOUT_MS = 10 * 60 * 1000;
+// git for the run's own worktree: no line-end conversion, so a Windows git's
+// core.autocrlf=true neither rewrites the files nor prints "LF will be
+// replaced by CRLF" (the same as anywhere else where it is unset)
+export const GIT = "git -c core.autocrlf=false -c core.safecrlf=false";
+// a command's standard output alone (git's warnings stay out of shas and the patch)
+const so = (r: { out: string; stdout?: string }): string => r.stdout ?? r.out;
+// Python missing on Windows: the Microsoft Store's stub answers "python" with exit 9009
+export const noPython = (code: number, out: string): boolean => code === 9009 || /Python was not found/.test(out);
+const pyNote = (code: number, out: string) => (noPython(code, out) ? " (Python is not installed here: Windows' Microsoft Store stub answered; install Python and open a new terminal)" : "");
 
 export type Stage = "intake" | "plan" | "build" | "expert-review" | "design-review" | "test" | "judge" | "regression" | "done";
 export const PIPELINE: Stage[] = ["intake", "plan", "build", "expert-review", "design-review", "test", "judge", "regression", "done"];
@@ -9060,7 +9105,7 @@ export interface Dispatched { text: string; exitCode: number; input: number; out
 export interface Decision { action: "approve" | "edit" | "stop" | "more" | "final" | "retry" | "commit" | "keep"; text?: string; by?: string }
 export interface Deps {
 	dispatch(expert: string, brief: Record<string, string>, cwd: string, meta: { stage: Stage; round: number; runId: string }): Promise<Dispatched>;
-	exec(cmd: string, cwd: string, timeoutMs?: number): Promise<{ code: number; out: string }>;
+	exec(cmd: string, cwd: string, timeoutMs?: number): Promise<{ code: number; out: string; stdout?: string }>;   // out: stdout and stderr
 	checkpoint(kind: Waiting, L: Ledger): Promise<Decision | null>;   // null: no one to ask, pause
 	available?(expert: string): boolean;   // the tester stage runs only where tester is usable and set up
 	progress?(line: string): void;
@@ -9142,7 +9187,7 @@ export function newId(now = Date.now()): string {
 export function saveLedger(L: Ledger, now = Date.now()): void {
 	L.updated = now; mkdirSync(L.dir, { recursive: true });
 	const f = join(L.dir, "ledger.json"); const tmp = `${f}.${process.pid}.tmp`;
-	writeFileSync(tmp, JSON.stringify(L, null, 2) + "\n", { mode: 0o600 }); renameSync(tmp, f);
+	writeFileSync(tmp, JSON.stringify(L, null, 2) + "\n", { mode: 0o600 }); lcwRename(tmp, f);
 }
 export function loadLedger(id: string, root = factoryRoot()): Ledger | null {
 	try { const L = JSON.parse(readFileSync(join(root, id, "ledger.json"), "utf8")); return L && L.v === 1 ? L : null; } catch { return null; }
@@ -9161,11 +9206,13 @@ function artifact(L: Ledger, name: string, text: string): string {
 // criteria, the approved plan, the developer's last report, the diff on disk
 // and the findings with their ids. No conversation reaches a stage.
 export function diffPath(L: Ledger): string { return join(L.dir, "artifacts", "change.patch"); }
+// the work tree as a command in a brief names it: quoted, with "/" (Git Bash reads "\" as an escape)
+const workArg = (L: Ledger) => sq(lcwPosix(L.work));
 export function briefFor(stage: Stage, L: Ledger): Record<string, string> {
 	const criteria = numbered(L.criteria);
-	const where = `${L.work} (its own git worktree of ${L.repo} on ${L.branch}; where the ticket names ${L.repo}, it means this worktree). The change is the work tree against commit ${L.base}: \`git -C ${L.work} diff ${L.base}\` (new files are staged, so they show), also saved as ${diffPath(L)}.`;
+	const where = `${lcwPosix(L.work)} (its own git worktree of ${L.repo} on ${L.branch}; where the ticket names ${L.repo}, it means this worktree). The change is the work tree against commit ${L.base}: \`git -C ${workArg(L)} diff ${L.base}\` (new files are staged, so they show), also saved as ${lcwPosix(diffPath(L))}.`;
 	// the ticket names the user's repo; the stages work in the run's worktree of it
-	const workspace = `The current folder, ${L.work}: this run's own git worktree of ${L.repo} (branch ${L.branch}), made for this ticket. Where the ticket or the plan names ${L.repo} or a path in it, it means the same path here: work here, not there.`;
+	const workspace = `The current folder, ${lcwPosix(L.work)}: this run's own git worktree of ${L.repo} (branch ${L.branch}), made for this ticket. Where the ticket or the plan names ${L.repo} or a path in it, it means the same path here: work here, not there.`;
 	const prev = (s: Stage) => (L.findings[s]?.length ? formatFindings(L.findings[s]!) : "");
 	const context = `Ticket:\n${L.ticket}${L.plan ? `\n\nApproved plan:\n${L.plan}` : ""}`;
 	const keep = [L.constraints, "Do not commit, push or open anything: the user approves the result first."].filter(Boolean).join("\n");
@@ -9179,7 +9226,7 @@ export function briefFor(stage: Stage, L: Ledger): Record<string, string> {
 	} else if (stage === "design-review") {
 		Object.assign(b, { diff: where, context, conventions: L.conventions, previous_findings: prev(stage), constraints: L.constraints });
 	} else if (stage === "test") {
-		Object.assign(b, { target: L.work, goal: `Verify the change for this ticket end to end, and find what it breaks. The change: ${where}\n\nCriteria:\n${criteria}\n\nTicket (Check every example and rule in the ticket too, not only the numbered criteria: they may leave some out.):\n${L.ticket}`, how_to_run: [L.howToRun && `Tests: ${L.howToRun}`, L.start && `Start the app: ${L.start}`].filter(Boolean).join("\n"), constraints: keep,
+		Object.assign(b, { target: lcwPosix(L.work), goal: `Verify the change for this ticket end to end, and find what it breaks. The change: ${where}\n\nCriteria:\n${criteria}\n\nTicket (Check every example and rule in the ticket too, not only the numbered criteria: they may leave some out.):\n${L.ticket}`, how_to_run: [L.howToRun && `Tests: ${L.howToRun}`, L.start && `Start the app: ${L.start}`].filter(Boolean).join("\n"), constraints: keep,
 			report: `Start your final message with the line VERDICT: APPROVE (nothing the change causes fails) or VERDICT: REVISE, then your usual headings; in Findings, one line per failure: T<n> | blocker|major|minor|nit | where | title.${prev(stage) ? `\nRe-check these earlier failures, keeping their ids:\n${prev(stage)}` : ""}` });
 	} else if (stage === "judge") {
 		Object.assign(b, { criteria, ticket: `Check every example and rule in the ticket too, not only the numbered criteria: they may leave some out. A failing example of the ticket is a failing criterion.\n\n${L.ticket}`, artifact: where, claim: L.claim, how_to_run: L.howToRun, constraints: L.constraints });
@@ -9206,7 +9253,7 @@ export function budgetFor(stage: Stage, L: Ledger): string {
 	const write = `One reply holds about ${b.write} lines: write a larger file in parts (its first part, then the rest by edits), never whole in one call.`;
 	if (stage === "plan") return `${head} Plan the build in steps of at most ${f} changed and about ${b.lines} lines read each. If the ticket needs more than ${b.steps} such steps, say so at the top of the plan, with how to split it into smaller tickets. ${write}${cut}`;
 	if (stage === "build") return `${head} Build the plan one step at a time, reading only what the current step needs: about ${b.lines} lines at a time, the parts of a file you change, not whole large files. ${write}${cut}`;
-	return `${head} Read the change file by file (\`git -C ${L.work} diff ${L.base} -- <file>\`) and only the code around each hunk, about ${b.lines} lines at a time, never the whole diff at once. One reply holds about ${b.write} lines: start your final reply with the verdict line, then one line per finding.${cut}`;
+	return `${head} Read the change file by file (\`git -C ${workArg(L)} diff ${L.base} -- <file>\`) and only the code around each hunk, about ${b.lines} lines at a time, never the whole diff at once. One reply holds about ${b.write} lines: start your final reply with the verdict line, then one line per finding.${cut}`;
 }
 
 // ------------------------------------------------------------------ the engine
@@ -9269,15 +9316,15 @@ async function stageRun(L: Ledger, deps: Deps, stage: Stage): Promise<{ text: st
 // (no git writes), so a .pyc staged once used to come back every round.
 const NOISE = ["**/__pycache__/**", "**/*.pyc", "**/.pytest_cache/**", "**/node_modules/**", "**/.DS_Store"].map((g) => `':(exclude,glob)${g}'`).join(" ");
 export async function stageChange(L: Ledger, deps: Deps): Promise<void> {
-	await deps.exec(`git read-tree ${L.base}`, L.work);
-	await deps.exec(`git add -A -- . ${NOISE}`, L.work);
+	await deps.exec(`${GIT} read-tree ${L.base}`, L.work);
+	await deps.exec(`${GIT} add -A -- . ${NOISE}`, L.work);
 }
 async function snapshot(L: Ledger, deps: Deps): Promise<string> {
 	await stageChange(L, deps);
-	const d = await deps.exec(`git diff ${L.base}`, L.work);
-	mkdirSync(join(L.dir, "artifacts"), { recursive: true }); writeFileSync(diffPath(L), d.out, { mode: 0o600 });
-	const stat = await deps.exec(`git diff --shortstat ${L.base}`, L.work);
-	return stat.out.trim();
+	const d = await deps.exec(`${GIT} diff ${L.base}`, L.work);
+	mkdirSync(join(L.dir, "artifacts"), { recursive: true }); writeFileSync(diffPath(L), so(d), { mode: 0o600 });
+	const stat = await deps.exec(`${GIT} diff --shortstat ${L.base}`, L.work);
+	return so(stat).trim();
 }
 // a fingerprint of the change as it stands (the diff against the base)
 export async function changeId(L: Ledger, deps: Deps): Promise<string> {
@@ -9308,7 +9355,7 @@ async function step(L: Ledger, deps: Deps): Promise<boolean> {
 		if (!L.criteria.length) L.criteria = parseCriteria(L.ticket);
 		if (L.howToRun && !L.baseline) { const r = await deps.exec(L.howToRun, L.work, SUITE_TIMEOUT_MS); L.baseline = { code: r.code, tail: r.out.slice(-1500) }; }
 		const t = (deps.now ?? Date.now)();
-		L.entries.push({ stage, round: 0, verdict: L.criteria.length ? `${L.criteria.length} criteria` : "no criteria found", summary: L.baseline ? `suite before the change: exit ${L.baseline.code}` : "no how_to_run: no baseline", input: 0, output_tokens: 0, seconds: 0, started: t, ended: t });
+		L.entries.push({ stage, round: 0, verdict: L.criteria.length ? `${L.criteria.length} criteria` : "no criteria found", summary: L.baseline ? `suite before the change: exit ${L.baseline.code}${pyNote(L.baseline.code, L.baseline.tail)}` : "no how_to_run: no baseline", input: 0, output_tokens: 0, seconds: 0, started: t, ended: t });
 		L.stage = "plan"; L.waiting = "criteria"; return true;
 	}
 	if (stage === "regression") {
@@ -9321,7 +9368,7 @@ async function step(L: Ledger, deps: Deps): Promise<boolean> {
 		const pass = r.code === 0; const failedBefore = before !== undefined && before !== 0;
 		const none = !pass && failedBefore && ranNoTests(r.code, r.out);   // runs no tests, now as before: judges nothing
 		const verdict = pass ? "PASS" : none ? "NO TESTS (as before the change)" : failedBefore ? "FAIL (as before the change)" : "FAIL";
-		L.entries.push({ stage, round: L.rounds, output: out, verdict, summary: `\`${short(L.howToRun, 60)}\` exit ${r.code}${failedBefore ? `, exit ${before} before the change` : ""}`, input: 0, output_tokens: 0, seconds: (t1 - t0) / 1000, started: t0, ended: t1 });
+		L.entries.push({ stage, round: L.rounds, output: out, verdict, summary: `\`${short(L.howToRun, 60)}\` exit ${r.code}${failedBefore ? `, exit ${before} before the change` : ""}${pyNote(r.code, r.out)}`, input: 0, output_tokens: 0, seconds: (t1 - t0) / 1000, started: t0, ended: t1 });
 		if (pass || failedBefore) { L.stage = "done"; if (failedBefore && !pass) L.note = "the suite failed before the change too"; return true; }
 		fixRound(L, stage, [{ id: "REG1", severity: "blocker", where: L.howToRun, title: "the test suite fails after the change", detail: r.out.slice(-3000) }]);
 		return true;
@@ -9422,9 +9469,9 @@ async function applyDecision(L: Ledger, d: Decision, deps: Deps): Promise<void> 
 			const msg = `${(L.ticket.split("\n").find((l) => l.trim()) ?? "factory run").replace(/^#+\s*/, "").slice(0, 72)}\n\nsoftware factory run ${L.id}`;
 			artifact(L, "commit-message.txt", msg);
 			// one commit on the run's branch from the base, whatever the children's checkpoints did to HEAD
-			const tree = (await deps.exec(`git write-tree`, L.work)).out.trim();
-			const c = await deps.exec(`git${await ident(L.work, deps)} commit-tree ${tree} -p ${L.base} -F ${join(L.dir, "artifacts", "commit-message.txt")}`, L.work);
-			const sha = c.out.trim();
+			const tree = so(await deps.exec(`${GIT} write-tree`, L.work)).trim();
+			const c = await deps.exec(`${GIT}${await ident(L.work, deps)} commit-tree ${tree} -p ${L.base} -F ${sq(lcwPosix(join(L.dir, "artifacts", "commit-message.txt")))}`, L.work);
+			const sha = so(c).trim();
 			if (c.code === 0 && /^[0-9a-f]{40,64}$/.test(sha)) { await deps.exec(`git update-ref refs/heads/${L.branch} ${sha}`, L.work); await deps.exec(`git symbolic-ref HEAD refs/heads/${L.branch}`, L.work); L.commit = sha; }
 			else { L.waiting = "result"; L.note = `commit failed: ${short(c.out, 200)}`; return; }
 		}
@@ -9476,11 +9523,11 @@ export async function prepareRepo(target: string, deps: Deps): Promise<string[]>
 	}
 	const top = await deps.exec(`git rev-parse --show-toplevel`, target);
 	if (top.code !== 0) return did;
-	const repo = top.out.trim();
+	const repo = so(top).trim();
 	if ((await deps.exec(`git rev-parse -q --verify HEAD`, repo)).code !== 0) {
-		const tree = (await deps.exec(`git hash-object -t tree /dev/null`, repo)).out.trim();
+		const tree = so(await deps.exec(`git hash-object -t tree --stdin </dev/null`, repo)).trim();   // the empty tree
 		const c = await deps.exec(`git${await ident(repo, deps)} commit-tree ${tree} -m "start: an empty first commit for the software factory"`, repo);
-		const sha = c.out.trim();
+		const sha = so(c).trim();
 		if (c.code !== 0 || !/^[0-9a-f]{40,64}$/.test(sha)) throw new Error(`the first commit in ${repo} failed: ${short(c.out, 300)}`);
 		const u = await deps.exec(`git update-ref HEAD ${sha}`, repo);
 		if (u.code !== 0) throw new Error(`the first commit in ${repo} failed: ${short(u.out, 300)}`);
@@ -9512,7 +9559,7 @@ export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 	const prepared = await prepareRepo(resolve(o.repo), deps);
 	const top = await deps.exec(`git rev-parse --show-toplevel`, resolve(o.repo));
 	if (top.code !== 0) throw new Error(`${o.repo} is not a git repository, and has files: make it one first (git init and a first commit of its files: a setup chore for a subagent), or give a new or empty folder for a new project`);
-	const repo = top.out.trim(); const base = (await deps.exec(`git rev-parse HEAD`, repo)).out.trim();
+	const repo = so(top).trim(); const base = so(await deps.exec(`git rev-parse HEAD`, repo)).trim();
 	const howToRun = await shellCommand(o.howToRun ?? "", "test command (how_to_run)", deps, repo);
 	const startCmd = await shellCommand(o.start ?? "", "start command", deps, repo);
 	// an id no run dir and no branch of this repo has yet (runs started in the same second)
@@ -9520,7 +9567,7 @@ export async function startRun(o: StartOpts, deps: Deps): Promise<Ledger> {
 	for (let i = 0; !o.id && i < 20 && (existsSync(join(root, id)) || (await deps.exec(`git rev-parse -q --verify refs/heads/pi/factory-${id}`, repo)).code === 0); i++) id = newId(now);
 	const dir = join(root, id); const branch = `pi/factory-${id}`; const work = join(dir, "work");
 	mkdirSync(dir, { recursive: true });
-	const add = await deps.exec(`git worktree add -q -b ${branch} ${JSON.stringify(work)} ${base}`, repo);
+	const add = await deps.exec(`${GIT} worktree add -q -b ${branch} ${sq(lcwPosix(work))} ${base}`, repo);
 	if (add.code !== 0) throw new Error(`git worktree add failed: ${short(add.out, 300)}`);
 	const L: Ledger = { v: 1, id, created: now, updated: now, repo, base, branch, work, dir, ticket: o.ticket.trim(), howToRun, start: startCmd, constraints: o.constraints ?? "", conventions: o.conventions ?? "",
 		tester: o.tester ?? "auto", status: "running", waiting: null, note: "", stage: "intake", rounds: 0, criteria: o.criteria ?? [], plan: "", claim: "", findings: {}, sent: {}, fixing: null, pending: null, baseline: null, commit: "", entries: [],
@@ -9549,14 +9596,17 @@ export async function resumeRun(id: string, deps: Deps, root = factoryRoot()): P
 }
 
 // ------------------------------------------------------------------ in a session
-export function shellExec(cmd: string, cwd: string, timeoutMs = 120000): Promise<{ code: number; out: string }> {
+// out: what it printed, stdout and stderr together (a suite's whole story);
+// stdout: its standard output alone. Run with Git Bash on Windows; the
+// timeout stops its whole tree (its process group; taskkill /T on Windows)
+export function shellExec(cmd: string, cwd: string, timeoutMs = 120000): Promise<{ code: number; out: string; stdout: string }> {
 	return new Promise((res) => {
-		let out = ""; const child = spawn("bash", ["-c", cmd], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true });
-		const timer = setTimeout(() => { try { process.kill(-child.pid!, "SIGKILL"); } catch { /* gone */ } }, timeoutMs); timer.unref?.();
+		let out = "", stdout = ""; const child = spawn(lcwBash(), ["-c", cmd], lcwSpawnOpts({ cwd, stdio: ["ignore", "pipe", "pipe"], detached: true }));
+		const timer = setTimeout(() => lcwKillTree(child.pid, "SIGKILL"), timeoutMs); timer.unref?.();
 		const add = (d: Buffer) => { out += d.toString(); if (out.length > 200000) out = out.slice(-100000); };
-		child.stdout.on("data", add); child.stderr.on("data", add);
-		child.on("error", (e) => { clearTimeout(timer); res({ code: 127, out: e.message }); });
-		child.on("close", (code) => { clearTimeout(timer); res({ code: code ?? 1, out }); });
+		child.stdout.on("data", (d: Buffer) => { add(d); stdout += d.toString(); if (stdout.length > 200000) stdout = stdout.slice(-100000); }); child.stderr.on("data", add);
+		child.on("error", (e) => { clearTimeout(timer); res({ code: 127, out: e.message, stdout: "" }); });
+		child.on("close", (code) => { clearTimeout(timer); res({ code: code ?? 1, out, stdout }); });
 	});
 }
 // the checkpoints as dialogs; no UI: null (the run pauses)
@@ -9690,7 +9740,7 @@ export function ticketFrom(brief: Record<string, unknown>, cwd: string): { ticke
 	const v = (k: string) => asText(brief?.[k]);
 	const pick = (name: string) => FIELDS[name].map(v).find(Boolean) ?? "";
 	let ticket = v("ticket");
-	if (ticket && !ticket.includes("\n") && ticket.length < 500) { const f = resolve(cwd, ticket); try { if (statSync(f).isFile()) ticket = readFileSync(f, "utf8"); } catch { /* the text itself */ } }
+	if (ticket && !ticket.includes("\n") && ticket.length < 500) { const f = resolve(cwd, lcwNative(ticket)); try { if (statSync(f).isFile()) ticket = readFileSync(f, "utf8"); } catch { /* the text itself */ } }
 	const goal = pick("goal"); const criteria = pick("criteria");
 	if (goal && !ticket.includes(goal)) ticket = ticket ? `${ticket}\n\nGoal: ${goal}` : goal;
 	if (criteria && !parseCriteria(ticket).length) ticket = `${ticket}\n\n## Acceptance criteria\n${criteriaFromText(criteria).map((c, i) => `${i + 1}. ${c}`).join("\n")}`.trim();
@@ -9726,7 +9776,7 @@ export async function runExpert(brief: Record<string, unknown>, ctx: any, signal
 		else {
 			// a path with the model's remark after it: "/x/chess (empty; becomes a repo)"
 			const repo = v("repo").split("\n")[0].replace(/\s+\([^()]*\)\s*$/, "").trim();
-			L = await startRun({ ticket, repo: resolve(cwd, repo || "."), howToRun, start: v("start"), constraints, window: ctx?.model?.contextWindow, outCap: ctx?.model?.maxTokens }, deps);
+			L = await startRun({ ticket, repo: resolve(cwd, lcwNative(repo) || "."), howToRun, start: v("start"), constraints, window: ctx?.model?.contextWindow, outCap: ctx?.model?.maxTokens }, deps);
 		}
 		return { text: report(L, true) + now, isError: false };
 	} catch (e) { return { text: `The software factory could not run: ${e instanceof Error ? e.message : String(e)}`, isError: true }; }
@@ -9761,7 +9811,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				if (verb !== "start" && verb !== "run" && verb !== "resume") return say(USAGE, "warning");
 				if (!arg) return say(USAGE, "warning");
-				const file = resolve(ctx.cwd, arg);
+				const file = resolve(ctx.cwd, lcwNative(arg));
 				if (verb !== "resume" && !existsSync(file)) return say(`No ticket file ${arg}.`, "warning");
 				const why = await ensureExperts(ctx); if (why) return say(why, "warning");
 				orchestrate(ctx, verb === "resume" ? "factory run resumed" : "factory run");
@@ -9781,6 +9831,7 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }

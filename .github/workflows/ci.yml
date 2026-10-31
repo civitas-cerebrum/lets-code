@@ -39,5 +39,16 @@ jobs:
       - name: 🔎  Syntax check (bash 3.2 on macOS)
         run: bash -n lets-code && bash --version | head -1
 
+      # On Linux the suite runs in a memory-capped scope with a heartbeat: since
+      # #98 the Ubuntu job died now and then with no log at all (the runner itself
+      # gone, not a test that failed), so a runaway now dies in the scope, the
+      # runner lives, and the log shows how memory went and which file it was.
       - name: 🧪  Tests
-        run: tests/run.sh
+        run: |
+          if [ "${RUNNER_OS}" = Linux ]; then
+            ( while sleep 60; do echo "[heartbeat] $(date +%T) $(free -m | awk 'NR==2 {print $3 " MB used, " $7 " MB available"}'); ps -eo rss=,args= --sort=-rss | head -3 | awk '{printf "  %d MB %s\n", $1/1024, substr($0, index($0,$2), 120)}'; done ) &
+            sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- \
+              sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" tests/run.sh
+          else
+            tests/run.sh
+          fi

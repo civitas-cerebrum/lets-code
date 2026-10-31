@@ -5517,6 +5517,18 @@ export function trimOld(messages: any[], keep = 2, limit = 1500): any[] | null {
 	return changed ? out : null;
 }
 export const MAX_GO_NUDGES = 2;
+// Task size. The mode tool's description alone did not move a small model:
+// in the default mode it wrote code on medium and hard tasks without asking for
+// plan mode (0 of 5 in a trigger check). So the size question is in the system
+// prompt wherever plan mode is there, and the first write of a request that
+// looks large, with no mode asked for, is held back once.
+export const TASK_SIZE_SECTION = "Task size: before you start, judge the request. A medium or large task (several files or steps, a new module or feature, a refactor, a spec with many rules) goes to plan mode first: ask for it with the mode tool before you write code, and where orchestration is listed, carry the approved plan out by orchestration. A small task (one file, a fix, a question) goes ahead directly.";
+export const SIZE_NUDGE = "lets-code: this request looks medium or large (a long spec, or many rules) and no mode was asked for. Ask for plan mode first with the mode tool; if the task really is small, write again and it goes through.";
+// a long request, or one with many rules: about 1400 characters, or 8 list lines
+export function looksLarge(text: string): boolean {
+	const t = String(text ?? "");
+	return t.length >= 1400 || t.split("\n").filter((l) => /^\s*([-*\u2022]|\d+[.)])\s+\S/.test(l)).length >= 8;
+}
 export const GO_TEXT = "[lets-code] No one can answer in this session: do not wait for approval. Go on with what you proposed now: start the software-factory run.";
 const PROTECTED = [".git/", ".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519"];
 
@@ -5934,6 +5946,9 @@ export default function (pi: ExtensionAPI) {
 	// without a call before any factory run has started is waiting for an answer
 	// that cannot come (a small model asked "approve?" and the session ended)
 	let factoryStarted = false, goNudges = 0;
+	// task size: the request looks large, a mode was asked for, the nudge was given
+	let requestLarge = false, modeAsked = false, sizeNudged = false;
+	const sizeApplies = () => subagentDepth === 0 && !process.env.LETS_CODE_ROLE && !(on && (roleName === "plan" || roleName === "orchestration"));
 	pi.on("turn_end", async (event: any) => {
 		if (!on || roleName !== "orchestration" || ui || factoryStarted || goNudges >= MAX_GO_NUDGES) return undefined;
 		const m = event?.message ?? {};
@@ -5950,7 +5965,9 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("before_agent_start", async (event: any, ctx: any) => {
 		seeModel(ctx);
+		if (typeof event?.prompt === "string") { requestLarge = looksLarge(event.prompt); modeAsked = false; }
 		const sections = event?.systemPromptOptions?.sections;
+		if (sections && typeof sections === "object") { if (sizeApplies()) sections.lets_code_task_size = TASK_SIZE_SECTION; else delete sections.lets_code_task_size; }
 		if (sections && typeof sections === "object") { if (on && role.prompt && !role.bypass) sections.lets_code_mandate = promptOf(roleName); else delete sections.lets_code_mandate; }
 		return undefined;
 	});
@@ -5958,6 +5975,11 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		const inp: any = event?.input;
 		if (event?.toolName === "expert" && (inp?.name === "software-factory" || inp?.brief?.ticket || inp?.brief?.resume)) factoryStarted = true;
+		if (event?.toolName === "mode") modeAsked = true;
+		if ((event?.toolName === "write" || event?.toolName === "edit") && requestLarge && !modeAsked && !sizeNudged && sizeApplies()) {
+			sizeNudged = true; log("size-nudge", { tool: event.toolName });
+			return { block: true, reason: SIZE_NUDGE };
+		}
 		if (!on || role.bypass) return undefined;
 		const name = event.toolName; const input: any = event.input ?? {};
 		const ok = (globalThis as any).__letsCodeClaudeApproved?.has?.(event.toolCallId) === true;

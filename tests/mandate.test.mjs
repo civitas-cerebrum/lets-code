@@ -121,7 +121,7 @@ const blocked = (r) => r?.block === true;
 	t("auto: .git protected", blocked(await h.call(d, "edit", { path: join(d, ".git/config") })), true);
 	t("auto: redirect into .git protected", blocked(await h.call(d, "bash", { command: "echo x > .git/HEAD" })), true);
 	t("auto: mode announced", h.emitted.some(([c, x]) => c === "lets-code:mode" && x.role === "auto"), true);
-	t("auto: no prompt section", (() => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), []);
+	t("auto: no mode prompt section (only the task-size one)", (() => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), ["lets_code_task_size"]);
 }
 
 // --- ask: prompts, remembers session grants, denies without UI
@@ -369,7 +369,7 @@ const blocked = (r) => r?.block === true;
 	const prompt = () => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); };
 	t("dormant: write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
 	t("dormant: any bash", await h.call(d, "bash", { command: "rm -rf build && npm install" }), undefined);
-	t("dormant: no prompt section", prompt(), []);
+	t("dormant: no mode prompt section", prompt().includes("lets_code_mandate"), false);
 	t("dormant: only /orchestration and /mode", Object.keys(h.commands), ["orchestration", "mode"]);
 	t("dormant: tools untouched", h.tools().includes("edit"), true);
 	t("dormant: a factory run engages it", globalThis.__letsCodeOrchestrate(h.ctx(d), "software factory run"), true);
@@ -382,7 +382,7 @@ const blocked = (r) => r?.block === true;
 	t("left: write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
 	t("left: any bash again", await h.call(d, "bash", { command: "npm install" }), undefined);
 	t("left: tools restored", h.tools().includes("edit"), true);
-	t("left: no prompt section", prompt(), []);
+	t("left: no mode prompt section", prompt().includes("lets_code_mandate"), false);
 	await h.commands.orchestration.handler("", h.ctx(d));
 	t("/orchestration engages it too", blocked(await h.call(d, "write", { path: join(d, "src/b.txt") })), true);
 	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
@@ -437,7 +437,7 @@ const blocked = (r) => r?.block === true;
 	const br = await load({}, { entries: [msg(PLAN)], branch: [msg("No plan on this branch.")] }); await br.start(d);
 	await br.commands.plan.handler("", br.ctx(d)); await br.commands.plan.handler("", br.ctx(d));
 	t("leaving by hand: the current branch is read, not every entry", br.selects.length, 0);
-	t("leaving by hand: no prompt section", (() => { const s = {}; m.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), []);
+	t("leaving by hand: no mode prompt section (only the task-size one)", (() => { const s = {}; m.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), ["lets_code_task_size"]);
 	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
 	t("plan alone, child: inert", Object.keys(c.handlers).length, 0);
 	// with the orchestration too: each goes back to where it came from
@@ -661,6 +661,35 @@ const blocked = (r) => r?.block === true;
 	t("with a UI: the user answers, no nudge", await u.handlers.turn_end({ message: ask }), undefined);
 	const a = await load({ LETS_CODE_MODE: "auto" }, { ui: false }); await a.start(d);
 	t("other modes: no nudge", await a.handlers.turn_end?.({ message: ask }), undefined);
+}
+// --- task size: the section in the prompt, and the first write of a large request held back once
+{
+	const { mod } = await load({});
+	const big = "Build a JSONPath engine.\n" + Array.from({ length: 9 }, (_, i) => `${i + 1}. rule number ${i + 1}`).join("\n");
+	t("looksLarge: many rules, a long spec, a short fix", [mod.looksLarge(big), mod.looksLarge("x".repeat(1500)), mod.looksLarge("Fix the off-by-one in stats.py: median of an even list."), mod.looksLarge("- a\n- b\n- c")], [true, true, false, false]);
+	const d = repo();
+	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_PLAN_ON = "1";
+	const sec = (h, prompt) => { const s = {}; h.handlers.before_agent_start({ prompt, systemPromptOptions: { sections: s } }, { hasUI: true }); return s; };
+	const h = await load({}); await h.start(d);
+	t("default mode with plan there: the task-size section", /Task size: before you start, judge the request/.test(sec(h, big).lets_code_task_size ?? ""), true);
+	const w1 = await h.call(d, "write", { path: join(d, "src/b.txt") });
+	t("large request, no mode asked: the first write held back, with why", [blocked(w1), /looks medium or large/.test(w1?.reason ?? "")], [true, true]);
+	t("large request: the second write goes through", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	const s2 = await load({}); await s2.start(d); sec(s2, "Fix the typo in README.md.");
+	t("small request: no write held back", await s2.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	const m = await load({}, { tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "mode"] }); await m.start(d); sec(m, big);
+	await m.call(d, "mode", { to: "plan", reason: "large" });
+	await m.commands.plan.handler("", m.ctx(d)); await m.commands.plan.handler("", m.ctx(d));
+	t("large request, plan mode asked for: no write held back", await m.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	const p = await load({}); await p.start(d); await p.commands.plan.handler("", p.ctx(d));
+	t("in plan mode: no task-size section (it is the plan)", "lets_code_task_size" in sec(p, big), false);
+	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
+	t("a subagent: no section (the plugin is inert there)", Object.keys(c.handlers).length, 0);
+	delete process.env.LETS_CODE_PLAN_ON; process.env.LETS_CODE_MANDATE_ON = "1";
+	const a = await load({ LETS_CODE_MODE: "auto" }); await a.start(d);
+	t("mandate on, auto: the section, and the hold-back once", ["lets_code_task_size" in sec(a, big), blocked(await a.call(d, "write", { path: join(d, "src/b.txt") }))], [true, true]);
+	const o = await load({ LETS_CODE_MODE: "orchestration" }); await o.start(d);
+	t("orchestration: no task-size section", "lets_code_task_size" in sec(o, big), false);
 }
 // --- the /mode menu and the agent's mode tool
 {

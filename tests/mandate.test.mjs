@@ -641,6 +641,27 @@ const blocked = (r) => r?.block === true;
 	const a = await load({ LETS_CODE_MODE: "auto" }); await a.start(d);
 	t("context hook: other modes left alone", await a.handlers.context({ messages: msgs }), undefined);
 }
+// --- orchestration with no one to answer: a turn that waits for approval is told to go on
+{
+	const d = repo();
+	const ask = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Here is the ticket. Approve and I'll run the factory." }] };
+	const o = await load({ LETS_CODE_MODE: "orchestration" }, { ui: false }); await o.start(d);
+	o.handlers.before_agent_start({ systemPromptOptions: { sections: {} } }, { hasUI: false });
+	const r1 = await o.handlers.turn_end({ message: ask });
+	t("no UI, no factory run yet, a turn ends waiting: told to go on", [r1?.continue, /No one can answer in this session/.test(r1?.entries?.[0]?.content ?? "")], [true, true]);
+	await o.handlers.turn_end({ message: ask });
+	t("no UI: at most MAX_GO_NUDGES", await o.handlers.turn_end({ message: ask }), undefined);
+	const o2 = await load({ LETS_CODE_MODE: "orchestration" }, { ui: false }); await o2.start(d);
+	o2.handlers.before_agent_start({ systemPromptOptions: { sections: {} } }, { hasUI: false });
+	await o2.handlers.tool_call({ toolName: "expert", input: { action: "run", name: "software-factory", brief: { ticket: "T" } } }, o2.ctx(d));
+	t("no UI, after the factory started: the final summary is not nudged", await o2.handlers.turn_end({ message: ask }), undefined);
+	t("no UI: a turn with a tool call is not nudged", await (async () => { const x = await load({ LETS_CODE_MODE: "orchestration" }, { ui: false }); await x.start(d); x.handlers.before_agent_start({ systemPromptOptions: { sections: {} } }, { hasUI: false }); return x.handlers.turn_end({ message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", name: "bash" }] } }); })(), undefined);
+	const u = await load({ LETS_CODE_MODE: "orchestration" }, { ui: true }); await u.start(d);
+	u.handlers.before_agent_start({ systemPromptOptions: { sections: {} } }, { hasUI: true });
+	t("with a UI: the user answers, no nudge", await u.handlers.turn_end({ message: ask }), undefined);
+	const a = await load({ LETS_CODE_MODE: "auto" }, { ui: false }); await a.start(d);
+	t("other modes: no nudge", await a.handlers.turn_end?.({ message: ask }), undefined);
+}
 // --- the /mode menu and the agent's mode tool
 {
 	const pick = (name) => (opts) => opts.find((o) => o.slice(2).startsWith(`${name} — `));

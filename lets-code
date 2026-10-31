@@ -5516,6 +5516,8 @@ export function trimOld(messages: any[], keep = 2, limit = 1500): any[] | null {
 	});
 	return changed ? out : null;
 }
+export const MAX_GO_NUDGES = 2;
+export const GO_TEXT = "[lets-code] No one can answer in this session: do not wait for approval. Go on with what you proposed now: start the software-factory run.";
 const PROTECTED = [".git/", ".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519"];
 
 // Built-in command groups. A simple command is matched against each group's
@@ -5928,6 +5930,18 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_e, ctx) => { cwd = ctx.cwd; allowedForSession = new Set(); askedPlan = ""; seeModel(ctx); reload(ctx); });
 	pi.on("project_trust", async (_e, ctx) => reload(ctx));
 
+	// orchestration with no one to answer (print mode, headless): a turn that ends
+	// without a call before any factory run has started is waiting for an answer
+	// that cannot come (a small model asked "approve?" and the session ended)
+	let factoryStarted = false, goNudges = 0;
+	pi.on("turn_end", async (event: any) => {
+		if (!on || roleName !== "orchestration" || ui || factoryStarted || goNudges >= MAX_GO_NUDGES) return undefined;
+		const m = event?.message ?? {};
+		const calls = Array.isArray(m.content) && m.content.some((c: any) => c?.type === "toolCall");
+		if (m.role !== "assistant" || m.stopReason !== "stop" || calls) return undefined;
+		goNudges++; log("go-nudge", { n: goNudges });
+		return { entries: [{ type: "custom_message" as const, customType: "lets-code-mandate", content: GO_TEXT, display: true }], continue: true };
+	});
 	// orchestration keeps its own context small: older turns trimmed before each request
 	pi.on("context", async (event: any) => {
 		if (!on || roleName !== "orchestration") return undefined;
@@ -5942,6 +5956,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
+		const inp: any = event?.input;
+		if (event?.toolName === "expert" && (inp?.name === "software-factory" || inp?.brief?.ticket || inp?.brief?.resume)) factoryStarted = true;
 		if (!on || role.bypass) return undefined;
 		const name = event.toolName; const input: any = event.input ?? {};
 		const ok = (globalThis as any).__letsCodeClaudeApproved?.has?.(event.toolCallId) === true;

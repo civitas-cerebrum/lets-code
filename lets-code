@@ -286,6 +286,7 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lets-code"
 CONFIG_FILE="${CONFIG_DIR}/config"
 SETUP_FILE="${CONFIG_FILE}"          # where setup saves (a preset file under setup --preset)
 PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"   # pi's config home (overridable)
+if on_windows; then PI_AGENT_DIR="$(native_path "${PI_AGENT_DIR}")"; fi   # a /c/... value, as pi (native) reads it
 PRESET_DIR="${CONFIG_DIR}/presets"
 PROVIDER_ID="lets-code"          # provider id we upsert into pi's files (lets-code-<preset> for a preset)
 DEFAULT_CONTEXT=128000

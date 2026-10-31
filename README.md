@@ -96,7 +96,7 @@ it, not a Claude Code clone. Where it stands:
 | 🧠 **Thinking probe** | One tiny request with thinking forced on. Reasoning tokens in the reply mean pi gets a thinking model, with per-level budgets vLLM enforces. |
 | 👁 **Vision probe** | One tiny request with a red 64×64 image. "Red" in the reply means pi may send screenshots. Setup asks you if the probe can't tell. |
 | 📏 **Overflow-proof** | The output cap is reserved in pi's compaction settings, so `input + max_tokens` can never exceed the server window. |
-| 🧯 **Memory guard** | A runaway process the session started is killed before it can freeze the box, and the agent is told why. Nothing else on the machine is touched. |
+| 🧯 **Memory guard** | A RAM watcher warns at 85 % use. The guard (off by default, `/memguard on`) kills a process the session started that is over 40 % of RAM while more than 80 % is used, and processes it left behind; the agent is told why. Nothing else on the machine is touched. |
 | 🔍 **Grounding guard** | pi looks facts up with its tools instead of guessing them (file contents, paths, names, versions, config, command output), invents nothing and says what it could not verify. An empty grep is not proof that something is missing, and an action the system "accepted" is checked against a control that must fail. Overwriting an existing file it has not read is blocked once: read first, or write again. |
 | 🧭 **Backend facts** | The agent knows its backend (server, model, API, context, thinking, vision) without discovering it, at no cost until it needs it: a prompt about the backend adds a short section, or the first command probing it gets the facts in its result. The API key is never written out. |
 | 🛟 **Git guard** | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
@@ -153,6 +153,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--vision` / `--no-vision` | Pin image input instead of probing |
 | `--insecure` | Skip TLS verification |
 | `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` / `--no-grounding` | Launch without a guard |
+| `--mem-guard` / `--no-mem-watch` | Launch with the memory guard on / without the RAM watcher |
 | `--no-session-tag` | Send no session tag with model requests |
 | `--metrics` / `--no-metrics` | Start this launch with the full / minimal footer (`/metrics` switches inside pi, and the size picked there is where later sessions start) |
 | `--metrics-log <file>` | Append the footer's numbers to `<file>` as JSON lines, also without a UI (see [Metrics log](#metrics-log)) |
@@ -364,8 +365,9 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MODEL`, `CONTEXT`, `OUTPUT_CAP`, `API` | Pins; empty means discovered or default. |
 | `VISION`, `REASONING` | `true`/`false` pins; empty means probed at launch. |
 | `THINKING` | Startup thinking level. Setup suggests one from the context window. |
-| `MEM_GUARD`, `GIT_GUARD`, `AGENT_GUARD`, `GROUNDING` | `false` turns a guard off. |
-| `MEM_GUARD_PROCESS`, `MEM_GUARD_SESSION` | The memory guard's size limits (default `20%` and `45%` of RAM): a `%` or a size like `1600M`; `0` or `off` turns one off. `LETS_CODE_MEM_GUARD_PROCESS` / `_SESSION` set them for one launch. |
+| `GIT_GUARD`, `AGENT_GUARD`, `GROUNDING` | `false` turns a guard off. |
+| `MEM_GUARD` | `true` turns the memory guard on (default `false`; `/memguard on` does it for one session). |
+| `MEM_WATCH` | `false` turns the RAM watcher off (default `true`). |
 | `TEMPLATE_EFFORT` | `off` skips the chat-template effort probe, `neutral` maps every level to the least-instruction value (see server setup). |
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS` | On by default; `false` turns the `subagent` tool off. |
@@ -455,44 +457,48 @@ only in budget.
 A test with an unbounded search can take all RAM and freeze the machine
 that serves the model. On a small one it is over in seconds: on an 8 GB
 Raspberry Pi, two `python3` runs of `10 ** 10 ** 10` reached 1.5 GB each,
-the box thrashed, and its hardware watchdog reset it. The guard only ever
-acts on processes this session started, never on pi itself, in two ways.
+the box thrashed, and its hardware watchdog reset it. Two parts:
 
-**Size limits**, checked every second whatever the free RAM:
+**RAM watcher** (on; `MEM_WATCH=false` turns it off). Every second it reads
+the machine's used RAM. At 85 % it shows a notice suggesting `/memguard on`
+and tells the agent memory is tight. Once per crossing: again only after use
+drops below 75 %. It kills nothing.
 
-| Limit | Default | Action |
-|---|---|---|
-| one process (`MEM_GUARD_PROCESS`) | 20 % of RAM (1.6 GB on 8 GB) | that process is killed |
-| all of them together (`MEM_GUARD_SESSION`) | 45 % of RAM (3.5 GB on 8 GB) | the largest is killed |
+**Memory guard** (off; `MEM_GUARD=true`, `--mem-guard`, or `/memguard on`
+in a session). It only acts on processes this session started, never on pi,
+its node, Claude Code or tmux:
 
-20 % leaves room for an ordinary build or test suite; two runaways at once
-stay under 45 %, and the rest of the machine keeps more than half. The
-limits read `/proc`, so they hold where systemd gives the user no memory
-controller (a `MemoryMax` on a user scope is then silently ignored).
+| Rule | Action |
+|---|---|
+| more than 80 % of RAM used, and a process over 40 % of RAM | that process is killed |
+| a process left behind by a pi of this session that has exited | SIGTERM, SIGKILL 10 s later |
 
-The session that started the process is told through its
+Below 80 % nothing is killed, however big; 40 % (3.2 GB on 8 GB) leaves room
+for any ordinary build or test suite. Sizes are read from `/proc`, so this
+holds where systemd gives the user no memory controller.
+
+Left behind ("abandoned"): every pi marks what it starts with
+`LETS_CODE_PI=<its pid>:<start time>`, and the session's first pi adds
+`LETS_CODE_RUN`. A process with this session's `LETS_CODE_RUN` whose
+`LETS_CODE_PI` names a pi that has exited (a subagent that quit, say) is
+ended. Without the markers, from another session, or while its pi still runs
+(a server the agent started in the background on purpose), it is left alone.
+
+The session that started a killed process is told through its
 [inbox](#sessions-and-messages), right after the command that died:
 
 ```
-[lets-code memory guard] stopped `python3 tests/test_calc.py` (pid 4242) at 1650 MB:
-over the per-process limit of 1612 MB. It would have frozen this machine (7.9 GiB of RAM).
+[lets-code memory guard] stopped `python3 tests/test_calc.py` (pid 4242) at 3400 MB:
+over 40 % of this machine's RAM (3277 MB of 8.0 GiB) while 91 % of it was in use. ...
 If a command ended with "Killed", exit 137 or output cut short, this is why; ...
 Don't run it again as it is: bound the input or the test ...
 ```
 
-The same command killed again within 5 minutes is not told twice. Every
-kill goes to `~/.pi/agent/lets-code-memory-guard.log` (JSON lines;
+The same command killed again within 5 minutes is not told twice. Kills,
+watcher notices and `/memguard` toggles go to
+`~/.pi/agent/lets-code-memory-guard.log` (JSON lines;
 `LETS_CODE_MEM_GUARD_LOG` moves it). With sessions off, the note comes with
 the next tool result instead.
-
-**Free RAM**, for the whole machine:
-
-| Free RAM | Action |
-|---|---|
-| under 20 % | pi is warned, with the session's largest processes listed |
-| under 10 % | new bash commands are blocked, except cleanup (`kill`, `ps`, `free`) |
-| under 5 % for 3 s | the largest process is stopped: SIGINT, SIGTERM, SIGKILL, 10 s apart |
-| under 2.5 % | the largest process is killed at once |
 
 The guard is a pi
 extension (part of lets-code's, `~/.pi/agent/extensions/lets-code/memory-guard.ts`) and is inert in
@@ -1817,8 +1823,8 @@ probe and the OpenRouter config, the move into the one extension, node tests
 for that extension's index, the git guard, checkpoints, agent guard, mandate,
 subagents, experts (and a lint of every built-in expert with the expert
 builder's `expert-lint`), the Claude Code adapter and sandbox config.
-`tests/mem-guard.test.mjs` runs the size limits against real children of a
-few tens of MB under tiny limits. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for the memory
+`tests/mem-guard.test.mjs` runs the watcher and the guard against a made-up
+`/proc/meminfo` and real children of at most 30 MB. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for the memory
 guard.
 
 A release is a GitHub release tagged `vX.Y.Z`: the publish workflow runs the

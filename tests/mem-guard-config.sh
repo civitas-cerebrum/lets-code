@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# The memory guard's size limits reach pi: MEM_GUARD_PROCESS and
-# MEM_GUARD_SESSION from the config, LETS_CODE_MEM_GUARD_* over it, a bad
-# value refused at launch, nothing exported with the guard off. Runs
+# The memory guard and RAM watcher settings reach pi: the guard off and the
+# watcher on by default, MEM_GUARD / MEM_WATCH from the config, env and flags
+# over it, a bad value refused at launch, nothing exported with both off, and
+# an outer session's markers (LETS_CODE_PI, LETS_CODE_RUN) dropped. Runs
 # against a fake /v1/models server and a fake pi that records its env.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -40,12 +41,12 @@ mkdir -p "${d}/bin"
 cat > "${d}/bin/pi" <<'SH'
 #!/bin/sh
 if [ "${1:-}" = "--help" ]; then echo "  --print, -p   Non-interactive mode"; exit 0; fi
-echo "session=${LETS_CODE_SESSION:-} process=${LETS_CODE_MEM_GUARD_PROCESS:-} session_limit=${LETS_CODE_MEM_GUARD_SESSION:-}" > "${PI_RECORD}"
+echo "session=${LETS_CODE_SESSION:-} guard=${LETS_CODE_MEM_GUARD:-} watch=${LETS_CODE_MEM_WATCH:-} pi=${LETS_CODE_PI:-} run=${LETS_CODE_RUN:-}" > "${PI_RECORD}"
 SH
 chmod +x "${d}/bin/pi"
 
 export PATH="${d}/bin:${PATH}" XDG_CONFIG_HOME="${d}/config" PI_CODING_AGENT_DIR="${d}/agent" PI_OFFLINE=1 PI_RECORD="${d}/record"
-unset LETS_CODE_MEM_GUARD LETS_CODE_MEM_GUARD_PROCESS LETS_CODE_MEM_GUARD_SESSION
+unset LETS_CODE_MEM_GUARD LETS_CODE_MEM_WATCH LETS_CODE_PI LETS_CODE_RUN
 mkdir -p "${d}/config/lets-code"
 config() {
     cat > "${d}/config/lets-code/config" <<EOF
@@ -57,24 +58,31 @@ GIT_GUARD="false"
 $*
 EOF
 }
-launch() { rm -f "${d}/record"; (cd "${d}" && bash "${lc}" -p hi < /dev/null > "${d}/out" 2> "${d}/err") || true; cat "${d}/record" 2>/dev/null || echo "(pi not started)"; }
+launch() { rm -f "${d}/record"; (cd "${d}" && bash "${lc}" "$@" -p hi < /dev/null > "${d}/out" 2> "${d}/err") || true; cat "${d}/record" 2>/dev/null || echo "(pi not started)"; }
+
+config ""
+check "defaults: guard off, watcher on" "$(launch)" "session=1 guard=false watch=true pi= run="
 
 config 'MEM_GUARD="true"'
-check "defaults: 20% and 45% reach pi" "$(launch)" "session=1 process=20% session_limit=45%"
-
-config 'MEM_GUARD="true"
-MEM_GUARD_PROCESS="1600M"
-MEM_GUARD_SESSION="off"'
-check "config: a size and off" "$(launch)" "session=1 process=1600M session_limit=off"
-
-check "env over config" "$(LETS_CODE_MEM_GUARD_PROCESS=30% LETS_CODE_MEM_GUARD_SESSION=3G launch)" "session=1 process=30% session_limit=3G"
-
-config 'MEM_GUARD="true"
-MEM_GUARD_PROCESS="lots"'
-check "a bad value: pi is not started" "$(launch)" "(pi not started)"
-check "a bad value: says which and why" "$(grep -c 'MEM_GUARD_PROCESS must be a % of RAM' "${d}/err")" 1
+check "config: MEM_GUARD=true" "$(launch)" "session=1 guard=true watch=true pi= run="
 
 config 'MEM_GUARD="false"
-MEM_GUARD_PROCESS="lots"'
-check "guard off: nothing exported, the limits not even read" "$(launch)" "session= process= session_limit="
+MEM_WATCH="false"'
+check "env over config" "$(LETS_CODE_MEM_GUARD=true launch)" "session=1 guard=true watch=false pi= run="
+check "--mem-guard" "$(launch --mem-guard)" "session=1 guard=true watch=false pi= run="
+check "both off: nothing exported" "$(launch)" "session= guard= watch= pi= run="
+
+config 'MEM_GUARD="yes"
+MEM_WATCH="on"'
+check "yes/on are true" "$(launch)" "session=1 guard=true watch=true pi= run="
+check "--no-mem-guard --no-mem-watch" "$(launch --no-mem-guard --no-mem-watch)" "session= guard= watch= pi= run="
+
+config 'MEM_GUARD_PROCESS="20%"
+MEM_GUARD_SESSION="45%"'
+check "the old size keys are ignored" "$(launch)" "session=1 guard=false watch=true pi= run="
+check "an outer session's markers are dropped" "$(LETS_CODE_PI=1:1 LETS_CODE_RUN=1:1 launch)" "session=1 guard=false watch=true pi= run="
+
+config 'MEM_GUARD="lots"'
+check "a bad value: pi is not started" "$(launch)" "(pi not started)"
+check "a bad value: says which and why" "$(grep -c 'MEM_GUARD must be true or false' "${d}/err")" 1
 exit "${fail}"

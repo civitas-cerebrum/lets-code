@@ -532,7 +532,7 @@ const blocked = (r) => r?.block === true;
 	const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } });
 	t("orchestration: every delivery reviewed, by the reviewer experts", [/never test or verify a delivery yourself/.test(s.lets_code_mandate), /expert-reviewer/.test(s.lets_code_mandate), /APPROVE: go on; REVISE: back to the one who did it/.test(s.lets_code_mandate)], [true, true, true]);
 	t("orchestration: the factory's verdict is taken", /software-factory run comes reviewed/.test(s.lets_code_mandate), true);
-	t("orchestration: a run blocked after its build goes final, not stopped", /goes to the final approval as it is with decision final, and you commit it: stopping it loses the work/.test(s.lets_code_mandate), true);
+	t("orchestration: a run blocked or stuck after its build goes final, not stopped", /blocked or stuck after its build .* goes to the final approval as it is with decision final .* and you commit it: stopping it loses the work/.test(s.lets_code_mandate), true);
 	t("orchestration: no tests of its own (refused)", blocked(await h.call(d, "bash", { command: "pytest -q" })), true);
 	t("orchestration: the reviewers may be dispatched", [await h.call(d, "expert", { action: "run", name: "expert-reviewer", brief: {} }), await h.call(d, "expert", { action: "run", name: "design-reviewer", brief: {} })], [undefined, undefined]);
 	t("orchestration: the plan section is not added outside plan", /Write the plan for orchestration/.test(s.lets_code_mandate), false);
@@ -611,6 +611,32 @@ const blocked = (r) => r?.block === true;
 	t("orchestration: no step sizes outside plan, told to split after a short run", [/Size each step/.test(sec(o, { model: { contextWindow: 32768 } })), /ran short of context, give the remaining steps in smaller parts/.test(sec(o, {}))], [false, true]);
 	delete process.env.LETS_CODE_EXPERTS_ON; delete process.env.LETS_CODE_SUBAGENTS_ON; delete process.env.LETS_CODE_ORCHESTRATOR_ON; delete process.env.LETS_CODE_PLAN_ON;
 	process.env.LETS_CODE_MANDATE_ON = "1";
+}
+// --- orchestration trims its older turns before each request
+{
+	const { mod } = await load({});
+	const big = "x".repeat(5000);
+	const A = (content) => ({ role: "assistant", content });
+	const R = (text) => ({ role: "toolResult", toolCallId: "c", content: [{ type: "text", text }] });
+	const msgs = [{ role: "user", content: [{ type: "text", text: "task" }] },
+		A([{ type: "toolCall", id: "c1", name: "expert", arguments: { action: "run", brief: { ticket: big, decision: "x" } } }]), R(big),
+		A([{ type: "text", text: big }]),
+		A([{ type: "toolCall", id: "c2", name: "expert", arguments: { brief: { ticket: big } } }]), R(big),
+		A([{ type: "text", text: "short" }])];
+	const out = mod.trimOld(msgs);
+	const len = (m) => JSON.stringify(m).length;
+	t("trim: an old tool result cut to head and tail, with a note", [len(out[2]) < 2500, /older turn trimmed: the run's ledger and artifacts have it all/.test(out[2].content[0].text), out[2].content[0].text.startsWith("xxx")], [true, true, true]);
+	t("trim: an old tool call's long fields cut, the rest kept", [out[1].content[0].arguments.brief.ticket.length < 2000, out[1].content[0].arguments.brief.decision, out[1].content[0].arguments.action, out[1].content[0].name], [true, "x", "run", "expert"]);
+	t("trim: old long text cut", out[3].content[0].text.length < 2000, true);
+	t("trim: the last two assistant turns and what follows kept whole", [out[4] === msgs[4], out[5] === msgs[5], out[6] === msgs[6]], [true, true, true]);
+	t("trim: the user's request never cut", out[0] === msgs[0], true);
+	t("trim: nothing long and old: no change", mod.trimOld([A([{ type: "text", text: "a" }]), R("b"), A([{ type: "text", text: "c" }]), R("d"), A([{ type: "text", text: "e" }])]), null);
+	t("trim: two assistant turns or fewer: no change", mod.trimOld([A([{ type: "text", text: big }]), R(big), A([{ type: "text", text: "e" }])]), null);
+	const d = repo();
+	const o = await load({ LETS_CODE_MODE: "orchestration" }); await o.start(d);
+	t("context hook: orchestration trims", !!(await o.handlers.context({ messages: msgs }))?.messages, true);
+	const a = await load({ LETS_CODE_MODE: "auto" }); await a.start(d);
+	t("context hook: other modes left alone", await a.handlers.context({ messages: msgs }), undefined);
 }
 // --- the /mode menu and the agent's mode tool
 {

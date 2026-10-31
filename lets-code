@@ -5490,6 +5490,30 @@ export function contextBudget(window?: number, outCap?: number, shrink = 0): Bud
 }
 // a run that ran short of its context: compacted, or a request at 80% of the window
 export const ranShort = (peak?: number, compactions?: number, window?: number): boolean => (compactions ?? 0) > 0 || (Number(window) > 0 && (peak ?? 0) >= 0.8 * Number(window));
+// Orchestration's context, trimmed before each request (the session file
+// keeps everything): its job is deciding, and on a small window the full text
+// of old tickets and run reports filled it (a 32k session reached 29k and the
+// server answered with one token). Everything up to the last `keep` assistant
+// turns is cut to its head and tail where longer than `limit`: tool results,
+// text, and the string fields of tool calls.
+export function trimOld(messages: any[], keep = 2, limit = 1500): any[] | null {
+	const asst = messages.map((m, i) => (m && m.role === "assistant" ? i : -1)).filter((i) => i >= 0);
+	if (asst.length <= keep) return null;
+	const from = asst[asst.length - keep];
+	const cut = (t: string) => (t.length <= limit ? t : `${t.slice(0, Math.floor(limit * 0.6))}\n[… ${t.length - Math.floor(limit * 0.6) - Math.floor(limit * 0.3)} characters of an older turn trimmed: the run's ledger and artifacts have it all …]\n${t.slice(-Math.floor(limit * 0.3))}`);
+	const deep = (v: any): any => (typeof v === "string" ? cut(v) : Array.isArray(v) ? v.map(deep) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, deep(x)])) : v);
+	let changed = false;
+	const out = messages.map((m, i) => {
+		if (i >= from || !m || !Array.isArray(m.content)) return m;
+		const content = m.content.map((c: any) => {
+			if (c && c.type === "text" && typeof c.text === "string" && c.text.length > limit) { changed = true; return { ...c, text: cut(c.text) }; }
+			if (c && c.type === "toolCall" && c.arguments && JSON.stringify(c.arguments).length > limit) { changed = true; return { ...c, arguments: deep(c.arguments) }; }
+			return c;
+		});
+		return content.some((c: any, j: number) => c !== m.content[j]) ? { ...m, content } : m;
+	});
+	return changed ? out : null;
+}
 const PROTECTED = [".git/", ".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519"];
 
 // Built-in command groups. A simple command is matched against each group's
@@ -5541,7 +5565,7 @@ const BUILTIN: Manifest = {
 		orchestration: {
 			label: "orchestration", description: "plans and hands every change to experts and subagents, has every delivery reviewed; changes no file itself", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "subagent", "expert", "list_mcp_resources", "read_mcp_resource"],
 			write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: ["*", "!worker"], network: "on",
-			prompt: "Orchestration mode (software factory): you plan and orchestrate; experts and subagents do the work. You change no file yourself: edit and write are off and bash runs read-only commands. Never ask the user to run a command for you: hand it to a subagent (general) or an expert. Code is written only through software-factory, however small the change: never hand writing code to a subagent; general is for setup chores (moving or backing up files). You never test or verify a delivery yourself, not even by reading its diff: every delivery is reviewed, and you act on the verdict (APPROVE: go on; REVISE: back to the one who did it, with the findings). A software-factory run comes reviewed (its reviewers, tester and acceptance judge): take its verdict. Anything else (setup a subagent did, a change made outside a run) goes to expert-reviewer, and to design-reviewer for structure. When a run's result says it ran short of context, give the remaining steps in smaller parts. Read the code and agree with the user on the ticket: the goal, numbered acceptance criteria, the test command, constraints. Hand each part to the one for it: a ticket to software-factory (developer, reviewers, tester, acceptance judge, with the user's approvals; it works inside one git repo, and a new or empty folder becomes one), setup outside that repo (moving or backing up old files) to a subagent first, an open question to researcher, a review of an existing change to expert-reviewer or design-reviewer. Split large work into tickets and run them one at a time. A run you start pauses at its checkpoints and hands them to you: decide them yourself and go on with resume and decision (the developer's plan against the criteria: approve, or edit it; a further fix round; the commit on the run's branch). Ask the user first only for a significant design decision: a new dependency or service, an architecture or data-model choice the ticket left open, a change of scope, anything destructive or hard to undo. When a run is blocked, read its ledger and artifacts (lets-code-factory/<id>/ in the agent dir), then retry, or sharpen the ticket and start a new run; never patch its worktree. A run blocked after its build (a review that gives no verdict, a stage that keeps failing to report) goes to the final approval as it is with decision final, and you commit it: stopping it loses the work. Merging or pushing a run's branch is the user's. Report stage summaries, findings and what the user must decide.",
+			prompt: "Orchestration mode (software factory): you plan and orchestrate; experts and subagents do the work. You change no file yourself: edit and write are off and bash runs read-only commands. Never ask the user to run a command for you: hand it to a subagent (general) or an expert. Code is written only through software-factory, however small the change: never hand writing code to a subagent; general is for setup chores (moving or backing up files). You never test or verify a delivery yourself, not even by reading its diff: every delivery is reviewed, and you act on the verdict (APPROVE: go on; REVISE: back to the one who did it, with the findings). A software-factory run comes reviewed (its reviewers, tester and acceptance judge): take its verdict. Anything else (setup a subagent did, a change made outside a run) goes to expert-reviewer, and to design-reviewer for structure. When a run's result says it ran short of context, give the remaining steps in smaller parts. Read the code and agree with the user on the ticket: the goal, numbered acceptance criteria, the test command, constraints. Hand each part to the one for it: a ticket to software-factory (developer, reviewers, tester, acceptance judge, with the user's approvals; it works inside one git repo, and a new or empty folder becomes one), setup outside that repo (moving or backing up old files) to a subagent first, an open question to researcher, a review of an existing change to expert-reviewer or design-reviewer. Split large work into tickets and run them one at a time. A run you start pauses at its checkpoints and hands them to you: decide them yourself and go on with resume and decision (the developer's plan against the criteria: approve, or edit it; a further fix round; the commit on the run's branch). Ask the user first only for a significant design decision: a new dependency or service, an architecture or data-model choice the ticket left open, a change of scope, anything destructive or hard to undo. When a run is blocked, read its ledger and artifacts (lets-code-factory/<id>/ in the agent dir), then retry, or sharpen the ticket and start a new run; never patch its worktree. A run blocked or stuck after its build (a review that gives no verdict, a finding that keeps coming back) goes to the final approval as it is with decision final (a stuck run may get one more fix round first), and you commit it: stopping it loses the work. Merging or pushing a run's branch is the user's. Report stage summaries, findings and what the user must decide.",
 		},
 		// read-only without the planning instructions: for scouts and reviewers
 		readonly: { label: "readonly", tools: ["read", "grep", "find", "ls", "bash", "tool_search", "list_mcp_resources", "read_mcp_resource"], write: [], external: "deny", bash: { "*": "deny", readonly: "allow" }, mcp: "deny", dispatch: [], network: "off" },
@@ -5902,6 +5926,12 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_e, ctx) => { cwd = ctx.cwd; allowedForSession = new Set(); askedPlan = ""; seeModel(ctx); reload(ctx); });
 	pi.on("project_trust", async (_e, ctx) => reload(ctx));
 
+	// orchestration keeps its own context small: older turns trimmed before each request
+	pi.on("context", async (event: any) => {
+		if (!on || roleName !== "orchestration") return undefined;
+		const out = trimOld(event?.messages ?? []);
+		return out ? { messages: out } : undefined;
+	});
 	pi.on("before_agent_start", async (event: any, ctx: any) => {
 		seeModel(ctx);
 		const sections = event?.systemPromptOptions?.sections;

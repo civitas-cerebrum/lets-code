@@ -619,7 +619,7 @@ const blocked = (r) => r?.block === true;
 	const big = "x".repeat(5000);
 	const A = (content) => ({ role: "assistant", content });
 	const R = (text) => ({ role: "toolResult", toolCallId: "c", content: [{ type: "text", text }] });
-	const msgs = [{ role: "user", content: [{ type: "text", text: "task" }] },
+	const msgs = [{ role: "user", content: [{ type: "text", text: "task: " + big }] },
 		A([{ type: "toolCall", id: "c1", name: "expert", arguments: { action: "run", brief: { ticket: big, decision: "x" } } }]), R(big),
 		A([{ type: "text", text: big }]),
 		A([{ type: "toolCall", id: "c2", name: "expert", arguments: { brief: { ticket: big } } }]), R(big),
@@ -630,7 +630,9 @@ const blocked = (r) => r?.block === true;
 	t("trim: an old tool call's long fields cut, the rest kept", [out[1].content[0].arguments.brief.ticket.length < 2000, out[1].content[0].arguments.brief.decision, out[1].content[0].arguments.action, out[1].content[0].name], [true, "x", "run", "expert"]);
 	t("trim: old long text cut", out[3].content[0].text.length < 2000, true);
 	t("trim: the last two assistant turns and what follows kept whole", [out[4] === msgs[4], out[5] === msgs[5], out[6] === msgs[6]], [true, true, true]);
-	t("trim: the user's request never cut", out[0] === msgs[0], true);
+	t("trim: the user's request never cut, however long", [out[0] === msgs[0], out[0].content[0].text.length], [true, 5006]);
+	const later = mod.trimOld([...msgs.slice(0, 3), { role: "user", content: [{ type: "text", text: "answer: " + big }] }, ...msgs.slice(3)]);
+	t("trim: a later user message never cut either", later[3].content[0].text.length, 5008);
 	t("trim: nothing long and old: no change", mod.trimOld([A([{ type: "text", text: "a" }]), R("b"), A([{ type: "text", text: "c" }]), R("d"), A([{ type: "text", text: "e" }])]), null);
 	t("trim: two assistant turns or fewer: no change", mod.trimOld([A([{ type: "text", text: big }]), R(big), A([{ type: "text", text: "e" }])]), null);
 	const d = repo();

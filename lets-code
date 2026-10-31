@@ -5495,7 +5495,8 @@ export const ranShort = (peak?: number, compactions?: number, window?: number): 
 // of old tickets and run reports filled it (a 32k session reached 29k and the
 // server answered with one token). Everything up to the last `keep` assistant
 // turns is cut to its head and tail where longer than `limit`: tool results,
-// text, and the string fields of tool calls.
+// assistant text, and the string fields of tool calls; never the user's own
+// messages (a trimmed request had the orchestrator guessing at its spec).
 export function trimOld(messages: any[], keep = 2, limit = 1500): any[] | null {
 	const asst = messages.map((m, i) => (m && m.role === "assistant" ? i : -1)).filter((i) => i >= 0);
 	if (asst.length <= keep) return null;
@@ -5504,7 +5505,8 @@ export function trimOld(messages: any[], keep = 2, limit = 1500): any[] | null {
 	const deep = (v: any): any => (typeof v === "string" ? cut(v) : Array.isArray(v) ? v.map(deep) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, deep(x)])) : v);
 	let changed = false;
 	const out = messages.map((m, i) => {
-		if (i >= from || !m || !Array.isArray(m.content)) return m;
+		// the user's messages are never cut: they are the request and its answers
+		if (i >= from || !m || m.role === "user" || !Array.isArray(m.content)) return m;
 		const content = m.content.map((c: any) => {
 			if (c && c.type === "text" && typeof c.text === "string" && c.text.length > limit) { changed = true; return { ...c, text: cut(c.text) }; }
 			if (c && c.type === "toolCall" && c.arguments && JSON.stringify(c.arguments).length > limit) { changed = true; return { ...c, arguments: deep(c.arguments) }; }

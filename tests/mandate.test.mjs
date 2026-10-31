@@ -691,6 +691,33 @@ const blocked = (r) => r?.block === true;
 	const o = await load({ LETS_CODE_MODE: "orchestration" }); await o.start(d);
 	t("orchestration: no task-size section", "lets_code_task_size" in sec(o, big), false);
 }
+// --- a large request with a UI: the user is offered plan mode first
+{
+	const big = "Build a JSONPath engine.\n" + Array.from({ length: 9 }, (_, i) => `${i + 1}. rule number ${i + 1}`).join("\n");
+	const d = repo();
+	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_PLAN_ON = "1"; process.env.LETS_CODE_ORCHESTRATOR_ON = "1";
+	process.env.LETS_CODE_EXPERTS_ON = "1"; process.env.LETS_CODE_SUBAGENTS_ON = "1";
+	const start = (h, prompt) => h.handlers.before_agent_start({ prompt, systemPromptOptions: { sections: {} } }, h.ctx(d));
+	const modes = (h) => h.emitted.filter(([c]) => c === "lets-code:mode").map(([, x]) => x);
+	const yes = await load({}, { answers: [(o) => o[0]] }); await yes.start(d); await start(yes, big);
+	t("large request, UI: offered, plan first carries on by orchestration", [yes.selects.at(-1), yes.options.at(-1)], ["This request looks medium or large (a long spec, or many rules).", ["Plan it first, then carry it out by orchestration", "Go ahead in yolo mode"]]);
+	t("offer taken: in plan mode, writes refused by plan, not by the hold-back", [modes(yes).at(-1)?.role, /plan/i.test((await yes.call(d, "write", { path: join(d, "src/b.txt") }))?.reason ?? ""), /looks medium or large/.test((await yes.call(d, "write", { path: join(d, "src/b.txt") }))?.reason ?? "")], ["plan", true, false]);
+	const no = await load({}, { answers: [(o) => o[1]] }); await no.start(d); await start(no, big);
+	t("offer declined: no mode change, and no hold-back on the first write", [modes(no).length, await no.call(d, "write", { path: join(d, "src/b.txt") })], [0, undefined]);
+	const small = await load({}, { answers: [(o) => o[0]] }); await small.start(d); await start(small, "Fix the typo in README.md.");
+	t("small request: no offer", small.selects.length, 0);
+	const head = await load({}, { ui: false }); await head.start(d); await start(head, big);
+	t("no UI: no offer; the first write is held back as before", [head.selects.length, /looks medium or large/.test((await head.call(d, "write", { path: join(d, "src/b.txt") }))?.reason ?? "")], [0, true]);
+	const inPlan = await load({}, { answers: [(o) => o[0]] }); await inPlan.start(d); await inPlan.commands.plan.handler("", inPlan.ctx(d)); const n0 = inPlan.selects.length; await start(inPlan, big);
+	t("already in plan mode: no offer", inPlan.selects.length - n0, 0);
+	delete process.env.LETS_CODE_EXPERTS_ON;
+	const noExp = await load({}, { answers: [(o) => o[1]] }); await noExp.start(d); await start(noExp, big);
+	t("experts off: plan first, without orchestration", noExp.options.at(-1)?.[0], "Plan it first");
+	delete process.env.LETS_CODE_SUBAGENTS_ON; delete process.env.LETS_CODE_ORCHESTRATOR_ON; delete process.env.LETS_CODE_PLAN_ON;
+	process.env.LETS_CODE_MANDATE_ON = "1";
+	const auto = await load({ LETS_CODE_MODE: "auto" }, { answers: [(o) => o[1]] }); await auto.start(d); await start(auto, big);
+	t("mandate on, auto: offered, go ahead names the mode", auto.options.at(-1)?.[1], "Go ahead in auto mode");
+}
 // --- the /mode menu and the agent's mode tool
 {
 	const pick = (name) => (opts) => opts.find((o) => o.slice(2).startsWith(`${name} — `));

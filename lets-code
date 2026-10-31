@@ -5702,9 +5702,11 @@ export const MAX_GO_NUDGES = 2;
 // Task size. The mode tool's description alone did not move a small model:
 // in the default mode it wrote code on medium and hard tasks without asking for
 // plan mode (0 of 5 in a trigger check). So the size question is in the system
-// prompt wherever plan mode is there, and the first write of a request that
-// looks large, with no mode asked for, is held back once.
+// prompt wherever plan mode is there; with a UI the user is offered plan mode at
+// the start of a request that looks large, and without one the first write of
+// such a request, with no mode asked for, is held back once.
 export const TASK_SIZE_SECTION = "Task size: before you start, judge the request. A medium or large task (several files or steps, a new module or feature, a refactor, a spec with many rules) goes to plan mode first: ask for it with the mode tool before you write code, and where orchestration is listed, carry the approved plan out by orchestration. A small task (one file, a fix, a question) goes ahead directly.";
+export const SIZE_OFFER = "This request looks medium or large (a long spec, or many rules).";
 export const SIZE_NUDGE = "lets-code: this request looks medium or large (a long spec, or many rules) and no mode was asked for. Ask for plan mode first with the mode tool; if the task really is small, write again and it goes through.";
 // a long request, or one with many rules: about 1400 characters, or 8 list lines
 export function looksLarge(text: string): boolean {
@@ -6147,7 +6149,18 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("before_agent_start", async (event: any, ctx: any) => {
 		seeModel(ctx);
-		if (typeof event?.prompt === "string") { requestLarge = looksLarge(event.prompt); modeAsked = false; }
+		if (typeof event?.prompt === "string") {
+			requestLarge = looksLarge(event.prompt); modeAsked = false;
+			// with a UI the user is offered the switch: the model, nudged, could
+			// still judge a large request small and go ahead (seen in a trigger check)
+			if (requestLarge && sizeApplies() && ctx?.hasUI && typeof ctx?.ui?.select === "function" && (PLAN || ACTIVE)) {
+				const plan = `Plan it first${canOrchestrate() ? ", then carry it out by orchestration" : ""}`, go = `Go ahead in ${current()} mode`;
+				const pick = await ctx.ui.select(SIZE_OFFER, [plan, go]);
+				modeAsked = true;   // the user decided: no hold-back on the first write
+				log("size-offer", { pick: pick === plan ? "plan" : "go" });
+				if (pick === plan) { enterPlan(ctx); ctx.ui.notify("mode: plan", "info"); }
+			}
+		}
 		const sections = event?.systemPromptOptions?.sections;
 		if (sections && typeof sections === "object") { if (sizeApplies()) sections.lets_code_task_size = TASK_SIZE_SECTION; else delete sections.lets_code_task_size; }
 		if (sections && typeof sections === "object") { if (on && role.prompt && !role.bypass) sections.lets_code_mandate = promptOf(roleName); else delete sections.lets_code_mandate; }

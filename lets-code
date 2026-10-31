@@ -5215,6 +5215,8 @@ export default function (pi: ExtensionAPI) {
 			log("stop-nudge", { turnsSinceWrap: d.totalTurns - wrapTurn });
 			entries.push(msg(STOP_TEXT));
 		}
+		// cut replies in a row: a reply that ended normally (or made its call) resets the count
+		if (m.role === "assistant" && (m.stopReason !== "length" || madeToolCall)) lengthNudges = 0;
 		if (m.role === "assistant" && m.stopReason === "length" && !madeToolCall && lengthNudges < MAX_LENGTH_NUDGES) {
 			lengthNudges++;
 			log("length-nudge", { n: lengthNudges });
@@ -8848,6 +8850,20 @@ async function step(L: Ledger, deps: Deps): Promise<boolean> {
 		L.findings[stage] = found;
 		if (!open.length) { L.stage = next(stage); entry.summary += "; REVISE without a blocker or major: going on"; return true; }
 		fixRound(L, stage, open); return true;
+	}
+	// no verdict even after asking again (a small model's reviewer can run past
+	// the reply limit every time): the suite decides, so a finished build is not
+	// lost to a reviewer that cannot report. It passes: on, marked unreviewed;
+	// it fails: a fix round with its output
+	if (ok && L.howToRun) {
+		const r = await deps.exec(L.howToRun, L.work, SUITE_TIMEOUT_MS);
+		if (r.code === 0) {
+			entry.verdict = "NO VERDICT (the suite passes)"; entry.summary = `no verdict from ${EXPERT[stage]}; \`${short(L.howToRun, 60)}\` passes: going on unreviewed`;
+			L.unreviewed = true; L.stage = next(stage); return true;
+		}
+		entry.verdict = "NO VERDICT (the suite fails)";
+		fixRound(L, stage, [{ id: "SUITE1", severity: "blocker", where: L.howToRun, title: `no verdict from ${EXPERT[stage]}, and the test suite fails`, detail: r.out.slice(-3000) }]);
+		return true;
 	}
 	blocked(L, `${stage}: ${ok ? `no verdict line in ${EXPERT[stage]}'s reply` : `${EXPERT[stage]}'s run failed: ${short(text, 200)}`}`);
 	return true;

@@ -190,17 +190,24 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	const r13 = makeRepo("ask-judge"); const fd13 = fakeDeps({ ...OK, build: [build()], judge: [noVerdict(false), "## Verdict\nACCEPT all pass\n## Criteria\nC1: PASS x\nC2: PASS y"] });
 	const L13 = await F.startRun(opts(r13), fd13);
 	t("judge without its verdict: asked again", [L13.status, fd13.calls.filter((c) => c.meta.stage === "judge").length], ["done", 2]);
-	// negative: never a verdict: at most MAX_CONTINUES more, then blocked as before
+	// never a verdict: asked again twice, then the suite decides
 	const r14 = makeRepo("ask-never"); const fd14 = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { blocked: { action: "stop" } } });
 	const L14 = await F.startRun(opts(r14), fd14);
-	t("never a verdict: asked again twice, then blocked", [fd14.calls.filter((c) => c.meta.stage === "expert-review").length, L14.entries.find((e) => e.stage === "expert-review").verdict, L14.status], [3, "NO VERDICT", "stopped"]);
+	t("never a verdict, the suite passes: on, marked unreviewed", [fd14.calls.filter((c) => c.meta.stage === "expert-review").length, L14.entries.find((e) => e.stage === "expert-review").verdict, L14.unreviewed, L14.status, fd14.calls.some((c) => c.meta.stage === "design-review")], [3, "NO VERDICT (the suite passes)", true, "done", true]);
+	const r14b = makeRepo("ask-never-red"); const fd14b = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { stuck: { action: "stop" }, blocked: { action: "stop" } } });
+	const L14b = await F.startRun(opts(r14b, { howToRun: "test -f nope.txt" }), fd14b);
+	const ev14b = L14b.entries.filter((e) => e.stage === "expert-review");
+	t("never a verdict, the suite fails: a fix round with its output, not on", [ev14b[0].verdict, fd14b.calls.filter((c) => c.meta.stage === "build").length >= 2, /no verdict from expert-reviewer, and the test suite fails/.test(fd14b.calls.filter((c) => c.meta.stage === "build")[1]?.brief.findings ?? ""), L14b.status], ["NO VERDICT (the suite fails)", true, true, "stopped"]);
+	const r14c = makeRepo("ask-never-nosuite"); const fd14c = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { blocked: { action: "stop" } } });
+	const L14c = await F.startRun(opts(r14c, { howToRun: "" }), fd14c);
+	t("never a verdict, no test command: blocked as before", [L14c.entries.find((e) => e.stage === "expert-review").verdict, L14c.status], ["NO VERDICT", "stopped"]);
 	// negative: a reviewer whose run failed is not asked again (that is a failure, not a missing line)
 	const r15 = makeRepo("ask-failed"); const fd15 = fakeDeps({ ...OK, build: [build()], "expert-review": [() => ({ text: "boom", exitCode: 1, input: 1, output: 1, seconds: 1 })] }, { decisions: { blocked: { action: "stop" } } });
 	const L15 = await F.startRun(opts(r15), fd15);
 	t("a failed review run: not asked again", [fd15.calls.filter((c) => c.meta.stage === "expert-review").length, L15.entries.find((e) => e.stage === "expert-review").verdict], [1, "FAILED"]);
 	// blocked after the build: decision final takes the build to the final approval, and it is committed
 	const r16 = makeRepo("final-blocked"); const fd16 = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { blocked: { action: "final", by: "the orchestrator" } } });
-	const L16 = await F.startRun(opts(r16), fd16);
+	const L16 = await F.startRun(opts(r16, { howToRun: "" }), fd16);
 	t("blocked after the build, final: committed on the run branch, marked unreviewed", [L16.status, !!L16.commit, L16.unreviewed, L16.entries.some((e) => e.verdict === "FINAL AS IT IS" && /expert-review and the stages after it did not run/.test(e.summary))], ["done", true, true, true]);
 	t("blocked after the build, final: the later stages did not run", fd16.calls.some((c) => c.meta.stage === "design-review" || c.meta.stage === "judge"), false);
 	t("blocked after the build: final is offered", F.decisionsAt("blocked", { ...L16, waiting: "blocked" }), ["retry", "final", "stop"]);
@@ -419,8 +426,8 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("blocked: the user is asked, the stage runs again", [fd.asked.includes("blocked"), L.status, fd.calls.filter((c) => c.meta.stage === "build").length], [true, "done", 2]);
 	const repo2 = makeRepo("ask-noverdict");
 	const fd2 = fakeDeps({ ...OK, "expert-review": ["looks good to me"] }, { decisions: { blocked: { action: "stop" } } });
-	const L2 = await F.startRun(opts(repo2), fd2);
-	t("no verdict line: blocked, then stopped", [L2.status, L2.entries.at(-1).verdict, fd2.asked.at(-1)], ["stopped", "NO VERDICT", "blocked"]);
+	const L2 = await F.startRun(opts(repo2, { howToRun: "" }), fd2);
+	t("no verdict line, no test command: blocked, then stopped", [L2.status, L2.entries.at(-1).verdict, fd2.asked.at(-1)], ["stopped", "NO VERDICT", "blocked"]);
 	const repo3 = makeRepo("nochange");
 	const L3 = await F.startRun(opts(repo3), fakeDeps({ ...OK, build: ["STATUS: DONE"] }, { decisions: { blocked: { action: "stop" } } }));
 	t("DONE without a change in the tree: blocked", [L3.status, L3.entries.at(-1).summary], ["stopped", "no change in the work tree"]);

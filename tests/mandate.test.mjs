@@ -824,6 +824,36 @@ const blocked = (r) => r?.block === true;
 	await h.commands.mode.handler("auto", h.ctx(d));
 	t("back to auto: everything from before, and the late tool", ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent", "codemode", "mcp__late__x"].every((x) => h.tools().includes(x)), true);
 }
+// --- Windows forms of commands (harmless elsewhere)
+{
+	const { mod } = await load({});
+	const { classify } = mod;
+	const ask = { bash: { "*": "allow", privileged: "ask", destructive: "ask", "package-install": "ask", "network-exec": "ask" } };
+	for (const c of ["rd /s /q build", "rmdir /S dist", "del /s *.tmp", `cmd /c "rd /s /q build"`, "Remove-Item -Recurse -Force build", `powershell -Command "Remove-Item build -Recurse"`, "pwsh -c rm -r build"])
+		t(`destructive: ${c}`, classify(c, ask).group, "destructive");
+	for (const c of ["py -3 -m pip install pytest", "python.exe -m pip install x", "C:\\Python313\\python.exe -m pip install x", "pip.exe install x", "npm.cmd install x", "winget install Python.Python.3.13"])
+		t(`package-install: ${c}`, classify(c, ask).group, "package-install");
+	t("not destructive: del one file, rm a name with -r in it", [classify("del notes.txt", ask).group, classify("rm build-r.txt", ask).group], ["", ""]);
+}
+// --- Windows paths (process.platform faked as win32): Git Bash's /c/x, /tmp/x and
+// ~ are mapped to Windows paths, compared without case, globbed with "/"
+{
+	const { mod } = await load({});
+	const { canonical, inScope, isProtected } = mod;
+	const real = Object.getOwnPropertyDescriptor(process, "platform");
+	Object.defineProperty(process, "platform", { value: "win32" });
+	try {
+		t("win: /c/x is C:\\x", canonical("/c/proj/src/a.txt", "C:\\proj"), "C:\\proj\\src\\a.txt");
+		t("win: relative and forward slashes", canonical("src/../src/b.txt", "C:/proj"), "C:\\proj\\src\\b.txt");
+		t("win: a top-level name keeps its first letter", canonical("D:\\newdir\\x", "C:\\proj"), "D:\\newdir\\x");
+		t("win: in the project, any case or form", ["/c/Proj/src/x", "C:/proj/src/x", "c:\\PROJ\\x", "src\\y"].map((p) => inScope(p, ["."], "C:\\proj")), [true, true, true, true]);
+		t("win: outside the project", ["D:/other/x", "/d/proj/x", "C:\\project2\\x", "C:\\"].map((p) => inScope(p, ["."], "C:\\proj")), [false, false, false, false]);
+		t("win: glob scopes match backslash paths", [inScope("C:\\proj\\src\\deep\\a.ts", ["src/**/*.ts"], "C:\\proj"), inScope("C:\\proj\\src\\a.js", ["src/**/*.ts"], "C:\\proj")], [true, false]);
+		t("win: /tmp writes are in the temp-dir scope", [inScope("/tmp/x/y.txt", [tmpdir()], "C:\\proj"), inScope("/c/proj/y.txt", [tmpdir()], "C:\\proj")], [true, false]);
+		t("win: protected names without case", [isProtected("C:\\proj\\.ENV", {}, "C:\\proj"), isProtected("/c/proj/.Git/config", {}, "C:\\proj"), isProtected("C:\\proj\\keys\\x.PEM", {}, "C:\\proj"), isProtected("C:\\proj\\src\\a.ts", {}, "C:\\proj")], [true, true, true, false]);
+	} finally { Object.defineProperty(process, "platform", real); delete globalThis.__lcwBash; }
+	t("posix unchanged: /c/x is a plain path", canonical("/c/proj/x", "/"), "/c/proj/x");
+}
 t("deny log written", readFileSync(process.env.LETS_CODE_MANDATE_LOG, "utf8").split("\n").filter((l) => l.includes('"deny"')).length > 5, true);
 
 rmSync(work, { recursive: true, force: true });

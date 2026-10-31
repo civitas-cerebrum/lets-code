@@ -4,6 +4,8 @@
 # touching files, with PATH stripped of fd/fdfind/rg.
 set -eu
 eval "$(sed -n '/^ensure_pi_tools() {/,/^}$/p' "$(dirname "$0")/../lets-code")"
+eval "$(sed -n '/^on_windows() {/p; /^native_path() {/,/^}$/p' "$(dirname "$0")/../lets-code")"
+LC_WIN=false
 command -v node >/dev/null || { echo "node needed"; exit 1; }
 LOG_PREFIX="[lets-code]"; log() { echo "${LOG_PREFIX} ${1}"; }
 
@@ -27,7 +29,7 @@ export async function ensureTool(tool, onStatus) {
 JS
 # a minimal PATH: node, the fake pi and the commands this test itself needs —
 # never fd/fdfind/rg, whatever the machine has installed
-for c in node grep rm tail sed chmod ln mkdir cat; do ln -s "$(command -v "${c}")" "${work}/path/${c}"; done
+for c in node grep rm tail sed chmod ln mkdir cat dirname tr; do ln -s "$(command -v "${c}")" "${work}/path/${c}"; done
 export PATH="${work}/path"
 PI_AGENT_DIR="${work}/agent"
 
@@ -63,4 +65,31 @@ t "retry hint printed"             "$(echo "${out}" | grep -c 'could not fetch')
 rm -rf "${PI_AGENT_DIR}/bin" "${pkg}/dist/utils/tools-manager.js"
 out="$(ensure_pi_tools 2>&1; echo "rc=$?")"
 t "unknown pi layout: note, rc 0"  "$(echo "${out}" | grep -c 'pi will download')|$(echo "${out}" | tail -1)" "1|rc=0"
+
+# Windows (faked): npm's pi is a shell shim next to node_modules/@earendil-works/
+# pi-coding-agent, not a symlink; pi's downloads are fd.exe / rg.exe
+LC_WIN=true
+cygpath() { shift 2; printf '%s\n' "$1"; }    # cygpath -m -- <p>: these test paths are native already
+npm() { return 1; }
+rm -f "${work}/path/pi"
+printf '#!/bin/sh\nexec node "$basedir/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" "$@"\n' > "${work}/path/pi"; chmod +x "${work}/path/pi"
+wpkg="${work}/path/node_modules/@earendil-works/pi-coding-agent"
+mkdir -p "${wpkg}/dist/utils"
+tm="$(cat <<'JS'
+import { mkdirSync, writeFileSync } from "fs";
+import { join } from "path";
+export async function ensureTool(tool) {
+    const bin = join(process.env.PI_CODING_AGENT_DIR, "bin");
+    mkdirSync(bin, { recursive: true });
+    const p = join(bin, tool + ".exe"); writeFileSync(p, ""); return p;
+}
+JS
+)"
+printf '%s\n' "${tm}" > "${wpkg}/dist/utils/tools-manager.js"
+rm -rf "${PI_AGENT_DIR}/bin"
+out="$(ensure_pi_tools 2>&1)"
+t "windows: package found by the shim" "$(echo "${out}" | grep -c 'fetching.*(fd rg)')" 1
+t "windows: fd.exe and rg.exe fetched" "$([ -f "${PI_AGENT_DIR}/bin/fd.exe" ] && [ -f "${PI_AGENT_DIR}/bin/rg.exe" ] && echo yes)" yes
+out="$(ensure_pi_tools 2>&1)"
+t "windows: fd.exe/rg.exe count as present" "${out}" ""
 exit "${fail}"

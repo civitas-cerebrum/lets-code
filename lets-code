@@ -5078,7 +5078,7 @@ const BURST_TURNS = Math.max(1, Number(process.env.LETS_CODE_BURST_TURNS) || 3);
 const MAX_BURSTS = Math.max(0, Number(process.env.LETS_CODE_MAX_BURSTS ?? 8));
 const REPLAY_RAW = (process.env.LETS_CODE_THINKING_REPLAY ?? "").trim();
 const REPLAY = REPLAY_RAW === "" || REPLAY_RAW === "all" ? Infinity : Math.max(0, Number(REPLAY_RAW) || 0);
-const LOG = process.env.LETS_CODE_AGENT_GUARD_LOG ?? "";
+const LOG = lcwNative(process.env.LETS_CODE_AGENT_GUARD_LOG ?? "");
 const MAX_LENGTH_NUDGES = 3;
 const TEST_REMIND_EDITS = 3;
 const MAX_TEST_REMINDERS = 5;
@@ -5096,7 +5096,8 @@ const REVIEW_MODE = (process.env.LETS_CODE_FINAL_REVIEW ?? "auto").trim().toLowe
 const REVIEW_OFF = ["0", "off", "false", "no"].includes(REVIEW_MODE);
 const REVIEW_ALWAYS = ["on", "1", "true", "yes", "always"].includes(REVIEW_MODE);
 // a bash command that executes code, as opposed to reading or listing files
-const EXEC_RE = /(^|[\s;&|(])(python3?|pytest|node|npm|npx|pnpm|yarn|bun|deno|go|cargo|make|ruby|rspec|java|mvn|gradle|dotnet|php|perl|bash|sh|\.\/[\w.\/-]+)(\s|$)/;
+// (Windows forms too: py, python.exe, pwsh/powershell, cmd /c, .\x.exe)
+const EXEC_RE = /(^|[\s;&|(])((python3?|py|pytest|node|npm|npx|pnpm|yarn|bun|deno|go|cargo|make|ruby|rspec|java|mvn|gradle|dotnet|php|perl|bash|sh|pwsh|powershell|cmd)(\.exe)?|\.[\/\\][\w.\/\\-]+)(\s|$)/;
 const FAILURE_RE = /\b(FAIL(ED)?|MISMATCH|AssertionError|SyntaxError|IndentationError|Traceback \(most recent call last\))\b/;
 const TEST_PATH_RE = /(^|[\/_.-])tests?([\/_.-]|$)/i;
 // documentation or text files: editing them is not a source change the verify nudge should chase
@@ -5657,6 +5658,7 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
@@ -5780,13 +5782,25 @@ ensure_pi() {
 ensure_pi_tools() {
     [ -z "${PI_OFFLINE:-}" ] || return 0
     local missing="" bin="${PI_AGENT_DIR}/bin"
-    { [ -x "${bin}/fd" ] || command -v fd >/dev/null 2>&1 || command -v fdfind >/dev/null 2>&1; } || missing="fd"
-    { [ -x "${bin}/rg" ] || command -v rg >/dev/null 2>&1; } || missing="${missing:+${missing} }rg"
+    # (on Windows pi's downloads are fd.exe and rg.exe)
+    { [ -x "${bin}/fd" ] || [ -f "${bin}/fd.exe" ] || command -v fd >/dev/null 2>&1 || command -v fdfind >/dev/null 2>&1; } || missing="fd"
+    { [ -x "${bin}/rg" ] || [ -f "${bin}/rg.exe" ] || command -v rg >/dev/null 2>&1; } || missing="${missing:+${missing} }rg"
     [ -n "${missing}" ] || return 0
     command -v node >/dev/null 2>&1 || return 0
-    local pi_bin pkg mod
-    pi_bin="$(node -p 'require("fs").realpathSync(process.argv[1])' "$(command -v pi)" 2>/dev/null)" || pi_bin=""
-    pkg="${pi_bin%/dist/*}"
+    local pi_bin="" pkg="" mod
+    if on_windows; then
+        # npm's pi on Windows is a shell shim, not a symlink into the package:
+        # the package sits in npm's global node_modules, next to the shim or
+        # where npm root -g says (made a C:/ path, the form node reads)
+        pkg="$(dirname "$(command -v pi 2>/dev/null || echo .)")/node_modules/@earendil-works/pi-coding-agent"
+        [ -f "${pkg}/dist/utils/tools-manager.js" ] \
+            || pkg="$(npm root -g 2>/dev/null | tr -d '\r')/@earendil-works/pi-coding-agent"
+        pkg="$(native_path "${pkg}")"
+        [ ! -f "${pkg}/dist/utils/tools-manager.js" ] || pi_bin="${pkg}"
+    else
+        pi_bin="$(node -p 'require("fs").realpathSync(process.argv[1])' "$(command -v pi)" 2>/dev/null)" || pi_bin=""
+        pkg="${pi_bin%/dist/*}"
+    fi
     mod="${pkg}/dist/utils/tools-manager.js"
     if [ -z "${pi_bin}" ] || [ ! -f "${mod}" ]; then
         log "note: pi will download its file-search helpers (${missing}) on first start."
@@ -5796,7 +5810,8 @@ ensure_pi_tools() {
     # shellcheck disable=SC2016
     PI_CODING_AGENT_DIR="${PI_AGENT_DIR}" node --input-type=module -e '
         const [mod, ...tools] = process.argv.slice(1);
-        const { ensureTool } = await import(mod);
+        const { pathToFileURL } = await import("node:url");   // a C:\ path is no import specifier
+        const { ensureTool } = await import(pathToFileURL(mod).href);
         let ok = true;
         for (const t of tools) {
             const p = await ensureTool(t, (s) => { if (s.type === "warning") { console.log("[lets-code] " + s.message); ok = false; } });
@@ -5842,7 +5857,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { existsSync, readFileSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep, posix, win32 } from "node:path";
 
 type Decision = "allow" | "ask" | "deny";
 interface Role {
@@ -5876,8 +5891,8 @@ export const modeName = (n: string) => (n === "orchestrator" ? "orchestration" :
 // With the mandate off, plan mode too (LETS_CODE_PLAN_ON, set unless
 // --no-mandate): dormant until /plan or ctrl+alt+p enters it.
 const PLAN = !ACTIVE && process.env.LETS_CODE_PLAN_ON === "1";
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-const LOG = process.env.LETS_CODE_MANDATE_LOG || join(AGENT_DIR, "lets-code-mandate.log");
+const AGENT_DIR = lcwNative(process.env.PI_CODING_AGENT_DIR) || join(lcwHome(), ".pi", "agent");
+const LOG = lcwNative(process.env.LETS_CODE_MANDATE_LOG) || join(AGENT_DIR, "lets-code-mandate.log");
 // the model's mode switches: asked first ("ask", the default) or made at
 // once ("auto", LETS_CODE_MODE_SWITCH=auto, for one launch)
 export function readModeSwitch(): "ask" | "auto" {
@@ -5959,11 +5974,15 @@ const GROUPS: Record<string, RegExp[]> = {
 		/^(node|python3?|ruby|go|cargo|rustc|java|gcc|clang|make|cmake|tsc|deno|bun)\s+(--version|-v|-V|version)(\s|$)/,
 	],
 	"git-write": [/^git\s+(add|commit|push|pull|fetch|merge|rebase|cherry-pick|revert|reset|checkout|switch|restore|stash|tag|rm|mv|clean|am|apply)(\s|$)/],
-	build: [/^(npm|pnpm|yarn|bun)\s+(run|test|t|start|build|exec|x)(\s|$)/, /^(npx|pnpx|bunx)\s/, /^(make|cmake|cargo|go|mvn|gradle|dotnet|tsc|pytest|python3?\s+-m\s+(pytest|unittest)|jest|vitest|mocha|node\s|deno\s|ruby\s|php\s|swift\s)/],
-	"package-install": [/^(npm|pnpm|yarn|bun)\s+(i|install|add|ci|link|uninstall|remove|rm|update|up)(\s|$)/, /^(pip|pip3|pipx|uv|poetry|conda)\s+(install|add|uninstall|remove|sync)(\s|$)/,
-		/^uv\s+(pip\s+(install|sync|uninstall)|tool\s+install)(\s|$)/, /^(\S*\/)?(python[\d.]*|py)\s+(-\S+\s+)*-m\s+(pip\s+(install|uninstall)|ensurepip)(\s|$)/, /^(\S*\/)?pip[\d.]*\s+(install|uninstall)(\s|$)/, /^(apt|apt-get|dnf|yum|pacman|apk|zypper|brew|port|snap|flatpak|gem|cargo\s+install|go\s+install|nix-env)(\s|$)/],
+	build: [/^(npm|pnpm|yarn|bun)(\.cmd)?\s+(run|test|t|start|build|exec|x)(\s|$)/, /^(npx|pnpx|bunx)(\.cmd)?\s/, /^(make|cmake|cargo|go|mvn|gradle|dotnet|tsc|pytest|python3?\s+-m\s+(pytest|unittest)|jest|vitest|mocha|node\s|deno\s|ruby\s|php\s|swift\s)/,
+		/^((py|python3?)(\.exe)?\s+(-\S+\s+)*-m\s+(pytest|unittest)|node\.exe\s)/],   // Windows forms (py -3 -m pytest, node.exe)
+	"package-install": [/^(npm|pnpm|yarn|bun)(\.cmd)?\s+(i|install|add|ci|link|uninstall|remove|rm|update|up)(\s|$)/, /^(pip|pip3|pipx|uv|poetry|conda)(\.exe)?\s+(install|add|uninstall|remove|sync)(\s|$)/,
+		/^uv\s+(pip\s+(install|sync|uninstall)|tool\s+install)(\s|$)/, /^(\S*[\/\\])?(python[\d.]*|py)(\.exe)?\s+(-\S+\s+)*-m\s+(pip\s+(install|uninstall)|ensurepip)(\s|$)/, /^(\S*[\/\\])?pip[\d.]*(\.exe)?\s+(install|uninstall)(\s|$)/, /^(apt|apt-get|dnf|yum|pacman|apk|zypper|brew|port|snap|flatpak|gem|cargo\s+install|go\s+install|nix-env|winget|choco|scoop)(\s|$)/],
 	privileged: [/^(sudo|doas|su|pkexec|runuser|setpriv|chroot)(\s|$)/, /^(systemctl|service|reboot|shutdown|halt|poweroff|mount|umount|modprobe|insmod|iptables|nft|ufw|useradd|usermod|passwd|chown|chgrp)(\s|$)/],
-	destructive: [/^rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\s|$)/, /^(rm|rmdir|shred|unlink)\s+.*(\s|^)(\/|~|\.\.|\*|\.git)(\s|$)/, /^(dd|mkfs|fdisk|parted|wipefs)(\s|$)/, /^git\s+(push\s+.*(-f|--force|--delete|--mirror)|branch\s+-D|reset\s+--hard|clean\s+-[a-zA-Z]*[fxd]|stash\s+(drop|clear))(\s|$)/, /^(truncate|:>|>\s*\/dev\/sd)/, /^(find|fd)\s+.*(-delete|-exec\s+rm)/, /^(chmod|chown)\s+(-R\s+)?(777|000)\s/],
+	destructive: [/^rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\s|$)/, /^(rm|rmdir|shred|unlink)\s+.*(\s|^)(\/|~|\.\.|\*|\.git)(\s|$)/, /^(dd|mkfs|fdisk|parted|wipefs)(\s|$)/, /^git\s+(push\s+.*(-f|--force|--delete|--mirror)|branch\s+-D|reset\s+--hard|clean\s+-[a-zA-Z]*[fxd]|stash\s+(drop|clear))(\s|$)/, /^(truncate|:>|>\s*\/dev\/sd)/, /^(find|fd)\s+.*(-delete|-exec\s+rm)/, /^(chmod|chown)\s+(-R\s+)?(777|000)\s/,
+		// Windows: rd /s, del /s (also through cmd /c), Remove-Item -Recurse (also through powershell)
+		/^(rd|rmdir|del|erase)\s+(.*\s)?\/s(\s|$)/i, /^cmd(\.exe)?\s+\/[ck]\s+.*\b(rd|rmdir|del|erase)\s+(.*\s)?\/s\b/i,
+		/^(Remove-Item|ri)\s+(.*\s)?-r(ecurse)?\b/i, /^(pwsh|powershell)(\.exe)?\s.*\b(Remove-Item|ri|rm|rmdir|del)\s+(.*\s)?-r(ecurse)?\b/i],
 	"network-exec": [/^(curl|wget|fetch)\b.*\|\s*(sh|bash|zsh|python3?|node|perl)(\s|$)/, /^(sh|bash|zsh)\s+<\(\s*(curl|wget)/, /^(nc|ncat|netcat|telnet|nmap|masscan|socat)(\s|$)/, /^ssh\s/, /^scp\s/, /^rsync\s.*:/],
 };
 // readonly commands with an option or script that writes or runs something:
@@ -6092,34 +6111,41 @@ export function loadManifest(cwd: string, trusted: boolean, warn: (m: string) =>
 
 // ------------------------------------------------------------------ paths
 function expandHome(p: string): string { return p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p; }
+// Paths are resolved by the platform's rules (path.win32 on Windows), and on
+// Windows compared without case and matched against globs with "/" (globs
+// are written with "/", Windows paths have "\"); unchanged elsewhere.
+const P = () => (lcwIsWin() ? win32 : posix);
+const fold = (p: string) => (lcwIsWin() ? p.replace(/\\/g, "/").toLowerCase() : p);
 function globToRe(g: string): RegExp {
 	const esc = g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\u0000/g, ".*");
 	return new RegExp(`^${esc}$`);
 }
-function canonical(p: string, cwd: string): string {
-	let abs = isAbsolute(p) ? p : resolve(cwd, expandHome(p));
+export function canonical(p: string, cwd: string): string {
+	// on Windows a bash command names paths as Git Bash does: /c/x, /tmp/x, ~/x
+	const { dirname, isAbsolute, join, resolve } = P();
+	p = lcwNative(p); cwd = lcwNative(cwd);
+	let abs = isAbsolute(p) ? (lcwIsWin() ? resolve(p) : p) : resolve(cwd, expandHome(p));
 	abs = expandHome(abs);
 	// resolve the deepest existing ancestor so symlinks cannot leave the scope
 	let probe = abs; const rest: string[] = [];
-	while (!existsSync(probe) && dirname(probe) !== probe) { rest.unshift(probe.slice(dirname(probe).length + 1)); probe = dirname(probe); }
+	while (!existsSync(probe) && dirname(probe) !== probe) { rest.unshift(probe.slice(dirname(probe).length).replace(/^[\\/]+/, "")); probe = dirname(probe); }
 	try { probe = realpathSync(probe); } catch { /* keep */ }
 	return rest.length ? join(probe, ...rest) : probe;
 }
-function inScope(path: string, scopes: string[] | undefined, cwd: string): boolean {
+export function inScope(path: string, scopes: string[] | undefined, cwd: string): boolean {
 	if (!scopes) return true;
 	const c = canonical(path, cwd);
 	for (const s of scopes) {
 		if (s === "*" || s === "/") return true;
-		if (/[*?]/.test(s)) { if (globToRe(canonical(s.replace(/[*?].*$/, "") , cwd) + s.slice(s.search(/[*?]/))).test(c) || globToRe(s).test(c)) return true; continue; }
-		const base = canonical(s, cwd);
-		if (c === base || c.startsWith(base.endsWith(sep) ? base : base + sep)) return true;
+		if (/[*?]/.test(s)) { if (globToRe(fold(canonical(s.replace(/[*?].*$/, "") , cwd) + s.slice(s.search(/[*?]/)))).test(fold(c)) || globToRe(fold(s)).test(fold(c))) return true; continue; }
+		if (lcwUnder(c, canonical(s, cwd))) return true;
 	}
 	return false;
 }
-function isProtected(path: string, role: Role, cwd: string): boolean {
-	const c = canonical(path, cwd); const name = c.split(sep).pop() ?? "";
-	for (const p of [...PROTECTED, ...(role.protected ?? [])]) {
-		if (p.endsWith("/")) { if (c.split(sep).includes(p.slice(0, -1))) return true; continue; }
+export function isProtected(path: string, role: Role, cwd: string): boolean {
+	const c = canonical(path, cwd), parts = c.split(P().sep).map(fold); const name = parts[parts.length - 1] ?? "";
+	for (const p of [...PROTECTED, ...(role.protected ?? [])].map(fold)) {
+		if (p.endsWith("/")) { if (parts.includes(p.slice(0, -1))) return true; continue; }
 		if (/[*?]/.test(p)) { if (globToRe(p).test(name)) return true; continue; }
 		if (name === p) return true;
 	}
@@ -6210,7 +6236,7 @@ export function redirectTargets(line: string): string[] {
 	// heredoc bodies are data, and so is quoted text with a ">" in it
 	// ("score > 100", a script's "# a -> b"): only the command lines count
 	const cmd = splitCommands(line).map((c) => c.replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, (q) => (q.includes(">") ? "''" : q))).join("; ");
-	for (const m of cmd.matchAll(/(?:^|[^<>])(?:\d?>>?|&>|>\|)\s*("[^"]*"|'[^']*'|[^\s;&|)]+)/g)) if (!/^&\d/.test(m[1]) && m[1] !== "/dev/null") out.push(m[1].replace(/^['"]|['"]$/g, ""));
+	for (const m of cmd.matchAll(/(?:^|[^<>])(?:\d?>>?|&>|>\|)\s*("[^"]*"|'[^']*'|[^\s;&|)]+)/g)) if (!/^&\d/.test(m[1]) && m[1] !== "/dev/null" && !(lcwIsWin() && /^nul$/i.test(m[1]))) out.push(m[1].replace(/^['"]|['"]$/g, ""));
 	// only where a command starts (line start, after ; & | ( or sudo/env/command):
 	// "npm install left-pad" is a package install, not install(1) writing "left-pad"
 	for (const m of cmd.matchAll(/(?:^|[;&|(]|\b(?:sudo|env|command|exec|time|nice)\s)\s*(?:tee|touch|mkdir|cp|mv|install|ln|rsync)\s+(?:-[a-zA-Z]+\s+)*(.*?)(?=$|[;&|])/g)) for (const a of m[1].split(/\s+/)) if (a && !a.startsWith("-")) out.push(a.replace(/^['"]|['"]$/g, ""));
@@ -6606,6 +6632,7 @@ export default function (pi: ExtensionAPI) {
 	}
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }

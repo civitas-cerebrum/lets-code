@@ -11,6 +11,7 @@ d="$(mktemp -d "${TMPDIR:-/tmp}/lets-code-update.XXXXXX")"
 srv=""
 trap '[ -z "${srv}" ] || kill "${srv}" 2>/dev/null; rm -rf "${d}"' EXIT
 fail=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) win=true ;; *) win=false ;; esac
 check() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: got '$2', want '$3'"; fail=1; fi; }
 
 # what the fake servers hand out: this checkout's script, marked
@@ -69,14 +70,20 @@ check "release: still executable" "$(test -x "${d}/bin/lets-code" && echo yes)" 
 check "release: nothing left behind" "$(ls -A "${d}/bin")" "lets-code"
 check "release: second run is a no-op" "$(bash "${d}/bin/lets-code" update 2>&1 | grep -c 'already up to date')" 1
 
-# snapshot, through a symlink
-fresh; ln -s "${d}/bin/lets-code" "${d}/link"
-bash "${d}/link" update --snapshot > "${d}/out" 2>&1 || { cat "${d}/out"; echo "FAIL  update --snapshot"; exit 1; }
+# snapshot, through a symlink (on Windows the script itself: Git Bash's
+# ln -s makes a copy, which update would replace instead)
+fresh
+if [ "${win}" = true ]; then link="${d}/bin/lets-code"; else ln -s "${d}/bin/lets-code" "${d}/link"; link="${d}/link"; fi
+bash "${link}" update --snapshot > "${d}/out" 2>&1 || { cat "${d}/out"; echo "FAIL  update --snapshot"; exit 1; }
 check "snapshot: stamped with the commit" "$(ver)" "lets-code main-0123456"
-check "snapshot: symlink kept" "$(test -L "${d}/link" && echo yes)" yes
-check "snapshot: second run is a no-op" "$(bash "${d}/link" update --snapshot 2>&1 | grep -c 'already up to date')" 1
+if [ "${win}" = true ]; then
+    echo "skip  snapshot: symlink kept: skipped on Windows: ln -s copies in Git Bash (no symlink to keep)"
+else
+    check "snapshot: symlink kept" "$(test -L "${d}/link" && echo yes)" yes
+fi
+check "snapshot: second run is a no-op" "$(bash "${link}" update --snapshot 2>&1 | grep -c 'already up to date')" 1
 echo "fedcba9876543210fedcba9876543210fedcba98" > "${d}/www/sha"
-bash "${d}/link" update --snapshot > /dev/null 2>&1
+bash "${link}" update --snapshot > /dev/null 2>&1
 check "snapshot: a new commit updates" "$(ver)" "lets-code main-fedcba9"
 
 # refusals leave the script alone

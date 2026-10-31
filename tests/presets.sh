@@ -10,6 +10,7 @@ d="$(mktemp -d "${TMPDIR:-/tmp}/lets-code-presets.XXXXXX")"
 srv=""
 trap '[ -z "${srv}" ] || kill "${srv}" 2>/dev/null; rm -rf "${d}"' EXIT
 fail=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) win=true ;; *) win=false ;; esac
 check() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: got '$2', want '$3'"; fail=1; fi; }
 
 # a server with one vLLM-style model and one gateway-style model; no chat
@@ -64,7 +65,11 @@ printf 'qwen\n%s\npreset-token\nvendor/big\n\nn\n' "${url}" | bash "${lc}" setup
     || { cat "${d}/setup.log"; echo "FAIL  setup preset exited non-zero"; exit 1; }
 p="${d}/config/lets-code/presets/qwen"
 check "preset file written" "$(test -f "${p}" && echo yes)" yes
-check "preset file mode 600" "$(stat -c %a "${p}" 2>/dev/null || stat -f %Lp "${p}")" 600
+if [ "${win}" = true ]; then
+    echo "skip  preset file mode 600: skipped on Windows: no mode bits there (chmod does nothing; the profile's ACL keeps the file private)"
+else
+    check "preset file mode 600" "$(stat -c %a "${p}" 2>/dev/null || stat -f %Lp "${p}")" 600
+fi
 check "preset model" "$(. "${p}"; echo "${MODEL}")" vendor/big
 check "preset token" "$(. "${p}"; echo "${TOKEN}")" preset-token
 check "preset vision pinned from the answer" "$(. "${p}"; echo "${VISION}")" false

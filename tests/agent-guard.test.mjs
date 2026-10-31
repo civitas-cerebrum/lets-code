@@ -116,8 +116,15 @@ for (const off of ["0", "off"]) {
 	check("length nudge continues", r?.continue, true);
 	check("length nudge message", r?.entries?.[0]?.type, "custom_message");
 	await turn(h, cut); await turn(h, cut);
-	check("length nudge capped", await turn(h, cut), undefined);
+	check("length nudge capped at 3 in a row", await turn(h, cut), undefined);
 	check("length with tool call: no nudge", await turn(h, { stopReason: "length" }), undefined);
+	// the cap counts cut replies in a row: a normal reply (or a call) between resets it
+	const g = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
+	await turn(g, cut); await turn(g, cut); await turn(g, cut);
+	await turn(g, { stopReason: "stop", content: [{ type: "text", text: "done with that part" }] });
+	check("length nudge: again after a normal reply", (await turn(g, cut))?.continue, true);
+	await turn(g, cut); await turn(g, cut);
+	check("length nudge: capped again after 3 more in a row", await turn(g, cut), undefined);
 }
 
 // --- wrap-up: once, after tests pass for WRAP_TURNS turns; a failure resets the count

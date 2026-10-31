@@ -121,7 +121,7 @@ const blocked = (r) => r?.block === true;
 	t("auto: .git protected", blocked(await h.call(d, "edit", { path: join(d, ".git/config") })), true);
 	t("auto: redirect into .git protected", blocked(await h.call(d, "bash", { command: "echo x > .git/HEAD" })), true);
 	t("auto: mode announced", h.emitted.some(([c, x]) => c === "lets-code:mode" && x.role === "auto"), true);
-	t("auto: no prompt section", (() => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), []);
+	t("auto: no mode prompt section (only the task-size one)", (() => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), ["lets_code_task_size"]);
 }
 
 // --- ask: prompts, remembers session grants, denies without UI
@@ -300,46 +300,46 @@ const blocked = (r) => r?.block === true;
 	t("mcp other server denied", blocked(await h.call(d, "mcp__web__fetch", {})), true);
 	rmSync(join(agentDir, "mandate.json"));
 }
-// --- orchestrator: reads and dispatches experts, changes no file
+// --- orchestration: reads and dispatches experts, changes no file
 {
-	const h = await load({ LETS_CODE_MODE: "orchestrator" }); const d = repo(); await h.start(d);
+	const h = await load({ LETS_CODE_MODE: "orchestration" }); const d = repo(); await h.start(d);
 	const prompt = () => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return s.lets_code_mandate ?? ""; };
-	t("orchestrator: edit/write dropped from active tools", h.tools().includes("edit") || h.tools().includes("write"), false);
-	t("orchestrator: subagent stays", h.tools().includes("subagent"), true);
+	t("orchestration: edit/write dropped from active tools", h.tools().includes("edit") || h.tools().includes("write"), false);
+	t("orchestration: subagent stays", h.tools().includes("subagent"), true);
 	const w = await h.call(d, "write", { path: join(d, "src/b.txt") });
-	t("orchestrator: write blocked", blocked(w), true);
-	t("orchestrator: the reason says to delegate", /hand it to an expert/.test(w?.reason ?? ""), true);
-	t("orchestrator: reason short", String(w?.reason).length <= 200, true);
-	t("orchestrator: readonly bash passes", await h.call(d, "bash", { command: "git diff --stat; grep -rn foo src | head" }), undefined);
-	t("orchestrator: tests are the experts'", blocked(await h.call(d, "bash", { command: "npm test" })), true);
-	t("orchestrator: sed -i blocked", blocked(await h.call(d, "bash", { command: "sed -i s/a/b/ src/a.txt" })), true);
-	t("orchestrator: redirection blocked", blocked(await h.call(d, "bash", { command: "echo x > src/a.txt" })), true);
-	t("orchestrator: mcp denied", blocked(await h.call(d, "mcp__fs__write_file", { path: "x" })), true);
-	t("orchestrator: dispatches an expert", await h.call(d, "expert", { action: "run", name: "developer", brief: {} }), undefined);
+	t("orchestration: write blocked", blocked(w), true);
+	t("orchestration: the reason says to delegate", /hand it to an expert/.test(w?.reason ?? ""), true);
+	t("orchestration: reason short", String(w?.reason).length <= 200, true);
+	t("orchestration: readonly bash passes", await h.call(d, "bash", { command: "git diff --stat; grep -rn foo src | head" }), undefined);
+	t("orchestration: tests are the experts'", blocked(await h.call(d, "bash", { command: "npm test" })), true);
+	t("orchestration: sed -i blocked", blocked(await h.call(d, "bash", { command: "sed -i s/a/b/ src/a.txt" })), true);
+	t("orchestration: redirection blocked", blocked(await h.call(d, "bash", { command: "echo x > src/a.txt" })), true);
+	t("orchestration: mcp denied", blocked(await h.call(d, "mcp__fs__write_file", { path: "x" })), true);
+	t("orchestration: dispatches an expert", await h.call(d, "expert", { action: "run", name: "developer", brief: {} }), undefined);
 	const wk = await h.call(d, "subagent", { agent: "worker", task: "write greet.py" });
-	t("orchestrator: no worker: code goes through the factory", [blocked(wk), /code goes through software-factory/.test(wk?.reason ?? "")], [true, true]);
-	t("orchestrator: general for setup and checks", await h.call(d, "subagent", { agent: "general", task: "move old files to a backup" }), undefined);
+	t("orchestration: no worker: code goes through the factory", [blocked(wk), /code goes through software-factory/.test(wk?.reason ?? "")], [true, true]);
+	t("orchestration: general for setup", await h.call(d, "subagent", { agent: "general", task: "move old files to a backup" }), undefined);
 	t("an exclusion with *", [h.mod.mayDispatch({ dispatch: ["*", "!worker"] }, "worker"), h.mod.mayDispatch({ dispatch: ["*", "!worker"] }, "scout")], [false, true]);
-	t("orchestrator: dispatches the factory", await h.call(d, "expert", { action: "run", name: "software-factory", brief: {} }), undefined);
-	t("orchestrator: prompt section", /Orchestrator mode/.test(prompt()), true);
+	t("orchestration: dispatches the factory", await h.call(d, "expert", { action: "run", name: "software-factory", brief: {} }), undefined);
+	t("orchestration: prompt section", /Orchestration mode/.test(prompt()), true);
 	await h.commands.mode.handler("plan", h.ctx(d)); await h.shortcuts["alt+m"].handler(h.ctx(d));
-	t("orchestrator: next after plan in the cycle", h.emitted.at(-1)?.[1]?.role, "orchestrator");
-	await h.commands.orchestrator.handler("", h.ctx(d));
-	t("/orchestrator leaves: tools restored", h.tools().includes("edit"), true);
-	t("/orchestrator leaves: write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	t("orchestration: next after plan in the cycle", h.emitted.at(-1)?.[1]?.role, "orchestration");
+	await h.commands.orchestration.handler("", h.ctx(d));
+	t("/orchestration leaves: tools restored", h.tools().includes("edit"), true);
+	t("/orchestration leaves: write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
 	await h.commands.mode.handler("ask", h.ctx(d));
 	t("factory hook engages it", globalThis.__letsCodeOrchestrate(h.ctx(d), "factory run"), true);
 	t("factory hook: write blocked", blocked(await h.call(d, "write", { path: join(d, "src/b.txt") })), true);
-	t("factory hook: told the user", h.notices.some((m) => /orchestrator \(factory run\)/.test(m)), true);
+	t("factory hook: told the user", h.notices.some((m) => /orchestration \(factory run\)/.test(m)), true);
 	t("factory hook: twice is a no-op", globalThis.__letsCodeOrchestrate(h.ctx(d), "factory run"), false);
-	await h.commands.orchestrator.handler("", h.ctx(d));
-	t("/orchestrator goes back to the mode it came from", h.emitted.at(-1)?.[1]?.role, "ask");
+	await h.commands.orchestration.handler("", h.ctx(d));
+	t("/orchestration goes back to the mode it came from", h.emitted.at(-1)?.[1]?.role, "ask");
 }
-// --- a child never inherits the orchestrator
+// --- a child never inherits the orchestration
 {
 	const h = await load({ LETS_CODE_MODE: "orchestrator", LETS_CODE_ROLE: "orchestrator", LETS_CODE_SUBAGENT_DEPTH: "1" }); const d = repo(); await h.start(d);
-	t("orchestrator child: gets the default role", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
-	t("orchestrator child: no orchestrator hook command", Object.keys(h.commands).length, 0);
+	t("orchestration child: gets the default role", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	t("orchestration child: no orchestration hook command", Object.keys(h.commands).length, 0);
 }
 // --- a child never asks the user: in ask mode what ask would ask about is refused
 {
@@ -362,15 +362,15 @@ const blocked = (r) => r?.block === true;
 	const h = await load({ LETS_CODE_ROLE: "ask" }, { answers: ["Allow once"] }); const d = repo(); await h.start(d);
 	t("main session in ask: still asks the user", [await h.call(d, "bash", { command: "npm install left-pad" }), h.selects.length], [undefined, 1]);
 }
-// --- mandate off: the orchestrator alone, dormant until engaged
+// --- mandate off: the orchestration alone, dormant until engaged
 {
 	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_ORCHESTRATOR_ON = "1";
 	const h = await load({}); const d = repo(); await h.start(d);
 	const prompt = () => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); };
 	t("dormant: write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
 	t("dormant: any bash", await h.call(d, "bash", { command: "rm -rf build && npm install" }), undefined);
-	t("dormant: no prompt section", prompt(), []);
-	t("dormant: only /orchestrator and /mode", Object.keys(h.commands), ["orchestrator", "mode"]);
+	t("dormant: no mode prompt section", prompt().includes("lets_code_mandate"), false);
+	t("dormant: only /orchestration and /mode", Object.keys(h.commands), ["orchestration", "mode"]);
 	t("dormant: tools untouched", h.tools().includes("edit"), true);
 	t("dormant: a factory run engages it", globalThis.__letsCodeOrchestrate(h.ctx(d), "software factory run"), true);
 	t("engaged: write blocked", blocked(await h.call(d, "write", { path: join(d, "src/b.txt") })), true);
@@ -378,13 +378,13 @@ const blocked = (r) => r?.block === true;
 	t("engaged: prompt section", prompt(), ["lets_code_mandate"]);
 	await h.start(d);
 	t("engaged: stays across a new session", blocked(await h.call(d, "edit", { path: join(d, "src/a.txt") })), true);
-	await h.commands.orchestrator.handler("", h.ctx(d));
+	await h.commands.orchestration.handler("", h.ctx(d));
 	t("left: write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
 	t("left: any bash again", await h.call(d, "bash", { command: "npm install" }), undefined);
 	t("left: tools restored", h.tools().includes("edit"), true);
-	t("left: no prompt section", prompt(), []);
-	await h.commands.orchestrator.handler("", h.ctx(d));
-	t("/orchestrator engages it too", blocked(await h.call(d, "write", { path: join(d, "src/b.txt") })), true);
+	t("left: no mode prompt section", prompt().includes("lets_code_mandate"), false);
+	await h.commands.orchestration.handler("", h.ctx(d));
+	t("/orchestration engages it too", blocked(await h.call(d, "write", { path: join(d, "src/b.txt") })), true);
 	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
 	t("dormant child: inert", Object.keys(c.handlers).length, 0);
 	delete process.env.LETS_CODE_ORCHESTRATOR_ON; process.env.LETS_CODE_MANDATE_ON = "1";
@@ -397,7 +397,7 @@ const blocked = (r) => r?.block === true;
 	const end = (h, d, text, stopReason = "stop") => h.handlers.agent_end({ type: "agent_end", messages: [{ role: "user", content: "go" }, { role: "assistant", content: [{ type: "text", text }], stopReason }] }, h.ctx(d));
 	const modes = (h) => h.emitted.filter(([c]) => c === "lets-code:mode").map(([, x]) => x);
 	const h = await load({}, { answers: ["Stay in plan mode", "Execute the plan"] }); const d = repo(); await h.start(d);
-	t("plan alone: /plan, /mode and ctrl+alt+p, no /orchestrator", [Object.keys(h.commands), "ctrl+alt+p" in h.shortcuts], [["plan", "mode"], true]);
+	t("plan alone: /plan, /mode and ctrl+alt+p, no /orchestration", [Object.keys(h.commands), "ctrl+alt+p" in h.shortcuts], [["plan", "mode"], true]);
 	t("plan alone: dormant, write allowed", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
 	t("plan alone: dormant, tools untouched", h.tools().includes("edit"), true);
 	await h.commands.plan.handler("", h.ctx(d));
@@ -437,28 +437,259 @@ const blocked = (r) => r?.block === true;
 	const br = await load({}, { entries: [msg(PLAN)], branch: [msg("No plan on this branch.")] }); await br.start(d);
 	await br.commands.plan.handler("", br.ctx(d)); await br.commands.plan.handler("", br.ctx(d));
 	t("leaving by hand: the current branch is read, not every entry", br.selects.length, 0);
-	t("leaving by hand: no prompt section", (() => { const s = {}; m.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), []);
+	t("leaving by hand: no mode prompt section (only the task-size one)", (() => { const s = {}; m.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return Object.keys(s); })(), ["lets_code_task_size"]);
 	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
 	t("plan alone, child: inert", Object.keys(c.handlers).length, 0);
-	// with the orchestrator too: each goes back to where it came from
+	// with the orchestration too: each goes back to where it came from
 	process.env.LETS_CODE_ORCHESTRATOR_ON = "1";
 	const o = await load({}); await o.start(d);
-	t("plan and orchestrator: both commands", Object.keys(o.commands).sort(), ["mode", "orchestrator", "plan"]);
-	await o.commands.plan.handler("", o.ctx(d)); await o.commands.orchestrator.handler("", o.ctx(d));
-	t("plan -> orchestrator", modes(o).at(-1)?.role, "orchestrator");
-	await o.commands.orchestrator.handler("", o.ctx(d));
-	t("orchestrator leaves back to plan", [modes(o).at(-1)?.role, blocked(await o.call(d, "write", { path: join(d, "src/b.txt") }))], ["plan", true]);
+	t("plan and orchestration: both commands", Object.keys(o.commands).sort(), ["mode", "orchestration", "plan"]);
+	await o.commands.plan.handler("", o.ctx(d)); await o.commands.orchestration.handler("", o.ctx(d));
+	t("plan -> orchestration", modes(o).at(-1)?.role, "orchestration");
+	await o.commands.orchestration.handler("", o.ctx(d));
+	t("orchestration leaves back to plan", [modes(o).at(-1)?.role, blocked(await o.call(d, "write", { path: join(d, "src/b.txt") }))], ["plan", true]);
 	await o.commands.plan.handler("", o.ctx(d));
 	t("plan leaves to unrestricted", [modes(o).at(-1)?.off, await o.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
-	// plan -> orchestrator -> plan again: no bouncing between the two on the way out
-	await o.commands.plan.handler("", o.ctx(d)); await o.commands.orchestrator.handler("", o.ctx(d)); await o.commands.plan.handler("", o.ctx(d));
-	t("back into plan from the orchestrator", modes(o).at(-1)?.role, "plan");
+	// plan -> orchestration -> plan again: no bouncing between the two on the way out
+	await o.commands.plan.handler("", o.ctx(d)); await o.commands.orchestration.handler("", o.ctx(d)); await o.commands.plan.handler("", o.ctx(d));
+	t("back into plan from orchestration", modes(o).at(-1)?.role, "plan");
 	await o.commands.plan.handler("", o.ctx(d));
-	t("  then out: unrestricted, not the orchestrator", [modes(o).at(-1)?.off, await o.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
-	await o.commands.orchestrator.handler("", o.ctx(d)); await o.commands.plan.handler("", o.ctx(d)); await o.commands.orchestrator.handler("", o.ctx(d));
-	await o.commands.orchestrator.handler("", o.ctx(d));
-	t("orchestrator -> plan -> orchestrator, then out: unrestricted", [modes(o).at(-1)?.off, await o.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
+	t("  then out: unrestricted, not orchestration", [modes(o).at(-1)?.off, await o.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
+	await o.commands.orchestration.handler("", o.ctx(d)); await o.commands.plan.handler("", o.ctx(d)); await o.commands.orchestration.handler("", o.ctx(d));
+	await o.commands.orchestration.handler("", o.ctx(d));
+	t("orchestration -> plan -> orchestration, then out: unrestricted", [modes(o).at(-1)?.off, await o.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
 	delete process.env.LETS_CODE_ORCHESTRATOR_ON; delete process.env.LETS_CODE_PLAN_ON; process.env.LETS_CODE_MANDATE_ON = "1";
+}
+// --- plan for orchestration: with the experts on, a plan is written for
+// orchestration and carried out by it; without them, as before
+{
+	const PLAN = "I read the code.\n\nPlan:\n1. software-factory: add x\n2. researcher: check y";
+	const end = (h, d, text) => h.handlers.agent_end({ type: "agent_end", messages: [{ role: "user", content: "go" }, { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }] }, h.ctx(d));
+	const modes = (h) => h.emitted.filter(([c]) => c === "lets-code:mode").map(([, x]) => x);
+	const section = (h) => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }); return s.lets_code_mandate ?? ""; };
+	const run = (h, d, input) => h.toolDefs.mode.execute("m1", input, undefined, undefined, h.ctx(d));
+	const text = (r) => r.content[0].text;
+	const d = repo();
+	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_PLAN_ON = "1"; process.env.LETS_CODE_ORCHESTRATOR_ON = "1";
+	process.env.LETS_CODE_EXPERTS_ON = "1"; process.env.LETS_CODE_SUBAGENTS_ON = "1";
+	// happy: the prompt asks for a plan for orchestration
+	const h = await load({}, { answers: ["Execute with orchestration"] }); await h.start(d);
+	await h.commands.plan.handler("", h.ctx(d));
+	t("plan, experts on: the plan is written for orchestration", [/Write the plan for orchestration/.test(section(h)), /software-factory for any code change/.test(section(h))], [true, true]);
+	// happy: the dialog offers orchestration first; it carries the plan out
+	await end(h, d, PLAN);
+	t("plan ready, experts on: orchestration is the first choice", h.options.at(-1), ["Execute with orchestration", "Execute here", "Refine the plan", "Stay in plan mode"]);
+	t("Execute with orchestration: in orchestration", [modes(h).at(-1)?.role, blocked(await h.call(d, "write", { path: join(d, "src/b.txt") }))], ["orchestration", true]);
+	t("Execute with orchestration: the orchestrate message", [/^Carry out the plan you wrote above by orchestration/.test(h.emitted.at(-1)?.[1] ?? ""), /have each delivery reviewed/.test(h.emitted.at(-1)?.[1] ?? "")], [true, true]);
+	t("Execute with orchestration: the plan persisted, marked", [h.appended.at(-1)?.[0], h.appended.at(-1)?.[1]?.orchestrated], ["lets-code-plan", true]);
+	// negative: leaving orchestration does not go back to plan, but to where plan came from
+	await h.commands.orchestration.handler("", h.ctx(d));
+	t("after a carried-out plan: /orchestration leaves to unrestricted, not plan", [modes(h).at(-1)?.off, await h.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
+	// happy: Execute here runs the plan in the session, as before
+	const e = await load({}, { answers: ["Execute here"] }); await e.start(d);
+	await e.commands.plan.handler("", e.ctx(d)); await end(e, d, PLAN);
+	t("Execute here: unrestricted, the execute message", [modes(e).at(-1)?.off, /^Execute the plan you wrote above/.test(e.emitted.at(-1)?.[1] ?? "")], [true, true]);
+	// negative: Stay keeps plan, nothing sent
+	const st = await load({}, { answers: ["Stay in plan mode"] }); await st.start(d);
+	await st.commands.plan.handler("", st.ctx(d)); await end(st, d, PLAN);
+	t("Stay: still plan, nothing sent", [modes(st).at(-1)?.role, st.emitted.filter(([c]) => c === "user").length], ["plan", 0]);
+	// happy: the agent's ask out of plan into orchestration carries the plan
+	const a = await load({}, { answers: ["Switch to orchestration"], tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "mode"] }); await a.start(d);
+	await a.commands.plan.handler("", a.ctx(d));
+	const r = await run(a, d, { to: "orchestration", reason: "You approved the plan." });
+	t("mode tool, plan -> orchestration: told to carry out the plan, not that writing is open", [/Carry out the approved plan/.test(text(r)), /Writing is open again/.test(text(r)), /never test or verify a delivery yourself/.test(text(r))], [true, false, true]);
+	await a.commands.orchestration.handler("", a.ctx(d));
+	t("mode tool, plan -> orchestration: leaving goes to unrestricted, not plan", modes(a).at(-1)?.off, true);
+	// negative: /orchestration typed in plan still comes back to plan (no plan carried)
+	const b = await load({}); await b.start(d);
+	await b.commands.plan.handler("", b.ctx(d)); await b.commands.orchestration.handler("", b.ctx(d)); await b.commands.orchestration.handler("", b.ctx(d));
+	t("/orchestration typed in plan: leaving goes back to plan", modes(b).at(-1)?.role, "plan");
+	// negative: the experts off: no orchestration in the prompt or the dialog
+	delete process.env.LETS_CODE_EXPERTS_ON;
+	const n = await load({}, { answers: ["Execute the plan"] }); await n.start(d);
+	await n.commands.plan.handler("", n.ctx(d));
+	t("plan, experts off: no orchestration in the prompt", /orchestration/.test(section(n)), false);
+	await end(n, d, PLAN);
+	t("plan ready, experts off: the old choices", n.options.at(-1), ["Execute the plan", "Refine the plan", "Stay in plan mode"]);
+	t("plan ready, experts off: executed here", [modes(n).at(-1)?.off, /^Execute the plan you wrote above/.test(n.emitted.at(-1)?.[1] ?? "")], [true, true]);
+	// negative: experts on but no orchestration role (plan alone): no orchestration either
+	process.env.LETS_CODE_EXPERTS_ON = "1"; delete process.env.LETS_CODE_ORCHESTRATOR_ON;
+	const pa = await load({}, { answers: ["Execute the plan"] }); await pa.start(d);
+	await pa.commands.plan.handler("", pa.ctx(d)); await end(pa, d, PLAN);
+	t("plan alone, experts on: no orchestration to hand to", [/orchestration/.test(section(pa)) || modes(pa).at(-1)?.role === "orchestration", pa.options.at(-1)?.[0]], [false, "Execute the plan"]);
+	// the mandate on: the same, with orchestration a role there
+	delete process.env.LETS_CODE_PLAN_ON; process.env.LETS_CODE_MANDATE_ON = "1";
+	const on = await load({ LETS_CODE_MODE: "plan" }, { answers: ["Execute with orchestration"] }); await on.start(d);
+	await end(on, d, PLAN);
+	t("mandate on, experts on: plan carried out by orchestration", modes(on).at(-1)?.role, "orchestration");
+	await on.commands.orchestration.handler("", on.ctx(d));
+	t("mandate on: leaving goes to the default, not plan", modes(on).at(-1)?.role, "auto");
+	delete process.env.LETS_CODE_EXPERTS_ON; delete process.env.LETS_CODE_SUBAGENTS_ON;
+}
+// --- orchestration: deliveries are reviewed, never verified by the session itself
+{
+	const h = await load({ LETS_CODE_MODE: "orchestration" }); const d = repo(); await h.start(d);
+	const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } });
+	t("orchestration: every delivery reviewed, by the reviewer experts", [/never test or verify a delivery yourself/.test(s.lets_code_mandate), /expert-reviewer/.test(s.lets_code_mandate), /APPROVE: go on; REVISE: back to the one who did it/.test(s.lets_code_mandate)], [true, true, true]);
+	t("orchestration: the factory's verdict is taken", /software-factory run comes reviewed/.test(s.lets_code_mandate), true);
+	t("orchestration: a detailed request is passed word for word, no research of its own", [/A request that already says what to build is the ticket: pass it word for word/.test(s.lets_code_mandate), /do not research the domain or restate the spec yourself/.test(s.lets_code_mandate)], [true, true]);
+	t("orchestration: a run blocked or stuck after its build goes final, not stopped", /blocked or stuck after its build .* goes to the final approval as it is with decision final .* and you commit it: stopping it loses the work/.test(s.lets_code_mandate), true);
+	t("orchestration: no tests of its own (refused)", blocked(await h.call(d, "bash", { command: "pytest -q" })), true);
+	t("orchestration: the reviewers may be dispatched", [await h.call(d, "expert", { action: "run", name: "expert-reviewer", brief: {} }), await h.call(d, "expert", { action: "run", name: "design-reviewer", brief: {} })], [undefined, undefined]);
+	t("orchestration: the plan section is not added outside plan", /Write the plan for orchestration/.test(s.lets_code_mandate), false);
+}
+// --- the old name: orchestrator is still taken where a mode is named; the command is renamed
+{
+	const d = repo();
+	const modes = (h) => h.emitted.filter(([c]) => c === "lets-code:mode").map(([, x]) => x);
+	const h = await load({ LETS_CODE_MODE: "orchestrator" }, { answers: ["Switch to orchestration"], tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "mode"] }); await h.start(d);
+	t("LETS_CODE_MODE=orchestrator: orchestration", [modes(h).at(-1)?.role, blocked(await h.call(d, "write", { path: join(d, "src/b.txt") }))], ["orchestration", true]);
+	t("/orchestration registered, /orchestrator not", ["orchestration" in h.commands, "orchestrator" in h.commands], [true, false]);
+	await h.commands.mode.handler("auto", h.ctx(d));
+	const r = await h.toolDefs.mode.execute("m1", { to: "orchestrator", reason: "big" }, undefined, undefined, h.ctx(d));
+	t("mode tool: the old name asks for orchestration", [/^Mode is now orchestration/.test(r.content[0].text), h.selects.at(-1)], [true, "The agent asks to switch mode: auto → orchestration\nbig"]);
+	t("mode tool: a name that is neither is refused", (await h.toolDefs.mode.execute("m1", { to: "orchestrate", reason: "" }, undefined, undefined, h.ctx(d))).isError, true);
+	// a manifest that names the old one: mapped
+	writeFileSync(join(agentDir, "mandate.json"), JSON.stringify({ default: "orchestrator", cycle: ["auto", "orchestrator"], roles: { orchestrator: { network: "off" } } }));
+	const m = await load({}); await m.start(d);
+	t("manifest: default orchestrator is orchestration", modes(m).at(-1)?.role, "orchestration");
+	t("manifest: the role's settings land on orchestration", modes(m).at(-1)?.network, "off");
+	await m.shortcuts["alt+m"].handler(m.ctx(d)); await m.shortcuts["alt+m"].handler(m.ctx(d));
+	t("manifest: the cycle maps the old name", modes(m).at(-1)?.role, "orchestration");
+	rmSync(join(agentDir, "mandate.json"));
+	// negative: an unknown mode by name is refused, nothing changes
+	await m.commands.mode.handler("orchestrat", m.ctx(d));
+	t("/mode with an unknown name: warned, mode kept", [m.notices.some((x) => /unknown mode 'orchestrat'/.test(x)), modes(m).at(-1)?.role], [true, "orchestration"]);
+}
+// --- the agent is told to ask for plan mode on a medium or large task
+{
+	const h = await load({}, { tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "mode"] });
+	const def = h.toolDefs.mode;
+	t("mode tool: plan first for a medium or large task", [/enter plan mode first when a task looks medium or large/.test(def.description), /plan first for a medium or large task/.test(def.promptSnippet)], [true, true]);
+	t("mode tool: out of plan to orchestration for a plan, auto only for a few lines", /to orchestration, if listed, to carry out a plan; auto for a change of a few lines/.test(def.description), true);
+	t("mode tool: still asks, the user decides", /they confirm or decline/.test(def.description), true);
+}
+// --- the plan's steps sized to the model's window
+{
+	const { mod } = await load({});
+	const cb = mod.contextBudget;
+	const B = (w, files, lines, steps, write) => ({ window: w, files, lines, steps, write });
+	t("budget: 32k window, 8k cap", cb(32768, 8192), B(32768, 2, 619, 6, 409));
+	t("budget: 128k window", cb(131072, 32768), B(131072, 10, 3076, 12, 1600));
+	t("budget: 1M window: capped", cb(1000000, 32000), B(1000000, 15, 6000, 12, 1600));
+	t("budget: no cap given: a quarter of the window", cb(32768), B(32768, 2, 619, 6, 409));
+	t("budget: a cap as large as the window: a quarter instead", cb(32768, 40000), B(32768, 2, 619, 6, 409));
+	t("budget: a window too small for room: the floor", cb(8192, 4096), B(8192, 1, 150, 3, 204));
+	t("budget: shrink halves the reading", cb(32768, 8192, 1), B(32768, 1, 309, 6, 409));
+	t("budget: shrink never below the floor", cb(32768, 8192, 3), B(32768, 1, 150, 6, 409));
+	t("budget: the write limit follows the reply cap, not the window", [cb(32768, 2000).write, cb(262144, 4096).write, cb(32768, 8192, 2).write], [100, 204, 409]);
+	t("budget: no window, no budget", [cb(0, 8192), cb(undefined), cb(-5), cb("x")], [null, null, null, null]);
+	t("ran short: compacted", mod.ranShort(1000, 1, 32768), true);
+	t("ran short: a request at 80% of the window", mod.ranShort(27000, 0, 32768), true);
+	t("ran short: not at 60%, not compacted", mod.ranShort(20000, 0, 32768), false);
+	t("ran short: no window, not compacted: no", mod.ranShort(900000, 0, undefined), false);
+	const d = repo();
+	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_PLAN_ON = "1"; process.env.LETS_CODE_ORCHESTRATOR_ON = "1";
+	process.env.LETS_CODE_EXPERTS_ON = "1"; process.env.LETS_CODE_SUBAGENTS_ON = "1";
+	const sec = (h, ctx) => { const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } }, ctx); return s.lets_code_mandate ?? ""; };
+	const h = await load({}); await h.start(d); await h.commands.plan.handler("", h.ctx(d));
+	t("plan, 32k model: steps sized to it", sec(h, { model: { contextWindow: 32768, maxTokens: 8192 } }).includes("Size each step to the model's context (32768 tokens): at most 2 files changed and about 619 lines read per step, and at most 6 steps in one plan"), true);
+	t("plan, 32k model: a step writes in parts past one reply", sec(h, { model: { contextWindow: 32768, maxTokens: 8192 } }).includes("One reply holds about 409 lines: a step that writes more says to write it in parts"), true);
+	t("plan, 1M model: larger steps", /\(1000000 tokens\): at most 15 files changed and about 6000 lines/.test(sec(h, { model: { contextWindow: 1000000, maxTokens: 32000 } })), true);
+	t("plan, a 1-file budget: 'file', not 'files'", /at most 1 file changed/.test(sec(h, { model: { contextWindow: 8192, maxTokens: 4096 } })), true);
+	const u = await load({}); await u.start(d); await u.commands.plan.handler("", u.ctx(d));
+	t("plan, the window unknown: no sizes", /Size each step/.test(sec(u, {})), false);
+	delete process.env.LETS_CODE_EXPERTS_ON;
+	const n = await load({}); await n.start(d); await n.commands.plan.handler("", n.ctx(d));
+	t("plan, experts off: no sizes either", /Size each step/.test(sec(n, { model: { contextWindow: 32768, maxTokens: 8192 } })), false);
+	process.env.LETS_CODE_EXPERTS_ON = "1";
+	const o = await load({}); await o.start(d); await o.commands.orchestration.handler("", o.ctx(d));
+	t("orchestration, a known window: tickets kept short", sec(o, { hasUI: true, model: { contextWindow: 32768, maxTokens: 8192 } }).includes("Your replies are cut at about 409 lines: keep each ticket and decision short"), true);
+	t("orchestration, with a UI: agrees the ticket with the user (nothing added)", /No one can be asked/.test(sec(o, { hasUI: true })), false);
+	t("orchestration, no UI: agrees the ticket itself", sec(o, { hasUI: false }).includes("No one can be asked in this session: agree the ticket yourself"), true);
+	const ou = await load({}); await ou.start(d); await ou.commands.orchestration.handler("", ou.ctx(d));
+	t("orchestration, window unknown: no reply size", /Your replies are cut/.test(sec(ou, { hasUI: true })), false);
+	t("orchestration: no step sizes outside plan, told to split after a short run", [/Size each step/.test(sec(o, { model: { contextWindow: 32768 } })), /ran short of context, give the remaining steps in smaller parts/.test(sec(o, {}))], [false, true]);
+	delete process.env.LETS_CODE_EXPERTS_ON; delete process.env.LETS_CODE_SUBAGENTS_ON; delete process.env.LETS_CODE_ORCHESTRATOR_ON; delete process.env.LETS_CODE_PLAN_ON;
+	process.env.LETS_CODE_MANDATE_ON = "1";
+}
+// --- orchestration trims its older turns before each request
+{
+	const { mod } = await load({});
+	const big = "x".repeat(5000);
+	const A = (content) => ({ role: "assistant", content });
+	const R = (text) => ({ role: "toolResult", toolCallId: "c", content: [{ type: "text", text }] });
+	const msgs = [{ role: "user", content: [{ type: "text", text: "task: " + big }] },
+		A([{ type: "toolCall", id: "c1", name: "expert", arguments: { action: "run", brief: { ticket: big, decision: "x" } } }]), R(big),
+		A([{ type: "text", text: big }]),
+		A([{ type: "toolCall", id: "c2", name: "expert", arguments: { brief: { ticket: big } } }]), R(big),
+		A([{ type: "text", text: "short" }])];
+	const out = mod.trimOld(msgs);
+	const len = (m) => JSON.stringify(m).length;
+	t("trim: an old tool result cut to head and tail, with a note", [len(out[2]) < 2500, /older turn trimmed: the run's ledger and artifacts have it all/.test(out[2].content[0].text), out[2].content[0].text.startsWith("xxx")], [true, true, true]);
+	t("trim: an old tool call's long fields cut, the rest kept", [out[1].content[0].arguments.brief.ticket.length < 2000, out[1].content[0].arguments.brief.decision, out[1].content[0].arguments.action, out[1].content[0].name], [true, "x", "run", "expert"]);
+	t("trim: old long text cut", out[3].content[0].text.length < 2000, true);
+	t("trim: the last two assistant turns and what follows kept whole", [out[4] === msgs[4], out[5] === msgs[5], out[6] === msgs[6]], [true, true, true]);
+	t("trim: the user's request never cut, however long", [out[0] === msgs[0], out[0].content[0].text.length], [true, 5006]);
+	const later = mod.trimOld([...msgs.slice(0, 3), { role: "user", content: [{ type: "text", text: "answer: " + big }] }, ...msgs.slice(3)]);
+	t("trim: a later user message never cut either", later[3].content[0].text.length, 5008);
+	t("trim: nothing long and old: no change", mod.trimOld([A([{ type: "text", text: "a" }]), R("b"), A([{ type: "text", text: "c" }]), R("d"), A([{ type: "text", text: "e" }])]), null);
+	t("trim: two assistant turns or fewer: no change", mod.trimOld([A([{ type: "text", text: big }]), R(big), A([{ type: "text", text: "e" }])]), null);
+	const d = repo();
+	const o = await load({ LETS_CODE_MODE: "orchestration" }); await o.start(d);
+	t("context hook: orchestration trims", !!(await o.handlers.context({ messages: msgs }))?.messages, true);
+	const a = await load({ LETS_CODE_MODE: "auto" }); await a.start(d);
+	t("context hook: other modes left alone", await a.handlers.context({ messages: msgs }), undefined);
+}
+// --- orchestration with no one to answer: a turn that waits for approval is told to go on
+{
+	const d = repo();
+	const ask = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Here is the ticket. Approve and I'll run the factory." }] };
+	const o = await load({ LETS_CODE_MODE: "orchestration" }, { ui: false }); await o.start(d);
+	o.handlers.before_agent_start({ systemPromptOptions: { sections: {} } }, { hasUI: false });
+	const r1 = await o.handlers.turn_end({ message: ask });
+	t("no UI, no factory run yet, a turn ends waiting: told to go on", [r1?.continue, /No one can answer in this session/.test(r1?.entries?.[0]?.content ?? "")], [true, true]);
+	await o.handlers.turn_end({ message: ask });
+	t("no UI: at most MAX_GO_NUDGES", await o.handlers.turn_end({ message: ask }), undefined);
+	const o2 = await load({ LETS_CODE_MODE: "orchestration" }, { ui: false }); await o2.start(d);
+	o2.handlers.before_agent_start({ systemPromptOptions: { sections: {} } }, { hasUI: false });
+	await o2.handlers.tool_call({ toolName: "expert", input: { action: "run", name: "software-factory", brief: { ticket: "T" } } }, o2.ctx(d));
+	t("no UI, after the factory started: the final summary is not nudged", await o2.handlers.turn_end({ message: ask }), undefined);
+	t("no UI: a turn with a tool call is not nudged", await (async () => { const x = await load({ LETS_CODE_MODE: "orchestration" }, { ui: false }); await x.start(d); x.handlers.before_agent_start({ systemPromptOptions: { sections: {} } }, { hasUI: false }); return x.handlers.turn_end({ message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", name: "bash" }] } }); })(), undefined);
+	const u = await load({ LETS_CODE_MODE: "orchestration" }, { ui: true }); await u.start(d);
+	u.handlers.before_agent_start({ systemPromptOptions: { sections: {} } }, { hasUI: true });
+	t("with a UI: the user answers, no nudge", await u.handlers.turn_end({ message: ask }), undefined);
+	const a = await load({ LETS_CODE_MODE: "auto" }, { ui: false }); await a.start(d);
+	t("other modes: no nudge", await a.handlers.turn_end?.({ message: ask }), undefined);
+}
+// --- task size: the section in the prompt, and the first write of a large request held back once
+{
+	const { mod } = await load({});
+	const big = "Build a JSONPath engine.\n" + Array.from({ length: 9 }, (_, i) => `${i + 1}. rule number ${i + 1}`).join("\n");
+	t("looksLarge: many rules, a long spec, a short fix", [mod.looksLarge(big), mod.looksLarge("x".repeat(1500)), mod.looksLarge("Fix the off-by-one in stats.py: median of an even list."), mod.looksLarge("- a\n- b\n- c")], [true, true, false, false]);
+	const d = repo();
+	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_PLAN_ON = "1";
+	const sec = (h, prompt) => { const s = {}; h.handlers.before_agent_start({ prompt, systemPromptOptions: { sections: s } }, { hasUI: true }); return s; };
+	const h = await load({}); await h.start(d);
+	t("default mode with plan there: the task-size section", /Task size: before you start, judge the request/.test(sec(h, big).lets_code_task_size ?? ""), true);
+	const w1 = await h.call(d, "write", { path: join(d, "src/b.txt") });
+	t("large request, no mode asked: the first write held back, with why", [blocked(w1), /looks medium or large/.test(w1?.reason ?? "")], [true, true]);
+	t("large request: the second write goes through", await h.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	const s2 = await load({}); await s2.start(d); sec(s2, "Fix the typo in README.md.");
+	t("small request: no write held back", await s2.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	const m = await load({}, { tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "mode"] }); await m.start(d); sec(m, big);
+	await m.call(d, "mode", { to: "plan", reason: "large" });
+	await m.commands.plan.handler("", m.ctx(d)); await m.commands.plan.handler("", m.ctx(d));
+	t("large request, plan mode asked for: no write held back", await m.call(d, "write", { path: join(d, "src/b.txt") }), undefined);
+	const p = await load({}); await p.start(d); await p.commands.plan.handler("", p.ctx(d));
+	t("in plan mode: no task-size section (it is the plan)", "lets_code_task_size" in sec(p, big), false);
+	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
+	t("a subagent: no section (the plugin is inert there)", Object.keys(c.handlers).length, 0);
+	delete process.env.LETS_CODE_PLAN_ON; process.env.LETS_CODE_MANDATE_ON = "1";
+	const a = await load({ LETS_CODE_MODE: "auto" }); await a.start(d);
+	t("mandate on, auto: the section, and the hold-back once", ["lets_code_task_size" in sec(a, big), blocked(await a.call(d, "write", { path: join(d, "src/b.txt") }))], [true, true]);
+	const o = await load({ LETS_CODE_MODE: "orchestration" }); await o.start(d);
+	t("orchestration: no task-size section", "lets_code_task_size" in sec(o, big), false);
 }
 // --- the /mode menu and the agent's mode tool
 {
@@ -469,44 +700,49 @@ const blocked = (r) => r?.block === true;
 	// mandate on: the menu lists the modes, the current one marked; a pick switches
 	const h = await load({}, { answers: [pick("ask")], tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent", "mode"] }); const d = repo(); await h.start(d);
 	await h.commands.mode.handler("", h.ctx(d));
-	t("/mode menu: the modes with a line each, the current marked", h.options[0], ["● auto — everything runs; only protected paths are refused", "  ask — confirms sudo, recursive deletes, installs and writes outside the project", "  plan — read-only: explores, then writes a numbered plan you approve", "  orchestrator — plans and hands every change to experts and subagents; changes no file itself", "  yolo — no rails at all", "  the model's switches: asked first (enter: switch without asking)"]);
+	t("/mode menu: the modes with a line each, the current marked", h.options[0], ["● auto — everything runs; only protected paths are refused", "  ask — confirms sudo, recursive deletes, installs and writes outside the project", "  plan — read-only: explores, then writes a numbered plan you approve", "  orchestration — plans and hands every change to experts and subagents, has every delivery reviewed; changes no file itself", "  yolo — no rails at all"]);
 	t("/mode menu: a pick switches", modes(h).at(-1)?.role, "ask");
 	// the agent asks: out of plan once the changes are approved
 	await h.commands.mode.handler("plan", h.ctx(d));
 	t("mode tool: stays active in plan", h.tools().includes("mode"), true);
 	t("mode tool: not refused in plan", await h.call(d, "mode", { to: "ask", reason: "x" }), undefined);
 	t("plan: a refused write points at the mode tool", /mode tool/.test((await h.call(d, "write", { path: join(d, "src/b.txt") }))?.reason ?? ""), true);
-	const h2 = await load({}, { answers: ["Stay in plan", "Switch to auto", "Switch to orchestrator"], tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "mode"] }); await h2.start(d);
+	// the default: asked first, the user confirms or declines
+	const h2 = await load({}, { answers: ["Stay in plan", "Switch to auto", "Switch to orchestration"], tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "mode"] }); await h2.start(d);
 	await h2.commands.mode.handler("plan", h2.ctx(d));
 	const no = await run(h2, d, { to: "auto", reason: "You approved the change." });
-	t("mode tool: the user sees the switch and the reason", h2.selects.at(-1), "The agent asks to switch mode: plan → auto\nYou approved the change.");
+	t("mode tool: the user sees the switch and the reason", [h2.selects.at(-1), h2.options.at(-1)], ["The agent asks to switch mode: plan → auto\nYou approved the change.", ["Switch to auto", "Stay in plan"]]);
 	t("mode tool: declined, still plan", [/kept plan mode/.test(text(no)), blocked(await h2.call(d, "write", { path: join(d, "src/b.txt") }))], [true, true]);
 	const yes = await run(h2, d, { to: "auto", reason: "You approved the change." });
 	t("mode tool: confirmed, out of plan, writing open, no plan run", [/^Mode is now auto/.test(text(yes)), /Writing is open again/.test(text(yes)), await h2.call(d, "write", { path: join(d, "src/b.txt") }), h2.tools().includes("edit"), h2.emitted.filter(([c]) => c === "user").length], [true, true, undefined, true, 0]);
-	const o = await run(h2, d, { to: "orchestrator", reason: "A long, multi-part task." });
-	t("mode tool: the new role's prompt in the result", [/Orchestrator mode/.test(text(o)), modes(h2).at(-1)?.role], [true, "orchestrator"]);
+	const o = await run(h2, d, { to: "orchestration", reason: "A long, multi-part task." });
+	t("mode tool: the new role's prompt in the result", [/Orchestration mode/.test(text(o)), modes(h2).at(-1)?.role], [true, "orchestration"]);
 	t("mode tool: yolo is the user's to pick", [(await run(h2, d, { to: "yolo", reason: "faster" })).isError, h2.selects.length], [true, 3]);
 	t("mode tool: an unknown mode", (await run(h2, d, { to: "nope", reason: "" })).isError, true);
-	t("mode tool: the mode it is in", text(await run(h2, d, { to: "orchestrator", reason: "" })), "The session is in orchestrator mode already.");
+	t("mode tool: the mode it is in", text(await run(h2, d, { to: "orchestration", reason: "" })), "The session is in orchestration mode already.");
 	const nu = await load({}, { ui: false }); await nu.start(d);
 	t("mode tool: no UI, refused", (await run(nu, d, { to: "plan", reason: "" })).isError, true);
 	const c = await load({ LETS_CODE_SUBAGENT_DEPTH: "1" });
 	t("mode tool: none in a subagent", "mode" in c.toolDefs, false);
 	// mandate off: the menu has off and the dormant modes there are
 	delete process.env.LETS_CODE_MANDATE_ON; process.env.LETS_CODE_PLAN_ON = "1";
-	const f = await load({}, { answers: [pick("plan"), "Switch to off"] }); await f.start(d);
+	const f = await load({}, { answers: [pick("plan"), "Switch to auto"] }); await f.start(d);
 	await f.commands.mode.handler("", f.ctx(d));
-	t("mandate off: the menu is off and plan", f.options[0], ["● off — no mode: nothing is enforced", "  plan — read-only: explores, then writes a numbered plan you approve", "  the model's switches: asked first (enter: switch without asking)"]);
+	t("mandate off: the menu is yolo, auto and plan", f.options[0], ["● yolo — no rails at all", "  auto — everything runs; only protected paths are refused", "  plan — read-only: explores, then writes a numbered plan you approve"]);
 	t("mandate off: a pick enters plan", blocked(await f.call(d, "write", { path: join(d, "src/b.txt") })), true);
-	t("mandate off: the tool asks back to off", [text(await run(f, d, { to: "off", reason: "Approved." })).startsWith("Mode is now off"), await f.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
+	t("mandate off: the tool may not ask for yolo", (await run(f, d, { to: "yolo", reason: "" })).isError, true);
+	t("mandate off: the tool asks out of plan to auto", [text(await run(f, d, { to: "auto", reason: "Approved." })).startsWith("Mode is now auto"), await f.call(d, "write", { path: join(d, "src/b.txt") })], [true, undefined]);
+	t("mandate off, auto: the rails are up (a protected path is refused)", blocked(await f.call(d, "write", { path: join(d, ".env") })), true);
+	await f.commands.mode.handler("yolo", f.ctx(d));
+	t("mandate off: /mode yolo drops the rails again", await f.call(d, "write", { path: join(d, ".env") }), undefined);
+	const fa = await load({}, { answers: [pick("auto")] }); await fa.start(d);
+	await fa.commands.mode.handler("", fa.ctx(d));
+	t("mandate off: auto picked from the menu", [modes(fa).at(-1)?.role, blocked(await fa.call(d, "write", { path: join(d, ".env") }))], ["auto", true]);
+	await fa.commands.mode.handler("off", fa.ctx(d));
+	t("mandate off: 'off' is no mode any more (yolo is)", [fa.notices.some((x) => /unknown mode 'off'/.test(x)), modes(fa).at(-1)?.role], [true, "auto"]);
 	delete process.env.LETS_CODE_PLAN_ON; process.env.LETS_CODE_MANDATE_ON = "1";
-	// the model's switches without asking: from the dialog, or the menu's toggle; remembered
-	const stateF = join(agentDir, "lets-code-state.json");
-	const saved = () => { try { return JSON.parse(readFileSync(stateF, "utf8")).modeSwitch; } catch { return undefined; } };
-	const a = await load({}, { answers: [(opts) => opts[1]] }); await a.start(d);
-	await a.commands.mode.handler("plan", a.ctx(d));
-	const al = await run(a, d, { to: "auto", reason: "Approved." });
-	t("dialog: 'switch without asking from now on' switches and is remembered", [/^Mode is now auto/.test(text(al)), saved(), a.options.at(-1)?.length], [true, "auto", 3]);
+	// LETS_CODE_MODE_SWITCH=auto: switched without asking, the user told
+	process.env.LETS_CODE_MODE_SWITCH = "auto";
 	const b = await load({}, { ui: true }); await b.start(d);
 	await b.commands.mode.handler("plan", b.ctx(d));
 	const n0 = b.selects.length;
@@ -515,14 +751,13 @@ const blocked = (r) => r?.block === true;
 	t("without asking: still never yolo", (await run(b, d, { to: "yolo", reason: "" })).isError, true);
 	const nu2 = await load({}, { ui: false }); await nu2.start(d);
 	t("without asking: no UI needed", text(await run(nu2, d, { to: "plan", reason: "" })).startsWith("Mode is now plan"), true);
-	const g = await load({}, { answers: [(opts) => opts.at(-1)] }); await g.start(d);
-	await g.commands.mode.handler("", g.ctx(d));
-	t("menu: the toggle line says it, and a pick turns asking back on", [g.options[0].at(-1), saved()], ["  the model's switches: made without asking (enter: ask first)", "ask"]);
-	const e = await load({ LETS_CODE_MODE_SWITCH: "auto" }); await e.start(d);
-	await e.commands.mode.handler("plan", e.ctx(d));
-	const ne = e.selects.length;
-	t("LETS_CODE_MODE_SWITCH=auto: for this launch, nothing saved", [text(await run(e, d, { to: "auto", reason: "" })).startsWith("Mode is now auto"), e.selects.length - ne, saved()], [true, 0, "ask"]);
 	delete process.env.LETS_CODE_MODE_SWITCH;
+	process.env.LETS_CODE_MODE_SWITCH = "yes";
+	const gb = await load({}, { answers: ["Stay in plan"] }); await gb.start(d);
+	await gb.commands.mode.handler("plan", gb.ctx(d));
+	t("LETS_CODE_MODE_SWITCH=yes (not auto): asked first", [text(await run(gb, d, { to: "auto", reason: "" })).includes("kept plan mode"), gb.selects.at(-1)?.startsWith("The agent asks to switch mode")], [true, true]);
+	delete process.env.LETS_CODE_MODE_SWITCH;
+	t("without asking: nothing saved", existsSync(join(agentDir, "lets-code-state.json")) && /modeSwitch/.test(readFileSync(join(agentDir, "lets-code-state.json"), "utf8")), false);
 }
 // --- mandate on: plan goes back to the mode it was entered from
 {
@@ -553,9 +788,9 @@ const blocked = (r) => r?.block === true;
 {
 	const h = await load({ LETS_CODE_MODE: "auto" }, { tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent", "codemode"] }); const d = repo(); await h.start(d);
 	await h.commands.mode.handler("orchestrator", h.ctx(d));
-	t("orchestrator: no codemode", h.tools().includes("codemode"), false);
+	t("orchestration: no codemode", h.tools().includes("codemode"), false);
 	await h.commands.plan.handler("", h.ctx(d));
-	t("orchestrator -> plan: codemode back (plan allows it)", h.tools().includes("codemode"), true);
+	t("orchestration -> plan: codemode back (plan allows it)", h.tools().includes("codemode"), true);
 	h.addTool("mcp__late__x");
 	await h.commands.mode.handler("developer", h.ctx(d));
 	t("plan -> developer: edit and write back", ["edit", "write"].every((x) => h.tools().includes(x)), true);

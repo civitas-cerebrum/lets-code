@@ -106,6 +106,214 @@ const OK = { plan: [PLAN], build: [build()], "expert-review": ["VERDICT: APPROVE
 const root = join(agentDir, "lets-code-factory");
 const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md"), "utf8"), repo, howToRun: "grep -q ok src/a.txt", root, ...extra });
 
+// ------------------------------------------------------------------ stage briefs sized to the model's window
+{
+	const cb = F.contextBudget;
+	const B = (w, files, lines, steps, write) => ({ window: w, files, lines, steps, write });
+	t("budget: 32k window, 8k cap", cb(32768, 8192), B(32768, 2, 619, 6, 409));
+	t("budget: 128k window", cb(131072, 32768), B(131072, 10, 3076, 12, 1600));
+	t("budget: 1M window: capped", cb(1000000, 32000), B(1000000, 15, 6000, 12, 1600));
+	t("budget: no cap given: a quarter of the window", cb(32768), B(32768, 2, 619, 6, 409));
+	t("budget: a cap as large as the window: a quarter instead", cb(32768, 40000), B(32768, 2, 619, 6, 409));
+	t("budget: a window too small for room: the floor", cb(8192, 4096), B(8192, 1, 150, 3, 204));
+	t("budget: shrink halves the reading", cb(32768, 8192, 1), B(32768, 1, 309, 6, 409));
+	t("budget: shrink never below the floor", cb(32768, 8192, 3), B(32768, 1, 150, 6, 409));
+	t("budget: the write limit follows the reply cap, not the window", [cb(32768, 2000).write, cb(262144, 4096).write, cb(32768, 8192, 2).write], [100, 204, 409]);
+	t("budget: no window, no budget", [cb(0, 8192), cb(undefined), cb(-5), cb("x")], [null, null, null, null]);
+	// sized: each stage told its part
+	const repo = makeRepo("budget"); const fd = fakeDeps({ ...OK, build: [build()] });
+	const L = await F.startRun(opts(repo, { window: 32768, outCap: 8192 }), fd);
+	const brief = (stage) => fd.calls.find((c) => c.meta.stage === stage)?.brief.context_budget ?? "";
+	t("budget: the run keeps the window", [L.window, L.outCap, L.shrink], [32768, 8192, undefined]);
+	t("budget: the plan in steps that fit, a split named past the step count", [/Plan the build in steps of at most 2 files changed and about 619 lines read each/.test(brief("plan")), /more than 6 such steps, say so at the top of the plan/.test(brief("plan"))], [true, true]);
+	t("budget: the plan and the build told to write in parts", [/One reply holds about 409 lines: write a larger file in parts/.test(brief("plan")), /One reply holds about 409 lines/.test(brief("build"))], [true, true]);
+	const tst = fakeDeps({ ...OK, build: [build()] }, { available: () => true }); const rt = makeRepo("tester-ticket");
+	await F.startRun(opts(rt, { tester: "on" }), tst);
+	const tgoal = tst.calls.find((c) => c.meta.stage === "test")?.brief.goal ?? "";
+	t("tester: the goal carries the ticket and the every-example rule", [/Ticket \(Check every example and rule in the ticket too/.test(tgoal), tgoal.includes(readFileSync(join(rt, "TICKET.md"), "utf8").trim().split("\n")[0])], [true, true]);
+	t("budget: the reviewers, tester and judge start with the verdict", ["expert-review", "design-review", "judge"].map((x) => /start your final reply with the verdict line, then one line per finding/.test(brief(x))), [true, true, true]);
+	t("budget: the build a step at a time", /Build the plan one step at a time, reading only what the current step needs: about 619 lines/.test(brief("build")), true);
+	t("budget: the reviewers and the judge read the change file by file", ["expert-review", "design-review", "judge"].map((s) => brief(s).includes(`git -C ${L.work} diff ${L.base} -- <file>`)), [true, true, true]);
+	t("budget: nothing cut when nothing ran short", [/already cut/.test(brief("build")), L.entries.some((e) => e.short)], [false, false]);
+	// not sized: no window given
+	const r2 = makeRepo("nobudget"); const fd2 = fakeDeps({ ...OK, build: [build()] });
+	const L2 = await F.startRun(opts(r2), fd2);
+	t("no window: no context_budget in any brief", [L2.window, fd2.calls.some((c) => "context_budget" in c.brief)], [undefined, false]);
+	t("no window: a shrink alone adds no sizes", F.budgetFor("build", { ...L2, shrink: 1 }), "");
+	// a stage that ran short: the stages after it get smaller sizes, and say why
+	const r3 = makeRepo("short"); const fd3 = fakeDeps({ ...OK, plan: [() => ({ text: PLAN, exitCode: 0, input: 1, output: 1, seconds: 1, compactions: 1 })], build: [build()] });
+	const L3 = await F.startRun(opts(r3, { window: 32768, outCap: 8192 }), fd3);
+	const b3 = (stage) => fd3.calls.find((c) => c.meta.stage === stage)?.brief.context_budget ?? "";
+	t("ran short: the plan stage marked, the run shrunk once", [L3.entries.find((e) => e.stage === "plan").short, L3.shrink], [true, 1]);
+	t("ran short: the build after it is cut and says so", [/about 309 lines/.test(b3("build")), /An earlier stage of this run ran short of context/.test(b3("build"))], [true, true]);
+	t("ran short: the plan before it was not", /about 619 lines/.test(b3("plan")), true);
+	// at 80% of the window without compacting counts; 60% does not
+	const r4 = makeRepo("peak"); const fd4 = fakeDeps({ ...OK, build: [({ cwd }) => ({ ...build()({ cwd }), peak: 27000, window: 32768 })] });
+	const L4 = await F.startRun(opts(r4, { window: 32768, outCap: 8192 }), fd4);
+	t("ran short: a request at 80% of the window", [L4.entries.find((e) => e.stage === "build").short, L4.shrink], [true, 1]);
+	const r5 = makeRepo("roomy"); const fd5 = fakeDeps({ ...OK, build: [({ cwd }) => ({ ...build()({ cwd }), peak: 20000, window: 32768 })] });
+	const L5 = await F.startRun(opts(r5, { window: 32768, outCap: 8192 }), fd5);
+	t("room left (60%): no shrink", [L5.entries.find((e) => e.stage === "build").short, L5.shrink], [undefined, undefined]);
+	// every stage short: the shrink stops at 3
+	const all = (x) => typeof x === "function" ? (a) => ({ ...x(a), compactions: 1 }) : () => ({ text: x, exitCode: 0, input: 1, output: 1, seconds: 1, compactions: 1 });
+	const r6 = makeRepo("allshort"); const fd6 = fakeDeps(Object.fromEntries(Object.entries({ ...OK, build: [build()] }).map(([k, v]) => [k, v.map(all)])));
+	const L6 = await F.startRun(opts(r6, { window: 32768, outCap: 8192 }), fd6);
+	t("ran short at every stage: the shrink stops at 3", [L6.shrink, L6.entries.filter((e) => e.short).length >= 4], [3, true]);
+	// a developer reply cut at the reply limit: continued from the work tree, not blocked
+	const cutOnce = [() => ({ text: "half a reply", exitCode: 0, input: 10, output: 8000, seconds: 3, cut: true }), build()];
+	const r7 = makeRepo("cut"); const fd7 = fakeDeps({ ...OK, build: cutOnce });
+	const L7 = await F.startRun(opts(r7, { window: 32768, outCap: 8192 }), fd7);
+	const builds7 = fd7.calls.filter((c) => c.meta.stage === "build");
+	t("cut build: continued once, then done", [L7.status, builds7.length, L7.entries.find((e) => e.stage === "build").continued], ["done", 2, 1]);
+	t("cut build: the continuation says where it stopped, from the work tree", [/cut off at the reply limit\. The work tree keeps every file you wrote/.test(builds7[1].brief.continue), builds7[1].brief.continue.endsWith("half a reply"), "continue" in builds7[0].brief], [true, true, false]);
+	t("cut build: tokens and time of both replies counted", [L7.entries.find((e) => e.stage === "build").output_tokens, L7.entries.find((e) => e.stage === "build").seconds], [8050, 5]);
+	const cutPlan = [() => ({ text: "1. a", exitCode: 0, input: 1, output: 1, seconds: 1, cut: true }), PLAN];
+	const r8 = makeRepo("cutplan"); const fd8 = fakeDeps({ ...OK, plan: cutPlan, build: [build()] });
+	const L8 = await F.startRun(opts(r8), fd8);
+	const plans8 = fd8.calls.filter((c) => c.meta.stage === "plan");
+	t("cut plan: asked again, shorter, and goes on", [L8.status, plans8.length, /Reply again with the whole plan, shorter/.test(plans8[1].brief.continue)], ["done", 2, true]);
+	// negative: cut every time: two continuations, then the run blocks as before
+	const always = () => ({ text: "cut again", exitCode: 0, input: 1, output: 1, seconds: 1, cut: true });
+	const r9 = makeRepo("cutalways"); const fd9 = fakeDeps({ ...OK, build: [always] }, { decisions: { stuck: { action: "stop" }, blocked: { action: "stop" } } });
+	const L9 = await F.startRun(opts(r9), fd9);
+	t("cut every time: continued at most MAX_CONTINUES, then blocked", [fd9.calls.filter((c) => c.meta.stage === "build").length, F.MAX_CONTINUES, L9.entries.find((e) => e.stage === "build").continued, L9.status], [3, 2, 2, "stopped"]);
+	// negative: a reviewer's cut reply is not continued
+	const r10 = makeRepo("cutreview"); const fd10 = fakeDeps({ ...OK, build: [build()], "expert-review": [() => ({ text: "VERDICT: APPROVE\n## Findings\nnone", exitCode: 0, input: 1, output: 1, seconds: 1, cut: true })] });
+	await F.startRun(opts(r10), fd10);
+	t("a reviewer's cut reply that has its verdict: not asked again", fd10.calls.filter((c) => c.meta.stage === "expert-review").length, 1);
+	// a review reply without its verdict (cut off, or left out): asked again, verdict first
+	const noVerdict = (cut) => () => ({ text: "I checked C1 and C2 and ran the suite; looking at the parser n", exitCode: 0, input: 1, output: 1, seconds: 1, cut });
+	const r11 = makeRepo("ask-cut-review"); const fd11 = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(true), "VERDICT: APPROVE\n## Findings\nnone"] });
+	const L11 = await F.startRun(opts(r11, { window: 32768, outCap: 8192 }), fd11);
+	const rv11 = fd11.calls.filter((c) => c.meta.stage === "expert-review");
+	t("review cut without its verdict: asked again, then on", [L11.status, rv11.length, L11.entries.find((e) => e.stage === "expert-review").continued, L11.entries.find((e) => e.stage === "expert-review").verdict], ["done", 2, 1, "APPROVE"]);
+	t("review asked again: verdict first, briefly, and why", [/ended without its verdict \(cut off at the reply limit\)/.test(rv11[1].brief.continue), /the verdict line first, then one line per finding/.test(rv11[1].brief.continue)], [true, true]);
+	const r12 = makeRepo("ask-leftout"); const fd12 = fakeDeps({ ...OK, build: [build()], "design-review": [noVerdict(false), "VERDICT: APPROVE\n## Findings\nnone"] });
+	const L12 = await F.startRun(opts(r12), fd12);
+	t("design review with the verdict left out (not cut): asked again", [L12.status, fd12.calls.filter((c) => c.meta.stage === "design-review").length, /ended without its verdict\. Check only/.test(fd12.calls.filter((c) => c.meta.stage === "design-review")[1].brief.continue)], ["done", 2, true]);
+	const r13 = makeRepo("ask-judge"); const fd13 = fakeDeps({ ...OK, build: [build()], judge: [noVerdict(false), "## Verdict\nACCEPT all pass\n## Criteria\nC1: PASS x\nC2: PASS y"] });
+	const L13 = await F.startRun(opts(r13), fd13);
+	t("judge without its verdict: asked again", [L13.status, fd13.calls.filter((c) => c.meta.stage === "judge").length], ["done", 2]);
+	const r13b = makeRepo("judge-never"); const fd13b = fakeDeps({ ...OK, build: [build()], judge: [noVerdict(false)] }, { decisions: { blocked: { action: "stop" } } });
+	const L13b = await F.startRun(opts(r13b), fd13b);
+	t("judge never a verdict, the suite passes: blocked, not waved through by the developer's suite", [L13b.entries.find((e) => e.stage === "judge").verdict, L13b.status, L13b.unreviewed], ["NO VERDICT", "stopped", undefined]);
+	const jb = fd13b.calls.find((c) => c.meta.stage === "judge").brief, tb = fd13b.calls.find((c) => c.meta.stage === "test")?.brief;
+	t("judge: given the ticket, told to check its every example", [/Check every example and rule in the ticket too/.test(jb.ticket), jb.ticket.includes(readFileSync(join(r13b, "TICKET.md"), "utf8").trim().split("\n")[0]), /A failing example of the ticket is a failing criterion/.test(jb.ticket)], [true, true, true]);
+	// never a verdict: asked again twice, then the suite decides
+	const r14 = makeRepo("ask-never"); const fd14 = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { blocked: { action: "stop" } } });
+	const L14 = await F.startRun(opts(r14), fd14);
+	t("never a verdict, the suite passes: on, marked unreviewed", [fd14.calls.filter((c) => c.meta.stage === "expert-review").length, L14.entries.find((e) => e.stage === "expert-review").verdict, L14.unreviewed, L14.status, fd14.calls.some((c) => c.meta.stage === "design-review")], [3, "NO VERDICT (the suite passes)", true, "done", true]);
+	const r14b = makeRepo("ask-never-red"); const fd14b = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { stuck: { action: "stop" }, blocked: { action: "stop" } } });
+	const L14b = await F.startRun(opts(r14b, { howToRun: "test -f nope.txt" }), fd14b);
+	const ev14b = L14b.entries.filter((e) => e.stage === "expert-review");
+	t("never a verdict, the suite fails: a fix round with its output, not on", [ev14b[0].verdict, fd14b.calls.filter((c) => c.meta.stage === "build").length >= 2, /no verdict from expert-reviewer, and the test suite fails/.test(fd14b.calls.filter((c) => c.meta.stage === "build")[1]?.brief.findings ?? ""), L14b.status], ["NO VERDICT (the suite fails)", true, true, "stopped"]);
+	// a test command that runs no tests (exit 5): it judges nothing, so no fix round on it
+	const noTestsCmd = "printf 'Ran 0 tests in 0.000s\\n\\nNO TESTS RAN\\n'; exit 5";
+	const r14d = makeRepo("ask-never-notests"); const fd14d = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { stuck: { action: "stop" }, blocked: { action: "stop" } } });
+	const L14d = await F.startRun(opts(r14d, { howToRun: noTestsCmd }), fd14d);
+	t("never a verdict, the suite runs no tests: on, unreviewed, no fix round", [L14d.entries.find((e) => e.stage === "expert-review").verdict, fd14d.calls.filter((c) => c.meta.stage === "build").length, L14d.unreviewed], ["NO VERDICT (the suite runs no tests)", 1, true]);
+	t("the suite ran no tests before the change: the developer is told", [/finds no tests yet: name and place your tests so that this exact command runs them/.test(fd14d.calls.find((c) => c.meta.stage === "plan").brief.test_command ?? ""), "test_command" in fd14d.calls.find((c) => c.meta.stage === "build").brief], [true, true]);
+	t("a suite that runs tests: no such note", "test_command" in fd14.calls.find((c) => c.meta.stage === "plan").brief, false);
+	t("the suite ran no tests, now as before: regression says NO TESTS, not FAIL", L14d.entries.find((e) => e.stage === "regression")?.verdict, "NO TESTS (as before the change)");
+	t("ranNoTests: unittest and pytest wording, exit 5 only", [F.ranNoTests(5, "Ran 0 tests in 0.000s\n\nNO TESTS RAN"), F.ranNoTests(5, "collected 0 items"), F.ranNoTests(1, "NO TESTS RAN"), F.ranNoTests(5, "FAILED (failures=2)")], [true, true, false, false]);
+	const r14c = makeRepo("ask-never-nosuite"); const fd14c = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { blocked: { action: "stop" } } });
+	const L14c = await F.startRun(opts(r14c, { howToRun: "" }), fd14c);
+	t("never a verdict, no test command: blocked as before", [L14c.entries.find((e) => e.stage === "expert-review").verdict, L14c.status], ["NO VERDICT", "stopped"]);
+	// negative: a reviewer whose run failed is not asked again (that is a failure, not a missing line)
+	const r15 = makeRepo("ask-failed"); const fd15 = fakeDeps({ ...OK, build: [build()], "expert-review": [() => ({ text: "boom", exitCode: 1, input: 1, output: 1, seconds: 1 })] }, { decisions: { blocked: { action: "stop" } } });
+	const L15 = await F.startRun(opts(r15), fd15);
+	t("a failed review run: not asked again", [fd15.calls.filter((c) => c.meta.stage === "expert-review").length, L15.entries.find((e) => e.stage === "expert-review").verdict], [1, "FAILED"]);
+	// blocked after the build: decision final takes the build to the final approval, and it is committed
+	const r16 = makeRepo("final-blocked"); const fd16 = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { blocked: { action: "final", by: "the orchestrator" } } });
+	const L16 = await F.startRun(opts(r16, { howToRun: "" }), fd16);
+	t("blocked after the build, final: committed on the run branch, marked unreviewed", [L16.status, !!L16.commit, L16.unreviewed, L16.entries.some((e) => e.verdict === "FINAL AS IT IS" && /expert-review and the stages after it did not run/.test(e.summary))], ["done", true, true, true]);
+	t("blocked after the build, final: the later stages did not run", fd16.calls.some((c) => c.meta.stage === "design-review" || c.meta.stage === "judge"), false);
+	t("blocked after the build: final is offered", F.decisionsAt("blocked", { ...L16, waiting: "blocked" }), ["retry", "final", "stop"]);
+	// negative: blocked before anything was built: final is not offered, and refused
+	const r17 = makeRepo("final-early"); const fd17 = fakeDeps({ ...OK, plan: ["I would add a file."] }, { decisions: { blocked: { action: "stop" } } });
+	const L17 = await F.startRun(opts(r17), fd17);
+	t("blocked before a build: final not offered", F.decisionsAt("blocked", L17), ["retry", "stop"]);
+	t("blocked before a build: final refused", typeof F.decisionFor("blocked", "final", undefined, L17), "string");
+	t("blocked after a build: final accepted", F.decisionFor("blocked", "final", undefined, L16), { action: "final", text: undefined, by: "the orchestrator" });
+	// a fix round that changes nothing is sent back to the findings
+	const revise = "VERDICT: REVISE\n## Findings\nR1 | major | feature.txt | confirmed | the content is wrong";
+	const idleFix = () => ({ text: "I looked at the findings.", exitCode: 0, input: 1, output: 1, seconds: 1 });
+	const disputeFix = () => ({ text: "STATUS: DONE\nR1 is wrong: the content is as the ticket says; no change.", exitCode: 0, input: 1, output: 1, seconds: 1 });
+	const r18 = makeRepo("idle-fix"); const fd18 = fakeDeps({ ...OK, build: [build(), idleFix, build("fixed\n")], "expert-review": [revise, "VERDICT: APPROVE\n## Findings\nnone"] });
+	const L18 = await F.startRun(opts(r18), fd18);
+	const b18 = fd18.calls.filter((c) => c.meta.stage === "build");
+	t("fix round that changed nothing: sent back, then fixed and on", [L18.status, b18.length, /changed nothing in the work tree, and the findings below are still open/.test(b18[2].brief.continue ?? ""), L18.entries.filter((e) => e.stage === "build")[1].continued], ["done", 3, true, 1]);
+	const r19 = makeRepo("real-fix"); const fd19 = fakeDeps({ ...OK, build: [build(), build("fixed\n")], "expert-review": [revise, "VERDICT: APPROVE\n## Findings\nnone"] });
+	const L19 = await F.startRun(opts(r19), fd19);
+	t("fix round that changed the work tree: not sent back", [L19.status, fd19.calls.filter((c) => c.meta.stage === "build").length], ["done", 2]);
+	const r22 = makeRepo("dispute-fix"); const fd22 = fakeDeps({ ...OK, build: [build(), disputeFix], "expert-review": [revise, "VERDICT: APPROVE\n## Findings\nnone"] });
+	const L22 = await F.startRun(opts(r22), fd22);
+	t("fix round that says STATUS DONE without a change (disputing a finding): not sent back, the reviews judge it", [L22.status, fd22.calls.filter((c) => c.meta.stage === "build").length], ["done", 2]);
+	const r20 = makeRepo("first-build"); const fd20 = fakeDeps({ ...OK, build: [build()] });
+	const L20 = await F.startRun(opts(r20), fd20);
+	t("the first build is never sent back for no change, and its fingerprint is kept", [fd20.calls.filter((c) => c.meta.stage === "build").length, /^\d+:[0-9a-f]+$/.test(L20.patch ?? "")], [1, true]);
+	const r21 = makeRepo("idle-always"); const fd21 = fakeDeps({ ...OK, build: [build(), idleFix], "expert-review": [revise] }, { decisions: { stuck: { action: "stop" } } });
+	const L21 = await F.startRun(opts(r21), fd21);
+	t("fix round that never changes anything: sent back twice, then on as before (stuck on the repeat)", [fd21.calls.filter((c) => c.meta.stage === "build").length, L21.status], [4, "stopped"]);
+	t("hasVerdict: the line, the judge's heading, neither", [F.hasVerdict("expert-review", "VERDICT: REVISE\nx"), F.hasVerdict("judge", "## Verdict\nREJECT C1"), F.hasVerdict("design-review", "all good"), F.hasVerdict("judge", "VERDICT is coming")], [true, true, false, false]);
+	// negative: an uncut reply is never continued
+	t("no cut: one build call", fd.calls.filter((c) => c.meta.stage === "build").length, 1);
+}
+
+// ------------------------------------------------------------------ no STATUS line (small models drop it)
+{
+	const noStatusBuild = ({ cwd }) => { writeFileSync(join(cwd, "feature.txt"), "feature\n"); return { text: "I wrote feature.txt and the tests pass.", exitCode: 0, input: 1, output: 1, seconds: 1 }; };
+	const r1 = makeRepo("nostatus-build"); const f1 = fakeDeps({ ...OK, build: [noStatusBuild] });
+	const L1 = await F.startRun(opts(r1), f1);
+	t("no STATUS, a build that changed the work tree: on to the reviews", [L1.status, L1.entries.find((e) => e.stage === "build").verdict, f1.calls.some((c) => c.meta.stage === "expert-review")], ["done", "DONE (no STATUS line)", true]);
+	const r2 = makeRepo("nostatus-nochange"); const f2 = fakeDeps({ ...OK, build: [() => ({ text: "Thinking about it.", exitCode: 0, input: 1, output: 1, seconds: 1 })] }, { decisions: { blocked: { action: "stop" } } });
+	const L2 = await F.startRun(opts(r2), f2);
+	t("no STATUS, no change: blocked as before, no review", [L2.entries.find((e) => e.stage === "build").verdict, f2.calls.some((c) => c.meta.stage === "expert-review"), L2.status], ["NO STATUS", false, "stopped"]);
+	const r3 = makeRepo("nostatus-plan"); const f3 = fakeDeps({ ...OK, plan: ["Here is how:\n1. add feature.txt\n2. test it"], build: [build()] });
+	const L3 = await F.startRun(opts(r3), f3);
+	t("no STATUS, a numbered plan: a plan", [L3.entries.find((e) => e.stage === "plan").verdict, L3.status], ["PLAN (no STATUS line)", "done"]);
+	const r4 = makeRepo("nostatus-prose"); const f4 = fakeDeps({ ...OK, plan: ["I would add a file and test it."] }, { decisions: { blocked: { action: "stop" } } });
+	const L4 = await F.startRun(opts(r4), f4);
+	t("no STATUS, a plan without steps: blocked", [L4.entries.find((e) => e.stage === "plan").verdict, L4.status], ["NO STATUS", "stopped"]);
+	const r5 = makeRepo("blocked-said"); const f5 = fakeDeps({ ...OK, build: [({ cwd }) => { writeFileSync(join(cwd, "feature.txt"), "x\n"); return { text: "STATUS: BLOCKED\nneed a key", exitCode: 0, input: 1, output: 1, seconds: 1 }; }] }, { decisions: { blocked: { action: "stop" } } });
+	const L5 = await F.startRun(opts(r5), f5);
+	// the developer built at the plan stage
+	const builtAtPlan = ({ cwd }) => { writeFileSync(join(cwd, "feature.txt"), "feature\n"); return { text: "Done, wrote feature.txt.\nSTATUS: DONE", exitCode: 0, input: 1, output: 1, seconds: 1 }; };
+	const r6 = makeRepo("built-at-plan"); const f6 = fakeDeps({ ...OK, plan: [builtAtPlan] });
+	const L6 = await F.startRun(opts(r6), f6);
+	t("DONE at the plan stage with a change: on to the reviews, no build stage", [L6.status, L6.entries.find((e) => e.stage === "plan").verdict, f6.calls.some((c) => c.meta.stage === "build"), f6.calls.some((c) => c.meta.stage === "expert-review")], ["done", "DONE (built at the plan stage)", false, true]);
+	t("DONE at the plan stage: no plan checkpoint asked", f6.asked.includes("plan"), false);
+	const r7 = makeRepo("done-at-plan-nochange"); const f7 = fakeDeps({ ...OK, plan: ["STATUS: DONE\nall good"] }, { decisions: { blocked: { action: "stop" } } });
+	const L7 = await F.startRun(opts(r7), f7);
+	t("DONE at the plan stage without a change: blocked", [L7.status, f7.calls.some((c) => c.meta.stage === "expert-review")], ["stopped", false]);
+	t("STATUS: BLOCKED said, even with a change: blocked", [L5.entries.find((e) => e.stage === "build").verdict, L5.status], ["BLOCKED", "stopped"]);
+}
+
+// ------------------------------------------------------------------ orchestrated: a green run is committed
+{
+	const E = (stage, verdict) => ({ stage, round: 0, verdict, summary: "", input: 0, output_tokens: 0, seconds: 0, started: 0, ended: 0 });
+	const L = (entries) => ({ entries, criteria: ["C1"] });
+	const cp = F.orchestrated();
+	t("orchestrated, green (judge ACCEPT, regression PASS): commit", await cp("result", L([E("judge", "ACCEPT"), E("regression", "PASS")])), { action: "commit", by: "the orchestrator" });
+	t("orchestrated, judge rejected: left to the orchestrator", await cp("result", L([E("judge", "REJECT"), E("regression", "PASS")])), null);
+	t("orchestrated, suite failed as before the change: left to the orchestrator", await cp("result", L([E("judge", "ACCEPT"), E("regression", "FAIL (as before the change)")])), null);
+	t("orchestrated, the suite runs no tests (as before) and the judge accepted: commit", await cp("result", L([E("judge", "ACCEPT"), E("regression", "NO TESTS (as before the change)")])), { action: "commit", by: "the orchestrator" });
+	t("orchestrated, no regression ran: left to the orchestrator", await cp("result", L([E("judge", "ACCEPT"), E("regression", "SKIPPED")])), null);
+	t("orchestrated, the last judge counts", await cp("result", L([E("judge", "REJECT"), E("judge", "ACCEPT"), E("regression", "PASS")])), { action: "commit", by: "the orchestrator" });
+	t("orchestrated, a given decision first", await F.orchestrated({ action: "keep", by: "x" })("result", L([E("judge", "ACCEPT"), E("regression", "PASS")])), { action: "keep", by: "x" });
+	t("orchestrated, other checkpoints unchanged", [await cp("plan", L([])), await cp("blocked", L([E("judge", "ACCEPT"), E("regression", "PASS")]))], [null, null]);
+	// end to end: an orchestrated run commits its green result itself
+	const repo = makeRepo("orch-green"); const fd = fakeDeps({ ...OK, build: [build()] }); fd.checkpoint = F.orchestrated();
+	const L0 = await F.startRun(opts(repo), fd);
+	t("orchestrated run: waits for the orchestrator at the plan", [L0.status, L0.waiting], ["waiting", "plan"]);
+	const Lg = await F.resumeRun(L0.id, { ...fd, checkpoint: F.orchestrated({ action: "approve", by: "the orchestrator" }) }, root);
+	t("orchestrated run, green: done and committed without being asked", [Lg.status, !!Lg.commit, Lg.waiting], ["done", true, null]);
+	const r2 = makeRepo("orch-red"); const fd2 = fakeDeps({ ...OK, build: [build()], judge: ["## Verdict\nREJECT C1\n## Criteria\nC1: FAIL x"] }, { decisions: { stuck: { action: "final" } } }); fd2.checkpoint = F.orchestrated();
+	const R0 = await F.startRun(opts(r2), fd2);
+	const Lr = await F.resumeRun(R0.id, { ...fd2, checkpoint: F.orchestrated({ action: "approve", by: "the orchestrator" }) }, root);
+	t("orchestrated run, judge rejects: not committed by itself", [!!Lr.commit, Lr.status], [false, "waiting"]);
+}
+
 // ------------------------------------------------------------------ the happy path
 {
 	const repo = makeRepo("happy"); const statusBefore = git(repo, "status", "--porcelain"); const head = git(repo, "rev-parse", "HEAD");
@@ -171,6 +379,12 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 		let err3 = ""; try { await F.startRun({ ticket, repo: join(work, "broken"), root, howToRun: "make test ((" }, fakeDeps(OK)); } catch (e) { err3 = e.message; }
 		t("new: a test command that does not parse stops the start", /test command \(how_to_run\) is not a shell command that parses/.test(err3), true);
 		t("new: a subshell is a command, not a remark", (await F.shellCommand("(cd src && make test)", "x", fakeDeps(OK), work)), "(cd src && make test)");
+		t("new: a test command in prose: the command in its backticks", await F.shellCommand("Run the unit tests: `python3 -m unittest -v` from the repo root", "x", fakeDeps(OK), work), "python3 -m unittest -v");
+		t("new: prose with a remark span first: the span that is a command", await F.shellCommand("Use `the test file` then run `python3 -m pytest -q`", "x", fakeDeps(OK), work), "python3 -m pytest -q");
+		let err4 = ""; try { await F.shellCommand("Run the tests the usual way, with `pytest ((` maybe", "x", fakeDeps(OK), work); } catch (e) { err4 = e.message; }
+		t("new: prose whose spans do not parse: still refused", /is not a shell command that parses/.test(err4), true);
+		let err5 = ""; try { await F.shellCommand("Run the unit tests from the repo root", "x", fakeDeps(OK), work); } catch (e) { err5 = e.message; }
+		t("new: prose without a command: still refused", /is not a shell command that parses/.test(err5), true);
 		t("new: a folder with files that is not a repo is refused, untouched", [/not a git repository, and has files/.test(err), existsSync(join(full, ".git"))], [true, false]);
 	} finally { for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); }
 }
@@ -273,10 +487,10 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	const fd = fakeDeps({ ...OK, build: ["STATUS: BLOCKED\n## Notes\nneeds npm install", build()] }, { decisions: { blocked: { action: "retry" } } });
 	const L = await F.startRun(opts(repo), fd);
 	t("blocked: the user is asked, the stage runs again", [fd.asked.includes("blocked"), L.status, fd.calls.filter((c) => c.meta.stage === "build").length], [true, "done", 2]);
-	const repo2 = makeRepo("noverdict");
+	const repo2 = makeRepo("ask-noverdict");
 	const fd2 = fakeDeps({ ...OK, "expert-review": ["looks good to me"] }, { decisions: { blocked: { action: "stop" } } });
-	const L2 = await F.startRun(opts(repo2), fd2);
-	t("no verdict line: blocked, then stopped", [L2.status, L2.entries.at(-1).verdict, fd2.asked.at(-1)], ["stopped", "NO VERDICT", "blocked"]);
+	const L2 = await F.startRun(opts(repo2, { howToRun: "" }), fd2);
+	t("no verdict line, no test command: blocked, then stopped", [L2.status, L2.entries.at(-1).verdict, fd2.asked.at(-1)], ["stopped", "NO VERDICT", "blocked"]);
 	const repo3 = makeRepo("nochange");
 	const L3 = await F.startRun(opts(repo3), fakeDeps({ ...OK, build: ["STATUS: DONE"] }, { decisions: { blocked: { action: "stop" } } }));
 	t("DONE without a change in the tree: blocked", [L3.status, L3.entries.at(-1).summary], ["stopped", "no change in the work tree"]);
@@ -433,9 +647,9 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 	t("expert: with the call that goes on, and when to ask the user", [!!idOf(r1), r1.text.includes('decision: "approve | edit | stop"'), /only for a significant design decision/.test(r1.text)], [true, true, true]);
 	t("expert: a ticket given as a path is read", sub.runs[0].task.includes("feature.txt exists"), true);
 	const r1b = await fm.runExpert({ resume: idOf(r1), decision: "approve" }, ctx, undefined, () => {}, "call-77");
-	t("expert: resume with approve builds, reviews, judges, then hands back the result", [r1b.isError, /waits at its result checkpoint/.test(r1b.text), r1b.text.includes('decision: "commit | keep | stop"'), selects.length], [false, true, true, 0]);
+	t("expert: resume with approve builds, reviews, judges; a green result is committed on its branch", [r1b.isError, /waits at its result checkpoint/.test(r1b.text), /done, committed/.test(r1b.text), selects.length], [false, false, true, 0]);
 	const r1c = await fm.runExpert({ resume: idOf(r1), decision: "approve" }, ctx, undefined, () => {}, "call-77");
-	t("expert: approve at the result is the commit, on the run's branch only", [/done, committed/.test(r1c.text), /pushing, merging or a PR is up to the user/.test(r1c.text)], [true, true]);
+	t("expert: the commit is on the run's branch only", [/done, committed/.test(r1c.text), /pushing, merging or a PR is up to the user/.test(r1c.text)], [true, true]);
 	t("expert: its stage runs carry the tool call's id (for /subagents and detaching)", [...new Set(sub.runs.map((r) => r.meta.callId))], ["call-77"]);
 	t("expert: constraints reach the stages", sub.runs.every((r) => r.task.includes("leave README.md alone")), true);
 	t("expert: the result is stage summaries, not stage output", [r1c.text.includes("## Changes"), r1c.text.split("\n").filter((l) => l.startsWith("- ")).length >= 7], [false, true]);

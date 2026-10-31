@@ -285,13 +285,38 @@ the next turn, so the result carries the new role's prompt. A refused call
 now points the model at the tool rather than at `/mode`. `/mode` without
 arguments is a menu (`ui.select`) of the cycle, the default and the user's
 own roles (built-in subagent roles are taken by name only), each with its
-`description`; with the mandate off it is there too, listing `off` and the
-dormant modes the launch has (plan, orchestrator). Subagents register
-neither. The user can let the model switch without asking (`modeSwitch`
-"auto" in lets-code-state.json, from the dialog's third choice or the
-menu's last line; `LETS_CODE_MODE_SWITCH` for one launch): then the tool
-switches at once, needs no UI, and notifies the user with the reason;
-bypass roles stay out of its reach either way.
+`description`; with the mandate off it is there too, listing `yolo` (no
+mode: the dormant state; it was called `off` before), `auto` (the built-in
+rails, taken up in the session) and the dormant modes the launch has (plan,
+orchestrator). The model may ask for `auto` there, never `yolo`, so leaving
+plan by the tool goes to `auto`. Subagents register
+neither. `LETS_CODE_MODE_SWITCH=auto` lets the tool switch without asking
+for one launch: then it needs no UI and notifies the user with the reason;
+bypass roles stay out of its reach either way. (A menu line and a dialog
+choice that turned this on, remembered in lets-code-state.json, came first;
+asking is the default, and they went.)
+
+**Orchestration: plans for it, deliveries reviewed.** lets-code is for
+small models, whose context is the scarce thing: a plan carried out step by
+step in the main session fills it. So where orchestration is there (the
+experts on, and the role: the mandate, or the dormant one), plan mode's
+prompt asks for a plan written for it (each step one self-contained task
+for one expert, small enough for a fresh context, with who does it and how
+it is reviewed), and the plan dialog's first choice is "Execute with
+orchestration": the session goes into orchestration and is sent the plan to
+carry out; leaving orchestration then goes where plan was entered from, not
+back to plan ("Execute here" is the old path). The mode tool's ask out of
+plan into orchestration carries the plan the same way; `/orchestration`
+typed in plan still nests (back to plan). Without the experts nothing
+changes. Orchestration never verifies a delivery itself (it cannot run
+tests anyway; reading the diff to judge it is ruled out in its prompt):
+a factory run comes reviewed, anything else goes to expert-reviewer (and
+design-reviewer), and it acts on APPROVE or REVISE. The mode tool also tells
+the model to ask for plan mode first on a medium or large task. The mode
+was called `orchestrator`: `modeName` maps the old name wherever a mode is
+named (LETS_CODE_MODE/ROLE, `/mode`, the mode tool, mandate.json's default,
+cycle and roles, MODE and `--orchestrator` in the launcher); the command is
+`/orchestration` only.
 
 **Plan mode, always there.** `/plan` lived below the mandate's on switch, and
 the mandate is off by default, so a plain launch had no plan mode. Now the

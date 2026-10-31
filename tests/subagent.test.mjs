@@ -502,6 +502,31 @@ async function load(env = {}) {
 	t("an assistant message without a start, and its error", [e.events[1].blocks, e.events[1].error], [[{ type: "text", text: "plain" }], "500 upstream"]);
 	mod.recordEvent(e, { type: "auto_retry_start", attempt: 1, maxAttempts: 3, errorMessage: "529 overloaded" });
 	t("retries are noted", e.events.at(-1).text, "retrying (attempt 1/3): 529 overloaded");
+	// how much of its context a run used: the largest request, and compactions
+	const k = mod.newRun({ name: "w" }, "t", work);
+	t("context: nothing yet", [k.peak, k.compactions], [undefined, undefined]);
+	mod.recordEvent(k, { type: "message_end", message: { role: "assistant", content: "a", stopReason: "stop", usage: { input: 1000, cacheRead: 9000, cacheWrite: 500, output: 300 } } });
+	mod.recordEvent(k, { type: "message_end", message: { role: "assistant", content: "b", stopReason: "stop", usage: { input: 200, output: 100 } } });
+	t("context: the largest request (prompt, cache and reply), not the last", k.peak, 10800);
+	t("context: totals still counted", [k.input, k.output], [1200, 400]);
+	mod.recordEvent(k, { type: "compaction_start", reason: "threshold" }); mod.recordEvent(k, { type: "compaction_start" });
+	t("context: compactions counted, and noted", [k.compactions, k.events.at(-1).text], [2, "compacting the context (threshold)"]);
+	t("context: a message without usage leaves it", (mod.recordEvent(k, { type: "message_end", message: { role: "assistant", content: "c", stopReason: "stop" } }), k.peak), 10800);
+	const cutRun = mod.newRun({ name: "w" }, "t", work);
+	t("cut: no reply yet: not cut", mod.endedCut(cutRun), false);
+	mod.recordEvent(cutRun, { type: "message_end", message: { role: "assistant", content: "part", stopReason: "length" } });
+	t("cut: the last reply stopped at the length limit", mod.endedCut(cutRun), true);
+	mod.recordEvent(cutRun, { type: "tool_execution_start", toolCallId: "x1", toolName: "read", args: {} });
+	t("cut: a tool event after it does not hide it", mod.endedCut(cutRun), true);
+	mod.recordEvent(cutRun, { type: "message_end", message: { role: "assistant", content: "done", stopReason: "stop" } });
+	t("cut: a later reply that ended normally: not cut", mod.endedCut(cutRun), false);
+	const R = (x) => ({ agent: "w", task: "x", text: "done", exitCode: 0, stderr: "", turns: 1, input: 1, output: 1, ...x });
+	t("short note: compacted", mod.shortNote({ compactions: 2, window: 32768, peak: 16384 }), "\n\n[context: this run ran short, reaching 50% of its 32768-token window, compacted 2×: give what is left in smaller steps]");
+	t("short note: at 85% of the window", mod.shortNote({ peak: 27853, window: 32768 }), "\n\n[context: this run ran short, reaching 85% of its 32768-token window: give what is left in smaller steps]");
+	t("short note: compacted, the window unknown", mod.shortNote({ compactions: 1 }), "\n\n[context: this run ran short, compacted 1×: give what is left in smaller steps]");
+	t("short note: room left: none", [mod.shortNote({ peak: 16000, window: 32768 }), mod.shortNote({ peak: 900000 }), mod.shortNote({})], ["", "", ""]);
+	t("render: the note after the report when short", mod.render(R({ compactions: 1, window: 32768, peak: 30000 })).endsWith("give what is left in smaller steps]"), true);
+	t("render: no note when it fit", mod.render(R({ peak: 1000, window: 32768 })).includes("[context:"), false);
 
 	// reopened after a restart: from disk; one saved while running shows as interrupted
 	const live = mod.newRun({ name: "scout" }, "left running", work, undefined, 1000); live.session = "sess-2"; mod.saveRun(live, true);

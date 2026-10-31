@@ -397,6 +397,19 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	has("runner: alone, never in runs:[..]", out(await run(tool, { action: "run", runs: [{ name: "sf", brief: { ticket: "T" } }, { name: "helper", brief: { target: "x", question: "y" } }] }, ctx([true]))), "sf runs alone");
 	has("runner: a brief without its ticket runs nothing", out(await run(tool, { action: "run", name: "sf", brief: {} }, ctx([true]))), "lacks ticket");
 	t("runner: nothing more ran", [fac.got.length, calls().length], [1, 0]);
+	// a factory call without the name (small models drop it on a resume): a resume or a ticket is the factory's
+	has("no name, no software-factory expert: a resume is not guessed", out(await run(tool, { action: "run", brief: { resume: "X", decision: "approve" } }, ctx([true]))), "Give {name, brief}");
+	A("software-factory.md", "---\nname: software-factory\ndescription: the factory\nrunner: factory\nexpert: true\nuse_for: tickets\nbrief:\n  - ticket: the ticket\n  - resume: a run to go on with\n  - decision: the decision\n---\nDocumentation only.\n");
+	const { tool: t2 } = await load();
+	const n0 = fac.got.length;
+	const r2 = await run(t2, { action: "run", brief: { resume: "20261030-x", decision: "approve" } }, ctx([true]));
+	t("no name, a resume: the factory's", [out(r2), fac.got.length - n0, fac.got.at(-1)?.brief.resume], ["factory run X: done", 1, "20261030-x"]);
+	await run(t2, { action: "run", brief: { ticket: "T-2" } }, ctx([true]));
+	t("no name, a ticket: the factory's", [fac.got.length - n0, fac.got.at(-1)?.brief.ticket], [2, "T-2"]);
+	has("no name, any other brief: still asked for the name", out(await run(t2, { action: "run", brief: { target: "x", question: "y" } }, ctx([true]))), "Give {name, brief}");
+	has("no name, no brief: still asked for the name", out(await run(t2, { action: "run" }, ctx([true]))), "Give {name, brief}");
+	t("a named call is not changed by it", [out(await run(t2, { action: "run", name: "sf", brief: { ticket: "T-3" } }, ctx([true]))), fac.got.at(-1)?.brief.ticket], ["factory run X: done", "T-3"]);
+	rmSync(join(agentDir, "agents", "software-factory.md"));
 	rmSync(join(agentDir, "agents", "sf.md")); rmSync(join(ext, "factory.ts"));
 }
 

@@ -9830,7 +9830,7 @@ pi_write_core_memory_extension() {
 // (searched on request) so the live store stays small.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9891,9 +9891,12 @@ export function projectRoot(cwd: string): string {
 		const p = dirname(d); if (p === d) return resolve(cwd); d = p;
 	}
 }
-const unalias = (p: string) => { for (const [from, to] of aliases) if (p === from || p.startsWith(from + sep)) return to + p.slice(from.length); return p; };
+// on Windows paths compare without case or separator (C:\x and c:/X are one)
+const under = (p: string, d: string) => (lcwIsWin() ? lcwUnder(p, d) && !lcwSamePath(p, d) : p.startsWith(d + sep));
+const unalias = (p: string) => { for (const [from, to] of aliases) if (lcwIsWin() ? lcwUnder(p, from) : p === from || p.startsWith(from + sep)) return to + p.slice(from.length); return p; };
 export function projectDir(root: string): string {
-	const h = createHash("sha1").update(root).digest("hex").slice(0, 8);
+	// the hash of the root itself off Windows (a store keeps its name), of its lcwKey on Windows
+	const h = createHash("sha1").update(lcwKey(root)).digest("hex").slice(0, 8);
 	const slug = (basename(root) || "root").replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 40);
 	return join(memoryRoot(), "projects", `${slug}-${h}`);
 }
@@ -9905,13 +9908,14 @@ export function normRef(ref: string, root: string): string {
 	if (/^(run|factory):\S+$/.test(r)) return r;
 	if (r.startsWith("session:")) r = r.slice(8);
 	const m = /^(.*?)(:\d+(?:-\d+)?)?$/.exec(r)!; let p = m[1], line = m[2] ?? "";
-	if (p.startsWith("~/")) p = join(homedir(), p.slice(2));
+	if (p.startsWith("~/") || (lcwIsWin() && p.startsWith("~\\"))) p = join(homedir(), p.slice(2));
+	p = lcwNative(p);   // on Windows a Git Bash path (/c/x, /tmp/x) as Windows names it
 	if (!isAbsolute(p) && root) p = resolve(root, p);
 	return `${unalias(p)}${line}`;
 }
 export function refKeys(ref: string): string[] {
 	if (/^(run|factory):/.test(ref)) return [ref];
-	const p = ref.replace(/:\d+(?:-\d+)?$/, ""); const keys = [p];
+	const p = ref.replace(/:\d+(?:-\d+)?$/, ""); const keys = [lcwKey(p)];   // on Windows without case or separator
 	const run = /[\\/]lets-code-runs[\\/][^\\/]+[\\/]([^\\/]+?)\.(?:json|pi\.jsonl|view\.jsonl|prompt\.md)$/.exec(p);
 	if (run) keys.push(`run:${run[1]}`);
 	const fac = /[\\/]lets-code-factory[\\/]([^\\/]+)(?:[\\/]|$)/.exec(p);
@@ -9980,6 +9984,7 @@ export class Store {
 		return gone.length;
 	}
 	byKey(key: string): Entry[] {
+		key = lcwKey(key);
 		const ids = new Set<string>(this.index.get(key) ?? []);
 		// a directory: what lies under it
 		if (!ids.size && isAbsolute(key)) for (const [k, v] of this.index) if (k.startsWith(key.endsWith(sep) ? key : key + sep)) for (const id of v) ids.add(id);
@@ -9999,8 +10004,8 @@ export class Store {
 	showRef(r: string): string {
 		if (/^(run|factory):/.test(r)) return r;
 		const p = r.replace(/:\d+(?:-\d+)?$/, ""), line = r.slice(p.length);
-		if (this.root && p.startsWith(this.root + sep)) return relative(this.root, p) + line;
-		const h = homedir(); return (p.startsWith(h + sep) ? `~${p.slice(h.length)}` : p) + line;
+		if (this.root && under(p, this.root)) return relative(this.root, p) + line;
+		const h = homedir(); return (under(p, h) ? `~${p.slice(h.length)}` : p) + line;
 	}
 	render(now = Date.now()): string {
 		const head = [`# Core memory: ${this.label()} (lets-code)`,
@@ -10039,7 +10044,7 @@ function readLines(file: string): { entries: Entry[]; bad: number } {
 	return { entries, bad };
 }
 function atomic(file: string, text: string): void {
-	const tmp = `${file}.${process.pid}.tmp`; writeFileSync(tmp, text, { mode: 0o600 }); renameSync(tmp, file);
+	const tmp = `${file}.${process.pid}.tmp`; writeFileSync(tmp, text, { mode: 0o600 }); lcwRename(tmp, file);
 }
 
 // ------------------------------------------------------------------ what the model sees
@@ -10238,6 +10243,13 @@ export default function (pi: ExtensionAPI) {
 		name: "memory", label: "memory",
 		description: TOOL_DESCRIPTION, promptSnippet: TOOL_SNIPPET, parameters: PARAMS,
 		async execute(_id, params: any, _signal, _onUpdate, ctx: ExtensionContext) {
+			// a store that cannot be read or written (a full disk, a file another
+			// program holds open on Windows) is the tool's error, not a throw
+			try { return await memoryTool(params, ctx); } catch (e) { return text(`memory: ${e instanceof Error ? e.message : String(e)}`, true); }
+		},
+	});
+	async function memoryTool(params: any, ctx: ExtensionContext) {
+		{
 			const action = String(params.action ?? "").trim().toLowerCase();
 			cwd = ctx?.cwd || cwd; const st = current();
 			if (action === "search") {
@@ -10267,8 +10279,8 @@ export default function (pi: ExtensionAPI) {
 				return text(`No entry #${id}.`, true);
 			}
 			return text("action is search, open, remember or forget.", true);
-		},
-	});
+		}
+	}
 
 	// ---------------------------------------------------------------- /memories
 	// The list is pi's selector (ctx.ui.select), which draws every option on
@@ -10287,7 +10299,7 @@ export default function (pi: ExtensionAPI) {
 	const dim = (t: string) => (process.env.NO_COLOR ? t : `\x1b[2m${t}\x1b[22m`);   // intensity only: a selected row keeps the theme's colour
 	const cut = (t: string, n: number) => { const cs = [...t]; return cs.length > n ? `${cs.slice(0, Math.max(0, n - 1)).join("")}…` : t; };
 	const padTo = (t: string, n: number) => { const cs = [...t]; return cs.length >= n ? cs.slice(0, n).join("") : t + " ".repeat(n - cs.length); };
-	const home = (p: string) => { const h = homedir(); return p.startsWith(h + sep) ? `~${p.slice(h.length)}` : p; };
+	const home = (p: string) => { const h = homedir(); return under(p, h) ? `~${p.slice(h.length)}` : p; };
 	const author = (b: By) => (b === "harness" ? "lets-code" : b === "user" ? "you" : "the model");
 	interface Row { s: Store; e: Entry }
 	function refSummary(refs: string[]): string {
@@ -10412,6 +10424,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("memory", { handler: command.handler });   // the old name, for one release
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
@@ -10458,7 +10471,7 @@ pi_write_experts_extension() {
 // the line and nothing else: its setup runs on enable.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -10487,7 +10500,7 @@ export function remember(name: string, on: boolean): void {
 		const p = statePath(); const s = readState();
 		s.experts = { ...(s.experts && typeof s.experts === "object" ? s.experts : {}), [name]: on };
 		mkdirSync(dirname(p), { recursive: true });
-		const tmp = `${p}.${process.pid}.tmp`; writeFileSync(tmp, JSON.stringify(s, null, 2) + "\n", { mode: 0o600 }); renameSync(tmp, p);
+		const tmp = `${p}.${process.pid}.tmp`; writeFileSync(tmp, JSON.stringify(s, null, 2) + "\n", { mode: 0o600 }); lcwRename(tmp, p);
 	} catch { /* never fatal */ }
 }
 
@@ -10517,15 +10530,17 @@ export function template(s: Spec, full = false): string {
 }
 
 // ------------------------------------------------------------------ setup
-// runs the expert's setup script with bash; progress lines (stderr) go
+// runs the expert's setup script with bash (Git Bash on Windows, its path
+// with forward slashes; stopped there with its process tree, since a
+// signal ends the bash alone); progress lines (stderr) go
 // to onLine, the last stdout line is the note: why it failed, or what the
 // user should know once it succeeded (e.g. an app to install by hand)
 export function runSetup(script: string, onLine: (l: string) => void, signal?: AbortSignal): Promise<{ ok: boolean; note: string }> {
 	return new Promise((resolve) => {
 		let out = ""; let err = ""; let done = false;
-		const child = spawn("bash", [script], { cwd: dirname(script), stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(lcwBash(), [lcwPosix(script)], lcwSpawnOpts({ cwd: dirname(script), stdio: ["ignore", "pipe", "pipe"] }));
 		const finish = (ok: boolean, note: string) => { if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener("abort", stop); resolve({ ok, note }); };
-		const stop = () => { try { child.kill("SIGTERM"); } catch { /* gone */ } };
+		const stop = () => { if (lcwIsWin()) { lcwKillTree(child.pid); return; } try { child.kill("SIGTERM"); } catch { /* gone */ } };
 		const timer = setTimeout(stop, SETUP_TIMEOUT); timer.unref?.();
 		signal?.addEventListener("abort", stop, { once: true });
 		child.stdout.on("data", (d) => { out += d.toString(); });
@@ -10772,6 +10787,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
@@ -12124,7 +12140,7 @@ pi_write_claudecode_extension() {
 // session start; edits apply to the next session.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -12136,16 +12152,18 @@ const DEPTH = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") || 0;
 const MAX_DEPTH = Number(process.env.LETS_CODE_SUBAGENT_MAX_DEPTH ?? "1") || 1;
 const CONCURRENCY = Math.max(1, Number(process.env.LETS_CODE_SUBAGENT_CONCURRENCY ?? "2") || 2);
 const agentDir = () => process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-const home = () => process.env.HOME || homedir();
-// Claude Code's own override moves both ~/.claude and ~/.claude.json
-export const claudeDir = () => process.env.CLAUDE_CONFIG_DIR || join(home(), ".claude");
-export const claudeJsonPath = () => (process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, ".claude.json") : join(home(), ".claude.json"));
+const home = () => lcwHome();
+// Claude Code's own override moves both ~/.claude and ~/.claude.json (on
+// Windows it may be set in Git Bash's form, /c/Users/x/...)
+const configDir = () => lcwNative(process.env.CLAUDE_CONFIG_DIR || "");
+export const claudeDir = () => configDir() || join(home(), ".claude");
+export const claudeJsonPath = () => (configDir() ? join(configDir(), ".claude.json") : join(home(), ".claude.json"));
 // CLAUDE_CODE=all also brings the user's own ~/.claude (hooks, skills,
 // commands, agents, workflows, CLAUDE.md, MCP, env); the default (auto) only
 // the project's .claude, and only where it has hooks or workflows
 export const userScope = () => process.env.LETS_CODE_CLAUDE_SCOPE === "all";
 // a folder whose .claude is the user's own (the home folder) is not a project
-export const isUserClaude = (d: string) => resolve(d, ".claude") === resolve(claudeDir());
+export const isUserClaude = (d: string) => lcwIsWin() ? lcwSamePath(resolve(d, ".claude"), resolve(claudeDir())) : resolve(d, ".claude") === resolve(claudeDir());
 const MAX_FILE = 256 * 1024;
 const CAP = 10_000;          // Claude's cap on one hook's context or message
 const short = (s: string, n = 190) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -12169,7 +12187,7 @@ function ancestors(dir: string, stop?: string): string[] {
 export function gitRoot(cwd: string): string | undefined { return ancestors(cwd).find((d) => existsSync(join(d, ".git"))); }
 // project .claude dirs are looked up from cwd to the git root (cwd alone outside git)
 const projectDirs = (cwd: string) => ancestors(cwd, gitRoot(cwd) ?? resolve(cwd)).filter((d) => !isUserClaude(d));
-const expandHome = (p: string) => (p === "~" ? home() : p.startsWith("~/") ? join(home(), p.slice(2)) : p);
+const expandHome = (p: string) => (p === "~" ? home() : p.startsWith("~/") || (lcwIsWin() && p.startsWith("~\\")) ? join(home(), p.slice(2)) : p);
 
 // A small YAML subset for frontmatter: key: value, quoted strings, inline
 // [a, b] and block (- a) lists, folded (>) and literal (|) blocks, booleans.
@@ -12209,11 +12227,25 @@ export function asList(v: unknown): string[] {
 }
 
 // ------------------------------------------------------------------ trust
+// What a map keyed by folder (~/.claude.json projects, pi's trust.json) holds
+// for <dir>: its entry as written; on Windows every entry whose key names the
+// same folder, as Claude Code writes it (C:/Users/x/proj) or as node does
+// (C:\Users\x\proj), in any case.
+export function folderEntries<T>(map: Record<string, T> | undefined, dir: string): T[] {
+	if (!map || typeof map !== "object") return [];
+	if (!lcwIsWin()) return map[dir] === undefined ? [] : [map[dir]];
+	const k = (p: string) => lcwKey(p).replace(/\\+$/, ""), want = k(dir);
+	const out = map[dir] === undefined ? [] : [map[dir]];
+	for (const [key, v] of Object.entries(map)) if (key !== dir && k(key) === want) out.push(v);
+	return out;
+}
 function nearestEntry<T>(map: Record<string, T> | undefined, cwd: string, value: (v: T) => boolean | null | undefined): boolean | null {
 	if (!map || typeof map !== "object") return null;
 	for (const d of [...new Set([...ancestors(real(cwd)), ...ancestors(resolve(cwd))])]) {
-		const v = map[d] === undefined ? undefined : value(map[d]);
-		if (v === true || v === false) return v;
+		for (const e of folderEntries(map, d)) {
+			const v = value(e);
+			if (v === true || v === false) return v;
+		}
 	}
 	return null;
 }
@@ -12230,7 +12262,7 @@ export function rememberTrust(cwd: string, decision: boolean): void {
 		const p = statePath(); const s = readJson(p) ?? {};
 		s.claudeCodeTrust = { ...(s.claudeCodeTrust ?? {}), [real(cwd)]: decision };
 		mkdirSync(dirname(p), { recursive: true });
-		const tmp = `${p}.${process.pid}.tmp`; writeFileSync(tmp, JSON.stringify(s, null, 2) + "\n"); renameSync(tmp, p);
+		const tmp = `${p}.${process.pid}.tmp`; writeFileSync(tmp, JSON.stringify(s, null, 2) + "\n"); lcwRename(tmp, p);
 	} catch { /* never fatal */ }
 }
 export function trustDecision(cwd: string): { trusted: boolean; source: string } {
@@ -12307,7 +12339,8 @@ export function loadSettings(cwd: string, trusted: boolean): Settings {
 const TO_CLAUDE: Record<string, string> = { bash: "Bash", read: "Read", write: "Write", edit: "Edit", grep: "Grep", find: "Glob", ls: "LS", subagent: "Agent", workflow: "Workflow" };
 export const claudeToolName = (pi: string) => TO_CLAUDE[pi] ?? pi;
 const ALIASES: Record<string, string[]> = { Agent: ["Agent", "Task"] };
-const abs = (p: unknown, cwd: string) => { const s = String(p ?? "."); return isAbsolute(expandHome(s)) ? expandHome(s) : resolve(cwd, s); };
+// (on Windows a Git Bash path, /c/x, as Windows names it: C:\x)
+const abs = (p: unknown, cwd: string) => { const s = lcwNative(expandHome(String(p ?? "."))); return isAbsolute(s) ? s : resolve(cwd, s); };
 const drop = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 
 export function toClaudeInput(tool: string, input: any, cwd: string): Record<string, unknown> {
@@ -12391,6 +12424,9 @@ export function selectHooks(hooks: HookDef[], event: string, value?: string | st
 }
 
 // ------------------------------------------------------------------ hooks
+// what hooks and !`cmd` run with: sh; Git Bash on Windows, which has no sh on
+// its PATH (Claude Code runs them with Git Bash there too)
+export const shell = () => (lcwIsWin() ? lcwBash() : "sh");
 export interface HookRun { hook: HookDef; code: number | null; stdout: string; stderr: string; timedOut?: boolean; error?: string }
 const DEFAULT_TIMEOUT: Record<string, number> = { UserPromptSubmit: 30 };
 export function runHook(hook: HookDef, input: Record<string, unknown>, opts: { cwd: string; signal?: AbortSignal; timeoutMs?: number }): Promise<HookRun> {
@@ -12407,9 +12443,12 @@ export function runHook(hook: HookDef, input: Record<string, unknown>, opts: { c
 	return new Promise((done) => {
 		const r: HookRun = { hook, code: null, stdout: "", stderr: "" };
 		let child: ReturnType<typeof spawn>;
-		try { child = spawn("sh", ["-c", String(hook.command ?? "")], { cwd: opts.cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: opts.cwd }, stdio: ["pipe", "pipe", "pipe"] }); }
+		try { child = spawn(shell(), ["-c", String(hook.command ?? "")], lcwSpawnOpts({ cwd: opts.cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: lcwPosix(opts.cwd) }, stdio: ["pipe", "pipe", "pipe"] })); }
 		catch (e) { r.error = (e as Error).message; done(r); return; }
-		const kill = () => { try { child.kill("SIGTERM"); } catch { /* gone */ } setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* gone */ } }, 2000).unref(); };
+		const kill = () => {
+			if (lcwIsWin()) { lcwKillTree(child.pid); return; }   // no signals there: the tree, at once
+			try { child.kill("SIGTERM"); } catch { /* gone */ } setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* gone */ } }, 2000).unref();
+		};
 		const timer = setTimeout(() => { r.timedOut = true; kill(); }, ms);
 		const onAbort = () => kill();
 		opts.signal?.addEventListener("abort", onAbort, { once: true });
@@ -12519,11 +12558,20 @@ export function pathPatternMatches(spec: string, base: string, cwd: string, path
 	else if (p.startsWith("~/")) { root = home(); p = p.slice(2); }
 	else if (p.startsWith("/")) { root = base; p = p.slice(1); }
 	else { root = cwd; p = p.replace(/^\.\//, ""); if (!p.replace(/\/$/, "").includes("/")) p = `**/${p}`; }
-	const rel = relative(root, path);
-	if (rel.startsWith("..") || isAbsolute(rel)) return false;
+	let rel: string;
+	if (lcwIsWin()) {
+		// Claude Code on Windows matches the POSIX form of a path (C:\Users\x is /c/Users/x), and a path's case does not count
+		const px = (x: string) => { const s = x.replace(/\\/g, "/"); const m = /^([A-Za-z]):(\/|$)/.exec(s); return (m ? `/${m[1]}${s.slice(2)}` : s).toLowerCase(); };
+		const r = px(root).replace(/\/+$/, ""), q = px(path);
+		if (q !== r && !q.startsWith(`${r}/`)) return false;
+		rel = q === r ? "" : q.slice(r.length + 1); p = p.toLowerCase();
+	} else {
+		rel = relative(root, path);
+		if (rel.startsWith("..") || isAbsolute(rel)) return false;
+	}
 	const re = globRe(p.replace(/\/$/, ""));
 	const dir = p.endsWith("/**") ? globRe(p.slice(0, -3)) : null;   // dir/** covers the directory itself too
-	const parts = rel.split(sep);
+	const parts = rel.split(lcwIsWin() ? "/" : sep);
 	for (let i = parts.length; i >= 1; i--) { const q = parts.slice(0, i).join("/"); if (re.test(q) || dir?.test(q)) return true; }   // the path, or a directory above it
 	return rel === "" && p === "**";
 }
@@ -12778,7 +12826,7 @@ export function toPiMcp(raw: any): Record<string, unknown> | string {
 // local > project > user on a name clash; project servers need trust and Claude's approval
 export function claudeMcpServers(cwd: string, s: Settings, trusted: boolean, askedHere: boolean): { servers: McpEntry[]; skipped: string[] } {
 	const cj = readJson(claudeJsonPath()) ?? {};
-	const proj = cj.projects?.[real(cwd)] ?? cj.projects?.[resolve(cwd)] ?? {};
+	const proj = folderEntries<any>(cj.projects, real(cwd))[0] ?? folderEntries<any>(cj.projects, resolve(cwd))[0] ?? {};
 	const servers = new Map<string, McpEntry>(); const skipped: string[] = [];
 	const add = (scope: McpEntry["scope"], all: any) => {
 		for (const [name, raw] of Object.entries(all && typeof all === "object" ? all : {})) {
@@ -13045,9 +13093,9 @@ export default function (pi: ExtensionAPI) {
 				const p = permissionCheck(settings, "Bash", { command: cmd }, cwd);
 				if (p.decision === "deny") return Promise.resolve({ code: 126, out: `denied by ${p.rule}` });
 				return new Promise((done) => {
-					const c = spawn("sh", ["-c", cmd], { cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: cwd } }); let out = "";
+					const c = spawn(shell(), ["-c", cmd], lcwSpawnOpts({ cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: lcwPosix(cwd) } })); let out = "";
 					c.stdout.on("data", (d) => { out += d; }); c.stderr.on("data", (d) => { out += d; });
-					const timer = setTimeout(() => c.kill("SIGKILL"), 120_000);
+					const timer = setTimeout(() => (lcwIsWin() ? lcwKillTree(c.pid) : c.kill("SIGKILL")), 120_000);
 					c.on("error", (e) => { clearTimeout(timer); done({ code: 127, out: e.message }); });
 					c.on("close", (code) => { clearTimeout(timer); done({ code: code ?? 1, out }); });
 				});
@@ -13313,6 +13361,7 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
@@ -13345,11 +13394,19 @@ def ups(d):
         out.append(d); p = os.path.dirname(d)
         if p == d: return out
         d = p
+# what a map keyed by folder holds for d: on Windows every key naming that
+# folder, as Claude Code writes it (C:/Users/x/proj) or with backslashes, in any case
+nt = os.name == "nt"
+def fkey(p): return os.path.normcase(p).rstrip("\\") if nt else p
+def entries(m, d):
+    if not isinstance(m, dict): return []
+    if not nt: return [m[d]] if d in m else []
+    return [v for k, v in m.items() if fkey(k) == fkey(d)]
 def nearest(m, pick):
     if not isinstance(m, dict): return None
     for d in ups(cwd):
-        if d in m:
-            v = pick(m[d])
+        for e in entries(m, d):
+            v = pick(e)
             if v is True or v is False: return v
     return None
 cj = rj(cj_path) or {}
@@ -13413,7 +13470,7 @@ for l in layers:
 env = {}
 for l in [user] + (layers if trusted else []):
     if isinstance(l.get("env"), dict): env.update({str(k): str(v) for k, v in l["env"].items()})
-mcp = set((cj.get("mcpServers") or {}).keys() if alls else []) | set((((cj.get("projects") or {}).get(cwd) or {}).get("mcpServers") or {}).keys())
+mcp = set((cj.get("mcpServers") or {}).keys() if alls else []) | set((((entries(cj.get("projects"), cwd) or [None])[0] or {}).get("mcpServers") or {}).keys())
 pm = (rj(os.path.join(cwd, ".mcp.json")) or {}).get("mcpServers") or {}
 if pm and not trusted: pending += len(pm)
 counts = [(len(commands), "command"), (len(skills), "skill"), (len(agents), "agent"), (nhooks, "hook"), (len(mcp), "MCP server"), (len(workflows), "workflow")]
@@ -13426,7 +13483,7 @@ for k, v in env.items():
     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k) and not k.startswith(("LETS_CODE_", "PI_")):
         print("export %s=%s" % (k, shlex.quote(v)))
 print("export LETS_CODE_CLAUDE_ENV=%s" % ("all" if trusted else "user"))
-' "${PWD}" 2>/dev/null)" || return 0
+' "$(native_path "${PWD}")" 2>/dev/null)" || return 0
     CC_SUMMARY="$(printf '%s\n' "${out}" | sed -n '1p')"
     CC_NEED="$(printf '%s\n' "${out}" | sed -n 's/^need=//p')"
     [ "${CC_NEED}" = 1 ] || return 0
@@ -13440,6 +13497,7 @@ print("export LETS_CODE_CLAUDE_ENV=%s" % ("all" if trusted else "user"))
 # runtime the extension warns and bash runs as before.
 SANDBOX_RUNTIME_VERSION="0.0.79"
 SB_NOTE=""
+SB_UNAVAILABLE=""   # 1: the sandbox cannot run on this platform (Windows); SB_NOTE says why
 pi_write_sandbox_extension() {
     local dir f tmp have=""
     lc_ext_module sandbox; dir="${LC_MOD_DIR}"; f="${LC_MOD_FILE}"
@@ -13559,7 +13617,13 @@ export default function (pi: ExtensionAPI) {
 		const cfg = loadConfig(cwd, mode, (m) => warn(ctx, m));
 		if (runtime) { try { await runtime.SandboxManager.reset(); } catch { /* ok */ } }
 		if (!cfg.enabled) { enabled = false; if (ctx?.hasUI) ctx.ui.setStatus("sandbox", mode?.bypass ? "sandbox: off (yolo)" : "sandbox: off"); return; }
-		if (process.platform !== "linux" && process.platform !== "darwin") { enabled = false; warn(ctx, `sandbox: not supported on ${process.platform}`); return; }
+		// the runtime confines with Seatbelt (macOS) or bubblewrap (Linux); lets-code does not install it elsewhere
+		if (process.platform !== "linux" && process.platform !== "darwin") {
+			enabled = false;
+			if (ctx?.hasUI) ctx.ui.setStatus("sandbox", "sandbox: unavailable");
+			warn(ctx, `sandbox: not available on ${lcwIsWin() ? "Windows" : process.platform} (macOS and Linux only); bash commands are NOT confined`);
+			return;
+		}
 		try {
 			if (!runtime) runtime = await import(join(HERE, "node_modules", "@anthropic-ai", "sandbox-runtime", "dist", "index.js"));
 			if (!piMod) piMod = await import("@earendil-works/pi-coding-agent");
@@ -13603,13 +13667,24 @@ export default function (pi: ExtensionAPI) {
 		description: "Show the sandbox configuration in effect",
 		handler: async (_a, ctx) => {
 			const c = loadConfig(ctx.cwd, mode, (m) => warn(ctx, m));
-			ctx.ui.notify([`sandbox: ${enabled ? "on" : "off"}${mode?.role ? ` (mode ${mode.role})` : ""}`, `network: ${c.network?.allowedDomains?.join(", ") || "(none)"}`, `deny read: ${c.filesystem?.denyRead?.join(", ")}`, `allow write: ${c.filesystem?.allowWrite?.join(", ")}`, `deny write: ${c.filesystem?.denyWrite?.join(", ")}`].join("\n"), "info");
+			const where = process.platform !== "linux" && process.platform !== "darwin" ? ` (not available on ${lcwIsWin() ? "Windows" : process.platform}: bash commands are NOT confined)` : "";
+			ctx.ui.notify([`sandbox: ${enabled ? "on" : "off"}${where}${mode?.role ? ` (mode ${mode.role})` : ""}`, `network: ${c.network?.allowedDomains?.join(", ") || "(none)"}`, `deny read: ${c.filesystem?.denyRead?.join(", ")}`, `allow write: ${c.filesystem?.allowWrite?.join(", ")}`, `deny write: ${c.filesystem?.denyWrite?.join(", ")}`].join("\n"), "info");
 		},
 	});
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
+    # Windows: the runtime confines with Seatbelt or bubblewrap, macOS and
+    # Linux only; nothing is installed, and SB_NOTE and SB_UNAVAILABLE say so
+    # to what reports the sandbox (the module itself refuses there too).
+    # (LC_WIN, what on_windows reads: the tests source this writer alone)
+    if [ "${LC_WIN:-false}" = true ]; then
+        SB_NOTE="not available on Windows (macOS and Linux only); bash commands run unconfined"
+        SB_UNAVAILABLE=1
+        return 0
+    fi
     printf '{\n  "name": "lets-code-sandbox",\n  "private": true,\n  "type": "module",\n  "dependencies": { "@anthropic-ai/sandbox-runtime": "%s" }\n}\n' "${SANDBOX_RUNTIME_VERSION}" > "${dir}/package.json"
     [ -f "${dir}/node_modules/@anthropic-ai/sandbox-runtime/package.json" ] && \
         have="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "${dir}/node_modules/@anthropic-ai/sandbox-runtime/package.json" 2>/dev/null)"
@@ -13634,12 +13709,16 @@ TS
 # MCP: pi has MCP built in (~/.pi/agent/mcp.json, .pi/mcp.json, `pi mcp add`).
 # Setup can import servers from the standard files other clients keep.
 mcp_import() {  # mcp_import <ask: yes|no>
-    local ask="$1" found
-    found="$(python3 - "${PI_AGENT_DIR}" <<'PY'
+    local ask="$1" found appdata=""
+    # Windows: Claude Desktop keeps its servers under %APPDATA%\Claude
+    if on_windows && [ -n "${APPDATA:-}" ]; then appdata="$(native_path "${APPDATA}")"; fi
+    found="$(LC_APPDATA="${appdata}" python3 - "${PI_AGENT_DIR}" <<'PY'
 import json, os, sys
 home = os.path.expanduser("~")
 cands = [os.path.join(os.getcwd(), ".mcp.json"), os.path.join(home, ".config", "mcp", "mcp.json"),
          os.path.join(home, ".claude.json"), os.path.join(home, ".cursor", "mcp.json"), os.path.join(home, ".codeium", "windsurf", "mcp_config.json")]
+if os.environ.get("LC_APPDATA"):
+    cands.append(os.path.join(os.environ["LC_APPDATA"], "Claude", "claude_desktop_config.json"))
 target = os.path.join(sys.argv[1], "mcp.json")
 try:
     have = (json.load(open(target)).get("mcpServers") or {}) if os.path.exists(target) else {}

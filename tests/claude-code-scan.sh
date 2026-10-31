@@ -4,7 +4,7 @@
 # always, the project's only in a trusted folder: Claude Code's record for
 # the folder or a parent, pi's trust.json, or lets-code's remembered answer).
 set -eu
-eval "$(sed -n '/^CC_SUMMARY=/p; /^claude_code_scan() {/,/^}$/p' "$(dirname "$0")/../lets-code")"
+eval "$(sed -n '/^LC_WIN=false$/p; /^on_windows() /p; /^native_path() {/,/^}$/p; /^CC_SUMMARY=/p;/^claude_code_scan() {/,/^}$/p' "$(dirname "$0")/../lets-code")"
 fail=0
 export LETS_CODE_CLAUDE_SCOPE=all   # CLAUDE_CODE=all first; the default (auto) at the end
 check() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: got '$2', want '$3'"; fail=1; fi; }

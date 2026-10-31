@@ -462,6 +462,24 @@ async function load(cwd, env = {}) {
 	for (const p of [join(claude, "settings.json"), join(claude, "skills"), join(claude, "commands"), join(claude, "CLAUDE.md"), join(agentDir, "skills")]) rmSync(p, { recursive: true, force: true });
 }
 
+// --- Windows (faked, around pure logic): Claude Code keys folders as
+// C:/Users/x/proj, node names them C:\Users\x\proj; path rules match the
+// POSIX form without case; hooks run with Git Bash, not sh
+{
+	t("off Windows: a folder's entry by its exact key", [m.folderEntries({ "/a/B": 1, "/a/b": 2 }, "/a/B"), m.shell()], [[1], "sh"]);
+	const real = process.platform;
+	Object.defineProperty(process, "platform", { value: "win32" });
+	try {
+		const projects = { "C:/Users/X/Proj": { hasTrustDialogAccepted: true }, "D:/other": {} };
+		t("win32: C:\\users\\x\\proj finds Claude's C:/Users/X/Proj", m.folderEntries(projects, "C:\\users\\x\\proj"), [{ hasTrustDialogAccepted: true }]);
+		t("win32: a trailing separator does not count", m.folderEntries({ "c:\\users\\x\\proj\\": 7 }, "C:\\Users\\X\\Proj").length, 1);
+		t("win32: another folder does not match", m.folderEntries(projects, "C:\\Users\\X\\Pro"), []);
+		t("win32: //c/... rule matches C:\\ paths in any case", [m.pathPatternMatches("//c/Users/**/.env", "", "C:\\w", "C:\\users\\x\\app\\.ENV"), m.pathPatternMatches("//d/**", "", "C:\\w", "C:\\x")], [true, false]);
+		t("win32: a bare name at any depth under the cwd", [m.pathPatternMatches("secrets.json", "", "C:\\Work\\App", "c:/work/app/conf/Secrets.json"), m.pathPatternMatches("secrets.json", "", "C:\\Work\\App", "C:\\Work\\Other\\secrets.json")], [true, false]);
+		t("win32: hooks run with a bash, not sh", /bash/i.test(m.shell()), true);
+	} finally { Object.defineProperty(process, "platform", { value: real }); }
+}
+
 console.error = origError;
 rmSync(work, { recursive: true, force: true });
 process.exit(fail);

@@ -401,5 +401,25 @@ const textOf = (r) => r.content.map((c) => c.text).join("\n");
 	t("child: the line only, no headlines, whatever the setting", [h4.mod.HEADLINES, s4.systemPromptOptions.sections.lets_code_core_memory.split("\n").length], [0, 1]);
 }
 
+// the store dir's hash is of the root itself off Windows (existing stores keep
+// their names); on Windows (faked here, around pure logic) paths are keyed and
+// hashed without case or separator
+{
+	const h = await load();
+	const { createHash } = await import("node:crypto");
+	const r = join(work, "Proj");
+	t("project dir: the hash of the root as it is (off Windows)", h.mod.projectDir(r).endsWith(`-${createHash("sha1").update(r).digest("hex").slice(0, 8)}`), true);
+	const real = process.platform;
+	Object.defineProperty(process, "platform", { value: "win32" });
+	try {
+		t("win32: one store dir for C:\\Users\\X\\Proj and c:/users/x/proj", h.mod.projectDir("C:\\Users\\X\\Proj").slice(-8) === h.mod.projectDir("c:/users/x/proj").slice(-8), true);
+		t("win32: a path key folds case and separators, a run id keeps its case", h.mod.refKeys("C:/Users/X/.pi/agent/lets-code-runs/S/Ab1.json:3"), ["c:\\users\\x\\.pi\\agent\\lets-code-runs\\s\\ab1.json", "run:Ab1"]);
+		const s = new h.mod.Store(join(work, "winstore"), "project", "");
+		s.entries = [{ id: "w1", t: 1, u: 1, kind: "fact", gist: "g", refs: ["C:\\Users\\X\\Proj\\src\\a.ts"], by: "model", n: 1 }]; s.reindex();
+		t("win32: a lookup by another spelling finds the entry", s.byKey("c:/users/x/proj/SRC/A.ts").map((e) => e.id), ["w1"]);
+	} finally { Object.defineProperty(process, "platform", { value: real }); }
+	t("off Windows: keys keep their case", h.mod.refKeys("/A/B.ts"), ["/A/B.ts"]);
+}
+
 console.log(`${n} checks, ${fail ? "FAILURES" : "all passed"}`);
 process.exit(fail);

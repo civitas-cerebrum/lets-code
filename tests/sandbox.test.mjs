@@ -90,6 +90,22 @@ const warnings = []; const warn = (m) => warnings.push(m);
 	t("back-to-back mode changes: no unhandled rejection", unhandled, []);
 }
 
+// --- Windows (faked): the runtime is macOS and Linux only; it says so, and that bash runs unconfined
+{
+	const h = await load();
+	const real = process.platform;
+	Object.defineProperty(process, "platform", { value: "win32" });
+	try {
+		await h.handlers.session_start({ type: "session_start" }, h.ctx(work));
+		await h.commands.sandbox.handler("", h.ctx(work));
+	} finally { Object.defineProperty(process, "platform", { value: real }); }
+	t("win32: warned unavailable, commands NOT confined", h.notices.some((m) => /not available on Windows \(macOS and Linux only\)/.test(m) && /NOT confined/.test(m)), true);
+	t("win32: no install hint", h.notices.some((m) => /npm install/.test(m)), false);
+	t("win32: the status says unavailable", h.status.includes("sandbox: unavailable"), true);
+	t("win32: /sandbox says off and why", /sandbox: off \(not available on Windows/.test(h.notices[h.notices.length - 1]), true);
+	t("win32: user_bash untouched", h.handlers.user_bash({}), undefined);
+}
+
 // --- inert when off
 { delete process.env.LETS_CODE_SANDBOX_ON; const h = await load(); t("inert when off", Object.keys(h.handlers).length, 0); }
 

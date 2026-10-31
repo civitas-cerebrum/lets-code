@@ -57,6 +57,9 @@ async function load(env, { trusted = true, ui = true, answers = [], entries = []
 }
 const repo = () => { const d = mkdtempSync(join(work, "proj-")); mkdirSync(join(d, ".git")); mkdirSync(join(d, "src")); writeFileSync(join(d, "src", "a.txt"), "a"); return realpathSync(d); };
 const blocked = (r) => r?.block === true;
+// a path as a bash command names it: on Windows C:/x (Git Bash reads the
+// backslashes of an unquoted C:\x as escapes: C:x, a path in the project)
+const sh = (p) => (process.platform === "win32" ? p.replace(/\\/g, "/") : p);
 
 // --- inert unless switched on
 { delete process.env.LETS_CODE_MANDATE_ON; const h = await load({}); t("inert: no handlers", Object.keys(h.handlers).length, 0); process.env.LETS_CODE_MANDATE_ON = "1"; }
@@ -173,7 +176,7 @@ const blocked = (r) => r?.block === true;
 		`cat ${join(agentDir, "researcher", "browser-profile", "Default", "Cookies")}`, `ls ~/.cache/ms-playwright`])
 		t(`researcher: blocked: ${cmd.slice(0, 50)}`, blocked(await h.call(d, "bash", { command: cmd })), true);
 	for (const cmd of [`python3 ${join(agentDir, "researcher", "bin", "web")} fetch https://example.com`, `python3 ${join(agentDir, "researcher", "bin", "web")} search "playwright cli docs"`,
-		`grep -i licence ${join(scratch, "S1.txt")}`, `cat > ${join(scratch, "plan.md")} <<'EOF'\nplan\nEOF`])
+		`grep -i licence ${sh(join(scratch, "S1.txt"))}`, `cat > ${sh(join(scratch, "plan.md"))} <<'EOF'\nplan\nEOF`])
 		t(`researcher: passes: ${cmd.slice(0, 50)}`, await h.call(d, "bash", { command: cmd }), undefined);
 	t("researcher: still no edit tool", blocked(await h.call(d, "edit", { path: join(d, "src", "a.txt") })), true);
 	t("researcher: still no git writes", blocked(await h.call(d, "bash", { command: "git commit -am x" })), true);
@@ -189,10 +192,11 @@ const blocked = (r) => r?.block === true;
 	t("reviewer: edit tool not available", blocked(await h.call(d, "edit", { path: join(d, "src", "a.txt") })), true);
 	t("reviewer: test runner passes", await h.call(d, "bash", { command: "npm test 2>&1 | tail -n 20" }), undefined);
 	t("reviewer: pytest passes", await h.call(d, "bash", { command: "python3 -m pytest -q tests" }), undefined);
-	t("reviewer: output to the temp dir passes", await h.call(d, "bash", { command: `node app.js > ${join(scratch, "out.txt")}` }), undefined);
+	t("reviewer: output to the temp dir passes", await h.call(d, "bash", { command: `node app.js > ${sh(join(scratch, "out.txt"))}` }), undefined);
+	if (process.platform === "win32") t("reviewer (Windows): an unquoted C:\\temp\\out.txt is blocked (bash writes C:tempout.txt, in the work)", blocked(await h.call(d, "bash", { command: `node app.js > ${join(scratch, "out.txt")}` })), true);
 	t("reviewer: output into the work blocked", blocked(await h.call(d, "bash", { command: "node app.js > out.txt" })), true);
 	t("reviewer: sed -i in the work blocked", blocked(await h.call(d, "bash", { command: "sed -i 's/a/b/' src/a.txt" })), true);
-	t("reviewer: sed -i in a temp copy passes", await h.call(d, "bash", { command: `sed -i 's/a/b/' ${join(scratch, "copy", "a.txt")}` }), undefined);
+	t("reviewer: sed -i in a temp copy passes", await h.call(d, "bash", { command: `sed -i 's/a/b/' ${sh(join(scratch, "copy", "a.txt"))}` }), undefined);
 	t("reviewer: git checkout blocked", blocked(await h.call(d, "bash", { command: "git checkout main" })), true);
 	t("reviewer: git stash blocked", blocked(await h.call(d, "bash", { command: "git stash" })), true);
 	t("reviewer: git diff passes", await h.call(d, "bash", { command: "git diff HEAD~1 -- src" }), undefined);
@@ -218,7 +222,7 @@ const blocked = (r) => r?.block === true;
 	t("developer: .git protected", blocked(await h.call(d, "write", { path: join(d, ".git", "config") })), true);
 	t("developer: test runner passes", await h.call(d, "bash", { command: "npm test 2>&1 | tail -n 20" }), undefined);
 	t("developer: output in the workspace passes", await h.call(d, "bash", { command: "node gen.js > src/out.txt" }), undefined);
-	t("developer: output to the temp dir passes", await h.call(d, "bash", { command: `node app.js > ${join(scratch, "out.txt")}` }), undefined);
+	t("developer: output to the temp dir passes", await h.call(d, "bash", { command: `node app.js > ${sh(join(scratch, "out.txt"))}` }), undefined);
 	t("developer: output outside blocked", blocked(await h.call(d, "bash", { command: `node app.js > ${join(outside, "out.txt")}` })), true);
 	t("developer: git diff passes", await h.call(d, "bash", { command: "git diff -- src" }), undefined);
 	t("developer: git commit blocked", blocked(await h.call(d, "bash", { command: "git commit -am wip" })), true);
@@ -839,10 +843,15 @@ const blocked = (r) => r?.block === true;
 // ~ are mapped to Windows paths, compared without case, globbed with "/"
 {
 	const { mod } = await load({});
-	const { canonical, inScope, isProtected } = mod;
+	const { canonical, inScope, isProtected, classify, redirectTargets } = mod;
 	const real = Object.getOwnPropertyDescriptor(process, "platform");
 	Object.defineProperty(process, "platform", { value: "win32" });
 	try {
+		// a model on Windows may write C:\x\y unquoted: Git Bash reads C:xy
+		t("win: a redirect to C:\\x\\y.txt, as written and as bash reads it", redirectTargets("node a.js > C:\\x\\y.txt"), ["C:\\x\\y.txt", "C:xy.txt"]);
+		t("win: a quoted one as written", redirectTargets("node a.js > 'C:\\x\\y.txt'"), ["C:\\x\\y.txt"]);
+		const browser = { bash: { "*": "allow", "browser-direct": "deny" }, groups: { "browser-direct": ["researcher/browser-profile"] } };
+		t("win: a pattern written with / matches a backslash path", classify("cat C:\\a\\researcher\\browser-profile\\x", browser).decision, "deny");
 		t("win: /c/x is C:\\x", canonical("/c/proj/src/a.txt", "C:\\proj"), "C:\\proj\\src\\a.txt");
 		t("win: relative and forward slashes", canonical("src/../src/b.txt", "C:/proj"), "C:\\proj\\src\\b.txt");
 		t("win: a top-level name keeps its first letter", canonical("D:\\newdir\\x", "C:\\proj"), "D:\\newdir\\x");
@@ -852,7 +861,12 @@ const blocked = (r) => r?.block === true;
 		t("win: /tmp writes are in the temp-dir scope", [inScope("/tmp/x/y.txt", [tmpdir()], "C:\\proj"), inScope("/c/proj/y.txt", [tmpdir()], "C:\\proj")], [true, false]);
 		t("win: protected names without case", [isProtected("C:\\proj\\.ENV", {}, "C:\\proj"), isProtected("/c/proj/.Git/config", {}, "C:\\proj"), isProtected("C:\\proj\\keys\\x.PEM", {}, "C:\\proj"), isProtected("C:\\proj\\src\\a.ts", {}, "C:\\proj")], [true, true, true, false]);
 	} finally { Object.defineProperty(process, "platform", real); delete globalThis.__lcwBash; }
-	t("posix unchanged: /c/x is a plain path", canonical("/c/proj/x", "/"), "/c/proj/x");
+	// off Windows (faked so on a Windows machine)
+	Object.defineProperty(process, "platform", { value: process.platform === "win32" ? "linux" : process.platform });
+	try {
+		if (real.value !== "win32") t("posix unchanged: /c/x is a plain path", canonical("/c/proj/x", "/"), "/c/proj/x");   // (on Windows the file system is not posix's: / is C:\)
+		t("posix unchanged: a backslash is no separator", redirectTargets("node a.js > C:\\x\\y.txt"), ["C:\\x\\y.txt"]);
+	} finally { Object.defineProperty(process, "platform", real); }
 }
 t("deny log written", readFileSync(process.env.LETS_CODE_MANDATE_LOG, "utf8").split("\n").filter((l) => l.includes('"deny"')).length > 5, true);
 

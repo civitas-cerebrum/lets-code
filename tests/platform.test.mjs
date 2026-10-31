@@ -10,7 +10,7 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const script = process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), "..", "lets-code");
@@ -133,6 +133,26 @@ try {
 	P.lcwKillTree(kid.pid);
 	t("lcwKillTree stops the child", await Promise.race([gone, new Promise((r) => setTimeout(() => r(false), 10000))]), true);
 	P.lcwKillTree(0);   // no pid: nothing
+	// lcwTmpDir: $TMPDIR on Windows when set (node's tmpdir() reads TEMP there)
+	{
+		const was = process.env.TMPDIR;
+		try {
+			process.env.TMPDIR = realWin ? work.replace(/\\/g, "/") : work;
+			t("lcwTmpDir: $TMPDIR (Windows: as a Windows path)", P.lcwTmpDir(), realWin ? work : tmpdir());
+		} finally { if (was === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = was; }
+	}
+	// lcwLong: 8.3 short names (C:\Users\RUNNER~1) are the long ones
+	t("lcwLong: a path without one unchanged", P.lcwLong(join(work, "a~b", "x")), join(work, "a~b", "x"));
+	if (realWin) {
+		const deep = join(work, "a-long-directory-name"); mkdirSync(deep);
+		const short = String(spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"for %I in ("${deep}") do @echo %~sI"`], { encoding: "utf8", windowsVerbatimArguments: true }).stdout || "").trim();
+		if (/~\d/.test(short)) {
+			t("win: lcwLong expands a short name, keeps the rest", P.lcwLong(join(short, "not-there", "f.txt")), join(deep, "not-there", "f.txt"));
+			t("win: lcwSamePath short and long", P.lcwSamePath(short, deep.replace(/\\/g, "/").toUpperCase()), true);
+			t("win: lcwUnder short below long", P.lcwUnder(join(short, "x"), deep), true);
+		} else console.log(`skip  lcwLong: no 8.3 name for ${deep} (${short || "none"})`);
+		t("win: lcwLong leaves a short name that is not there", P.lcwLong("C:\\NOSUCH~1\\x"), "C:\\NOSUCH~1\\x");
+	}
 } finally {
 	rmSync(work, { recursive: true, force: true });
 }

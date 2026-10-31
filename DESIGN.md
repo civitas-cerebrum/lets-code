@@ -1254,6 +1254,11 @@ section at the top makes the rest of the script hold there:
   writes (a sitecustomize), so `$(python3 ...)` never ends in `\r`.
 - pi is started with MSYS argument conversion off (`/review` reaches pi as
   typed). The extension's index turns it back on for pi's own bash commands.
+- a model may write `C:\Users\x\repo` unquoted in a bash command, which
+  Git Bash reads as `C:Usersxrepo` (backslashes escape). The git guard and
+  the mandate judge such a command both as bash reads it and as written,
+  and refuse it if either reading is refused. Git Bash's `/` (Git's own
+  directory, with `/c` below it) counts as a root.
 
 The modules share one block of plain-JS helpers, `lc_ts_platform`, which a
 writer appends to the module it writes, so each module stays one
@@ -1262,7 +1267,9 @@ self-contained file. The helpers are:
 - `lcwCommand` and `lcwPi`: npm `.cmd` shims run as node plus their script.
 - `lcwKillTree`: `taskkill /T` stops a process tree.
 - `lcwNative`, `lcwKey` and `lcwUnder`: `/c/x`, `/tmp` and `~` mapped to
-  Windows paths, compared without case.
+  Windows paths, compared without case and with 8.3 short names
+  (`C:\Users\RUNNER~1`, as `%TEMP%` may say) expanded (`lcwLong`).
+- `lcwTmpDir`: `$TMPDIR` when set (node's `tmpdir()` reads `TEMP` there).
 - `lcwRename`: retried while another process holds the file.
 - `lcwSocket`: named pipes for sockets.
 

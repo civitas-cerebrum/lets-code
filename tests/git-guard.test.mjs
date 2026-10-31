@@ -16,7 +16,12 @@ process.env.LETS_CODE_GIT_GUARD_ON = "1";
 
 // Node strips types but does not resolve the type-only import of a package
 // that is not installed here; rewrite the extension into a temp copy without it.
-const work = realpathSync(mkdtempSync(join(tmpdir(), "gitguard-test-")));
+// On Windows the paths the bash commands below name are in the C:/x form, as
+// lets-code keeps its paths and as a Git Bash command line takes them (a
+// backslash there is an escape); the C:\x form is checked on its own below.
+const WIN = process.platform === "win32";
+const fwd = (p) => (WIN ? p.replace(/\\/g, "/") : p);
+const work = fwd(realpathSync(mkdtempSync(join(tmpdir(), "gitguard-test-"))));
 const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
 const extCopy = join(work, "gitguard.ts");
 writeFileSync(extCopy, src);
@@ -28,7 +33,7 @@ if (!handler) throw new Error("extension did not register a tool_call handler");
 
 const git = (cwd, ...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd, stdio: "pipe" }).toString();
 function repo(branch) {
-	const d = mkdtempSync(join(work, "repo-"));
+	const d = fwd(mkdtempSync(join(work, "repo-")));
 	git(d, "init", "-q", "-b", branch);
 	git(d, "commit", "-q", "--allow-empty", "-m", "init");
 	return d;
@@ -50,13 +55,13 @@ const tag = (cwd) => basename(cwd).replace(/-.*$/, "");
 const bash = (cmd, cwd, want) => check(`bash [${tag(cwd)}] ${JSON.stringify(cmd.length > 120 ? `${cmd.slice(0, 117)}…` : cmd)}`, call("bash", { command: cmd }, cwd), want);
 
 const main = repo("main"), pi = repo("pi/test");
-const plain = mkdtempSync(join(work, "plain-"));
+const plain = fwd(mkdtempSync(join(work, "plain-")));
 mkdirSync(join(main, "sub"));
 mkdirSync(join(pi, "build"));
 writeFileSync(join(pi, "a.txt"), "a"); git(pi, "add", "a.txt"); git(pi, "commit", "-q", "-m", "a");
 writeFileSync(join(main, "m.txt"), "m"); git(main, "add", "m.txt"); git(main, "commit", "-q", "-m", "m");
-const wt = join(work, "wt"); git(main, "worktree", "add", "-q", "-b", "pi/wt", wt);
-const wtMain = join(work, "wt-main"); git(pi, "worktree", "add", "-q", "-b", "feature", wtMain);
+const wt = fwd(join(work, "wt")); git(main, "worktree", "add", "-q", "-b", "pi/wt", wt);
+const wtMain = fwd(join(work, "wt-main")); git(pi, "worktree", "add", "-q", "-b", "feature", wtMain);
 symlinkSync(main, join(plain, "link-to-main"));
 symlinkSync(main, join(pi, "link-to-main"));
 
@@ -694,7 +699,8 @@ console.log("# Windows (process.platform faked as win32 around each call)");
 {
 	const mod = await import(pathToFileURL(extCopy).href);
 	const real = process.platform;
-	const win = async (f) => { Object.defineProperty(process, "platform", { value: "win32" }); try { return await f(); } finally { Object.defineProperty(process, "platform", { value: real }); } };
+	const as = (platform) => async (f) => { Object.defineProperty(process, "platform", { value: platform }); try { return await f(); } finally { Object.defineProperty(process, "platform", { value: real }); } };
+	const win = as("win32"), unix = WIN ? as("linux") : (f) => f();   // "off Windows" on a Windows machine too
 	const eq = (name, got, want) => check(`${name} (${JSON.stringify(got)})`, Promise.resolve(got === want ? undefined : { block: true, reason: `want ${JSON.stringify(want)}` }), false);
 	// Git Bash's paths in a command are the Windows paths they name: rm -rf /c/... is judged on C:\...
 	await eq("win: /c/Users/x/repo", await win(() => mod.piPath("/c/Users/x/repo")), "C:\\Users\\x\\repo");
@@ -702,10 +708,10 @@ console.log("# Windows (process.platform faked as win32 around each call)");
 	await eq("win: @/c/x", await win(() => mod.piPath("@/c/x")), "C:\\x");
 	await eq("win: file:///C:/x/y", await win(() => mod.piPath("file:///C:/x/y")), "C:/x/y");
 	await eq("win: C:/x unchanged", await win(() => mod.piPath("C:/x")), "C:/x");
-	await eq("off Windows: /c/Users/x unchanged", mod.piPath("/c/Users/x"), "/c/Users/x");
+	await eq("off Windows: /c/Users/x unchanged", await unix(() => mod.piPath("/c/Users/x")), "/c/Users/x");
 	await eq("win: cmd's %VAR% and PowerShell's $env:VAR", await win(() => mod.winScript("rd /s /q %USERPROFILE%\\repo & ri $env:TEMP\\x")), "rd /s /q ${USERPROFILE}/repo & ri ${TEMP}/x");
 	await eq("win: $USERPROFILE is the home dir", await win(() => mod.expand("${USERPROFILE}/repo", {}, pi)), `${homedir()}/repo`);
-	await eq("off Windows: $USERPROFILE is unknown", mod.expand("${USERPROFILE}/repo", {}, pi).includes("\0"), true);
+	await eq("off Windows: $USERPROFILE is unknown", (await unix(() => mod.expand("${USERPROFILE}/repo", {}, pi))).includes("\0"), true);
 	const wbash = (cmd, cwd, want) => win(() => bash(cmd, cwd, want));
 	const wps = (cmd, cwd, want) => win(() => check(`powershell [${tag(cwd)}] ${JSON.stringify(cmd)}`, call("powershell", { command: cmd }, cwd), want));
 	await wbash("rd /s /q .git", pi, true);
@@ -744,7 +750,49 @@ console.log("# Windows (process.platform faked as win32 around each call)");
 	await wps("Get-ChildItem; Get-Content m.txt", main, false);
 	await wps("Set-Location ..; Remove-Item -Recurse " + basename(pi), pi, true);
 	// the same commands off Windows: not commands there, judged as any other
-	await bash("rd /s /q .git", pi, false);
+	await unix(() => bash("rd /s /q .git", pi, false));
+}
+
+if (WIN) {
+	console.log("# Windows (a real one): backslash paths in a bash command");
+	// A model on Windows may write C:\Users\x\repo unquoted. Git Bash reads that
+	// as C:Usersxrepo (a path relative to the current directory); the guard
+	// judges both readings and refuses when either one is refused.
+	const bs = (p) => p.replace(/\//g, "\\");
+	await bash(`rm -rf ${bs(pi)}`, pi, true);
+	await bash(`rm -rf "${bs(pi)}"`, pi, true);
+	await bash(`rm -rf '${bs(pi)}'`, pi, true);
+	await bash(`rm -rf ${bs(pi)}\\.git`, pi, true);
+	await bash(`mv ${bs(pi)} /tmp/x`, pi, true);
+	await bash(`cd ${bs(main)} && echo x > a.txt`, pi, true);
+	await bash(`pushd ${bs(main)}; echo x > a.txt`, pi, true);
+	await bash(`git -C ${bs(main)} commit -am x`, pi, true);
+	await bash(`git --git-dir=${bs(main)}\\.git --work-tree=${bs(main)} commit -am x`, pi, true);
+	await bash(`GIT_DIR=${bs(main)}\\.git GIT_WORK_TREE=${bs(main)} git commit -am x`, pi, true);
+	await bash(`sh -c "cd ${bs(main)} && echo x > a.txt"`, pi, true);
+	await bash(`echo x > ${bs(main)}\\a.txt`, pi, true);
+	await bash(`cp a.txt ${bs(main)}\\b.txt`, pi, true);
+	await bash(`rm -rf ${bs(pi)}\\build`, pi, false);                       // neither reading is lethal
+	await bash(`cat ${bs(main)}\\m.txt`, pi, false);
+	// as bash reads it: C:\ is C: (this directory), C:\x\.git is C:x.git
+	await bash("rm -rf C:\\", pi, true);
+	await bash(`cd ${bs(pi)}; echo x > a.txt`, main, true);                  // bash: cd fails, the write lands in main
+	await bash(`cd ${pi}; echo x > a.txt`, main, false);
+	// Git Bash's / is Git's directory; /c, below it, the C: drive
+	await bash("rm -rf /", pi, true);
+	await bash("rm -rf /*", pi, true);
+	await bash("rm -rf /c", pi, true);
+	await bash("rm -rf C:/", pi, true);
+	await bash("rm -rf C:\\*", pi, true);
+	console.log("# Windows (a real one): 8.3 short names");
+	// %TEMP% may name the profile by its short name (C:\Users\RUNNER~1); a
+	// path in that form is the same directory as the long one
+	const short = execFileSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"for %I in ("${bs(main)}") do @echo %~sI"`], { encoding: "utf8", windowsVerbatimArguments: true }).trim();
+	if (short && short.toLowerCase() !== bs(main).toLowerCase()) {
+		await bash(`cd ${fwd(short)} && echo x > a.txt`, pi, true);
+		await bash(`rm -rf ${fwd(short)}/.git`, main, true);
+		await check(`8.3 name ${short} -> write blocked`, call("write", { path: join(short, "a.txt"), content: "x" }, pi), true);
+	} else console.log(`(no 8.3 short name for ${main}; skipped)`);
 }
 
 console.log(`\n${n} cases, ${fail ? "FAILURES" : "all passed"}`);

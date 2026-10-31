@@ -74,6 +74,10 @@ await settled(pi, 2);
 t("second checkpoint after a change (two calls debounced)", refs(pi).length, 2);
 
 for (let i = 0; i < 3; i++) { writeFileSync(join(pi, "new.txt"), `v${i}\n`); await result("edit", { path: join(pi, "new.txt") }, pi); await sleep(300); }
+// the last snapshot may still be running (a slow runner: each git call takes
+// ~100 ms on Windows), its prune after its update-ref: wait for it, as a
+// session end does
+await handlers.session_shutdown({ type: "session_shutdown" }, { cwd: pi });
 t("pruned to KEEP=3", refs(pi).length, 3);
 t("private index lives in .git", existsSync(join(pi, ".git/lets-code-checkpoint.index")), true);
 

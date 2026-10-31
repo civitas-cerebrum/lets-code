@@ -8676,6 +8676,7 @@ export function briefFor(stage: Stage, L: Ledger): Record<string, string> {
 	const b: Record<string, string> = {};
 	if (stage === "plan" || stage === "build") {
 		Object.assign(b, { task: L.ticket, criteria, mode: stage === "plan" ? "plan" : "build", how_to_run: L.howToRun, constraints: keep, workspace });
+		if (L.howToRun && L.baseline && ranNoTests(L.baseline.code, L.baseline.tail)) b.test_command = `\`${L.howToRun}\` finds no tests yet: name and place your tests so that this exact command runs them (for unittest discovery: test_*.py files with unittest.TestCase classes), and run it yourself before you finish.`;
 		if (stage === "build") { b.plan = L.plan; if (L.fixing) b.findings = `Fix these findings of the ${L.fixing.stage} stage, by id:\n${formatFindings(L.fixing.findings)}${L.fixNote ? `\n\nFrom the one running this pipeline, on this round:\n${L.fixNote}` : ""}`; }
 	} else if (stage === "expert-review") {
 		Object.assign(b, { diff: where, criteria, context, previous_findings: prev(stage), how_to_run: L.howToRun, constraints: L.constraints });
@@ -8690,6 +8691,10 @@ export function briefFor(stage: Stage, L: Ledger): Record<string, string> {
 	const budget = budgetFor(stage, L); if (budget) b.context_budget = budget;
 	for (const k of Object.keys(b)) if (!b[k]) delete b[k];
 	return b;
+}
+// a test command that ran no tests (unittest and pytest exit 5): it judges nothing
+export function ranNoTests(code: number, out: string): boolean {
+	return code === 5 && /NO TESTS RAN|no tests ran|collected 0 items|Ran 0 tests/i.test(out);
 }
 // a review, test or judge reply that carries its verdict
 export function hasVerdict(stage: Stage, text: string): boolean {
@@ -8805,7 +8810,8 @@ async function step(L: Ledger, deps: Deps): Promise<boolean> {
 		const out = artifact(L, `${String(L.entries.length + 1).padStart(2, "0")}-regression.out.md`, `$ ${L.howToRun}\nexit ${r.code}\n\n${r.out.slice(-20000)}`);
 		const before = L.baseline?.code;
 		const pass = r.code === 0; const failedBefore = before !== undefined && before !== 0;
-		const verdict = pass ? "PASS" : failedBefore ? "FAIL (as before the change)" : "FAIL";
+		const none = !pass && failedBefore && ranNoTests(r.code, r.out);   // runs no tests, now as before: judges nothing
+		const verdict = pass ? "PASS" : none ? "NO TESTS (as before the change)" : failedBefore ? "FAIL (as before the change)" : "FAIL";
 		L.entries.push({ stage, round: L.rounds, output: out, verdict, summary: `\`${short(L.howToRun, 60)}\` exit ${r.code}${failedBefore ? `, exit ${before} before the change` : ""}`, input: 0, output_tokens: 0, seconds: (t1 - t0) / 1000, started: t0, ended: t1 });
 		if (pass || failedBefore) { L.stage = "done"; if (failedBefore && !pass) L.note = "the suite failed before the change too"; return true; }
 		fixRound(L, stage, [{ id: "REG1", severity: "blocker", where: L.howToRun, title: "the test suite fails after the change", detail: r.out.slice(-3000) }]);
@@ -8862,8 +8868,10 @@ async function step(L: Ledger, deps: Deps): Promise<boolean> {
 	// it fails: a fix round with its output
 	if (ok && L.howToRun) {
 		const r = await deps.exec(L.howToRun, L.work, SUITE_TIMEOUT_MS);
-		if (r.code === 0) {
-			entry.verdict = "NO VERDICT (the suite passes)"; entry.summary = `no verdict from ${EXPERT[stage]}; \`${short(L.howToRun, 60)}\` passes: going on unreviewed`;
+		if (r.code === 0 || ranNoTests(r.code, r.out)) {
+			const none = r.code !== 0;
+			entry.verdict = none ? "NO VERDICT (the suite runs no tests)" : "NO VERDICT (the suite passes)";
+			entry.summary = `no verdict from ${EXPERT[stage]}; \`${short(L.howToRun, 60)}\` ${none ? "runs no tests, so it cannot judge either" : "passes"}: going on unreviewed`;
 			L.unreviewed = true; L.stage = next(stage); return true;
 		}
 		entry.verdict = "NO VERDICT (the suite fails)";
@@ -9104,7 +9112,7 @@ export function orchestrated(decision?: Decision): Deps["checkpoint"] {
 // the last judge accepted and the last regression passed
 export function green(L: Ledger): boolean {
 	const last = (st: Stage) => [...L.entries].reverse().find((e) => e.stage === st)?.verdict ?? "";
-	return /^ACCEPT/.test(last("judge")) && last("regression") === "PASS";
+	return /^ACCEPT/.test(last("judge")) && (last("regression") === "PASS" || last("regression") === "NO TESTS (as before the change)");
 }
 // the real stages: the experts module's brief rendering, the subagents runner
 export async function sessionDeps(ctx: any, signal?: AbortSignal, progress?: (l: string) => void, callId?: string): Promise<Deps> {

@@ -198,6 +198,15 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	const L14b = await F.startRun(opts(r14b, { howToRun: "test -f nope.txt" }), fd14b);
 	const ev14b = L14b.entries.filter((e) => e.stage === "expert-review");
 	t("never a verdict, the suite fails: a fix round with its output, not on", [ev14b[0].verdict, fd14b.calls.filter((c) => c.meta.stage === "build").length >= 2, /no verdict from expert-reviewer, and the test suite fails/.test(fd14b.calls.filter((c) => c.meta.stage === "build")[1]?.brief.findings ?? ""), L14b.status], ["NO VERDICT (the suite fails)", true, true, "stopped"]);
+	// a test command that runs no tests (exit 5): it judges nothing, so no fix round on it
+	const noTestsCmd = "printf 'Ran 0 tests in 0.000s\\n\\nNO TESTS RAN\\n'; exit 5";
+	const r14d = makeRepo("ask-never-notests"); const fd14d = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { stuck: { action: "stop" }, blocked: { action: "stop" } } });
+	const L14d = await F.startRun(opts(r14d, { howToRun: noTestsCmd }), fd14d);
+	t("never a verdict, the suite runs no tests: on, unreviewed, no fix round", [L14d.entries.find((e) => e.stage === "expert-review").verdict, fd14d.calls.filter((c) => c.meta.stage === "build").length, L14d.unreviewed], ["NO VERDICT (the suite runs no tests)", 1, true]);
+	t("the suite ran no tests before the change: the developer is told", [/finds no tests yet: name and place your tests so that this exact command runs them/.test(fd14d.calls.find((c) => c.meta.stage === "plan").brief.test_command ?? ""), "test_command" in fd14d.calls.find((c) => c.meta.stage === "build").brief], [true, true]);
+	t("a suite that runs tests: no such note", "test_command" in fd14.calls.find((c) => c.meta.stage === "plan").brief, false);
+	t("the suite ran no tests, now as before: regression says NO TESTS, not FAIL", L14d.entries.find((e) => e.stage === "regression")?.verdict, "NO TESTS (as before the change)");
+	t("ranNoTests: unittest and pytest wording, exit 5 only", [F.ranNoTests(5, "Ran 0 tests in 0.000s\n\nNO TESTS RAN"), F.ranNoTests(5, "collected 0 items"), F.ranNoTests(1, "NO TESTS RAN"), F.ranNoTests(5, "FAILED (failures=2)")], [true, true, false, false]);
 	const r14c = makeRepo("ask-never-nosuite"); const fd14c = fakeDeps({ ...OK, build: [build()], "expert-review": [noVerdict(false)] }, { decisions: { blocked: { action: "stop" } } });
 	const L14c = await F.startRun(opts(r14c, { howToRun: "" }), fd14c);
 	t("never a verdict, no test command: blocked as before", [L14c.entries.find((e) => e.stage === "expert-review").verdict, L14c.status], ["NO VERDICT", "stopped"]);
@@ -259,6 +268,7 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("orchestrated, green (judge ACCEPT, regression PASS): commit", await cp("result", L([E("judge", "ACCEPT"), E("regression", "PASS")])), { action: "commit", by: "the orchestrator" });
 	t("orchestrated, judge rejected: left to the orchestrator", await cp("result", L([E("judge", "REJECT"), E("regression", "PASS")])), null);
 	t("orchestrated, suite failed as before the change: left to the orchestrator", await cp("result", L([E("judge", "ACCEPT"), E("regression", "FAIL (as before the change)")])), null);
+	t("orchestrated, the suite runs no tests (as before) and the judge accepted: commit", await cp("result", L([E("judge", "ACCEPT"), E("regression", "NO TESTS (as before the change)")])), { action: "commit", by: "the orchestrator" });
 	t("orchestrated, no regression ran: left to the orchestrator", await cp("result", L([E("judge", "ACCEPT"), E("regression", "SKIPPED")])), null);
 	t("orchestrated, the last judge counts", await cp("result", L([E("judge", "REJECT"), E("judge", "ACCEPT"), E("regression", "PASS")])), { action: "commit", by: "the orchestrator" });
 	t("orchestrated, a given decision first", await F.orchestrated({ action: "keep", by: "x" })("result", L([E("judge", "ACCEPT"), E("regression", "PASS")])), { action: "keep", by: "x" });

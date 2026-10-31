@@ -9,11 +9,39 @@ root="$(cd "${here}/.." && pwd)"
 skip="mem-guard-live.sh run.sh"           # need a live server / tmux
 fail=0; ran=0
 
+# A test file that runs past TEST_TIMEOUT seconds (default 600) is stopped:
+# its process tree is printed first, so a hang names itself (a CI job that
+# hung used to run 46 minutes and leave no log), then the file counts as
+# failed. Plain bash: macOS has no timeout(1).
+TEST_TIMEOUT="${TEST_TIMEOUT:-600}"
+tree() {  # tree <pid>: the pid and its descendants, one "pid ppid elapsed command" line each
+    ps -A -o pid=,ppid=,etime=,command= 2>/dev/null | awk -v root="$1" '
+        { pid[NR] = $1; ppid[NR] = $2; line[NR] = $0 }
+        END { keep[root] = 1; for (pass = 0; pass < 8; pass++) for (i = 1; i <= NR; i++) if (keep[ppid[i]]) keep[pid[i]] = 1
+              for (i = 1; i <= NR; i++) if (keep[pid[i]]) print "    " substr(line[i], 1, 200) }'
+}
+stop_tree() {  # stop_tree <pid>: TERM the descendants, deepest first, then the pid
+    local kid
+    for kid in $(ps -A -o pid=,ppid= 2>/dev/null | awk -v p="$1" '$2 == p { print $1 }'); do stop_tree "${kid}"; done
+    kill -TERM "$1" 2>/dev/null
+}
 run() {  # run <label> <cmd...>
     ran=$((ran + 1))
-    echo "=== $1"
+    local label="$1" pid dog rc
+    echo "=== ${label}"
     shift
-    if "$@"; then echo "--- ok"; else echo "--- FAIL"; fail=1; fi
+    "$@" &
+    pid=$!
+    ( sleep "${TEST_TIMEOUT}"
+      if kill -0 "${pid}" 2>/dev/null; then
+          echo "--- TIMEOUT: ${label} still running after ${TEST_TIMEOUT}s; its processes:"
+          tree "${pid}"
+          stop_tree "${pid}"
+      fi ) &
+    dog=$!
+    wait "${pid}"; rc=$?
+    stop_tree "${dog}"; wait "${dog}" 2>/dev/null
+    if [ "${rc}" -eq 0 ]; then echo "--- ok"; else echo "--- FAIL"; fail=1; fi
 }
 
 for t in "${here}"/*.sh; do

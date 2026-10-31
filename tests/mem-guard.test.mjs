@@ -17,9 +17,9 @@ const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-co
 const work = realpathSync(mkdtempSync(join(tmpdir(), "memguard-test-")));
 const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
 
-let fail = 0, n = 0;
+let fail = 0, n = 0, last = "the start";
 function check(name, got, want) {
-	n++;
+	n++; last = name;
 	const ok = JSON.stringify(got) === JSON.stringify(want);
 	if (!ok) { fail++; console.log(`FAIL ${name}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); }
 }
@@ -29,6 +29,13 @@ const kids = new Set();
 const cleanup = () => { for (const pid of kids) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } } kids.clear(); };
 process.on("exit", () => { cleanup(); rmSync(work, { recursive: true, force: true }); });
 for (const s of ["SIGINT", "SIGTERM"]) process.on(s, () => process.exit(1));
+// bounded: a CI run hung here for 46 minutes without a line of output. Past
+// HANG_MS the test fails, naming the last check that ran and the children left
+const HANG_MS = Number(process.env.MEM_GUARD_TEST_HANG_MS ?? 180_000);
+setTimeout(() => {
+	console.log(`FAIL  hung for ${HANG_MS / 1000}s after "${last}"; children still there: ${[...kids].map((p) => { try { return `${p} ${readFileSync(`/proc/${p}/cmdline`, "utf8").replace(/\0/g, " ").trim()}`; } catch { return `${p} (gone)`; } }).join("; ") || "none"}`);
+	cleanup(); process.exit(1);
+}, HANG_MS).unref();
 
 // a process that touches <mb> MB, says "ready" and sleeps
 const hog = join(work, "hog.py");
@@ -40,7 +47,8 @@ function start(cmd, args, opts = {}) {
 	const c = spawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"], ...opts });
 	kids.add(c.pid);
 	c.on("exit", () => kids.delete(c.pid));
-	const ready = new Promise((r) => { let out = ""; c.stdout.on("data", (d) => { out += d; if (out.includes("ready")) r(); }); c.on("exit", r); });
+	// ready: it said so, it exited, or 15 s went by (never a wait without an end)
+	const ready = new Promise((r) => { let out = ""; c.stdout.on("data", (d) => { out += d; if (out.includes("ready")) r(); }); c.on("exit", r); setTimeout(r, 15_000).unref(); });
 	return { pid: c.pid, ready };
 }
 const startHog = async (mb, opts) => { const h = start("python3", [hog, String(mb)], opts); await h.ready; return h.pid; };

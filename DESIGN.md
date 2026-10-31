@@ -1242,6 +1242,34 @@ Portability: bash 3.2 (macOS) has no `pipefail` without a guard, cannot
 parse a `case` pattern inside `$(...)`, and `"${array[@]}"` on an empty
 array trips `set -u`, so the final `exec` is an if/else.
 
+Windows: the script runs in Git Bash (MSYS2), the bash pi's own bash tool
+uses, while pi, node, python and git are native programs. The `windows`
+section at the top makes the rest of the script hold there:
+- paths are kept in the `C:/Users/x` form (`cygpath -m`), which bash and
+  native programs both read. HOME and TMPDIR are set so, and with them
+  every path built on them. A path bash itself makes (`$PWD`, `$0`) goes
+  through `native_path` before a native program, or a file one reads, gets it.
+- `python3` is the real interpreter (the Store stub named python3 is
+  passed over), run with UTF-8 and with LF line ends on stdout and in text
+  writes (a sitecustomize), so `$(python3 ...)` never ends in `\r`.
+- pi is started with MSYS argument conversion off (`/review` reaches pi as
+  typed). The extension's index turns it back on for pi's own bash commands.
+
+The modules share one block of plain-JS helpers, `lc_ts_platform`, which a
+writer appends to the module it writes, so each module stays one
+self-contained file. The helpers are:
+- `lcwBash`: Git Bash, found as pi finds it, never WSL's `bash.exe`.
+- `lcwCommand` and `lcwPi`: npm `.cmd` shims run as node plus their script.
+- `lcwKillTree`: `taskkill /T` stops a process tree.
+- `lcwNative`, `lcwKey` and `lcwUnder`: `/c/x`, `/tmp` and `~` mapped to
+  Windows paths, compared without case.
+- `lcwRename`: retried while another process holds the file.
+- `lcwSocket`: named pipes for sockets.
+
+On Linux and macOS every helper does what the code did before. npm's
+`.cmd` and `.ps1` shims are pointed by the postinstall at
+`bin/lets-code-windows.js`, which finds Git Bash and runs the script.
+
 ## Roadmap
 
 `--harness deepseek` (`@deepseek-ai/dsh`, YAML config) and

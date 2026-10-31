@@ -9,7 +9,12 @@ model on your own hardware:
   (with per-level budgets the server enforces) and vision, probed from the
   server; the output cap reserved in pi's compaction settings so a session
   never overflows
-- guards: memory (Linux), git (a `pi/*` branch, refused irreversible
+- Windows: runs in Git Bash (as pi does) from PowerShell, cmd, Windows
+  Terminal or Git Bash, installed with `npm install -g
+  --allow-scripts=@civitas-cerebrum/lets-code @civitas-cerebrum/lets-code`;
+  every feature but the sandbox (macOS and Linux only), with a lighter
+  memory guard; the test suite runs on windows-latest in CI
+- guards: memory (Linux; a lighter one on Windows), git (a `pi/*` branch, refused irreversible
   commands, checkpoints before every tool call), agent (bash timeouts,
   cut-off recovery, test reminders, dynamic thinking), grounding
 - modes and roles (`plan`, `auto`, `ask`, `orchestrator`, `yolo`) enforced

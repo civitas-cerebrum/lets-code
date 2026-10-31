@@ -7,7 +7,7 @@
 
 <p align="center">
   <img alt="bash" src="https://img.shields.io/badge/bash-3.2%2B-4EAA25?logo=gnubash&logoColor=white">
-  <img alt="platforms" src="https://img.shields.io/badge/linux%20%7C%20macOS%20%7C%20Termux-supported-blue">
+  <img alt="platforms" src="https://img.shields.io/badge/linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Termux-supported-blue">
   <img alt="servers" src="https://img.shields.io/badge/vLLM%20%7C%20SGLang%20%7C%20Ollama%20%7C%20LM%20Studio-OpenAI--compatible-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
@@ -52,9 +52,46 @@ granular` asks about each one. Flags lets-code does not know are passed
 to pi, so `lets-code -p "..."` and the rest of pi's options work as they are.
 
 Needs `bash` 3.2+, `curl`, `python3`; `node`/`npm` only if it installs pi
-for you. Linux and macOS (the test suite runs on both in CI). Termux on
-Android runs it too, against a server on the LAN or on Claude, and is where
-the `termux-device` expert lives; it is verified by hand, not in CI.
+for you. Linux, macOS and Windows (the test suite runs on all three in CI).
+Termux on Android runs it too, against a server on the LAN or on Claude, and
+is where the `termux-device` expert lives; it is verified by hand, not in CI.
+
+### Windows
+
+lets-code runs in Git Bash, the bash pi itself uses on Windows; pi, node,
+python and git stay native Windows programs. Install the three it needs and
+lets-code from npm, then run it from PowerShell, cmd, Windows Terminal or
+Git Bash alike:
+
+```powershell
+winget install Git.Git OpenJS.NodeJS.LTS Python.Python.3.13
+# open a new terminal, then:
+npm install -g --allow-scripts=@civitas-cerebrum/lets-code @civitas-cerebrum/lets-code
+lets-code setup
+```
+
+`--allow-scripts` lets the package's postinstall point npm's `lets-code.cmd`
+and `lets-code.ps1` at a small launcher that finds Git Bash (pi's
+`shellPath` setting, then Git for Windows, then a `bash.exe` on PATH that is
+not WSL's). npm 12 runs no install scripts without it; if they were skipped,
+run `lets-code` once from Git Bash and it puts the shims right itself. A
+`python3` that is only the Microsoft Store stub is passed over for the real
+interpreter (`python` or `py -3`), for lets-code and for what pi runs.
+
+What differs on Windows:
+
+- **sandbox**: not available (it confines with macOS Seatbelt or Linux
+  bubblewrap); the launch says so and bash commands run unconfined. Run
+  lets-code inside WSL for a sandbox.
+- **memory guard**: a lighter one, through PowerShell's process list every
+  3 s: the same per-process and session limits and low-memory stop, with
+  hard kills (Windows has no pause or signals to send first) and no
+  session scope.
+- **git guard** also reads `cmd /c` and PowerShell commands (`rd /s`,
+  `Remove-Item -Recurse`, `Set-Content` ...) and Git Bash paths (`/c/...`).
+- the TUI needs a real console: Windows Terminal, PowerShell, cmd, or Git
+  Bash's mintty with ConPTY (the default in current Git for Windows); under an
+  old mintty lets-code runs pi through `winpty` when it is installed.
 
 ## Compared with Claude Code
 

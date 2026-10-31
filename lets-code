@@ -279,6 +279,22 @@ PY
         python3() { echo "[lets-code] ERROR: Python 3 is not installed (on Windows: winget install Python.Python.3.13, then open a new terminal)." >&2; return 127; }
     fi
     unset lc_c lc_site lc_shim
+    # npm's lets-code.cmd/.ps1 run lets-code with Git Bash only once the
+    # package's postinstall has pointed them at bin/lets-code-windows.js; npm
+    # 12 runs no install scripts unless allowed, which leaves them running
+    # whatever `bash` is on PATH (none, or WSL's) from cmd and PowerShell. A
+    # launch from Git Bash (npm's sh shim) puts that right here, once.
+    lc_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
+    case "${lc_dir}" in
+        */node_modules/@civitas-cerebrum/lets-code)
+            for lc_shim in "${lc_dir%/node_modules/@civitas-cerebrum/lets-code}/lets-code.cmd" "${lc_dir%/@civitas-cerebrum/lets-code}/.bin/lets-code.cmd"; do
+                if [ -f "${lc_shim}" ] && ! grep -q "Written by lets-code's postinstall" "${lc_shim}" 2>/dev/null && [ -f "${lc_dir}/scripts/postinstall.js" ]; then
+                    node "$(cygpath -m -- "${lc_dir}/scripts/postinstall.js")" >&2 || true
+                    break
+                fi
+            done ;;
+    esac
+    unset lc_dir lc_shim
 fi
 
 # Stamped by the publish workflow (the release tag) and by `update --snapshot`
@@ -20473,8 +20489,12 @@ run_update() {  # run_update [--snapshot]
             command -v npm >/dev/null || { log_error "lets-code was installed by npm, but npm is not on PATH."; exit 1; }
             local spec="${UPDATE_PACKAGE}@latest"
             [ "${mode}" = snapshot ] && spec="github:${UPDATE_REPO}"
-            log "installed by npm — running: npm install -g ${spec}"
-            npm install -g "${spec}" || { log_error "npm install failed — see the npm output above."; exit 1; }
+            # on Windows the postinstall points npm's .cmd/.ps1 shims at Git
+            # Bash; npm 12 runs it only when allowed
+            local allow=""
+            on_windows && allow="--allow-scripts=${UPDATE_PACKAGE}"
+            log "installed by npm — running: npm install -g ${allow:+${allow} }${spec}"
+            npm install -g ${allow:+"${allow}"} "${spec}" || { log_error "npm install failed — see the npm output above."; exit 1; }
             log "updated: $("${self}" --version 2>/dev/null || echo lets-code)"
             exit 0 ;;
     esac

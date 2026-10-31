@@ -49,9 +49,11 @@ if (args[0] === "update" && process.platform === "win32") {
 		process.exit(1);
 	}
 	const spec = args[1] === "--snapshot" ? "github:civitas-cerebrum/lets-code" : "@civitas-cerebrum/lets-code@latest";
-	console.log(`[lets-code] installed by npm — running: npm install -g ${spec}`);
-	// npm is npm.cmd: only a shell runs it; the spec is ours, nothing to quote
-	const r = spawnSync(`npm install -g ${spec}`, { stdio: "inherit", shell: true });
+	// the postinstall points the new shims back here; npm 12 runs it only when allowed
+	const cmd = `npm install -g --allow-scripts=@civitas-cerebrum/lets-code ${spec}`;
+	console.log(`[lets-code] installed by npm — running: ${cmd}`);
+	// npm is npm.cmd: only a shell runs it; the command is ours, nothing to quote
+	const r = spawnSync(cmd, { stdio: "inherit", shell: true });
 	if (r.status !== 0) {
 		console.error("[lets-code] ERROR: npm install failed — see the npm output above.");
 		process.exit(1);

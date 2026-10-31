@@ -24,6 +24,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # the suite takes 2 (Linux) to 8 (macOS) minutes; a hang ends here, and
+    # tests/run.sh stops a single file after TEST_TIMEOUT with its process tree
+    timeout-minutes: 25
     steps:
       - name: 🗂️  Checkout
         uses: actions/checkout@v4

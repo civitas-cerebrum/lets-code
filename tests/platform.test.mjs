@@ -7,7 +7,7 @@
 // as win32, so their Windows side is checked on Linux and macOS too.
 //
 //   tests/platform.test.mjs [path/to/lets-code]
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, statSync, realpathSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -22,7 +22,9 @@ if (end < 0) { console.log("FAIL  no lc_ts_platform block in " + script); proces
 const block = s.slice(open + "cat <<'TS'\n".length, end + 1);
 const names = [...block.matchAll(/^function (lcw\w+)\(/gm)].map((m) => m[1]);
 
-const work = mkdtempSync(join(tmpdir(), "platform-test-"));
+// the long form: %TEMP% can name the profile by its 8.3 short name
+// (C:\Users\RUNNER~1), which lcwLong expands, so expected paths start long too
+const work = realpathSync.native(mkdtempSync(join(tmpdir(), "platform-test-")));
 const modFile = join(work, "platform.mjs");
 writeFileSync(modFile, block + `\nexport { ${names.join(", ")} };\n`);
 const P = await import(pathToFileURL(modFile).href);

@@ -53,6 +53,8 @@
 #                                when the output shows pi struggling
 #   lets-code --insecure ...     skip TLS verification (self-signed certs)
 #   lets-code --no-mem-guard     launch without the memory guard
+#   lets-code --git-guard        launch with the git guard (off unless chosen
+#                                in setup, or GIT_GUARD=true)
 #   lets-code --no-git-guard     launch without the git guard
 #   lets-code --no-agent-guard   launch without the agent guard
 #   lets-code --no-grounding     launch without the grounding guard (look up
@@ -6075,7 +6077,7 @@ thinking_check() {
 # that is a typo, and the error names the flag meant rather than letting
 # pi refuse it (or, for a --no-* flag, take it as a message). pi's own
 # flags are never questioned, so --models (an edit from --model) passes.
-LC_FLAGS="--url --model --context --output-cap --api --vision --no-vision --thinking-level --insecure --no-mem-guard --no-git-guard --no-agent-guard --grounding --no-grounding --no-session-tag --metrics --no-metrics --metrics-log --mandate --orchestration --orchestrator --no-mandate --subagents --no-subagents --experts --no-experts --core-memory --no-core-memory --sessions --no-sessions --claude-code --no-claude-code --sandbox --no-sandbox --verbose --debug --help --version --preset --claude --harness"
+LC_FLAGS="--url --model --context --output-cap --api --vision --no-vision --thinking-level --insecure --no-mem-guard --git-guard --no-git-guard --no-agent-guard --grounding --no-grounding --no-session-tag --metrics --no-metrics --metrics-log --mandate --orchestration --orchestrator --no-mandate --subagents --no-subagents --experts --no-experts --core-memory --no-core-memory --sessions --no-sessions --claude-code --no-claude-code --sandbox --no-sandbox --verbose --debug --help --version --preset --claude --harness"
 PI_FLAGS="--provider --model --api-key --system-prompt --append-system-prompt --mode --print --continue --resume --session --session-id --fork --session-dir --no-session --name --models --no-tools --no-builtin-tools --tools --exclude-tools --thinking --extension --no-extensions --skill --no-skills --prompt-template --no-prompt-templates --theme --use-theme --no-themes --no-context-files --export --list-models --verbose --tui-mode --approve --no-approve --offline --help --version"
 flag_check() {
     local f="${1%%=*}" near=""
@@ -19860,28 +19862,39 @@ run_setup() {  # run_setup [full|granular]
         fi ;;
     esac
 
-    # 5b. optional features: off in the default setup, all on with 'full',
-    #     one question each with 'granular'
-    local feat_mandate="false" feat_mode="" feat_subagents="true" feat_sandbox="false" feat_mcp="no" feat_metrics="false" feat_core_memory="true"
+    # 5b. extensions that are off unless chosen: the first-run setup asks
+    #     about each (git guard, mandate modes, sandbox, MCP import); 'full'
+    #     turns them all on; 'granular' also asks about the ones that are on
+    #     by default (subagents, core memory) and the metrics footer
+    local feat_git_guard="false" feat_mandate="false" feat_mode="" feat_subagents="true" feat_sandbox="false" feat_mcp="no" feat_metrics="false" feat_core_memory="true"
     case "${profile}" in
-        full) feat_mandate="true"; feat_subagents="true"; feat_sandbox="true"; feat_mcp="yes"; feat_metrics="true" ;;
-        granular)
+        full) feat_git_guard="true"; feat_mandate="true"; feat_subagents="true"; feat_sandbox="true"; feat_mcp="yes"; feat_metrics="true" ;;
+        ""|granular)
             echo ""
-            echo "Optional features (each can be changed later in ${CONFIG_FILE}):"
+            echo "Extensions (each can be changed later in ${CONFIG_FILE}):"
+            printf "  Git guard — in a git repo, work on a pi/* branch made at launch, block edits off it and irreversible git commands, checkpoint before each tool call? [y/N] "
+            read -r reply; case "${reply}" in y|Y) feat_git_guard="true" ;; esac
             printf "  Mandate modes — plan / auto / ask / orchestration / yolo per session, roles per subagent? [y/N] "
             read -r reply; case "${reply}" in y|Y) feat_mandate="true"
                 printf "  Start mode [auto] (plan|auto|ask|orchestration|yolo): "; read -r feat_mode
                 case "${feat_mode}" in ""|auto) feat_mode="" ;; orchestrator) feat_mode="orchestration" ;; plan|ask|orchestration|yolo) ;; *) log_error "mode must be plan|auto|ask|orchestration|yolo"; exit 1 ;; esac ;; esac
-            printf "  Subagents — a 'subagent' tool that delegates to agent files? [Y/n] "
-            read -r reply; case "${reply}" in n|N) feat_subagents="false" ;; esac
-            printf "  Core memory — a memory per project the agent searches on demand and adds to? [Y/n] "
-            read -r reply; case "${reply}" in n|N) feat_core_memory="false" ;; esac
-            printf "  Sandbox — bash confined with bubblewrap/Seatbelt via sandbox-runtime? [y/N] "
-            read -r reply; case "${reply}" in y|Y) feat_sandbox="true" ;; esac
+            if [ "${profile}" = granular ]; then
+                printf "  Subagents — a 'subagent' tool that delegates to agent files? [Y/n] "
+                read -r reply; case "${reply}" in n|N) feat_subagents="false" ;; esac
+                printf "  Core memory — a memory per project the agent searches on demand and adds to? [Y/n] "
+                read -r reply; case "${reply}" in n|N) feat_core_memory="false" ;; esac
+            fi
+            # the sandbox confines with Seatbelt (macOS) or bubblewrap (Linux) only
+            if ! on_windows; then
+                printf "  Sandbox — bash confined with bubblewrap/Seatbelt via sandbox-runtime? [y/N] "
+                read -r reply; case "${reply}" in y|Y) feat_sandbox="true" ;; esac
+            fi
             printf "  MCP — import servers from .mcp.json and other clients' configs into pi? [y/N] "
             read -r reply; case "${reply}" in y|Y) feat_mcp="yes" ;; esac
-            printf "  Metrics — tokens/s and time to first token in pi's footer? [y/N] "
-            read -r reply; case "${reply}" in y|Y) feat_metrics="true" ;; esac ;;
+            if [ "${profile}" = granular ]; then
+                printf "  Metrics — tokens/s and time to first token in pi's footer? [y/N] "
+                read -r reply; case "${reply}" in y|Y) feat_metrics="true" ;; esac
+            fi ;;
     esac
 
     # 6. save config (re-emitted after the live probe with the thinking level)
@@ -19920,8 +19933,8 @@ run_setup() {  # run_setup [full|granular]
             echo "MEM_GUARD_SESSION=\"45%\""
             echo ""
             echo "# Git guard: in a git repo, work on a pi/* branch (created at launch);"
-            echo "# edits off such a branch are blocked. GIT_GUARD=false disables it."
-            echo "GIT_GUARD=\"true\""
+            echo "# edits off such a branch are blocked. Off unless chosen: GIT_GUARD=true enables it."
+            echo "GIT_GUARD=\"${feat_git_guard}\""
             echo ""
             echo "# Agent guard: bash timeouts, cut-off reply recovery, a wrap-up hint"
             echo "# once tests pass, and the auto thinking level. AGENT_GUARD=false disables it."
@@ -20136,6 +20149,11 @@ print("%s|%s" % (d.get("id", ""), d.get("max_model_len", "")))' 2>/dev/null || t
     fi
     [ "${feat_subagents}" = "true" ] && write_default_agents
     [ "${feat_mcp}" = "yes" ] && mcp_import yes
+    if [ "${feat_git_guard}" = "true" ]; then
+        log "git guard: on — in a git repo, sessions work on a pi/* branch; --no-git-guard skips it for one launch"
+    else
+        log "git guard: off — GIT_GUARD=\"true\" in ${CONFIG_FILE}, or --git-guard for one launch, turns it on"
+    fi
     if [ "${feat_mandate}" = "true" ]; then
         log "mandate: modes plan/auto/ask/yolo on (start mode: ${feat_mode:-auto}); /mode and alt+m switch, 'lets-code mandate init' writes a project manifest"
     fi
@@ -20265,7 +20283,7 @@ claude_remote() {
 # never rewrite each other's backend.
 # Names that would shadow a lets-code option; pi's own options are checked
 # against `pi --help` at setup.
-PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard no-git-guard no-agent-guard grounding no-grounding no-session-tag metrics no-metrics metrics-log mandate no-mandate subagents no-subagents experts no-experts core-memory no-core-memory sessions no-sessions claude-code no-claude-code sandbox no-sandbox verbose debug help preset"
+PRESET_RESERVED="harness url model context output-cap api vision no-vision thinking-level insecure no-mem-guard git-guard no-git-guard no-agent-guard grounding no-grounding no-session-tag metrics no-metrics metrics-log mandate no-mandate subagents no-subagents experts no-experts core-memory no-core-memory sessions no-sessions claude-code no-claude-code sandbox no-sandbox verbose debug help preset"
 preset_name_ok() {  # preset_name_ok <name> -> 0 when usable as --<name>
     case "$1" in ""|[!a-z0-9]*|*[!a-z0-9_-]*) return 1 ;; esac
     case " ${PRESET_RESERVED} " in *" $1 "*) return 1 ;; esac
@@ -20647,7 +20665,7 @@ THINKING=""
 MEM_GUARD="true"
 MEM_GUARD_PROCESS="20%"   # the memory guard kills one process over this (% of RAM or a size like 1600M; 0/off: no limit)
 MEM_GUARD_SESSION="45%"   # ... and the largest once the session's processes together are over this
-GIT_GUARD="true"
+GIT_GUARD="false"    # off unless chosen (setup asks; GIT_GUARD=true or --git-guard turns it on)
 AGENT_GUARD="true"
 GROUNDING="true"
 SESSION_TAG="true"
@@ -20743,6 +20761,7 @@ while [ $# -gt 0 ]; do
                           THINKING_OVERRIDE="$2"; shift 2 ;;
         --insecure) INSECURE=true; shift ;;
         --no-mem-guard) MEM_GUARD=false; shift ;;
+        --git-guard)    GIT_GUARD=true; shift ;;
         --no-git-guard) GIT_GUARD=false; shift ;;
         --no-agent-guard) AGENT_GUARD=false; shift ;;
         --grounding) GROUNDING=true; shift ;;

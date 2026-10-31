@@ -14,8 +14,9 @@ model on your own hardware:
   --allow-scripts=@civitas-cerebrum/lets-code @civitas-cerebrum/lets-code`;
   every feature but the sandbox (macOS and Linux only), with a lighter
   memory guard; the test suite runs on windows-latest in CI
-- guards: memory (Linux; a lighter one on Windows), git (a `pi/*` branch, refused irreversible
-  commands, checkpoints before every tool call), agent (bash timeouts,
+- guards: memory (Linux; a lighter one on Windows), git (opt-in, asked at
+  setup with the other optional extensions: a `pi/*` branch, refused
+  irreversible commands, checkpoints before every tool call), agent (bash timeouts,
   cut-off recovery, test reminders, dynamic thinking), grounding
 - modes and roles (`plan`, `auto`, `ask`, `orchestrator`, `yolo`) enforced
   on every tool call, with manifests per user and per project

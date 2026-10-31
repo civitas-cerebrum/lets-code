@@ -46,9 +46,10 @@ onboarding and installs the `lets-code` command for you. No server, but a
 Claude subscription? `lets-code --claude` needs no setup at all (see
 [Claude](#claude-claude-code-subscription)).
 
-`setup` keeps to the essentials. `setup full` also turns on the optional
-features below (modes, sandbox, MCP import, the full footer); `setup
-granular` asks about each one. Flags lets-code does not know are passed
+`setup` keeps to the essentials and asks about the extensions that are off
+unless you choose them: the git guard, mandate modes, the sandbox and MCP
+import. `setup full` turns them all on (and the full footer); `setup
+granular` also asks about the ones that are on by default. Flags lets-code does not know are passed
 to pi, so `lets-code -p "..."` and the rest of pi's options work as they are.
 
 Needs `bash` 3.2+, `curl`, `python3`; `node`/`npm` only if it installs pi
@@ -136,7 +137,7 @@ it, not a Claude Code clone. Where it stands:
 | 🧯 **Memory guard** | A runaway process the session started is killed before it can freeze the box, and the agent is told why. Nothing else on the machine is touched. |
 | 🔍 **Grounding guard** | pi looks facts up with its tools instead of guessing them (file contents, paths, names, versions, config, command output), invents nothing and says what it could not verify. An empty grep is not proof that something is missing, and an action the system "accepted" is checked against a control that must fail. Overwriting an existing file it has not read is blocked once: read first, or write again. |
 | 🧭 **Backend facts** | The agent knows its backend (server, model, API, context, thinking, vision) without discovering it, at no cost until it needs it: a prompt about the backend adds a short section, or the first command probing it gets the facts in its result. The API key is never written out. |
-| 🛟 **Git guard** | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
+| 🛟 **Git guard** (opt-in: setup asks) | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
 | 🧭 **Agent guard** | Default bash timeout, a nudge to run tests after untested edits, a wrap-up hint once they pass, and thinking that switches on only while the model struggles. |
 | 🧭 **Modes** (optional; `/plan` always) | `plan` explores read-only and ends in a numbered plan you approve before it runs (`/plan` works without the mandate too), `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
 | 🤝 **Claude Code projects** (automatic) | A project whose `.claude/` has hooks or workflow scripts works as it is: its hooks, workflows, skills, `/commands`, agents, permission rules, MCP servers and CLAUDE.md, read live at each start. Your own `~/.claude` stays out unless `CLAUDE_CODE=all`. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
@@ -174,7 +175,7 @@ lets-code --openrouter            # a saved preset (see Presets below)
 lets-code --claude                # Claude through Claude Code (see Claude below)
 lets-code update                  # latest release from npm (--snapshot: latest main)
 lets-code --thinking-level low    # quieter model
-lets-code --no-git-guard          # you know what you're doing
+lets-code --git-guard             # the git guard for one launch (off unless chosen in setup)
 ```
 
 | Flag | Meaning |
@@ -189,6 +190,7 @@ lets-code --no-git-guard          # you know what you're doing
 | `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`, or the default you set in pi; this flag decides for one launch), `xhigh` (opt-in, 32k budget, also selectable in-session; see server setup), `adaptive[:<lvl>]` (medium, low once the tests pass, bursts up on struggle), or `auto[:<lvl>]` (off, bursts up on struggle); see [Choosing a thinking level](#choosing-a-thinking-level) |
 | `--vision` / `--no-vision` | Pin image input instead of probing |
 | `--insecure` | Skip TLS verification |
+| `--git-guard` | Launch with the git guard (off unless `lets-code setup` turned it on, or `GIT_GUARD=true`) |
 | `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` / `--no-grounding` | Launch without a guard |
 | `--no-session-tag` | Send no session tag with model requests |
 | `--metrics` / `--no-metrics` | Start this launch with the full / minimal footer (`/metrics` switches inside pi, and the size picked there is where later sessions start) |

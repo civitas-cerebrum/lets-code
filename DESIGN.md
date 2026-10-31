@@ -104,6 +104,9 @@ exists.
 
 ## Git guard
 
+Off unless chosen: the first-run `lets-code setup` asks (`setup full` turns
+it on), and `GIT_GUARD=true` or `--git-guard` enables it.
+
 - **Launch:** a repo whose HEAD is not on a `pi/*` branch gets
   `git switch -c pi/<timestamp>`. A merge, rebase or cherry-pick in progress
   is never switched away from.

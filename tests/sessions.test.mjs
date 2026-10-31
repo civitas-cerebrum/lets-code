@@ -356,6 +356,13 @@ t("alive: a dead pid", A.mod.alive(deadPid()), false);
 	t("unsafe dir: not registered", readdirSync(bad), []);
 	t("unsafe dir: one warning", U.s.notices.filter((m) => /not yours alone/.test(m)).length, 1);
 	t("unsafe dir: the tool refuses", (await U.send({ to: "x", text: "y" })).isError, true);
+	// Windows has no mode bits (stat shows group and other write on every
+	// directory): the profile's ACL keeps it private, so sessions stay on there
+	const real = process.platform;
+	Object.defineProperty(process, "platform", { value: "win32" });
+	try { t("win: a directory's mode bits do not turn sessions off", U.mod.dirSafe(bad), true); }
+	finally { Object.defineProperty(process, "platform", { value: real }); }
+	t("off Windows: the same directory is still unsafe", U.mod.dirSafe(bad), false);
 	delete process.env.LETS_CODE_SESSIONS_DIR;
 }
 

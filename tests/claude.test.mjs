@@ -247,6 +247,16 @@ try {
 	await hooks.before_provider_request({}, { model: { provider: "lets-code" } });
 	t("a request to another provider leaves the sidecar alone", (await mod.health(port))?.pid, after?.pid);
 
+	// the stop Windows uses (a signal there kills at once): POST /shutdown with
+	// the key the proxy keeps in its state dir; without the key it is refused
+	const state = mod.stateDir(env);
+	t("the proxy keeps its control key in its state dir", /^[0-9a-f]{32}$/.test(readFileSync(join(state, "control.key"), "utf8").trim()), true);
+	const refused = await fetch(`${base}/shutdown`, { method: "POST", headers: { "X-Lets-Code-Control": "wrong" } });
+	t("/shutdown without the key: refused, still up", [refused.status, (await mod.health(port))?.pid], [403, after?.pid]);
+	await mod.stopProxy(port, after.pid, state);
+	t("stopProxy: the proxy is gone", await mod.health(port), null);
+	t("ensureProxy after stopProxy starts it again", await mod.ensureProxy(env), "");
+
 	// a port taken by something else is reported, not fought over
 	const other = await freePort();
 	const foreign = http.createServer((_q, s) => { s.writeHead(200, { "content-type": "application/json" }); s.end("{}"); }).listen(other, "127.0.0.1");

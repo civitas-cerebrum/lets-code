@@ -264,8 +264,9 @@ PY
         [ "$(cat "${LC_WIN_DIR}/py/sitecustomize.py" 2>/dev/null)" = "${lc_site}" ] \
             || printf '%s\n' "${lc_site}" > "${LC_WIN_DIR}/py/sitecustomize.py" 2>/dev/null || true
         LC_PY_SITE="$(cygpath -w -- "${LC_WIN_DIR}/py")"
+        # (command: the interpreter, never this function, when LC_PY is python3 itself)
         # shellcheck disable=SC2086
-        python3() { PYTHONPATH="${LC_PY_SITE}${PYTHONPATH:+;${PYTHONPATH}}" ${LC_PY} "$@"; }
+        python3() { PYTHONPATH="${LC_PY_SITE}${PYTHONPATH:+;${PYTHONPATH}}" command ${LC_PY} "$@"; }
         # what pi runs (its bash tool, the experts' helpers) finds a working
         # python3 too when the one on PATH is the Store stub or missing; a
         # plain one, with none of the line-end setup above
@@ -13825,9 +13826,14 @@ def ups(d):
         if p == d: return out
         d = p
 # what a map keyed by folder holds for d: on Windows every key naming that
-# folder, as Claude Code writes it (C:/Users/x/proj) or with backslashes, in any case
+# folder, as Claude Code writes it (C:/Users/x/proj) or with backslashes, in any
+# case, or through a short (8.3) name such as RUNNER~1
 nt = os.name == "nt"
-def fkey(p): return os.path.normcase(p).rstrip("\\") if nt else p
+def fkey(p):
+    if not nt: return p
+    try: p = os.path.realpath(p)
+    except Exception: pass
+    return os.path.normcase(p).rstrip("\\")
 def entries(m, d):
     if not isinstance(m, dict): return []
     if not nt: return [m[d]] if d in m else []
@@ -14245,6 +14251,7 @@ set -u
 here="$(cd "$(dirname "$0")" && pwd)"; main="$(dirname "${here}")"
 # Windows (Git Bash): paths in the C:/Users/x form, which node (mcp.json's
 # entry) and python read too
+# (cmd's switches with Git Bash's path conversion off: it makes /J a path)
 win=""; case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) win=1; here="$(cygpath -m "${here}")"; main="$(cygpath -m "${main}")" ;; esac
 rt="${here}/runtime"; agent="${here}/agent"; have=""
 mkdir -p "${rt}"
@@ -14258,6 +14265,7 @@ if [ "${have}" != "${version}" ]; then
     (cd "${rt}" && npm install --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error >/dev/null 2>&1) || { echo "install failed; run: cd ${rt} && npm install --omit=dev --ignore-scripts"; exit 1; }
 fi
 mkdir -p "${agent}"
+copies=""
 for e in "${main}"/* "${main}"/.[!.]*; do
     [ -e "${e}" ] || continue
     name="$(basename "${e}")"
@@ -14269,18 +14277,30 @@ for e in "${main}"/* "${main}"/.[!.]*; do
         # copy, refreshed when the main one changed.
         if [ -d "${e}" ]; then
             [ -e "${agent}/${name}" ] || [ -L "${agent}/${name}" ] || \
-                cmd //c mklink /J "$(cygpath -w "${agent}/${name}")" "$(cygpath -w "${e}")" >/dev/null 2>&1 || true
+                MSYS2_ARG_CONV_EXCL='*' cmd /c mklink /J "$(cygpath -w "${agent}/${name}")" "$(cygpath -w "${e}")" >/dev/null 2>&1 || true
         elif [ -f "${e}" ] && [ ! -d "${agent}/${name}" ]; then
             cmp -s "${e}" "${agent}/${name}" || cp -p "${e}" "${agent}/${name}" 2>/dev/null || true
+            copies="${copies}${name}
+"
         fi
         continue
     fi
     if [ -e "${agent}/${name}" ] && [ ! -L "${agent}/${name}" ]; then rm -rf "${agent:?}/${name}"; fi
     ln -sfn "${e}" "${agent}/${name}"
 done
+if [ -n "${win}" ]; then
+    # Windows: a copy whose main file is gone goes, as a dangling link does
+    # elsewhere (the copies made are listed in .lets-code-copies)
+    if [ -f "${agent}/.lets-code-copies" ]; then
+        while IFS= read -r n; do
+            if [ -n "${n}" ] && [ ! -e "${main}/${n}" ] && [ -f "${agent}/${n}" ]; then rm -f "${agent:?}/${n}"; fi
+        done < "${agent}/.lets-code-copies"
+    fi
+    printf '%s' "${copies}" > "${agent}/.lets-code-copies"
+fi
 for e in "${agent}"/* "${agent}"/.[!.]*; do   # links whose target is gone
     if [ -L "${e}" ] && [ ! -e "${e}" ]; then
-        if [ -n "${win}" ]; then cmd //c rmdir "$(cygpath -w "${e}")" >/dev/null 2>&1 || rm -f "${e}"; else rm -f "${e}"; fi
+        if [ -n "${win}" ]; then MSYS2_ARG_CONV_EXCL='*' cmd /c rmdir "$(cygpath -w "${e}")" >/dev/null 2>&1 || rm -f "${e}"; else rm -f "${e}"; fi
     fi
 done
 # REA registered alone, compact schemas; env keys the user added to the
@@ -16154,6 +16174,7 @@ deps="node_modules .venv venv vendor target"
 # Windows (Git Bash): paths in the C:/Users/x form git prints and pi's tools
 # open, and the dependency dirs as directory junctions (a symlink there
 # needs Developer Mode, and ln -s copies instead)
+# (cmd's switches with Git Bash's path conversion off: it makes /J a path)
 win=""; case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) win=1 ;; esac
 native() { if [ -n "${win}" ]; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
 root="${TMPDIR:-/tmp}"; root="${root%/}/lets-code-judge"
@@ -16161,7 +16182,7 @@ if [ "${1:-}" = --clean ]; then
     if [ -n "${win}" ]; then   # unlink the junctions first, so rm never walks into the originals
         for c in "${root}"/copy.*; do
             for d in ${deps}; do
-                if [ -L "${c}/${d}" ]; then cmd //c rmdir "$(cygpath -w "${c}/${d}")" >/dev/null 2>&1 || true; fi
+                if [ -L "${c}/${d}" ]; then MSYS2_ARG_CONV_EXCL='*' cmd /c rmdir "$(cygpath -w "${c}/${d}")" >/dev/null 2>&1 || true; fi
             done
         done
     fi
@@ -16183,7 +16204,7 @@ if top="$(git -C "${src}" rev-parse --show-toplevel 2>/dev/null)"; then
     for d in ${deps}; do
         if [ -e "${top}/${d}" ] && [ ! -e "${dst}/${d}" ]; then
             if [ -z "${win}" ]; then ln -s "${top}/${d}" "${dst}/${d}"
-            elif [ -d "${top}/${d}" ]; then cmd //c mklink /J "$(cygpath -w "${dst}/${d}")" "$(cygpath -w "${top}/${d}")" >/dev/null 2>&1 || continue
+            elif [ -d "${top}/${d}" ]; then MSYS2_ARG_CONV_EXCL='*' cmd /c mklink /J "$(cygpath -w "${dst}/${d}")" "$(cygpath -w "${top}/${d}")" >/dev/null 2>&1 || continue
             else continue
             fi
             echo "${d}" >> "${dst}/.git/info/exclude" 2>/dev/null || true
@@ -16642,7 +16663,8 @@ or a tool that is not there.
   native programs: print paths in the C:/Users/x form (`cygpath -m` in
   bash), never /c/... or /tmp/...; strip `\r` from a native program's
   output (`| tr -d '\r'`); `ln -s` copies there (use a directory junction,
-  `cmd //c mklink /J`, for a directory).
+  `MSYS2_ARG_CONV_EXCL='*' cmd /c mklink /J`, for a directory: without
+  the variable Git Bash turns `/J` into a path).
 
 ## Platforms
 - `platform: termux` for the phone (Termux on Android), `linux, darwin,
@@ -16832,6 +16854,7 @@ function parseBrief(itemsOf) {
 	return { fields: out, bad };
 }
 const WIN = process.platform === "win32";
+const fwd = (p) => WIN ? p.replace(/\\/g, "/") : p;   // paths printed with "/" on Windows too
 function underRoot(p, root) {
 	if (!p || /[\0\r\n]/.test(p)) return null;
 	const abs = path.isAbsolute(p) ? path.resolve(p) : path.resolve(root, p);
@@ -17052,7 +17075,7 @@ function lintFile(file, opt) {
 	}
 	// the scaffold's placeholders, anywhere in the expert's files
 	const todo = [file, ...walk(own)].filter((f) => { try { return fs.readFileSync(f, "utf8").includes(TODO); } catch { return false; } });
-	for (const f of todo) err("todo", `${path.relative(A, f)} still has ${TODO} placeholders`);
+	for (const f of todo) err("todo", `${fwd(path.relative(A, f))} still has ${TODO} placeholders`);
 
 	// neighbours: the same name, overlapping use_for
 	const others = survey(A).filter((o) => path.resolve(o.file) !== path.resolve(file));
@@ -17133,7 +17156,7 @@ async function main(argv) {
 		}
 		errors += R.errors.length;
 		if (opt.json) { console.log(JSON.stringify(R)); continue; }
-		const r0 = path.relative(process.cwd(), f); const rel = !r0 || r0.startsWith("..") ? f : r0;
+		const r0 = path.relative(process.cwd(), f); const rel = fwd(!r0 || r0.startsWith("..") || path.isAbsolute(r0) ? f : r0);
 		for (const e of R.errors) console.log(`${rel}: error: ${e}`);
 		for (const w of R.warnings) console.log(`${rel}: warning: ${w}`);
 		for (const n of R.notes) console.log(`${rel}: note: ${n}`);
@@ -17373,7 +17396,7 @@ function main(argv) {
 	const [cmd, ...rest] = argv;
 	let o; try { o = parseArgs(rest); } catch (e) { console.error(`expert-new: ${e.message}`); return 2; }
 	try {
-		if (cmd === "init") { const made = init(o._[0], o); console.log(made.map((f) => `wrote ${f}`).join("\n")); console.log(`next: fill in every ${TODO}, then: expert-lint --user ${made[0]}`); return 0; }
+		if (cmd === "init") { const made = init(o._[0], o); console.log(made.map((f) => `wrote ${fwd(f)}`).join("\n")); console.log(`next: fill in every ${TODO}, then: expert-lint --user ${fwd(made[0])}`); return 0; }
 		if (cmd === "pack") { process.stdout.write(pack(o._[0], o)); return 0; }
 	} catch (e) { console.error(`expert-new: ${e.message}`); return 1; }
 	console.error("usage: expert-new init <name> [--agent-dir A] [--description T] [--job T] [--use-for T] [--keywords T] [--tools a,b] [--brief 'f (required): hint']... [--platform P] [--timeout S] [--ref f.md]... [--bin f]... [--setup] [--force]\n       expert-new pack <name> [--agent-dir A] [--fn F] [--test]");
@@ -17588,7 +17611,7 @@ async function main(argv) {
 	const from = path.resolve(expand(opt.from || process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent")));
 	const temp = !opt._[1];
 	opt.scratch = path.resolve(expand(opt._[1] || path.join(from, "expert-builder", "work", `route.${process.pid}`)));
-	for (const real of [from, path.join(os.homedir(), ".pi", "agent")]) if (sameDir(opt.scratch, real)) { console.error(`route-check: ${opt.scratch} is a real agent dir; give a scratch dir`); return 2; }
+	for (const real of [from, path.join(os.homedir(), ".pi", "agent")]) if (sameDir(opt.scratch, real)) { console.error(`route-check: ${fwd(opt.scratch)} is a real agent dir; give a scratch dir`); return 2; }
 	const L = opt.launcherArg || process.env.LETS_CODE_LAUNCHER || "lets-code";
 	opt.launcher = launcherCmd(L);
 	if (opt.dry) { for (const p of prompts) console.log(`${opt.launcher.join(" ")} --thinking-level ${opt.thinking} --mode json --no-session -p ${JSON.stringify(p.prompt)}`); return 0; }
@@ -17600,10 +17623,10 @@ async function main(argv) {
 		fs.copyFileSync(path.join(D, "agents", `${opt.expert}.md`), path.join(opt.scratch, "agents", `${opt.expert}.md`));
 		if (fs.existsSync(path.join(D, opt.expert))) fs.cpSync(path.join(D, opt.expert), path.join(opt.scratch, opt.expert), { recursive: true });
 	}
-	if (!fs.existsSync(path.join(opt.scratch, "agents", `${opt.expert}.md`))) { console.error(`route-check: no agents/${opt.expert}.md in ${opt.scratch}`); if (temp && !opt.keep) fs.rmSync(opt.scratch, { recursive: true, force: true }); return 1; }
+	if (!fs.existsSync(path.join(opt.scratch, "agents", `${opt.expert}.md`))) { console.error(`route-check: no agents/${opt.expert}.md in ${fwd(opt.scratch)}`); if (temp && !opt.keep) fs.rmSync(opt.scratch, { recursive: true, force: true }); return 1; }
 	try { fs.rmSync(path.join(opt.scratch, "lets-code-state.json"), { force: true }); } catch { /* none */ }   // every expert dormant
 	opt.cwd = path.resolve(expand(opt.cwd || path.join(opt.scratch, "project"))); fs.mkdirSync(opt.cwd, { recursive: true });
-	console.log(`route-check: ${prompts.length} prompts for ${opt.expert}, one at a time (scratch ${opt.scratch}, folder ${opt.cwd})`);
+	console.log(`route-check: ${prompts.length} prompts for ${opt.expert}, one at a time (scratch ${fwd(opt.scratch)}, folder ${fwd(opt.cwd)})`);
 	const results = [];
 	try {
 		for (const p of prompts) {

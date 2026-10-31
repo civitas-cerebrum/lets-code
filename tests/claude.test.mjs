@@ -26,8 +26,13 @@ const freePort = () => new Promise((r) => { const s = createServer().listen(0, "
 const records = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
 
 // fake claude: stream-json in and out, MCP client of the bridge
-const fake = join(work, "claude");
-writeFileSync(fake, `#!/usr/bin/env node
+// (on Windows a script is started through a shim, as npm installs claude
+// there: claude.cmd running node on claude.js)
+const WIN = process.platform === "win32";
+const fakeJs = join(work, WIN ? "claude.js" : "claude");
+const fake = WIN ? join(work, "claude.cmd") : fakeJs;
+if (WIN) writeFileSync(fake, `@ECHO off\r\nnode "%~dp0\\claude.js" %*\r\n`);
+writeFileSync(fakeJs, `#!/usr/bin/env node
 const fs = require("fs"); const cp = require("child_process"); const rl = require("readline");
 const argv = process.argv.slice(2); const arg = (k) => { const i = argv.indexOf(k); return i < 0 ? null : argv[i + 1]; };
 let model = arg("--model"); const effort = arg("--effort");
@@ -76,7 +81,7 @@ async function handle(m) {
   out({ type: "result", subtype: "success", is_error: false });
 }
 `);
-chmodSync(fake, 0o755);
+chmodSync(fakeJs, 0o755);
 
 const port = await freePort();
 const env = {

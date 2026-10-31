@@ -1098,8 +1098,35 @@ function lcwNative(p) {
 // A path with forward slashes, for a command line Git Bash runs (it would
 // read the backslashes of C:\x as escapes): C:\x -> C:/x. Unchanged off Windows.
 function lcwPosix(p) { return lcwIsWin() && typeof p === "string" ? p.replace(/\\/g, "/") : p; }
-// A key to compare paths by: case and separators folded on Windows.
-function lcwKey(p) { return lcwIsWin() && typeof p === "string" ? p.replace(/\//g, "\\").toLowerCase() : p; }
+// A path with its 8.3 short names expanded (Windows): %TEMP% may read
+// C:\Users\RUNNER~1\... where realpath and the home dir say
+// C:\Users\runneradmin\..., one directory. The part up to the last component
+// that looks short (X~1) is resolved by the OS when it exists (remembered);
+// the rest is kept as written. Anything else, and every path off Windows,
+// is returned as is.
+function lcwLong(p) {
+	if (!lcwIsWin() || typeof p !== "string" || !/~\d/.test(p)) return p;
+	const parts = p.split(/[\\/]/);
+	let k = -1, len = 0, end = 0;
+	for (let i = 0; i < parts.length; i++) { len += parts[i].length + (i ? 1 : 0); if (/~\d/.test(parts[i])) { k = i; end = len; } }
+	const head = p.slice(0, end);
+	if (k < 1 || !lcwPath.isAbsolute(head)) return p;
+	const g = globalThis, cache = g.__lcwLong || (g.__lcwLong = new Map()), key = head.replace(/\//g, "\\").toLowerCase();
+	let long = cache.get(key);
+	if (long === undefined) {
+		try { long = lcwFs.realpathSync.native(head).replace(/^\\\\\?\\/, ""); } catch { return p; }  // not there (yet): as written, asked again next time
+		cache.set(key, long);
+	}
+	return long + p.slice(end);
+}
+// The temp dir commands write to: on Windows $TMPDIR when set (lets-code
+// sets it, in the C:/x form, for the Git Bash commands it runs; node's
+// tmpdir() reads TEMP there), as a Windows path; else, and off Windows,
+// os.tmpdir() (which reads TMPDIR itself there).
+function lcwTmpDir() { const t = lcwIsWin() ? process.env.TMPDIR : ""; return t ? lcwPath.resolve(lcwNative(t)) : lcwOs.tmpdir(); }
+// A key to compare paths by: on Windows case and separators folded, 8.3
+// short names expanded (lcwLong).
+function lcwKey(p) { return lcwIsWin() && typeof p === "string" ? lcwLong(p).replace(/\//g, "\\").toLowerCase() : p; }
 function lcwSamePath(a, b) { return lcwKey(a) === lcwKey(b); }
 // true when <p> is <dir> or below it (by lcwKey).
 function lcwUnder(p, dir) {
@@ -1666,10 +1693,12 @@ export function rate(output: number, ms: number): number | undefined {
 	return output > 0 && ms >= 50 ? output / (ms / 1000) : undefined;
 }
 
+// On Windows shown with "/" (~/github/app, C:/x), as Git Bash shows paths;
+// a short (8.3) name in the path is the same directory as the long one.
 export function tilde(cwd: string, home = homedir()): string {
-	const r = relative(resolve(home), resolve(cwd));
+	const r = relative(resolve(lcwLong(home)), resolve(lcwLong(cwd)));
 	if (r === "") return "~";
-	return r === ".." || r.startsWith(".." + sep) || isAbsolute(r) ? cwd : `~${sep}${r}`;
+	return r === ".." || r.startsWith(".." + sep) || isAbsolute(r) ? lcwPosix(cwd) : `~${lcwIsWin() ? "/" : sep}${lcwPosix(r)}`;
 }
 
 type Color = (c: string, s: string) => string;
@@ -2568,6 +2597,12 @@ class Session {
       this.stderr = (this.stderr + d).slice(-4000);
     });
     this.proc.stdin.on("error", () => {});
+    // a claude that cannot be started (not found; on Windows a script that is
+    // no .exe and no npm shim) fails this session, never the whole proxy
+    this.proc.on("error", (e) => {
+      log(`session ${this.id.slice(0, 8)} could not start ${CLAUDE_BIN}: ${e.message}`);
+      this.die(`claude could not be started (${CLAUDE_BIN}): ${e.message}`);
+    });
     readline.createInterface({ input: this.proc.stdout }).on("line", (l) => {
       let ev;
       try {
@@ -3509,11 +3544,13 @@ function sweepTmp(d: string, names: string[], now: number): void {
 };
 
 // the git repository of a directory: its top level, and a key every worktree
-// of the repository shares (the common git dir); empty outside git
+// of the repository shares (the common git dir); empty outside git. On
+// Windows git names them C:/Users/longname/... where the cwd may read
+// C:\Users\SHORT~1\...: both are made the one realpath form (lcwLong).
 const repoCache = new Map<string, { root: string; key: string }>();
 export function repoOf(cwd: string): { root: string; key: string } {
 	const hit = repoCache.get(cwd); if (hit) return hit;
-	const real = (p: string) => { try { return realpathSync(p); } catch { return p; } };
+	const real = (p: string) => { try { return lcwLong(realpathSync(p)); } catch { return p; } };
 	let r = { root: "", key: "" };
 	try {
 		const out = execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel", "--git-common-dir"], { stdio: ["ignore", "pipe", "ignore"], timeout: 3000, windowsHide: true }).toString().trim().split(/\r?\n/);
@@ -3567,7 +3604,7 @@ export function resolveTo(to: string, me: Partial<Entry> & { pid: number }, all:
 	const t = to.trim(), others = all.filter((e) => e.pid !== me.pid);
 	if (t === "parent") return me.parentPid ? others.filter((e) => e.pid === me.parentPid) : [];
 	if (t === "children") return others.filter((e) => e.parentPid === me.pid);
-	if (t === "repo") { const k = me.repoKey || me.repoRoot; return k ? others.filter((e) => (e.repoKey || e.repoRoot) === k) : []; }
+	if (t === "repo") { const k = me.repoKey || me.repoRoot; return k ? others.filter((e) => lcwSamePath(e.repoKey || e.repoRoot || "", k)) : []; }
 	if (/^\d+$/.test(t)) return others.filter((e) => e.pid === Number(t));
 	const exact = others.filter((e) => e.piSessionId === t || (!!e.tag && e.tag === t));
 	if (exact.length) return exact;
@@ -4494,11 +4531,13 @@ function realPath(p: string, cwd: string): string {
 	let d = abs, tail = "";
 	for (let i = 0; i < 64 && !exists(d); i++) { const up = dirname(d); if (up === d) break; tail = join(basename(d), tail); d = up; }
 	try { d = realpathSync(d); } catch { /* keep */ }
-	return tail ? join(d, tail) : d;
+	return lcwLong(tail ? join(d, tail) : d);  // Windows: 8.3 short names (RUNNER~1) expanded
 }
 const realDir = (p: string, cwd: string): string => { const r = realPath(p, cwd); return isDir(r) ? r : dirname(r); };
 const within = (p: string, dir: string): boolean => { const r = relative(dir, p); return r === "" || (!r.startsWith("..") && !isAbsolute(r)); };
-const isRoot = (p: string) => dirname(p) === p;
+// A filesystem root; on Windows also Git Bash's / (Git's install directory:
+// `rm -rf /*` there reaches /c, the C: drive, too).
+const isRoot = (p: string) => dirname(p) === p || (lcwIsWin() && lcwGitRoot() !== "" && lcwSamePath(resolve(p), resolve(lcwGitRoot())));
 // Shell glob -> RegExp (*, ?, [..], [!..]).
 const globRe = (pat: string) => new RegExp("^" + pat.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".").replace(/\[!/g, "[^") + "$", lcwIsWin() ? "i" : "");
 const hasGlob = (s: string) => /[*?[]/.test(s);
@@ -4590,7 +4629,10 @@ function lex(src: string, out: Simple[] = []): Simple[] {
 			}
 			hasWord = true; i = j; continue;
 		}
-		if (c === "\\") { if (i + 1 < src.length && src[i + 1] !== "\n") { word += src[i + 1]; hasWord = true; } i++; continue; }
+		if (c === "\\") {
+			if (bsLiteral && i + 1 < src.length && !/[\s'"`$\\;&|<>()]/.test(src[i + 1])) { word += "\\"; hasWord = true; continue; }  // the literal reading: C:\x as written
+			if (i + 1 < src.length && src[i + 1] !== "\n") { word += src[i + 1]; hasWord = true; } i++; continue;
+		}
 		if (src.startsWith("$(", i) || c === "`") { i = subst(i) - 1; hasWord = true; continue; }
 		if (c === "$" && src[i + 1] === "{") { const e = src.indexOf("}", i); const end = e < 0 ? src.length : e + 1; word += src.slice(i, end); hasWord = true; i = end - 1; continue; }
 		if (c === "#" && !hasWord) { const e = src.indexOf("\n", i); i = e < 0 ? src.length : e - 1; continue; }
@@ -4637,6 +4679,7 @@ function lex(src: string, out: Simple[] = []): Simple[] {
 				const ch = src[j];
 				if (q) { if (ch === q) q = null; else t += ch; continue; }
 				if (ch === "'" || ch === '"') { q = ch; continue; }
+				if (ch === "\\" && lcwIsWin() && !bsLiteral && j + 1 < src.length) { t += src[++j]; continue; }  // as bash reads it (see judgeBash)
 				if (/[\s;&|<>()]/.test(ch)) break;
 				t += ch;
 			}
@@ -5047,7 +5090,19 @@ function winOp(name: string, args: string[]): WinOp | null {
 	}
 }
 
+// Windows: a model may write C:\Users\x\repo unquoted into a bash command,
+// which Git Bash reads as C:Usersxrepo (backslashes escape). The guard must
+// not fail open on either reading: a command naming backslashes is judged as
+// bash runs it and again with them kept as written (bsLiteral, read by lex),
+// and refused if either reading is.
+let bsLiteral = false;
 function judgeBash(cmd: string, cwd0: string): Verdict {
+	const v = judgeBashOnce(cmd, cwd0);
+	if (v || !lcwIsWin() || !cmd.includes("\\")) return v;
+	bsLiteral = true;
+	try { return judgeBashOnce(cmd, cwd0); } finally { bsLiteral = false; }
+}
+function judgeBashOnce(cmd: string, cwd0: string): Verdict {
 	const cmds = lex(cmd);
 	if (cmds.length > MAX_CMDS) return { block: true, reason: tooLong() };
 	let cwd = realDir(cwd0, cwd0);
@@ -6420,21 +6475,21 @@ const BUILTIN: Manifest = {
 		// temp dir, never changes the work's git state, installs nothing (the
 		// reviewer agent, acceptance-judge)
 		reviewer: {
-			label: "reviewer", tools: ["read", "grep", "find", "ls", "bash", "tool_search"], write: [tmpdir()], external: "deny", mcp: "deny", dispatch: [], network: "on",
+			label: "reviewer", tools: ["read", "grep", "find", "ls", "bash", "tool_search"], write: [lcwTmpDir()], external: "deny", mcp: "deny", dispatch: [], network: "on",
 			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
 		},
 		// the developer expert's: edits and runs inside its workspace (the
 		// working folder) and the temp dir only; no git writes (the caller
 		// reviews and commits), installs, recursive deletes, sudo or remote shells
 		developer: {
-			label: "developer", tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "tool_search"], write: [".", tmpdir()], external: "deny", mcp: "deny", dispatch: [], network: "on",
+			label: "developer", tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "tool_search"], write: [".", lcwTmpDir()], external: "deny", mcp: "deny", dispatch: [], network: "on",
 			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
 		},
 		// the tester expert's (the QA lead): the developer's (it writes tests in
 		// its working folder, never the git state), and its team: the UI and
 		// API specialists, started with the expert tool
 		tester: {
-			label: "tester", tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "tool_search", "expert"], write: [".", tmpdir()], external: "deny", mcp: "deny", dispatch: ["ui-tester", "api-tester"], network: "on",
+			label: "tester", tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "tool_search", "expert"], write: [".", lcwTmpDir()], external: "deny", mcp: "deny", dispatch: ["ui-tester", "api-tester"], network: "on",
 			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
 		},
 		// the researcher expert's: the reviewer's, and its browser only through
@@ -6442,7 +6497,7 @@ const BUILTIN: Manifest = {
 		// reading): no Playwright CLI, the runtime that holds it, its daemon,
 		// Playwright's browsers or the logged-in profile straight from bash
 		researcher: {
-			label: "researcher", tools: ["read", "grep", "find", "ls", "bash", "tool_search"], write: [tmpdir()], external: "deny", mcp: "deny", dispatch: [], network: "on",
+			label: "researcher", tools: ["read", "grep", "find", "ls", "bash", "tool_search"], write: [lcwTmpDir()], external: "deny", mcp: "deny", dispatch: [], network: "on",
 			groups: { "browser-direct": ["^(\\S*/)?((npx|pnpx|bunx)\\s+(-y\\s+)?)?(@playwright/cli|playwright(-cli)?)(\\.js)?(@\\S*)?(\\s|$)", "playwright-cli|@playwright/cli|playwright-core|cliDaemon|ms-playwright|researcher/runtime|researcher/browser-profile"] },
 			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny", "browser-direct": "deny" },
 		},
@@ -6607,7 +6662,10 @@ export function classify(cmd: string, role: Role): { decision: Decision; group: 
 	const policy = role.bash ?? { "*": "allow" };
 	const dflt: Decision = policy["*"] ?? "allow";
 	let worst: { decision: Decision; group: string; command: string } = { decision: "allow", group: "", command: "" };
-	for (const raw of splitCommands(cmd)) {
+	// Windows: a command naming C:\x\y is judged with its backslashes as path
+	// separators too (C:/x/y, as the patterns are written); the stricter wins
+	const lines = splitCommands(cmd).flatMap((r) => (lcwIsWin() && r.includes("\\") ? [r, r.replace(/\\/g, "/")] : [r]));
+	for (const raw of lines) {
 		// git's global options before the subcommand: "git -C dir commit" is a commit
 		const c = stripPrefixes(raw).replace(/^git\s+(?:(?:-C|-c|--git-dir|--work-tree|--namespace)\s+\S+\s+|--(?:git-dir|work-tree|namespace)=\S+\s+|--no-pager\s+|--bare\s+)+/, "git ");
 		if (!c) continue;
@@ -6639,6 +6697,9 @@ export function redirectTargets(line: string): string[] {
 	// "npm install left-pad" is a package install, not install(1) writing "left-pad"
 	for (const m of cmd.matchAll(/(?:^|[;&|(]|\b(?:sudo|env|command|exec|time|nice)\s)\s*(?:tee|touch|mkdir|cp|mv|install|ln|rsync)\s+(?:-[a-zA-Z]+\s+)*(.*?)(?=$|[;&|])/g)) for (const a of m[1].split(/\s+/)) if (a && !a.startsWith("-")) out.push(a.replace(/^['"]|['"]$/g, ""));
 	for (const m of cmd.matchAll(/\bsed\s+-i\S*\s+(?:-e\s+\S+\s+|'[^']*'\s+|"[^"]*"\s+)+(\S+)/g)) out.push(m[1]);
+	// Windows: an unquoted C:\x\y is C:xy to Git Bash (backslashes escape);
+	// the path is judged as written and as bash reads it
+	if (lcwIsWin()) for (const p of [...out]) if (p.includes("\\") && !line.includes(`'${p}'`) && !line.includes(`"${p}"`)) out.push(p.replace(/\\(.)/g, "$1"));
 	return out.filter((p) => !/[$`]/.test(p));
 }
 

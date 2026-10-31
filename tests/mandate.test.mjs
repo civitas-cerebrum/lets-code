@@ -532,6 +532,7 @@ const blocked = (r) => r?.block === true;
 	const s = {}; h.handlers.before_agent_start({ systemPromptOptions: { sections: s } });
 	t("orchestration: every delivery reviewed, by the reviewer experts", [/never test or verify a delivery yourself/.test(s.lets_code_mandate), /expert-reviewer/.test(s.lets_code_mandate), /APPROVE: go on; REVISE: back to the one who did it/.test(s.lets_code_mandate)], [true, true, true]);
 	t("orchestration: the factory's verdict is taken", /software-factory run comes reviewed/.test(s.lets_code_mandate), true);
+	t("orchestration: a detailed request is passed word for word, no research of its own", [/A request that already says what to build is the ticket: pass it word for word/.test(s.lets_code_mandate), /do not research the domain or restate the spec yourself/.test(s.lets_code_mandate)], [true, true]);
 	t("orchestration: a run blocked or stuck after its build goes final, not stopped", /blocked or stuck after its build .* goes to the final approval as it is with decision final .* and you commit it: stopping it loses the work/.test(s.lets_code_mandate), true);
 	t("orchestration: no tests of its own (refused)", blocked(await h.call(d, "bash", { command: "pytest -q" })), true);
 	t("orchestration: the reviewers may be dispatched", [await h.call(d, "expert", { action: "run", name: "expert-reviewer", brief: {} }), await h.call(d, "expert", { action: "run", name: "design-reviewer", brief: {} })], [undefined, undefined]);

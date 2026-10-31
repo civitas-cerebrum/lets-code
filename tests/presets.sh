@@ -10,6 +10,9 @@ d="$(mktemp -d "${TMPDIR:-/tmp}/lets-code-presets.XXXXXX")"
 srv=""
 trap '[ -z "${srv}" ] || kill "${srv}" 2>/dev/null; rm -rf "${d}"' EXIT
 fail=0
+# pdir <dir>: the dir as a PATH entry (on Windows Git Bash's /c/x form: the
+# C: of a C:/x path would split PATH)
+pdir() { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) cygpath -u -- "$1" ;; *) printf '%s\n' "$1" ;; esac; }
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) win=true ;; *) win=false ;; esac
 check() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: got '$2', want '$3'"; fail=1; fi; }
 
@@ -48,7 +51,7 @@ if [ "${1:-}" = "--help" ]; then echo "  --print, -p   Non-interactive mode"; ex
 SH
 chmod +x "${d}/bin/pi"
 
-export PATH="${d}/bin:${PATH}" XDG_CONFIG_HOME="${d}/config" PI_CODING_AGENT_DIR="${d}/agent" PI_OFFLINE=1 PI_RECORD="${d}/record"
+export PATH="$(pdir "${d}/bin"):${PATH}" XDG_CONFIG_HOME="${d}/config" PI_CODING_AGENT_DIR="${d}/agent" PI_OFFLINE=1 PI_RECORD="${d}/record"
 mkdir -p "${d}/config/lets-code"
 cat > "${d}/config/lets-code/config" <<EOF
 ENDPOINTS="${url}"

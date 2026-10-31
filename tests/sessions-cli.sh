@@ -16,6 +16,9 @@ case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) win=true ;; *) win=false ;; esac
 [ "${win}" = false ] || live="$(cat "/proc/${lpid}/winpid")"
 mkdir -p "${d}/config" "${d}/agent" "${d}/home" "${d}/repo"
 export XDG_CONFIG_HOME="${d}/config" PI_CODING_AGENT_DIR="${d}/agent" HOME="${d}/home"
+# (on Windows native python's ~, which the listing shortens paths under, is
+# USERPROFILE, as node's os.homedir() is: the scratch home too)
+[ "${win}" = false ] || { USERPROFILE="$(cygpath -m -- "${HOME}")"; export USERPROFILE; }
 unset LETS_CODE_SESSIONS_DIR
 git -C "${d}/repo" init -q
 repo="$(cd "${d}/repo" && pwd -P)"

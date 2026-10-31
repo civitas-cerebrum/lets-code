@@ -15,6 +15,8 @@ PY
 )"
 
 work="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/judge-test.XXXXXX")" && pwd -P)"   # macOS: TMPDIR ends in /, /var is /private/var
+# on Windows in the C:/Users/x form the helpers print and native python reads
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) work="$(cygpath -m -- "${work}")" ;; esac
 trap 'rm -rf "${work}"' EXIT
 PI_AGENT_DIR="${work}/agent"; JUDGE_DIR="${PI_AGENT_DIR}/acceptance-judge"
 fail=0

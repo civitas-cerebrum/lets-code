@@ -7,6 +7,10 @@ set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "${here}/.." && pwd)"
 skip="mem-guard-live.sh run.sh"           # need a live server / tmux
+# tests/run.sh [<file>...]: only the test files named (basenames, e.g.
+# git-guard.test.mjs cli.sh; "builtin" for the built-in experts' lint)
+only=" $* "
+picked() { [ "${only}" = "  " ] || case "${only}" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 fail=0; ran=0
 
 # Windows (Git Bash, as lets-code runs there; node, python and git are
@@ -100,6 +104,7 @@ run() {  # run <label> <cmd...>
 
 for t in "${here}"/*.sh; do
     case " ${skip} " in *" $(basename "${t}") "*) continue ;; esac
+    picked "$(basename "${t}")" || continue
     run "$(basename "${t}")" bash "${t}"
 done
 
@@ -185,10 +190,11 @@ PYX
     . "${agent}/experts.sh"
     pi_write_rea files; pi_write_tester; pi_write_api_tester; pi_write_ui_tester files; pi_write_judge; write_termux_agent; pi_write_expert_builder; pi_write_developer; pi_write_expert_reviewer; pi_write_design_reviewer; pi_write_software_factory; pi_write_researcher
 ) || { echo "could not write the built-in experts from lets-code"; exit 1; }
-run "built-in experts: expert-lint --builtin" node "${agent}/builtin/expert-builder/bin/expert-lint" --builtin "${agent}/builtin/agents"
+picked builtin && run "built-in experts: expert-lint --builtin" node "${agent}/builtin/expert-builder/bin/expert-lint" --builtin "${agent}/builtin/agents"
 
 for t in "${here}"/*.test.mjs; do
     [ -e "${t}" ] || continue
+    picked "$(basename "${t}")" || continue
     case "$(basename "${t}")" in
         lets-code*)                 ext="${agent}/extensions/lets-code/index.ts" ;;
         git-guard*|git-checkpoint*) ext="${agent}/extensions/lets-code/git-guard.ts" ;;

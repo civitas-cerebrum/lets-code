@@ -690,6 +690,63 @@ console.log("# performance");
 	await check(`20000-deep nesting ${deep?.block ? "refused" : "judged"} in ${t5 - t4} ms (< 5000)`, Promise.resolve(t5 - t4 < 5000 ? undefined : { block: true, reason: "slow" }), false);
 }
 
+console.log("# Windows (process.platform faked as win32 around each call)");
+{
+	const mod = await import(pathToFileURL(extCopy).href);
+	const real = process.platform;
+	const win = async (f) => { Object.defineProperty(process, "platform", { value: "win32" }); try { return await f(); } finally { Object.defineProperty(process, "platform", { value: real }); } };
+	const eq = (name, got, want) => check(`${name} (${JSON.stringify(got)})`, Promise.resolve(got === want ? undefined : { block: true, reason: `want ${JSON.stringify(want)}` }), false);
+	// Git Bash's paths in a command are the Windows paths they name: rm -rf /c/... is judged on C:\...
+	await eq("win: /c/Users/x/repo", await win(() => mod.piPath("/c/Users/x/repo")), "C:\\Users\\x\\repo");
+	await eq("win: /d", await win(() => mod.piPath("/d")), "D:\\");
+	await eq("win: @/c/x", await win(() => mod.piPath("@/c/x")), "C:\\x");
+	await eq("win: file:///C:/x/y", await win(() => mod.piPath("file:///C:/x/y")), "C:/x/y");
+	await eq("win: C:/x unchanged", await win(() => mod.piPath("C:/x")), "C:/x");
+	await eq("off Windows: /c/Users/x unchanged", mod.piPath("/c/Users/x"), "/c/Users/x");
+	await eq("win: cmd's %VAR% and PowerShell's $env:VAR", await win(() => mod.winScript("rd /s /q %USERPROFILE%\\repo & ri $env:TEMP\\x")), "rd /s /q ${USERPROFILE}/repo & ri ${TEMP}/x");
+	await eq("win: $USERPROFILE is the home dir", await win(() => mod.expand("${USERPROFILE}/repo", {}, pi)), `${homedir()}/repo`);
+	await eq("off Windows: $USERPROFILE is unknown", mod.expand("${USERPROFILE}/repo", {}, pi).includes("\0"), true);
+	const wbash = (cmd, cwd, want) => win(() => bash(cmd, cwd, want));
+	const wps = (cmd, cwd, want) => win(() => check(`powershell [${tag(cwd)}] ${JSON.stringify(cmd)}`, call("powershell", { command: cmd }, cwd), want));
+	await wbash("rd /s /q .git", pi, true);
+	await wbash("rmdir /s .git", pi, true);
+	await wbash("del /s /q .", pi, true);
+	await wbash("del .git", pi, true);
+	await wbash("del /s /q build", pi, false);
+	await wbash("rmdir build", pi, false);                                  // Git Bash's own rmdir
+	await wbash('cmd /c "rmdir /s /q .git"', pi, true);
+	await wbash("cmd //c rd /s /q .", pi, true);
+	await wbash('cmd.exe /d /c "del .git\\HEAD"', pi, true);
+	await wbash('cmd /c "rd /s /q %USERPROFILE%"', pi, true);
+	await wbash('cmd /c "rd /s /q build"', pi, false);
+	await wbash('powershell -NoProfile -Command "Remove-Item -Recurse -Force .git"', pi, true);
+	await wbash("pwsh -c 'ri -r -fo .'", pi, true);
+	await wbash("powershell.exe -ExecutionPolicy Bypass -c Remove-Item -Path build -Recurse", pi, false);
+	await wbash(`powershell -EncodedCommand ${Buffer.from("Remove-Item -Recurse .git", "utf16le").toString("base64")}`, pi, true);
+	await wbash('"C:\\Program Files\\Git\\usr\\bin\\rm.exe" -rf .git', pi, true);
+	await wbash("/usr/bin/rm.exe -rf .git", pi, true);
+	await wbash("git.exe reset --hard", pi, true);
+	await wbash("GIT.EXE push --force", pi, true);
+	await wbash('bash.exe -c "rm -rf .git"', pi, true);
+	await wbash("robocopy empty . /MIR", pi, true);
+	await wbash("git.exe status", main, false);
+	await wbash("echo x > a.txt", main, true);
+	await wbash("cat <<EOF\r\nhello\r\nEOF\r\nrm -rf .git\r\n", pi, true);    // CRLF: the heredoc ends at EOF\r
+	await wps("Remove-Item -Recurse -Force .git", pi, true);
+	await wps("Remove-Item -Recurse $env:USERPROFILE", pi, true);
+	await wps("Get-ChildItem | Remove-Item -Recurse", pi, true);           // targets from the pipeline: unknown
+	await wps("Set-Content -Path .git\\HEAD -Value x", pi, true);
+	await wps("'x' | Out-File .git/config", pi, true);
+	await wps("Set-Content a.txt x", pi, false);
+	await wps("Set-Content a.txt x", main, true);                           // off a pi/* branch
+	await wps("Copy-Item a.txt -Destination .git\\x", pi, true);
+	await wps("Move-Item .git old-git", pi, true);
+	await wps("Get-ChildItem; Get-Content m.txt", main, false);
+	await wps("Set-Location ..; Remove-Item -Recurse " + basename(pi), pi, true);
+	// the same commands off Windows: not commands there, judged as any other
+	await bash("rd /s /q .git", pi, false);
+}
+
 console.log(`\n${n} cases, ${fail ? "FAILURES" : "all passed"}`);
 rmSync(work, { recursive: true, force: true });
 process.exit(fail);

@@ -12,8 +12,45 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-if (process.platform !== "linux") { console.log("skipped: the memory guard is Linux only"); process.exit(0); }
 const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/memory-guard.ts");
+
+// The Windows lite guard's pure parts, on every platform (process.platform
+// faked as win32 around the calls): the PowerShell process list read as the
+// process table, and pi and Claude Code told from the rest by their argv.
+{
+	const d = mkdtempSync(join(tmpdir(), "memguard-win-"));
+	const f = join(d, "memory-guard.ts");
+	writeFileSync(f, readFileSync(extPath, "utf8").replace(/^import type .*$/m, ""));
+	const mod = await import(pathToFileURL(f).href);
+	rmSync(d, { recursive: true, force: true });
+	let bad = 0;
+	const eq = (name, got, want) => { const ok = JSON.stringify(got) === JSON.stringify(want); if (!ok) { bad++; console.log(`FAIL ${name}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); } };
+	const real = process.platform;
+	const win = (fn) => { Object.defineProperty(process, "platform", { value: "win32" }); try { return fn(); } finally { Object.defineProperty(process, "platform", { value: real }); } };
+	const ps = JSON.stringify([
+		{ ProcessId: 100, ParentProcessId: 4, WorkingSetSize: 1000, CreationDate: "/Date(1000)/", CommandLine: '"C:\\nodejs\\node.exe" "C:\\npm\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js"' },
+		{ ProcessId: 200, ParentProcessId: 100, WorkingSetSize: 5e8, CreationDate: "/Date(2000)/", CommandLine: "C:\\Python\\python.exe -c x" },
+		{ ProcessId: 300, ParentProcessId: 200, WorkingSetSize: 7e8, CreationDate: "2026-10-31T10:00:00.000Z", CommandLine: null },
+		{ ProcessId: 400, ParentProcessId: 999, WorkingSetSize: 1, CreationDate: "/Date(500)/", CommandLine: "x" },
+		{ ProcessId: 999, ParentProcessId: 4, WorkingSetSize: 1, CreationDate: "/Date(9000)/", CommandLine: "y" },
+	]);
+	const tab = mod.winTable(ps);
+	eq("win: every process read", [...tab.t.keys()], [100, 200, 300, 400, 999]);
+	eq("win: working set and parent", [tab.t.get(200).bytes, tab.t.get(200).ppid], [5e8, 100]);
+	eq("win: both date forms", [tab.t.get(200).start, tab.t.get(300).start], [2000, Date.parse("2026-10-31T10:00:00.000Z")]);
+	eq("win: a parent that started after its child is a reused pid", tab.t.get(400).ppid, 0);
+	eq("win: one process is an object, not a list", [...mod.winTable(JSON.stringify({ ProcessId: 7, ParentProcessId: 1, WorkingSetSize: 3 })).t.keys()], [7]);
+	eq("win: a command line as argv", mod.winArgv('"C:\\Program Files\\x.exe" -a "b c" d'), ["C:\\Program Files\\x.exe", "-a", "b c", "d"]);
+	eq("win: pi (node and its cli.js) is an agent", win(() => mod.isAgent(tab.argv.get(100))), true);
+	eq("win: claude.exe is an agent", win(() => mod.isAgent(["C:\\Users\\x\\.local\\bin\\claude.exe", "-p"])), true);
+	eq("win: python is not", win(() => mod.isAgent(tab.argv.get(200))), false);
+	eq("win: the session's processes are pi's descendants", mod.mineOf(tab.t, 100, (pid) => tab.argv.get(pid) ?? []).map((p) => p.pid), [200]);
+	eq("win: over the limits", win(() => mod.overLimits(mod.mineOf(tab.t, 100, (pid) => (pid === 300 ? ["big"] : tab.argv.get(pid) ?? [])), { proc: 6e8, session: 0 }).map((k) => k.p.pid)), [300]);
+	console.log(bad ? `FAIL  Windows lite guard: ${bad} checks` : "ok    Windows lite guard: the process list and argv");
+	if (bad) process.exit(1);
+}
+
+if (process.platform !== "linux") { console.log("skipped: the memory guard is Linux only"); process.exit(0); }
 const work = realpathSync(mkdtempSync(join(tmpdir(), "memguard-test-")));
 const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");
 

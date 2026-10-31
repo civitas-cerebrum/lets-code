@@ -331,13 +331,18 @@ log_error()   { echo "${LOG_PREFIX} ERROR: ${1}" >&2; }
 # configured endpoint (first reachable wins), so a strict check here would
 # wrongly kill LAN/VPN fallbacks. Certificate trust is enforced separately,
 # before launch, for the endpoint that won (see the https block in main).
+# On Windows, Git's curl may use Schannel, whose certificate revocation check
+# fails for a LAN or private-CA server (no CRL it can reach: exit 35); there
+# the probes skip that check (asked once, here).
+LC_CURL_TLS=""
+if on_windows && curl -V 2>/dev/null | grep -qi schannel; then LC_CURL_TLS="--ssl-no-revoke|"; fi
 
 tls_args_for() {
     case "$1" in
         https://*)
-            if   [ -n "${CA_FOUND:-}" ];        then echo "--cacert|${CA_FOUND}"
-            elif [ "${INSECURE:-false}" = true ]; then echo "-k"
-            else echo "-k"   # permissive probe; trust is enforced before launch
+            if   [ -n "${CA_FOUND:-}" ];        then echo "${LC_CURL_TLS:-}--cacert|${CA_FOUND}"
+            elif [ "${INSECURE:-false}" = true ]; then echo "${LC_CURL_TLS:-}-k"
+            else echo "${LC_CURL_TLS:-}-k"   # permissive probe; trust is enforced before launch
             fi ;;
         *) echo "" ;;
     esac
@@ -555,7 +560,7 @@ else:
 probe_template_effort() {  # probe_template_effort <base-url-without-/v1> <model> [1 = neutral: map every level to the least-instruction value]
     EFFORT_MAP=""; EFFORT_NOTE=""
     local out
-    out="$(LC_BASE="$1" LC_MODEL="$2" LC_TOKEN="${TOKEN:-}" LC_CA="${CA_FOUND:-}" LC_NEUTRAL="${3:-0}" python3 -c '
+    out="$(LC_BASE="$1" LC_MODEL="$2" LC_TOKEN="${TOKEN:-}" LC_CA="$(native_path "${CA_FOUND:-}" 2>/dev/null || printf '%s' "${CA_FOUND:-}")" LC_NEUTRAL="${3:-0}" python3 -c '
 import json, os, ssl, urllib.request, urllib.error
 base, model, token, ca = (os.environ[k] for k in ("LC_BASE", "LC_MODEL", "LC_TOKEN", "LC_CA"))
 ctx = None
@@ -674,7 +679,7 @@ pi_write_configs() {  # pi_write_configs <base> <api> <model> <context> <output-
     # machine's Claude Code sign-in. pi resolves it from the environment.
     [ -z "${CLAUDE_TOKEN:-}" ] || claude_key='$LETS_CODE_CLAUDE_TOKEN'
     LC_CLAUDE_BASE="${claude_base}" LC_CLAUDE_KEY="${claude_key}" LC_CLAUDE_MODELS="${CLAUDE_MODELS:-${CLAUDE_DEFAULT_MODELS:-haiku sonnet opus fable}}" LC_CLAUDE_CONTEXT="${CLAUDE_CONTEXT:-1000000}" LC_CLAUDE_CAP="${CLAUDE_OUTPUT_CAP:-32000}" \
-    PI_AGENT_DIR="${PI_AGENT_DIR}" LC_PROVIDER="${PROVIDER_ID:-lets-code}" LC_XHIGH_BUDGET="${XHIGH_THINKING_BUDGET:-}" LC_XHIGH_ROOM="${XHIGH_ANSWER_ROOM:-}" LC_XHIGH_CAP="${XHIGH_LEVEL_CAP:-}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
+    PI_AGENT_DIR="$(native_path "${PI_AGENT_DIR}" 2>/dev/null || printf '%s' "${PI_AGENT_DIR}")" LC_PROVIDER="${PROVIDER_ID:-lets-code}" LC_XHIGH_BUDGET="${XHIGH_THINKING_BUDGET:-}" LC_XHIGH_ROOM="${XHIGH_ANSWER_ROOM:-}" LC_XHIGH_CAP="${XHIGH_LEVEL_CAP:-}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "${9:-}" <<'PY'
 import json, os, sys, tempfile
 
 base, api, model, context, cap, vision, reasoning, thinking, effort_map = sys.argv[1:10]
@@ -1171,20 +1176,24 @@ lc_migrate_extensions() {
     for feat in ${LC_EXT_FEATURES}; do
         for d in "${base}/${feat}" "${base}/lets-code-${feat}"; do
             [ "${d}" != "${LC_EXT_ROOT}" ] && lc_written "${d}/index.ts" || continue
+            # a file another running pi holds open (Windows refuses to move
+            # or delete it then) is left for a later launch; this one goes on
             if [ "${feat}" = sandbox ] && [ ! -e "${LC_EXT_ROOT}/sandbox" ]; then
-                mv "${d}" "${LC_EXT_ROOT}/sandbox"; continue
+                mv "${d}" "${LC_EXT_ROOT}/sandbox" 2>/dev/null || log "note: could not move ${d} (in use?); a later launch moves it."
+                continue
             fi
             if [ "${feat}" = sandbox ]; then
-                rm -rf "${d}/node_modules"; rm -f "${d}/package.json" "${d}/package-lock.json"
+                { rm -rf "${d}/node_modules" && rm -f "${d}/package.json" "${d}/package-lock.json"; } 2>/dev/null \
+                    || log "note: could not remove all of ${d} (in use?); a later launch tries again."
             elif [ ! -e "${LC_EXT_ROOT}/${feat}.ts" ]; then
-                mv "${d}/index.ts" "${LC_EXT_ROOT}/${feat}.ts"
+                mv "${d}/index.ts" "${LC_EXT_ROOT}/${feat}.ts" 2>/dev/null || log "note: could not move ${d}/index.ts (in use?); a later launch moves it."
             fi
-            rm -f "${d}/index.ts" "${d}"/.index.*
+            rm -f "${d}/index.ts" "${d}"/.index.* 2>/dev/null || true
             rmdir "${d}" 2>/dev/null || log "note: ${d} holds files lets-code did not write; left in place (no longer loaded)."
         done
     done
     for f in "${base}"/lets-code-*.ts; do
-        if lc_written "${f}"; then rm -f "${f}"; fi
+        if lc_written "${f}"; then rm -f "${f}" 2>/dev/null || true; fi
     done
 }
 
@@ -1358,7 +1367,8 @@ JSON
 # launch without a terminal (scripts, -p in a pipe) never asks and leaves
 # pi's default. LETS_CODE_THEME_PROMPT=force asks without a terminal (tests).
 pick_theme_once() {
-    local settings="${PI_AGENT_DIR}/settings.json" reply theme
+    local settings reply theme
+    settings="$(native_path "${PI_AGENT_DIR}/settings.json" 2>/dev/null || printf '%s' "${PI_AGENT_DIR}/settings.json")"
     if [ "${LETS_CODE_THEME_PROMPT:-}" != force ]; then
         [ -t 0 ] && [ -t 1 ] || return 0
     fi
@@ -1441,7 +1451,9 @@ PY
 # kernel OOM-kills one process, systemd's default would stop the whole session.
 # A machine-wide memguard daemon (github.com/civitas-cerebrum/memguard,
 # /run/memguard present) already covers lets-code sessions: the extension then
-# stays out of the way. Linux only; elsewhere the guard is off.
+# stays out of the way. Linux; on Windows a lite guard (the size limits and the
+# low-RAM kill from a PowerShell process list every 3 s; no pause, no signal
+# ladder, no scope); elsewhere the guard is off.
 mem_limited_ancestor() {  # prints the nearest ancestor cgroup with a finite memory.max, if any
     local rel d
     rel="$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)" || return 0
@@ -1463,6 +1475,16 @@ mem_guard_plan() {  # sets MG_MODE (scope|process|off) and MG_NOTE
             log_error "${v%%=*} must be a % of RAM (20%), a size (1600M, 2G), or 0/off; got: ${v#*=}"; exit 1
         fi
     done
+    if on_windows 2>/dev/null; then
+        # the lite guard (see the module): sizes and free RAM from PowerShell
+        # every few seconds, kills only; no pause step, no signal ladder, no scope
+        if command -v powershell.exe >/dev/null 2>&1 || command -v pwsh.exe >/dev/null 2>&1; then
+            MG_MODE=process; MG_NOTE="Windows: sizes polled every few seconds, kills only"
+        else
+            MG_NOTE="not available on Windows without PowerShell"
+        fi
+        return 0
+    fi
     if [ "$(uname -s)" != Linux ]; then MG_NOTE="not available on $(uname -s)"; return 0; fi
     MG_MODE=process   # the extension alone: this pi's descendants
     local limited
@@ -1490,6 +1512,22 @@ mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
     if [ "${MG_MODE}" = scope ]; then
         exec systemd-run --user --scope --quiet --collect --unit="lets-code-$$" \
             -p OOMPolicy=continue -- "$@"
+    fi
+    if on_windows 2>/dev/null; then
+        # pi reads its agent dir as a Windows path
+        if [ -n "${PI_CODING_AGENT_DIR:-}" ]; then PI_CODING_AGENT_DIR="$(native_path "${PI_CODING_AGENT_DIR}")"; export PI_CODING_AGENT_DIR; fi
+        # A native program in an older mintty (Git Bash's own window without
+        # ConPTY) gets pipes, not a terminal: pi would start without its UI.
+        # winpty gives it a console; without winpty, say where pi runs.
+        if [ -t 0 ] && [ -t 1 ] && [ -z "${LETS_CODE_WINPTY:-}" ] \
+            && ! node -e 'process.exit(process.stdin.isTTY && process.stdout.isTTY ? 0 : 1)' >/dev/null 2>&1; then
+            if command -v winpty >/dev/null 2>&1; then
+                export LETS_CODE_WINPTY=1
+                # winpty runs a console program: Git's bash, which runs pi's own launcher
+                exec winpty "${LETS_CODE_BASH}" -c 'exec "$@"' bash "$@"
+            fi
+            log "note: this terminal gives Windows programs no console, so pi may start without its UI. Run lets-code from Windows Terminal or PowerShell, or as: winpty lets-code"
+        fi
     fi
     exec "$@"
 }
@@ -1745,7 +1783,7 @@ export function saveFull(file: string, full: boolean): void {
 	doc.metrics = full;
 	const tmp = `${file}.${process.pid}.tmp`;
 	writeFileSync(tmp, JSON.stringify(doc, null, 2) + "\n", { mode: 0o600 });
-	renameSync(tmp, file);
+	lcwRename(tmp, file);   // retried on Windows while pi reads it
 }
 export function appendRecord(file: string, rec: Record<string, unknown>): boolean {
 	if (!file) return false;
@@ -2023,6 +2061,7 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
@@ -2093,11 +2132,13 @@ export function namedFiles(command: string, cwd: string): string[] {
 	for (const raw of command.split(/[\s;&|()<>]+/)) {
 		const w = raw.replace(/^['"]|['"]$/g, "");
 		if (!w || w.startsWith("-") || w.includes("$") || w.includes("*")) continue;
-		const p = resolve(cwd, w);
+		const p = resolve(cwd, lcwNative(w));   // on Windows /c/x, ~/x: Git Bash's paths
 		if (isFile(p)) out.push(p);
 	}
 	return out;
 }
+// the key a path is remembered by: case-insensitive on Windows
+const key = (p: string) => lcwKey(p);
 
 export default function (pi: ExtensionAPI) {
 	if (process.env.LETS_CODE_GROUNDING_ON !== "1") return;
@@ -2115,21 +2156,22 @@ export default function (pi: ExtensionAPI) {
 		const input = event?.input ?? {};
 		const name = event?.toolName;
 		if (name === "read" || name === "edit") {
-			if (input.path) seen.add(resolve(cwd, String(input.path)));
+			if (input.path) seen.add(key(resolve(cwd, lcwNative(String(input.path)))));
 			return undefined;
 		}
-		if (name === "bash") {
-			for (const p of namedFiles(String(input.command ?? ""), cwd)) seen.add(p);
+		if (name === "bash" || (name === "powershell" && lcwIsWin())) {
+			for (const p of namedFiles(String(input.command ?? ""), cwd)) seen.add(key(p));
 			return undefined;
 		}
 		if (name !== "write" || !input.path) return undefined;
-		const p = resolve(cwd, String(input.path));
-		if (seen.has(p) || warned.has(p) || !isFile(p)) { seen.add(p); return undefined; }
-		warned.add(p);
+		const p = resolve(cwd, lcwNative(String(input.path)));
+		if (seen.has(key(p)) || warned.has(key(p)) || !isFile(p)) { seen.add(key(p)); return undefined; }
+		warned.add(key(p));
 		return { block: true, reason: blockText(String(input.path)) };
 	});
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
@@ -2244,7 +2286,8 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 const env = process.env;
 const PORT = +(env.PORT || 8795);
@@ -2272,7 +2315,15 @@ const STYLE = [
 // version) to every conversation: the proxy's empty folder, and on another
 // machine's proxy (the phone's) another machine. pi's tools run elsewhere.
 const WHERE = "Environment (lets-code): the working directory, platform and OS version Claude Code adds to this conversation are the relaying proxy's, not where your tools run. Take the working directory and platform from the prompt above, or check with a tool; never work in the proxy's folder.";
-const BRIDGE = new URL("./bridge.mjs", import.meta.url).pathname;
+const BRIDGE = fileURLToPath(new URL("./bridge.mjs", import.meta.url));
+// how to start claude without a shell: on Windows an npm-installed one is
+// node and its script (found once)
+let CLAUDE_CMD = null;
+const claudeCommand = () => (CLAUDE_CMD ??= lcwCommand(CLAUDE_BIN));
+// a stop asked over HTTP (POST /shutdown from this machine with this key,
+// kept in STATE_DIR): on Windows a signal kills at once, with no cleanup
+const CONTROL_KEY = randomBytes(16).toString("hex");
+const CONTROL_FILE = path.join(STATE_DIR, "control.key");
 // index.ts compares this with its copy of the file and restarts an older daemon
 const VERSION = createHash("sha256").update(fs.readFileSync(new URL(import.meta.url))).digest("hex").slice(0, 16);
 // a unix socket path has room for about 107 bytes: a deep STATE_DIR gets its
@@ -2474,7 +2525,8 @@ class Session {
       "--thinking-display", "summarized",
     ];
     if (this.effort) args.push("--effort", this.effort);
-    this.proc = spawn(CLAUDE_BIN, args, { cwd: WORK_DIR, stdio: ["pipe", "pipe", "pipe"], env: childEnv(token, this.thinkingOff) });
+    const [bin, ...pre] = claudeCommand();
+    this.proc = spawn(bin, [...pre, ...args], { cwd: WORK_DIR, stdio: ["pipe", "pipe", "pipe"], env: childEnv(token, this.thinkingOff), windowsHide: true });
     this.stderr = "";
     this.proc.stderr.on("data", (d) => {
       this.stderr = (this.stderr + d).slice(-4000);
@@ -2654,7 +2706,8 @@ class Session {
     this.idleWaiters.splice(0).forEach((f) => f());
     sessions.delete(this.id);
     try {
-      this.proc.kill("SIGTERM");
+      if (lcwIsWin()) lcwKillTree(this.proc.pid); // a signal is a hard kill there: its children (the bridge) go too
+      else this.proc.kill("SIGTERM");
     } catch {}
     fs.rmSync(this.dir, { recursive: true, force: true }); // sync: shutdown exits right after
   }
@@ -2938,6 +2991,16 @@ async function chat(req, res, body, token = null) {
 
 const server = http.createServer(async (req, res) => {
   try {
+    // a stop from this machine's lets-code (see CONTROL_KEY): the key it read
+    // from STATE_DIR, over loopback, not through a reverse proxy
+    if (req.method === "POST" && req.url === "/shutdown") {
+      const local = /^(127\.|::1$|::ffff:127\.)/.test(req.socket.remoteAddress ?? "");
+      const relayed = !!(req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || req.headers.forwarded);
+      if (!local || relayed || req.headers["x-lets-code-control"] !== CONTROL_KEY) return sendJson(res, 403, { error: { message: "forbidden" } });
+      log("shutdown asked over HTTP");
+      sendJson(res, 200, { ok: true });
+      return void res.on("finish", () => setImmediate(shutdown));
+    }
     if (API_KEY && req.headers.authorization !== `Bearer ${API_KEY}`)
       return sendJson(res, 401, { error: { message: "bad api key" } });
     // A Claude Code token sent as the API key (CLAUDE_TOKEN in lets-code,
@@ -2997,9 +3060,12 @@ server.listen(PORT, HOST, () => {
   fs.rmSync(path.join(STATE_DIR, "sessions"), { recursive: true, force: true });
   fs.mkdirSync(path.join(STATE_DIR, "sessions"), { recursive: true });
   try {
-    fs.unlinkSync(SOCK);
+    if (!lcwIsWin()) fs.unlinkSync(SOCK); // a named pipe on Windows: nothing is left behind
   } catch {}
-  bridges.listen(SOCK);
+  bridges.listen(lcwSocket(SOCK));
+  try {
+    fs.writeFileSync(CONTROL_FILE, CONTROL_KEY + "\n", { mode: 0o600 });
+  } catch {}
   log(`lets-code Claude proxy on http://${HOST}:${PORT}/v1 (version ${VERSION})`);
 });
 
@@ -3010,6 +3076,7 @@ const shutdown = () => {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 MJS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${dir}/server.mjs"; then rm -f "${tmp}"; else mv "${tmp}" "${dir}/server.mjs"; fi
     tmp="$(mktemp "${dir}/.bridge.XXXXXX")"
@@ -3024,7 +3091,7 @@ import readline from "node:readline";
 const [sock, session] = process.argv.slice(2);
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\n");
 
-const conn = net.createConnection(sock);
+const conn = net.createConnection(lcwSocket(sock)); // a named pipe on Windows, as server.mjs listens
 const waiting = new Map();
 let nextRid = 1;
 const ask = (msg) =>
@@ -3083,6 +3150,7 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
 });
 process.stdin.on("end", () => process.exit(0));
 BRIDGE
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${dir}/bridge.mjs"; then rm -f "${tmp}"; else mv "${tmp}" "${dir}/bridge.mjs"; fi
     tmp="$(mktemp "${dir}/.index.XXXXXX")"
@@ -3133,8 +3201,26 @@ export async function health(port: number): Promise<Health> {
 
 // Starts the daemon unless the current one answers; resolves to an error
 // message, or "" when the proxy is up.
+export const stateDir = (env: Record<string, string | undefined> = process.env) =>
+	env.LETS_CODE_CLAUDE_STATE || join(env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "lets-code-claude");
+
+// Stops the proxy on <port> (pid <pid>) the way that lets it stop its claude
+// processes: POST /shutdown with the key it keeps in <state>, then, if it is
+// still up after 3 s (a proxy from before the key), its whole process tree.
+// Used on Windows, where a signal kills at once and orphans claude.exe.
+export async function stopProxy(port: number, pid: number, state: string): Promise<void> {
+	let key = "";
+	try { key = readFileSync(join(state, "control.key"), "utf8").trim(); } catch { /* an older proxy */ }
+	if (key) {
+		try { await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST", headers: { "X-Lets-Code-Control": key }, signal: AbortSignal.timeout(1500) }); } catch { /* not answering */ }
+		for (let i = 0; i < 30 && (await health(port)); i++) await sleep(100);
+	}
+	if (await health(port)) lcwKillTree(pid);
+}
+
 export async function ensureProxy(env: Record<string, string | undefined> = process.env, file = SERVER): Promise<string> {
 	const port = proxyPort(env);
+	const state = stateDir(env);
 	const want = proxyVersion(file);
 	let h = await health(port);
 	if (h?.version === want) return "";
@@ -3142,14 +3228,18 @@ export async function ensureProxy(env: Record<string, string | undefined> = proc
 	if (h?.pid) {
 		// an older proxy (lets-code was updated): its live conversations are
 		// replayed by the new one
-		try { process.kill(h.pid, "SIGTERM"); } catch { /* gone already */ }
+		if (lcwIsWin()) await stopProxy(port, h.pid, state);
+		else try { process.kill(h.pid, "SIGTERM"); } catch { /* gone already */ }
 		for (let i = 0; i < 50 && (await health(port)); i++) await sleep(100);
 	}
-	const state = env.LETS_CODE_CLAUDE_STATE || join(env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "lets-code-claude");
 	mkdirSync(state, { recursive: true });
 	const logFd = openSync(join(state, "proxy.log"), "a");
 	spawn(process.execPath, [file], {
-		detached: true,   // the sidecar outlives this session
+		// the sidecar outlives this session: detached on Windows too, where a
+		// child that is not is killed with pi (node's job object); hidden there,
+		// so it opens no console window
+		detached: true,
+		windowsHide: true,
 		cwd: state,       // not pi's project directory
 		stdio: ["ignore", logFd, logFd],
 		env: { ...env, PORT: String(port), HOST: "127.0.0.1", STATE_DIR: state },
@@ -3200,6 +3290,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_provider_request", async (_event: any, ctx: any) => { if (onClaude(ctx)) await ensure(ctx); return undefined; });
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${dir}/index.ts"; then rm -f "${tmp}"; else mv "${tmp}" "${dir}/index.ts"; fi
 }
@@ -3359,19 +3450,19 @@ export function alive(pid: number): boolean {
 	try { process.kill(pid, 0); return true; } catch { return false; }
 };
 // the directory is usable when it is missing (made 0700) or this user's
-// and writable by nobody else
+// and writable by nobody else (on Windows, which has no such mode bits, the
+// profile directory's ACL keeps it private)
 export function dirSafe(d = sessionsDir()): boolean {
 	let st;
 	try { st = statSync(d); } catch { return true; }
 	if (!st.isDirectory()) return false;
-	if (typeof process.getuid === "function" && st.uid !== process.getuid()) return false;
-	return (st.mode & 0o022) === 0;
+	return lcwPrivateDir(st);
 };
 function ensureDir(d: string): string { mkdirSync(d, { recursive: true, mode: 0o700 }); return d; };
 export function writeAtomic(file: string, data: unknown): void {
 	const tmp = `${file}.${process.pid}.${randomBytes(3).toString("hex")}.tmp`;
 	writeFileSync(tmp, JSON.stringify(data) + "\n", { mode: 0o600 });
-	renameSync(tmp, file);
+	lcwRename(tmp, file);
 };
 const readJson = (f: string): any => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return undefined; } };
 function sweepTmp(d: string, names: string[], now: number): void {
@@ -3389,7 +3480,7 @@ export function repoOf(cwd: string): { root: string; key: string } {
 	const real = (p: string) => { try { return realpathSync(p); } catch { return p; } };
 	let r = { root: "", key: "" };
 	try {
-		const out = execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel", "--git-common-dir"], { stdio: ["ignore", "pipe", "ignore"], timeout: 3000 }).toString().trim().split("\n");
+		const out = execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel", "--git-common-dir"], { stdio: ["ignore", "pipe", "ignore"], timeout: 3000, windowsHide: true }).toString().trim().split(/\r?\n/);
 		r = { root: out[0] ? real(out[0]) : "", key: out[1] ? real(resolve(cwd, out[1])) : "" };
 	} catch { /* not a repository */ }
 	repoCache.set(cwd, r);
@@ -3424,7 +3515,7 @@ export function liveSessions(isAlive: (pid: number) => boolean = alive, now = Da
 	return out.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
 };
 export const label = (e: Partial<Entry>) => e.name || e.agent || basename(e.repoRoot || e.cwd || "") || `pid ${e.pid}`;
-const home = (p: string) => { const h = homedir(); return p && p.startsWith(h + sep) ? `~${p.slice(h.length)}` : p; };
+const home = (p: string) => { const h = homedir(); return p && lcwUnder(p, h) && !lcwSamePath(p, h) ? `~${p.slice(h.length)}` : p; };
 export function listText(all: Entry[], me: number): string {
 	if (!all.length) return "No live lets-code session on this machine.";
 	const rows = all.map((e) => [
@@ -3683,6 +3774,7 @@ export default function (pi: ExtensionAPI) {
 	attach(pi);
 };
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
@@ -3701,7 +3793,8 @@ TS
 # lc_thinking_default <provider/model>: that default, or nothing; also notes
 # the global default as seen
 lc_thinking_default() {
-    LC_STATE="${PI_AGENT_DIR}/lets-code-state.json" LC_SETTINGS="${PI_AGENT_DIR}/settings.json" python3 - "$1" <<'PY' 2>/dev/null || true
+    local d; d="$(native_path "${PI_AGENT_DIR}" 2>/dev/null || printf '%s' "${PI_AGENT_DIR}")"
+    LC_STATE="${d}/lets-code-state.json" LC_SETTINGS="${d}/settings.json" python3 - "$1" <<'PY' 2>/dev/null || true
 import json, os, sys
 LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 key = sys.argv[1]
@@ -3780,8 +3873,10 @@ pi_write_memguard_extension() {
 // A kill is told to the session that owns the process through its inbox (the
 // sessions module), once per command per 5 minutes; without sessions, in the
 // next tool result. Every kill and stop is logged to LETS_CODE_MEM_GUARD_LOG.
+// On Windows a lite guard (see attachWindows): the same limits from a
+// PowerShell process list every few seconds, and kills only.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -3860,6 +3955,11 @@ function procTable(): Map<number, Proc> {
 
 // The agents themselves (pi, its node entry, Claude Code, tmux) are never stopped.
 export function isAgent(argv: string[]): boolean {
+	if (lcwIsWin()) {   // C:\...\node.exe C:\...\pi-coding-agent\dist\cli.js, claude.exe
+		const b = lcwProg(argv[0] ?? "");
+		if (/^(pi|claude)$/.test(b)) return true;
+		return b === "node" && /pi-coding-agent[\\/]|[\\/]@anthropic-ai[\\/]claude-code[\\/]/i.test(argv[1] ?? "");
+	}
 	const base = (argv[0] ?? "").split("/").pop() ?? "";
 	if (/^(pi|tmux|claude)$/.test(base)) return true;
 	return /^(node|nodejs)$/.test(base) && /pi-coding-agent\//.test(argv[1] ?? "");
@@ -3976,8 +4076,132 @@ const alive = (pid: number) => { const s = read(`/proc/${pid}/stat`); return !!s
 const ignoresInt = (pid: number) => { const m = /SigIgn:\s+([0-9a-f]+)/.exec(read(`/proc/${pid}/status`) ?? ""); return !!m && (BigInt(`0x${m[1]}`) & 2n) !== 0n; };
 const signal = (pid: number, sig: NodeJS.Signals) => { try { process.kill(pid, sig); return true; } catch { return false; } };
 
+// ------------------------------------------------------------------ Windows (lite)
+// No /proc, no signals, no process groups, no scope: one PowerShell query
+// lists every process (parent, working set, start, command line) every few
+// seconds, run in the background so pi never waits on it. The same size
+// limits apply (working set for RSS), and below the stop level of free RAM
+// (os.freemem) the largest session process goes; each is killed with its
+// tree (taskkill /T /F). No pause step, no signal ladder. The agent is told
+// as on Linux (inbox, else the next tool result).
+const WIN_POLL_MS = Math.max(1000, Number(process.env.LETS_CODE_MEM_GUARD_POLL_MS ?? "") || 3000);
+const WIN_QUERY = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize,CreationDate,CommandLine | ConvertTo-Json -Compress";
+const WIN_CLEANUP_OK = /^\s*(taskkill|tasklist|stop-process|spps|get-process|gps|kill|ps|echo|true|start-sleep|sleep\s+\d)\b/i;
+// a Windows command line as argv (quotes removed; backslashes kept)
+export function winArgv(line: string): string[] {
+	const out: string[] = [];
+	for (const m of String(line ?? "").matchAll(/"([^"]*)"|(\S+)/g)) out.push(m[1] ?? m[2]);
+	return out;
+}
+// CreationDate as PowerShell writes it: "/Date(ms)/" (5.1) or an ISO date (7)
+const winTime = (v: unknown): number => {
+	if (v && typeof v === "object") return winTime((v as any).value ?? (v as any).DateTime);
+	const s = String(v ?? ""), m = /Date\((\d+)/.exec(s);
+	return m ? Number(m[1]) : Date.parse(s) || 0;
+};
+// The query's JSON as the process table mineOf reads. A parent that started
+// after its child is a reused pid, not the parent.
+export function winTable(json: string): { t: Map<number, Lite>; argv: Map<number, string[]> } {
+	let rows: any = JSON.parse(String(json || "[]").trim() || "[]");
+	if (!Array.isArray(rows)) rows = [rows];
+	const t = new Map<number, Lite>(), argv = new Map<number, string[]>();
+	for (const r of rows) {
+		const pid = Number(r?.ProcessId);
+		if (!Number.isInteger(pid) || pid <= 0) continue;
+		t.set(pid, { pid, ppid: Number(r.ParentProcessId) || 0, bytes: Number(r.WorkingSetSize) || 0, start: winTime(r.CreationDate) });
+		argv.set(pid, winArgv(r.CommandLine ?? ""));
+	}
+	for (const p of t.values()) { const up = t.get(p.ppid); if (up && up.start && p.start && up.start > p.start) p.ppid = 0; }
+	return { t, argv };
+}
+function attachWindows(pi: ExtensionAPI): void {
+	const told = new Map<string, { at: number; repeats: number }>(), killed = new Map<string, number>(), notes: string[] = [];
+	let timer: NodeJS.Timeout | undefined, polling = false, shell = "powershell.exe", below = 0, quietUntil = 0;
+	let mine: Proc[] = [];
+	const kill = (k: Kill, t: Map<number, Lite>, total: number, now: number) => {
+		lcwKillTree(k.p.pid);
+		killed.set(`${k.p.pid}:${k.p.start}`, now);
+		const owner = ownerOf(k.p.pid, t), key = `${owner}\0${k.p.argv.join(" ")}`, last = told.get(key);
+		let how = "repeat";
+		if (last && now - last.at < REPEAT_MS) last.repeats++;
+		else {
+			const text = killText(k, total, last?.repeats ?? 0);
+			how = SESSIONS_ON && post(owner, text) ? "inbox" : "tool result";
+			if (how === "tool result") notes.push(text);
+			told.set(key, { at: now, repeats: 0 });
+		}
+		logEvent({ event: "kill", rule: k.rule, pid: k.p.pid, cmd: k.p.argv.join(" ").slice(0, 300), bytes: k.p.bytes, limit: k.limit, total: k.total, owner, told: how });
+	};
+	const onTable = (tab: ReturnType<typeof winTable>, self: number | undefined) => {
+		const total = lcwOs.totalmem(), now = Date.now();
+		for (const [id, at] of killed) if (now - at > 10_000) killed.delete(id);
+		mine = mineOf(tab.t, process.pid, (pid) => (pid === self ? [] : tab.argv.get(pid) ?? []))
+			.filter((p) => !killed.has(`${p.pid}:${p.start}`));
+		const lim = limitsOf(total);
+		const kills = lim.proc || lim.session ? overLimits(mine, lim) : [];
+		for (const k of kills) kill(k, tab.t, total, now);
+		// the low-RAM rule: the largest left, after NEED polls below the stop level (at once below emergency)
+		const avail = lcwOs.freemem(), lv = levelOf(avail, levels(total));
+		below = lv === "stop" || lv === "emergency" ? below + 1 : 0;
+		if (now < quietUntil || (lv !== "emergency" && below < NEED)) return;
+		const target = mine.filter((p) => !kills.some((k) => k.p === p)).sort((a, b) => b.bytes - a.bytes || b.start - a.start)[0];
+		below = 0;
+		if (!target) return;
+		lcwKillTree(target.pid);
+		killed.set(`${target.pid}:${target.start}`, now);
+		logEvent({ event: "stop", rule: "pressure", pid: target.pid, cmd: target.cmd, bytes: target.bytes, avail, signal: "taskkill" });
+		notes.push(`[lets-code] The machine was down to ${gib(avail)} of free RAM, so \`${target.cmd}\` (pid ${target.pid}, ${gib(target.bytes)}) was stopped. If a command above ended abruptly, that is why: it used too much memory; it is not a bug where it stopped. Reduce input size or recursion depth, bound caches, or stream data.`);
+		quietUntil = now + GRACE_MS;   // the memory comes back before the next one
+	};
+	const poll = () => {
+		if (polling) return;
+		polling = true;
+		let child: ReturnType<typeof execFile> | undefined;
+		try {
+			child = execFile(shell, ["-NoProfile", "-NonInteractive", "-Command", WIN_QUERY], { windowsHide: true, maxBuffer: 64 * 2 ** 20, timeout: 30_000 }, (err: any, out) => {
+				polling = false;
+				if (err) { if (err.code === "ENOENT" && shell === "powershell.exe") shell = "pwsh.exe"; return; }
+				try { onTable(winTable(String(out)), child?.pid); } catch { /* the next poll */ }
+			});
+		} catch { polling = false; }
+	};
+	const status = () => {
+		const total = lcwOs.totalmem(), avail = lcwOs.freemem(), th = levels(total), lv = levelOf(avail, th);
+		return { m: { total, avail }, th, level: (lv === "stop" || lv === "emergency" ? "critical" : lv) as "ok" | "warn" | "critical" };
+	};
+	const message = (st: ReturnType<typeof status>) => {
+		const top = mine.filter((p) => p.bytes >= PAUSE_MIN).sort((a, b) => b.bytes - a.bytes).slice(0, 3);
+		const lines = [`[lets-code] MEMORY ${st.level.toUpperCase()}: the machine has ${gib(st.m.avail)} of RAM left (of ${gib(st.m.total)}). Below ${gib(st.th.stop)} lets-code stops the largest process this session started.`];
+		if (top.length) lines.push("Largest processes this session started: " + top.map((p) => `pid ${p.pid} ${gib(p.bytes)} \`${p.cmd}\``).join("; "));
+		lines.push(st.level === "critical"
+			? "New commands are blocked except cleanup (taskkill/Stop-Process/tasklist/...). Stop processes you started and no longer need, then retry with smaller inputs, bounded depth/caches, or streaming."
+			: "Before starting anything memory-heavy: stop background jobs you no longer need, and keep inputs, recursion depth and caches bounded.");
+		return lines.join("\n");
+	};
+	pi.on("session_start", async () => {
+		if (timer) clearInterval(timer);
+		timer = setInterval(() => { try { poll(); } catch { /* never break pi */ } }, WIN_POLL_MS);
+		timer.unref?.();
+	});
+	pi.on("session_shutdown", async () => { if (timer) clearInterval(timer); timer = undefined; });
+	pi.on("tool_call", async (event) => {
+		if (event.toolName !== "bash" && event.toolName !== "powershell") return undefined;
+		const st = status();
+		if (st.level !== "critical") return undefined;
+		const cmd = String((event.input as { command?: string }).command ?? "");
+		return WIN_CLEANUP_OK.test(cmd) ? undefined : { block: true, reason: message(st) };
+	});
+	pi.on("tool_result", async (event) => {
+		const out: string[] = notes.splice(0), st = status();
+		if (st.level !== "ok") out.push(message(st));
+		if (!out.length) return undefined;
+		return { content: [...event.content, { type: "text", text: `\n${out.join("\n")}` }] };
+	});
+}
+
 export default function (pi: ExtensionAPI) {
 	if (!ACTIVE || DEFER) return;
+	if (lcwIsWin()) return attachWindows(pi);
 
 	type Stop = { pid: number; cmd: string; bytes: number; avail: number; signals: string[]; step: number; sentAt: number; paused: number[]; done: boolean };
 	let stop: Stop | null = null;
@@ -4100,6 +4324,7 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
@@ -4197,15 +4422,21 @@ const isFile = (p: string): boolean => { try { return statSync(p).isFile(); } ca
 const exists = (p: string): boolean => { try { statSync(p); return true; } catch { return false; } };
 
 // ================================================================ paths
-// pi's own tool path rules: a leading `@`, then a file:// URL, then ~.
-function piPath(p: string): string {
+// pi's own tool path rules: a leading `@`, then a file:// URL, then ~. On
+// Windows a path in Git Bash's form (/c/Users/x, /tmp, ~) is the Windows path
+// it names there (a file:// URL there is file:///C:/x).
+export function piPath(p: string): string {
 	if (p.startsWith("@")) p = p.slice(1);
-	if (p.startsWith("file://")) { try { p = decodeURIComponent(p.slice(7)); } catch { p = p.slice(7); } }
-	return expandTilde(p);
+	if (p.startsWith("file://")) { try { p = decodeURIComponent(p.slice(7)); } catch { p = p.slice(7); } if (lcwIsWin() && /^\/[a-zA-Z]:/.test(p)) p = p.slice(1); }
+	return lcwNative(expandTilde(p));
 }
 const expandTilde = (p: string) => (p === "~" || p.startsWith("~/") ? join(homedir(), p.slice(1)) : p);
+// Paths compare without case on Windows.
+const same = (a: string, b: string | undefined) => (lcwIsWin() ? b !== undefined && lcwSamePath(a, b) : a === b);
+const isGitName = (s: string) => (lcwIsWin() ? s.toLowerCase() === ".git" : s === ".git");
 // Absolute path with symlinks resolved on the deepest existing ancestor.
 function realPath(p: string, cwd: string): string {
+	p = lcwNative(p);
 	const abs = isAbsolute(p) ? p : resolve(cwd, p);
 	let d = abs, tail = "";
 	for (let i = 0; i < 64 && !exists(d); i++) { const up = dirname(d); if (up === d) break; tail = join(basename(d), tail); d = up; }
@@ -4216,7 +4447,7 @@ const realDir = (p: string, cwd: string): string => { const r = realPath(p, cwd)
 const within = (p: string, dir: string): boolean => { const r = relative(dir, p); return r === "" || (!r.startsWith("..") && !isAbsolute(r)); };
 const isRoot = (p: string) => dirname(p) === p;
 // Shell glob -> RegExp (*, ?, [..], [!..]).
-const globRe = (pat: string) => new RegExp("^" + pat.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".").replace(/\[!/g, "[^") + "$");
+const globRe = (pat: string) => new RegExp("^" + pat.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".").replace(/\[!/g, "[^") + "$", lcwIsWin() ? "i" : "");
 const hasGlob = (s: string) => /[*?[]/.test(s);
 
 // ================================================================ repo state
@@ -4254,7 +4485,7 @@ function branchExists(r: Repo | null, name: string): boolean {
 }
 const isPi = (b: string) => b.startsWith(PREFIX);
 const onPi = (r: Repo | null) => r === null || isPi(r.branch);  // no repo = nothing to protect
-const inGitDir = (p: string, r: Repo | null) => !!r && (within(p, r.gitdir) || p.split(sep).includes(".git"));
+const inGitDir = (p: string, r: Repo | null) => !!r && (within(p, r.gitdir) || (lcwIsWin() ? p.toLowerCase().split(/[\\/]/) : p.split(sep)).includes(".git"));
 
 // ================================================================ shell lexing
 // argv "(" / ")" mark subshells. writes: redirection targets. stdin: text fed
@@ -4297,7 +4528,10 @@ function lex(src: string, out: Simple[] = []): Simple[] {
 		if (c === '"' || (c === "$" && src[i + 1] === '"')) {  // ".." and $".."
 			let j = c === "$" ? i + 2 : i + 1;
 			for (; j < src.length && src[j] !== '"'; j++) {
-				if (src[j] === "\\" && j + 1 < src.length) { word += src[++j]; continue; }
+				if (src[j] === "\\" && j + 1 < src.length) {
+					if (lcwIsWin() && !"$`\"\\\n".includes(src[j + 1])) { word += "\\"; continue; }  // as bash keeps it: "C:\x" for cmd /c, powershell -c
+					word += src[++j]; continue;
+				}
 				if (src.startsWith("$(", j) || src[j] === "`") { j = subst(j) - 1; continue; }
 				word += src[j];
 			}
@@ -4314,7 +4548,7 @@ function lex(src: string, out: Simple[] = []): Simple[] {
 				let j = i + 1, body = "";
 				for (;;) {
 					const e = src.indexOf("\n", j); const line = src.slice(j, e < 0 ? src.length : e);
-					if (line.replace(/^\t+/, "") === delim || e < 0) { i = e < 0 ? src.length : e; break; }
+					if ((lcwIsWin() ? line.replace(/\r$/, "") : line).replace(/^\t+/, "") === delim || e < 0) { i = e < 0 ? src.length : e; break; }  // CRLF lines on Windows
 					if (!quoted) for (const m of line.matchAll(/\$\(|`/g)) { subst(j + m.index!); word = ""; hasWord = false; }  // substitutions in an unquoted body run
 					body += line + "\n"; j = e + 1;
 				}
@@ -4376,13 +4610,19 @@ const UNRESOLVED = "\0";  // marker: an expansion we do not know
 // Expands what can be known: ~, $PWD/$HOME/$TMPDIR, variables assigned earlier
 // in the call (with or without ${..} modifiers), $(pwd), $(mktemp [-d]) (a fresh
 // path under the temp dir: never a repo), $(git rev-parse --show-toplevel).
-function expand(w: string, vars: Env, cwd: string): string {
+export function expand(w: string, vars: Env, cwd: string): string {
 	let s = w.replace(/\$\{([A-Za-z_]\w*)(?::?[-=?+]([^}]*)|[#%/^,][^}]*)?\}|\$([A-Za-z_]\w*)|\$\(\s*(pwd|mktemp(?:\s+-d)?|git\s+rev-parse\s+--show-toplevel)\s*\)/g, (_, b, def, n, cmd) => {
 		if (cmd) return cmd === "pwd" ? cwd : cmd.startsWith("mktemp") ? join(tmpdir(), "lets-code-unknown-tmp") : repoOf(cwd)?.top ?? cwd;
 		const name = b ?? n;
 		if (name === "PWD") return cwd;
 		if (name === "HOME") return homedir();
 		if (name === "TMPDIR") return process.env.TMPDIR ?? tmpdir();
+		if (lcwIsWin() && !(name in vars)) {  // also as cmd's %VAR% and PowerShell's $env:VAR (see winScript)
+			const n = name.toUpperCase();
+			if (n === "USERPROFILE" || n === "HOME") return homedir();
+			if (n === "TEMP" || n === "TMP" || n === "TMPDIR") return tmpdir();
+			if (n === "CD" || n === "PWD") return cwd;
+		}
 		if (name in vars) return vars[name];
 		return def !== undefined ? def : UNRESOLVED;
 	});
@@ -4396,19 +4636,55 @@ const unresolved = (s: string) => s.includes(UNRESOLVED);
 const WRAPPERS: Record<string, string> = { env: "uCS", sudo: "ugpChUrtT", doas: "u", command: "", exec: "a", builtin: "", nice: "n", nohup: "", time: "f", timeout: "sk", xargs: "nIPLsdaE", stdbuf: "ioe", chronic: "", caffeinate: "t", setsid: "", unbuffer: "", ionice: "cn", chrt: "p", flock: "wE", strace: "oe", ltrace: "o", watch: "n", script: "c" };
 const WRAP_LONG = /^--(signal|kill-after|user|group|host|prompt|unset|chdir|max-args|max-procs|replace|delimiter|arg-file|eof|max-lines|max-chars|adjustment|output|input|error|interval|command)$/;
 const SHELLS = /^(sh|bash|zsh|dash|ksh)$/;
+// A program's name as a command line names it: on Windows without directory,
+// .exe and case (C:\Git\usr\bin\rm.exe, git.EXE -> rm, git).
+const prog = (w: string) => (lcwIsWin() ? lcwProg(w) : basename(w));
+// A cmd or PowerShell script (Windows) as this lexer reads it: backslashes
+// (path separators there) as /, %VAR% and $env:VAR as ${VAR} (see expand).
+export function winScript(s: string): string {
+	return s.replace(/\\/g, "/").replace(/%([A-Za-z_]\w*)%/g, (_, n) => "${" + n + "}").replace(/\$env:([A-Za-z_]\w*)/gi, (_, n) => "${" + n + "}");
+}
+// The script `powershell|pwsh <args>` runs: -Command (any prefix, -c), the
+// rest of the line after it; -EncodedCommand decoded; "-" or nothing: stdin.
+// undefined for a script file (-File, or pwsh's first argument), not checked here.
+function psCommand(a: string[], stdin?: string): string | undefined {
+	const pwsh = prog(a[0]) === "pwsh";
+	for (let k = 1; k < a.length; k++) {
+		const x = a[k], f = x.toLowerCase();
+		if (/^-{1,2}c(o(m(m(a(n(d)?)?)?)?)?)?$/.test(f)) { const s = a.slice(k + 1).join(" "); return s === "-" || s === "" ? stdin ?? "" : winScript(s); }
+		if (/^-{1,2}e(c|n(c(o(d(e(d(c(o(m(m(a(n(d)?)?)?)?)?)?)?)?)?)?)?)?)?$/.test(f) && !/^-{1,2}ex/.test(f)) {
+			try { return winScript(Buffer.from(a[k + 1] ?? "", "base64").toString("utf16le")); } catch { return "\0"; }
+		}
+		if (/^-{1,2}f(i(l(e)?)?)?$/.test(f)) return undefined;
+		if (/^-{1,2}(executionpolicy|ep|ex|windowstyle|w|outputformat|of|o|inputformat|if|i|configurationname|version|v|workingdirectory|wd|settingsfile|custompipename)$/.test(f)) { k++; continue; }
+		if (f.startsWith("-")) continue;   // -NoProfile, -NonInteractive, -NoLogo, ...
+		return pwsh ? undefined : winScript(a.slice(k).join(" "));   // powershell runs the rest as a command; pwsh as a script file
+	}
+	return stdin ?? "";
+}
 // Strips wrappers and VAR=val; a shell with -c, a shell fed a script on stdin,
 // or eval yields `script` instead (to be lexed), "|" when the script is piped in.
+// On Windows `cmd /c ...` and `powershell -Command ...` are shells too.
 function unwrap(cmd: Simple): { argv: string[]; env: Env; script?: string } {
 	const env: Env = {};
 	let a = cmd.argv.slice();
 	for (let guard = 0; guard < 8 && a.length; guard++) {
 		while (a.length && /^[A-Za-z_]\w*=/.test(a[0])) { const i = a[0].indexOf("="); env[a[0].slice(0, i)] = a[0].slice(i + 1); a.shift(); }
 		if (!a.length) break;
-		const w = basename(a[0]);
+		const w = prog(a[0]);
 		if (SHELLS.test(w)) {
 			const i = a.findIndex((x, k) => k > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x));
 			if (i > 0) return { argv: [], env, script: a[i + 1] ?? "" };
 			if (!a.slice(1).some((x) => !x.startsWith("-"))) return { argv: [], env, script: cmd.stdin ?? "" };  // no script file: stdin is the script
+		}
+		if (lcwIsWin() && w === "cmd") {  // cmd /c (Git Bash: //c), /k; /d /s /q before it
+			const i = a.findIndex((x, k) => k > 0 && /^\/\/?[ck]$/i.test(x));
+			if (i > 0) return { argv: [], env, script: winScript(a.slice(i + 1).join(" ")) };
+			if (a.length === 1 || a.slice(1).every((x) => /^\/\/?[a-z]$/i.test(x))) return { argv: [], env, script: cmd.stdin ?? "" };
+		}
+		if (lcwIsWin() && (w === "powershell" || w === "pwsh")) {
+			const s = psCommand(a, cmd.stdin);
+			if (s !== undefined) return { argv: [], env, script: s };
 		}
 		if (w === "eval") return { argv: [], env, script: a.slice(1).join(" ") };
 		if (!(w in WRAPPERS)) break;
@@ -4454,7 +4730,7 @@ function aliasOf(name: string, dir: string, cli: Env, cache: Map<string, Env>): 
 	if (name in cli) return cli[name];
 	if (!cache.has(dir)) {
 		const table: Env = {};
-		try { for (const line of execFileSync("git", ["-C", dir, "config", "--get-regexp", "^alias\\."], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).toString().split("\n")) { const m = /^alias\.(\S+) (.*)$/.exec(line); if (m) table[m[1]] = m[2]; } } catch { /* no aliases or no git */ }
+		try { for (const line of execFileSync("git", ["-C", dir, "config", "--get-regexp", "^alias\\."], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, windowsHide: true }).toString().split(/\r?\n/)) { const m = /^alias\.(\S+) (.*)$/.exec(line); if (m) table[m[1]] = m[2]; } } catch { /* no aliases or no git */ }
 		cache.set(dir, table);
 	}
 	return cache.get(dir)![name] ?? null;
@@ -4605,13 +4881,13 @@ function lethalPath(p: string, cwd: string, recursive: boolean): boolean {
 	const repo = repoOf(target);
 	if (glob) {
 		if (!recursive) return false;
-		if (target === homedir() || isRoot(target) || (repo && within(target, repo.gitdir))) return true;
+		if (same(target, homedir()) || isRoot(target) || (repo && within(target, repo.gitdir))) return true;
 		const pat = basename(p), re = globRe(pat);
-		if (repo?.top === target) return re.test(".git") || pat === "*";             // at the repo top: .git, or everything
+		if (same(target, repo?.top)) return re.test(".git") || pat === "*";             // at the repo top: .git, or everything
 		return within(cwd, target) && re.test(cwd.slice(target.length + 1).split(sep)[0] ?? "");  // an ancestor: the dir that leads to us
 	}
-	if (basename(target) === ".git") return true;
-	if (recursive && (target === homedir() || isRoot(target))) return true;
+	if (isGitName(basename(target))) return true;
+	if (recursive && (same(target, homedir()) || isRoot(target))) return true;
 	if (!repo) return recursive && within(cwd, target);                              // an ancestor of where we are
 	if (within(target, repo.gitdir)) return !/\.lock$/.test(target);                 // inside .git, except stale locks
 	return recursive && (within(repo.top, target) || within(cwd, target));
@@ -4622,7 +4898,7 @@ function lethalPath(p: string, cwd: string, recursive: boolean): boolean {
 function findDeletes(args: string[]): { paths: string[]; risky: boolean } | null {
 	const i = args.findIndex((x) => x.startsWith("-") || x === "!" || x === "(");
 	const paths = (i < 0 ? args : args.slice(0, i)).filter((x) => x !== "--"), expr = i < 0 ? [] : args.slice(i);
-	const action = expr.findIndex((x, k) => x === "-delete" || (/^-exec(dir)?$/.test(x) && /^(rm|shred|unlink)$/.test(basename(expr[k + 1] ?? ""))));
+	const action = expr.findIndex((x, k) => x === "-delete" || (/^-exec(dir)?$/.test(x) && /^(rm|shred|unlink)$/.test(prog(expr[k + 1] ?? ""))));
 	if (action < 0) return null;
 	const before = expr.slice(0, action);
 	const prunesGit = before.some((x, k) => /^-i?(name|path|wholename)$/.test(x) && /^(\.\/)?\.git$/.test(before[k + 1] ?? "") && before[k + 2] === "-prune");
@@ -4661,6 +4937,62 @@ const WRITERS: Record<string, (f: Flags, plain: string[]) => string[]> = {
 	sed: (f, p) => has(f.flags, "-i") || [...f.flags].some((x) => x.startsWith("--in-place")) ? p : [],
 	perl: (f, p) => has(f.flags, "-i") ? p : [],
 };
+
+// ---- Windows: cmd's and PowerShell's own file commands (names as prog() gives them)
+const WIN_READONLY = new Set(["dir", "type", "findstr", "where", "ver", "tasklist", "systeminfo", "get-childitem", "gci", "get-content", "gc", "get-item", "gi", "get-itemproperty", "test-path", "resolve-path", "get-location", "gl", "select-string", "sls", "get-command", "gcm", "write-output", "write-host", "measure-object", "sort-object", "select-object", "where-object", "foreach-object", "format-list", "format-table", "out-string", "out-host", "get-process", "get-date", "get-help", "start-sleep"]);
+const WIN_CD: Record<string, string> = { "set-location": "cd", sl: "cd", chdir: "cd", "push-location": "pushd", "pop-location": "popd" };
+// PowerShell parameters (any unambiguous prefix): switches, and the ones that take a value
+const PS_SWITCH = ["-recurse", "-force", "-whatif", "-confirm", "-nonewline", "-append", "-passthru", "-noclobber", "-container", "-asjob"];
+const PS_VALUED = ["-path", "-literalpath", "-lp", "-pspath", "-filepath", "-destination", "-value", "-include", "-exclude", "-filter", "-encoding", "-itemtype", "-name", "-newname", "-credential", "-stream", "-inputobject", "-target", "-width"];
+function psArgs(args: string[]): { opt: (...names: string[]) => string[]; sw: (name: string) => boolean; pos: string[] } {
+	const opts: [string, string][] = [], sws: string[] = [], pos: string[] = [];
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i];
+		if (!/^-[A-Za-z]/.test(a)) { pos.push(a); continue; }
+		const c = a.indexOf(":"), k = (c > 0 ? a.slice(0, c) : a).toLowerCase();
+		const sw = PS_SWITCH.find((o) => o.startsWith(k)), valued = PS_VALUED.find((o) => o === k) ?? PS_VALUED.find((o) => o.startsWith(k));
+		if (sw || !valued) { sws.push(sw ?? k); continue; }
+		opts.push([valued, c > 0 ? a.slice(c + 1) : args[++i] ?? ""]);
+	}
+	return { opt: (...names) => opts.filter(([k]) => names.includes(k)).flatMap(([, v]) => v.split(",").filter(Boolean)), sw: (n) => sws.includes(n), pos };
+}
+type WinOp = { removes: string[]; recursive: boolean; writes: string[] };
+// What a cmd/PowerShell file command removes and writes, or null for any other command.
+function winOp(name: string, args: string[]): WinOp | null {
+	// cmd's switches: /s, /q, /a:h (robocopy's are words: /mir, /r:3); /c/x is a path
+	const cmdFlag = name === "robocopy" ? (x: string) => /^\/[a-z]+(:\S*)?$/i.test(x) : (x: string) => /^\/[a-z](:\S*)?$/i.test(x);
+	const cmdStyle = args.some(cmdFlag), flags = new Set(args.filter(cmdFlag).map((x) => x.replace(/:.*$/, "").toLowerCase()));
+	const cmdPos = args.filter((x) => !cmdFlag(x));
+	const ps = psArgs(args), paths = () => [...ps.opt("-path", "-literalpath", "-lp", "-pspath", "-filepath"), ...ps.pos.slice(0, ps.opt("-path", "-literalpath", "-lp", "-pspath", "-filepath").length ? 0 : 1)];
+	switch (name) {
+		case "rd": case "rmdir": case "del": case "erase":
+			if (cmdStyle) return { removes: cmdPos, recursive: flags.has("/s"), writes: [] };
+			if (name === "rmdir") return null;   // GNU rmdir (Git Bash)
+			return { removes: [...ps.opt("-path", "-literalpath", "-lp", "-pspath"), ...ps.pos], recursive: ps.sw("-recurse"), writes: [] };
+		case "remove-item": case "ri":
+			return { removes: [...ps.opt("-path", "-literalpath", "-lp", "-pspath"), ...ps.pos], recursive: ps.sw("-recurse"), writes: [] };
+		case "set-content": case "add-content": case "ac": case "clear-content": case "clc": case "out-file":
+			return { removes: [], recursive: false, writes: paths() };
+		case "new-item": case "ni": {
+			const p = paths(), n = ps.opt("-name");
+			return { removes: [], recursive: false, writes: n.length ? n.map((x) => join(p[0] ?? ".", x)) : p };
+		}
+		case "rename-item": case "rni": case "ren": case "rename":
+			return { removes: cmdStyle ? cmdPos.slice(0, 1) : paths(), recursive: false, writes: [] };
+		case "copy-item": case "cpi": case "copy": case "xcopy": case "move-item": case "mi": case "move": {
+			const pos = cmdStyle || name === "copy" || name === "xcopy" || name === "move" ? cmdPos : ps.pos;
+			const dest = ps.opt("-destination")[0] ?? (pos.length >= 2 ? pos[pos.length - 1] : ".");
+			const moves = name === "move-item" || name === "mi" || name === "move";
+			return { removes: moves ? [...ps.opt("-path", "-literalpath", "-lp"), ...pos.slice(0, -1)] : [], recursive: moves, writes: [dest] };
+		}
+		case "robocopy": {   // robocopy <src> <dst> [files] [/mir|/purge: deletes in dst] [/move: deletes src]
+			const [src, dst] = cmdPos;
+			const purge = flags.has("/mir") || flags.has("/purge"), move = flags.has("/move") || flags.has("/mov");
+			return { removes: [...(purge && dst ? [dst] : []), ...(move && src ? [src] : [])], recursive: true, writes: dst ? [dst] : [] };
+		}
+		default: return null;
+	}
+}
 
 function judgeBash(cmd: string, cwd0: string): Verdict {
 	const cmds = lex(cmd);
@@ -4707,9 +5039,12 @@ function judgeBash(cmd: string, cwd0: string): Verdict {
 		for (const k in env) if (!argv.length) vars[k] = expand(env[k], vars, cwd);  // `D=../main` alone: remembered
 		for (const w of simple.writes) { const v = writeTarget(w); if (v) return v; }
 		if (!argv.length) continue;
-		const name = basename(argv[0]);
+		const prog0 = prog(argv[0]), name = lcwIsWin() ? WIN_CD[prog0] ?? prog0 : prog0;
 		if (name === "cd" || name === "pushd") {
-			const args = argv.slice(1).filter((a) => !/^-[LPe@]+$/.test(a) && a !== "--");
+			let args = argv.slice(1).filter((a) => !/^-[LPe@]+$/.test(a) && a !== "--");
+			if (lcwIsWin()) {  // Set-Location -Path X, cmd's cd /d X (a lone /d is Git Bash's D: drive)
+				args = args.filter((a, k) => !/^-(path|literalpath|lp)$/i.test(a) && !(k === 0 && /^\/d$/i.test(a) && args.length > 1));
+			}
 			if (name === "pushd") dirs.push(cwd);
 			if (!args.length) cwd = homedir();
 			else if (args[0] === "-") { /* previous dir: keep */ }
@@ -4717,7 +5052,16 @@ function judgeBash(cmd: string, cwd0: string): Verdict {
 			continue;
 		}
 		if (name === "popd") { cwd = dirs.pop() ?? cwd; continue; }
-		if (unresolved(cwd) && (name === "git" || name in WRITERS || /^(rm|mv|find|shred|unlink|rmdir)$/.test(name))) return { block: true, reason: unknownTarget("cd target") };
+		const win = lcwIsWin() ? winOp(name, argv.slice(1)) : null;
+		if (unresolved(cwd) && (name === "git" || name in WRITERS || win || /^(rm|mv|find|shred|unlink|rmdir)$/.test(name))) return { block: true, reason: unknownTarget("cd target") };
+		if (win) {  // Windows: rd /s, del, Remove-Item -Recurse, Set-Content, Copy-Item ...
+			for (const p of win.removes) { const v = removal(name, p, win.recursive); if (v) return v; }
+			for (const t of win.writes) { const v = writeTarget(t); if (v) return v; }
+			if (!win.removes.length && win.writes.length) continue;
+			if (!win.removes.length && win.recursive) return { block: true, reason: unknownTarget(`${name} (targets from stdin)`) };
+			const v = judgeDir(cwd); if (v) return v;   // as rm: it runs in (and changes) the current directory
+			continue;
+		}
 		if (name === "git") {
 			let g = parseGit(argv, cwd, env, vars);
 			if (unresolved(g.dir)) return { block: true, reason: unknownTarget("git -C target") };
@@ -4744,7 +5088,7 @@ function judgeBash(cmd: string, cwd0: string): Verdict {
 			const recursive = name === "mv" || name === "rmdir" || has(flags, "-r", "-R", "--recursive");
 			const targets = name === "mv" ? pos.slice(0, -1) : pos;
 			if (!targets.length) {  // targets from stdin (`find … | xargs rm`): judged by the find's tests, as if it deleted
-				const feed = cmds[n - 1], fd = feed?.argv[0] === "find" ? findDeletes([...feed.argv.slice(1), "-delete"]) : null;
+				const feed = cmds[n - 1], fd = prog(feed?.argv[0] ?? "") === "find" ? findDeletes([...feed.argv.slice(1), "-delete"]) : null;
 				if (fd && !fd.risky) continue;
 				if (recursive || fd) return { block: true, reason: unknownTarget(`${name} (targets from stdin)`) };
 			}
@@ -4752,7 +5096,7 @@ function judgeBash(cmd: string, cwd0: string): Verdict {
 		}
 		if (name === "find") {
 			const k = argv.findIndex((x) => /^-exec(dir)?$/.test(x));
-			if (k > 0 && SHELLS.test(basename(argv[k + 1] ?? ""))) {  // -exec sh -c '…': the script runs too
+			if (k > 0 && SHELLS.test(prog(argv[k + 1] ?? ""))) {  // -exec sh -c '…': the script runs too
 				const end = argv.findIndex((x, j) => j > k && (x === ";" || x === "+"));
 				const sub = unwrap({ argv: argv.slice(k + 1, end < 0 ? undefined : end), writes: [] });
 				if (sub.script) { const v = splice(sub.script, n); if (v) return v; }
@@ -4767,7 +5111,7 @@ function judgeBash(cmd: string, cwd0: string): Verdict {
 			continue;
 		}
 		// Anything else runs in the current directory: fine on pi/*, outside a repo, or read-only.
-		if (!unresolved(cwd) && !READONLY.has(name)) { const v = judgeDir(cwd); if (v) return v; }
+		if (!unresolved(cwd) && !READONLY.has(name) && !(lcwIsWin() && WIN_READONLY.has(name))) { const v = judgeDir(cwd); if (v) return v; }
 	}
 	return undefined;
 }
@@ -4791,9 +5135,9 @@ const CP_MAX_UNTRACKED = Number(process.env.LETS_CODE_GIT_CHECKPOINT_MAX_UNTRACK
 const CP_SYNC_BUDGET_MS = 2000;  // a repo whose warm snapshot takes longer is only snapshotted in the background
 
 const gitEnv = (extra: Env) => ({ ...process.env, GIT_AUTHOR_NAME: "lets-code", GIT_AUTHOR_EMAIL: "lets-code@localhost", GIT_COMMITTER_NAME: "lets-code", GIT_COMMITTER_EMAIL: "lets-code@localhost", ...extra });
-const gitSync = (args: string[], cwd: string, extra: Env = {}) => String(execFileSync("git", args, { cwd, env: gitEnv(extra), stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 2 ** 20, timeout: 60_000 }));
+const gitSync = (args: string[], cwd: string, extra: Env = {}) => String(execFileSync("git", args, { cwd, env: gitEnv(extra), stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 2 ** 20, timeout: 60_000, windowsHide: true }));
 const gitAsync = (args: string[], cwd: string, extra: Env = {}) => new Promise<string>((res, rej) =>
-	execFile("git", args, { cwd, env: gitEnv(extra), maxBuffer: 64 * 2 ** 20 }, (err, out) => (err ? rej(err) : res(String(out)))));
+	execFile("git", args, { cwd, env: gitEnv(extra), maxBuffer: 64 * 2 ** 20, windowsHide: true }, (err, out) => (err ? rej(err) : res(String(out)))));
 type Runner = (args: string[], cwd: string, extra?: Env) => string | Promise<string>;
 
 const cpLastTree = new Map<string, string>(), cpWarm = new Set<string>(), cpSlow = new Set<string>();
@@ -4883,7 +5227,7 @@ export default function (pi: ExtensionAPI) {
 				break;
 			}
 			case "bash": case "powershell":
-				try { verdict = judgeBash(String(input.command ?? ""), ctx.cwd); }
+				try { const c = String(input.command ?? ""); verdict = judgeBash(lcwIsWin() && event.toolName === "powershell" ? winScript(c) : c, ctx.cwd); }
 				catch { verdict = { block: true, reason: `git guard: this command is too complex to judge; simplify it.` }; }  // fail closed
 				break;
 			default: return undefined;  // read-only tools and custom tools are never blocked
@@ -4902,6 +5246,7 @@ export default function (pi: ExtensionAPI) {
 	}
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }

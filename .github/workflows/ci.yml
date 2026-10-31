@@ -46,9 +46,8 @@ jobs:
       - name: 🧪  Tests
         run: |
           if [ "${RUNNER_OS}" = Linux ]; then
-            ( while sleep 60; do echo "[heartbeat] $(date +%T) $(free -m | awk 'NR==2 {print $3 " MB used, " $7 " MB available"}'); ps -eo rss=,args= --sort=-rss | head -3 | awk '{printf "  %d MB %s\n", $1/1024, substr($0, index($0,$2), 120)}'; done ) &
-            sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- \
-              sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" tests/run.sh
+            bash .github/ci-heartbeat.sh &
+            sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" tests/run.sh
           else
             tests/run.sh
           fi

@@ -1,0 +1,188 @@
+name: debug-linux-hang
+# TEMPORARY: one step per test file on Ubuntu, to find the file that loses the
+# runner (the job's step list shows which step was running). Remove after.
+on:
+  push:
+    branches: [feat/windows]
+permissions:
+  contents: read
+jobs:
+  steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: agent-guard.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh agent-guard.test.mjs
+      - name: backend.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh backend.test.mjs
+      - name: claude-code-scan.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh claude-code-scan.sh
+      - name: claude-code.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh claude-code.test.mjs
+      - name: claude-launch.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh claude-launch.sh
+      - name: claude.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh claude.test.mjs
+      - name: cli.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh cli.sh
+      - name: compaction-reserve.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh compaction-reserve.sh
+      - name: core-memory.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh core-memory.test.mjs
+      - name: design-reviewer.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh design-reviewer.sh
+      - name: developer.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh developer.sh
+      - name: expert-builder.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh expert-builder.sh
+      - name: expert-lint.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh expert-lint.test.mjs
+      - name: expert-migrate.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh expert-migrate.sh
+      - name: expert-reviewer.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh expert-reviewer.sh
+      - name: expert.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh expert.test.mjs
+      - name: ext-migrate.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh ext-migrate.sh
+      - name: factory.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh factory.test.mjs
+      - name: git-checkpoint.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh git-checkpoint.test.mjs
+      - name: git-guard-launch.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh git-guard-launch.sh
+      - name: git-guard.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh git-guard.test.mjs
+      - name: grounding.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh grounding.test.mjs
+      - name: judge.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh judge.sh
+      - name: lets-code.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh lets-code.test.mjs
+      - name: mandate.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh mandate.test.mjs
+      - name: mem-guard-config.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh mem-guard-config.sh
+      - name: mem-guard.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh mem-guard.test.mjs
+      - name: metrics.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh metrics.test.mjs
+      - name: normalize-endpoint.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh normalize-endpoint.sh
+      - name: openrouter-config.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh openrouter-config.sh
+      - name: output-cap.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh output-cap.sh
+      - name: pi-schema-vars.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh pi-schema-vars.sh
+      - name: pi-tools.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh pi-tools.sh
+      - name: platform.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh platform.test.mjs
+      - name: presets.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh presets.sh
+      - name: print-stdin.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh print-stdin.sh
+      - name: rea.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh rea.sh
+      - name: researcher.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh researcher.sh
+      - name: sandbox.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh sandbox.test.mjs
+      - name: session-tag.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh session-tag.test.mjs
+      - name: sessions-cli.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh sessions-cli.sh
+      - name: sessions.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh sessions.test.mjs
+      - name: software-factory.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh software-factory.sh
+      - name: starter-agents.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh starter-agents.sh
+      - name: subagent-claude.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh subagent-claude.test.mjs
+      - name: subagent-view.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh subagent-view.test.mjs
+      - name: subagent.test.mjs
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh subagent.test.mjs
+      - name: template-effort.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh template-effort.sh
+      - name: termux-agent.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh termux-agent.sh
+      - name: tester.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh tester.sh
+      - name: theme-pick.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh theme-pick.sh
+      - name: themes.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh themes.sh
+      - name: thinking-default.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh thinking-default.sh
+      - name: thinking-suggest.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh thinking-suggest.sh
+      - name: ui-tester.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh ui-tester.sh
+      - name: update.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh update.sh
+      - name: vision-probe.sh
+        timeout-minutes: 6
+        run: sudo systemd-run --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- sudo -u "$(id -un)" env "PATH=${PATH}" "HOME=${HOME}" TEST_TIMEOUT=300 bash tests/run.sh vision-probe.sh

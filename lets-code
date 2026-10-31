@@ -563,7 +563,8 @@ suggested_thinking_level() {  # suggested_thinking_level <context> <output-cap>
 #                     + hard thinking_token_budget ceiling when thinking)
 #   settings.json -> compaction.enabled = true +
 #                    compaction.modelOverrides["lets-code/<model>"]
-#                    .reserveTokens = output cap
+#                    .reserveTokens = output cap + a margin (context/6,
+#                    at most 16k) for pi's low estimate of the context
 #                    + modelThinkingLevels["lets-code/<model>"] = startup
 #                    thinking level (when thinking is registered)
 #                    + enableInstallTelemetry = false when the key is absent
@@ -811,7 +812,11 @@ def to_settings(doc):
     overrides = compaction.get("modelOverrides")
     if not isinstance(overrides, dict):
         overrides = {}
-    overrides[provider + "/" + model] = {"reserveTokens": cap}
+    # the room pi keeps free: the reply budget, plus a margin for its own
+    # estimate of the context (characters / 4) running below what the server
+    # counts (code tokenizes nearer 3): at a 32k window, without it, a
+    # session filled its context and never compacted
+    overrides[provider + "/" + model] = {"reserveTokens": cap + min(ctx // 6, 16384)}
     compaction["modelOverrides"] = overrides
     compaction["enabled"] = True  # auto-compaction explicit, not pi's implicit default
     doc["compaction"] = compaction
@@ -9089,8 +9094,17 @@ export function orchestrated(decision?: Decision): Deps["checkpoint"] {
 	return async (kind, L) => {
 		if (given) { const d = given; given = undefined; return d; }
 		if (kind === "criteria" && L.criteria.length) return { action: "approve", by: "the orchestrator" };
+		// a green run (the judge accepted, the suite passes) is committed on its
+		// branch: the orchestrator would, and a small model's session can run out
+		// of room before it says so (merging stays the user's)
+		if (kind === "result" && green(L)) return { action: "commit", by: "the orchestrator" };
 		return null;
 	};
+}
+// the last judge accepted and the last regression passed
+export function green(L: Ledger): boolean {
+	const last = (st: Stage) => [...L.entries].reverse().find((e) => e.stage === st)?.verdict ?? "";
+	return /^ACCEPT/.test(last("judge")) && last("regression") === "PASS";
 }
 // the real stages: the experts module's brief rendering, the subagents runner
 export async function sessionDeps(ctx: any, signal?: AbortSignal, progress?: (l: string) => void, callId?: string): Promise<Deps> {

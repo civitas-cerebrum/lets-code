@@ -251,6 +251,30 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("STATUS: BLOCKED said, even with a change: blocked", [L5.entries.find((e) => e.stage === "build").verdict, L5.status], ["BLOCKED", "stopped"]);
 }
 
+// ------------------------------------------------------------------ orchestrated: a green run is committed
+{
+	const E = (stage, verdict) => ({ stage, round: 0, verdict, summary: "", input: 0, output_tokens: 0, seconds: 0, started: 0, ended: 0 });
+	const L = (entries) => ({ entries, criteria: ["C1"] });
+	const cp = F.orchestrated();
+	t("orchestrated, green (judge ACCEPT, regression PASS): commit", await cp("result", L([E("judge", "ACCEPT"), E("regression", "PASS")])), { action: "commit", by: "the orchestrator" });
+	t("orchestrated, judge rejected: left to the orchestrator", await cp("result", L([E("judge", "REJECT"), E("regression", "PASS")])), null);
+	t("orchestrated, suite failed as before the change: left to the orchestrator", await cp("result", L([E("judge", "ACCEPT"), E("regression", "FAIL (as before the change)")])), null);
+	t("orchestrated, no regression ran: left to the orchestrator", await cp("result", L([E("judge", "ACCEPT"), E("regression", "SKIPPED")])), null);
+	t("orchestrated, the last judge counts", await cp("result", L([E("judge", "REJECT"), E("judge", "ACCEPT"), E("regression", "PASS")])), { action: "commit", by: "the orchestrator" });
+	t("orchestrated, a given decision first", await F.orchestrated({ action: "keep", by: "x" })("result", L([E("judge", "ACCEPT"), E("regression", "PASS")])), { action: "keep", by: "x" });
+	t("orchestrated, other checkpoints unchanged", [await cp("plan", L([])), await cp("blocked", L([E("judge", "ACCEPT"), E("regression", "PASS")]))], [null, null]);
+	// end to end: an orchestrated run commits its green result itself
+	const repo = makeRepo("orch-green"); const fd = fakeDeps({ ...OK, build: [build()] }); fd.checkpoint = F.orchestrated();
+	const L0 = await F.startRun(opts(repo), fd);
+	t("orchestrated run: waits for the orchestrator at the plan", [L0.status, L0.waiting], ["waiting", "plan"]);
+	const Lg = await F.resumeRun(L0.id, { ...fd, checkpoint: F.orchestrated({ action: "approve", by: "the orchestrator" }) }, root);
+	t("orchestrated run, green: done and committed without being asked", [Lg.status, !!Lg.commit, Lg.waiting], ["done", true, null]);
+	const r2 = makeRepo("orch-red"); const fd2 = fakeDeps({ ...OK, build: [build()], judge: ["## Verdict\nREJECT C1\n## Criteria\nC1: FAIL x"] }, { decisions: { stuck: { action: "final" } } }); fd2.checkpoint = F.orchestrated();
+	const R0 = await F.startRun(opts(r2), fd2);
+	const Lr = await F.resumeRun(R0.id, { ...fd2, checkpoint: F.orchestrated({ action: "approve", by: "the orchestrator" }) }, root);
+	t("orchestrated run, judge rejects: not committed by itself", [!!Lr.commit, Lr.status], [false, "waiting"]);
+}
+
 // ------------------------------------------------------------------ the happy path
 {
 	const repo = makeRepo("happy"); const statusBefore = git(repo, "status", "--porcelain"); const head = git(repo, "rev-parse", "HEAD");
@@ -584,9 +608,9 @@ export function renderBrief(s, b) { return "Brief for the " + s.name + " expert.
 	t("expert: with the call that goes on, and when to ask the user", [!!idOf(r1), r1.text.includes('decision: "approve | edit | stop"'), /only for a significant design decision/.test(r1.text)], [true, true, true]);
 	t("expert: a ticket given as a path is read", sub.runs[0].task.includes("feature.txt exists"), true);
 	const r1b = await fm.runExpert({ resume: idOf(r1), decision: "approve" }, ctx, undefined, () => {}, "call-77");
-	t("expert: resume with approve builds, reviews, judges, then hands back the result", [r1b.isError, /waits at its result checkpoint/.test(r1b.text), r1b.text.includes('decision: "commit | keep | stop"'), selects.length], [false, true, true, 0]);
+	t("expert: resume with approve builds, reviews, judges; a green result is committed on its branch", [r1b.isError, /waits at its result checkpoint/.test(r1b.text), /done, committed/.test(r1b.text), selects.length], [false, false, true, 0]);
 	const r1c = await fm.runExpert({ resume: idOf(r1), decision: "approve" }, ctx, undefined, () => {}, "call-77");
-	t("expert: approve at the result is the commit, on the run's branch only", [/done, committed/.test(r1c.text), /pushing, merging or a PR is up to the user/.test(r1c.text)], [true, true]);
+	t("expert: the commit is on the run's branch only", [/done, committed/.test(r1c.text), /pushing, merging or a PR is up to the user/.test(r1c.text)], [true, true]);
 	t("expert: its stage runs carry the tool call's id (for /subagents and detaching)", [...new Set(sub.runs.map((r) => r.meta.callId))], ["call-77"]);
 	t("expert: constraints reach the stages", sub.runs.every((r) => r.task.includes("leave README.md alone")), true);
 	t("expert: the result is stage summaries, not stage output", [r1c.text.includes("## Changes"), r1c.text.split("\n").filter((l) => l.startsWith("- ")).length >= 7], [false, true]);

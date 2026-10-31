@@ -6,7 +6,7 @@
 //   tests/subagent.test.mjs [path/to/lets-code/subagents.ts]
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, realpathSync, rmSync, chmodSync, readdirSync, existsSync, statSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/subagents.ts");
@@ -18,7 +18,9 @@ process.env.LETS_CODE_SUBAGENTS_ON = "1";
 process.env.LETS_CODE_MODEL = "test-model";
 process.env.LETS_CODE_SUBAGENT_CONCURRENCY = "2";
 process.env.LETS_CODE_SUBAGENT_IDLE_S = "0.5";   // children at rest go soon (each is a process)
-process.env.PATH = `${bin}:${process.env.PATH}`;
+process.env.PATH = `${bin}${delimiter}${process.env.PATH}`;
+// on Windows a shebang script on PATH is no program: the extension starts pi as LETS_CODE_PI says
+if (process.platform === "win32") process.env.LETS_CODE_PI = JSON.stringify([process.execPath, join(bin, "pi")]);
 
 writeFileSync(join(bin, "pi"), `#!/usr/bin/env node
 // fake pi in RPC mode: records its start (argv, env, instructions) and the

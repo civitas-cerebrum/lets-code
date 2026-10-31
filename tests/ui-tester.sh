@@ -3,6 +3,9 @@
 # runs them against a scratch agent dir with a fake npm (a stub install with a
 # fake playwright), fake appium/adb for the mobile check, and e2e-init.
 set -eu
+# pdir <dir>: the dir as a PATH entry (on Windows Git Bash's /c/x form: the
+# C: of a C:/x path would split PATH)
+pdir() { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) cygpath -u -- "$1" ;; *) printf '%s\n' "$1" ;; esac; }
 src="$(dirname "$0")/../lets-code"
 PI_AGENT_DIR=/nonexistent     # UI_TESTER_DIR is derived from it; set for real below
 eval "$(python3 - "${src}" <<'PY'
@@ -27,7 +30,7 @@ mkdir -p node_modules/.bin
 printf '#!/bin/sh\necho "playwright $*" >> "%s"\n' "${PW_LOG}" > node_modules/.bin/playwright; chmod +x node_modules/.bin/playwright
 SH
 chmod +x "${work}/bin/npm"
-export PATH="${work}/bin:${PATH}" NPM_LOG="${work}/npm.log" PW_LOG="${work}/pw.log"
+export PATH="$(pdir "${work}/bin"):${PATH}" NPM_LOG="${work}/npm.log" PW_LOG="${work}/pw.log"
 : > "${NPM_LOG}"
 PI_AGENT_DIR="${work}/agent"; UI_TESTER_DIR="${PI_AGENT_DIR}/ui-tester"
 
@@ -38,7 +41,8 @@ pins_sorted="$(printf '%s\n' ${UI_TESTER_PINS} | sort | tr '\n' ',' | sed 's/,$/
 pi_write_ui_tester on >/dev/null 2>&1
 t "ready"                          "${UI_TESTER_NOTE}" ""
 t "installed once"                 "$(grep -c "^${UI_TESTER_DIR}/runtime|" "${NPM_LOG}")" 1
-t "the pinned packages"            "$(cut -d'|' -f3 "${NPM_LOG}")" "${pins_sorted}"
+# (the runtime's install alone: an appium on this machine's PATH runs npm too)
+t "the pinned packages"            "$(grep "^${UI_TESTER_DIR}/runtime|" "${NPM_LOG}" | cut -d'|' -f3)" "${pins_sorted}"
 t "install scripts off"            "$(cut -d'|' -f2 "${NPM_LOG}" | grep -c -- '--ignore-scripts')" 1
 t "exact versions"                 "$(printf '%s\n' ${UI_TESTER_PINS} | grep -c '@[0-9][0-9.]*$')" 4
 t "the API, not achilles"          "$(printf '%s\n' ${UI_TESTER_PINS} | grep -c '^@civitas-cerebrum/achilles')" 0
@@ -108,8 +112,10 @@ t "e2e-init --mobile: no Playwright config" "$([ -e "${p3}/playwright.config.ts"
 
 # mobile-check: what is missing, then ready with appium, adb, a device and the SDK
 min="${work}/min"; mkdir -p "${min}"
-for c in awk wc tr grep sort uname sed tail; do ln -s "$(command -v "${c}")" "${min}/${c}"; done
-rc=0; out="$(env -i PATH="${min}" HOME="${work}" "${bash_bin}" "${UI_TESTER_DIR}/bin/mobile-check")" || rc=$?
+# (each a script that runs the real one: on Windows ln -s copies, and a copy
+# of a Git Bash program away from its DLLs does not start)
+for c in awk wc tr grep sort uname sed tail; do printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v "${c}")" > "${min}/${c}"; chmod +x "${min}/${c}"; done
+rc=0; out="$(env -i PATH="$(pdir "${min}")" HOME="${work}" "${bash_bin}" "${UI_TESTER_DIR}/bin/mobile-check")" || rc=$?
 t "mobile: not ready -> exit 1"    "${rc}" 1
 t "mobile: says appium is missing" "$(echo "${out}" | grep -c 'appium not found')" 1
 t "mobile: says adb is missing"    "$(echo "${out}" | grep -c 'adb not found')" 1
@@ -117,7 +123,7 @@ t "mobile: web unaffected"         "$(echo "${out}" | tail -n 1)" "mobile: not r
 printf '#!/bin/sh\ncase "$1" in --version) echo 2.11.0 ;; driver) echo "uiautomator2@3.0.0 [installed (npm)]" ;; esac\n' > "${min}/appium"
 printf '#!/bin/sh\nprintf "List of devices attached\\nemulator-5554\\tdevice\\n\\n"\n' > "${min}/adb"
 printf '#!/bin/sh\n' > "${min}/java"; chmod +x "${min}/appium" "${min}/adb" "${min}/java"
-rc=0; out="$(env -i PATH="${min}" HOME="${work}" ANDROID_HOME=/sdk "${bash_bin}" "${UI_TESTER_DIR}/bin/mobile-check")" || rc=$?
+rc=0; out="$(env -i PATH="$(pdir "${min}")" HOME="${work}" ANDROID_HOME=/sdk "${bash_bin}" "${UI_TESTER_DIR}/bin/mobile-check")" || rc=$?
 t "mobile: ready -> exit 0"        "${rc}:$(echo "${out}" | tail -n 1)" "0:mobile: ready"
 t "mobile: one device"             "$(echo "${out}" | grep -c '1 device')" 1
 t "mobile: the driver"             "$(echo "${out}" | grep -c 'drivers: uiautomator2')" 1
@@ -139,14 +145,14 @@ t "files: setup --no-install says not installed" "$(bash "${UI_TESTER_DIR}/setup
 rm -rf "${UI_TESTER_DIR}"
 mkdir -p "${work}/pwbad"; printf '#!/bin/sh\nmkdir -p node_modules/.bin\nprintf "#!/bin/sh\\nexit 1\\n" > node_modules/.bin/playwright; chmod +x node_modules/.bin/playwright\n' > "${work}/pwbad/npm"
 chmod +x "${work}/pwbad/npm"
-PATH="${work}/pwbad:${PATH}" pi_write_ui_tester on >/dev/null 2>&1
+PATH="$(pdir "${work}/pwbad"):${PATH}" pi_write_ui_tester on >/dev/null 2>&1
 t "browsers fail -> note"          "$(echo "${UI_TESTER_NOTE}" | grep -c 'browser download failed')" 1
 t "browsers fail -> not installed" "$([ -e "${UI_TESTER_DIR}/runtime/.installed" ] && echo yes || echo no)" no
 
 # install fails: a note; the agent file is there but not set up (requires)
 rm -rf "${UI_TESTER_DIR}" "${af}"
 mkdir -p "${work}/badbin"; printf '#!/bin/sh\nexit 1\n' > "${work}/badbin/npm"; chmod +x "${work}/badbin/npm"
-PATH="${work}/badbin:${PATH}" pi_write_ui_tester on >/dev/null 2>&1
+PATH="$(pdir "${work}/badbin"):${PATH}" pi_write_ui_tester on >/dev/null 2>&1
 t "install fails -> note"          "$(echo "${UI_TESTER_NOTE}" | grep -c 'install failed')" 1
 t "not installed -> no marker"     "$([ -e "${PI_AGENT_DIR}/$(sed -n 's/^requires: //p' "${af}")" ] && echo yes || echo no)" no
 exit ${fail}

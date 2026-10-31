@@ -15,6 +15,8 @@ for start, end in (("\npi_write_tester() {", "\n}  # end of pi_write_tester\n"),
 PY
 )"
 work="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/tester-test.XXXXXX")" && pwd)"
+# on Windows in the C:/Users/x form the helpers print and native python reads
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) work="$(cygpath -m -- "${work}")" ;; esac
 trap 'rm -rf "${work}"' EXIT
 PI_AGENT_DIR="${work}/agent"; mkdir -p "${PI_AGENT_DIR}"
 d="${PI_AGENT_DIR}/tester"; af="${PI_AGENT_DIR}/agents/tester.md"

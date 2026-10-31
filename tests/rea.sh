@@ -2,6 +2,9 @@
 # Unit test for pi_write_rea: extracts the function from ./lets-code and runs
 # it against a scratch agent dir with a fake npm (installs a stub rea-agents).
 set -eu
+# pdir <dir>: the dir as a PATH entry (on Windows Git Bash's /c/x form: the
+# C: of a C:/x path would split PATH)
+pdir() { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) cygpath -u -- "$1" ;; *) printf '%s\n' "$1" ;; esac; }
 src="$(dirname "$0")/../lets-code"
 PI_AGENT_DIR=/nonexistent     # REA_DIR is derived from it; set for real below
 eval "$(python3 - "${src}" <<'PY'
@@ -26,19 +29,27 @@ touch node_modules/rea-agents/scripts/rea.mjs
 echo x >> "${NPM_LOG}"
 SH
 chmod +x "${work}/bin/npm"
-export PATH="${work}/bin:${PATH}" NPM_LOG="${work}/npm.log"
+export PATH="$(pdir "${work}/bin"):${PATH}" NPM_LOG="${work}/npm.log"
 echo '{}' > "${work}/agent/models.json"; echo '{}' > "${work}/agent/settings.json"
 echo '{"mcpServers":{"other":{"command":"x"}}}' > "${work}/agent/mcp.json"
 PI_AGENT_DIR="${work}/agent"; REA_DIR="${PI_AGENT_DIR}/rea"
 a="${REA_DIR}/agent"
 
+win=false; case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) win=true ;; esac
+# linked <file> <main file>: the main file when <file> stands for it: a link
+# to it, or on Windows (where ln -s copies and a symlink needs Developer
+# Mode; directories are junctions) a copy of it
+linked() {
+    if [ "${win}" = true ]; then [ -f "$1" ] && [ ! -L "$1" ] && cmp -s "$1" "$2" && printf '%s\n' "$2"; else readlink "$1"; fi
+    return 0
+}
 fail=0
 t() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1 -> $2 (want $3)"; fail=1; fi; }
 
 pi_write_rea on >/dev/null 2>&1
 t "ready"                          "${REA_NOTE}" ""
 t "installed once"                 "$(wc -l < "${NPM_LOG}" | tr -d ' ')" 1
-t "models linked"                  "$(readlink "${a}/models.json")" "${PI_AGENT_DIR}/models.json"
+t "models linked"                  "$(linked "${a}/models.json" "${PI_AGENT_DIR}/models.json")" "${PI_AGENT_DIR}/models.json"
 t "extensions linked"              "$([ -L "${a}/extensions" ] && echo yes)" yes
 t "main mcp.json not linked"       "$([ -L "${a}/mcp.json" ] && echo linked || echo own)" own
 t "skills not linked"              "$([ -e "${a}/skills" ] && echo yes || echo no)" no
@@ -84,8 +95,8 @@ rm "${PI_AGENT_DIR}/models.json"
 mkdir -p "${REA_DIR}/skill/reverse-engineering"; : > "${REA_DIR}/run"   # what an earlier version wrote
 pi_write_rea on >/dev/null 2>&1
 t "user env kept"                  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mcpServers"]["rea"]["env"].get("GHIDRA_INSTALL_DIR"))' "${a}/mcp.json")" /opt/ghidra
-t "replaced file relinked"         "$(readlink "${a}/settings.json")" "${PI_AGENT_DIR}/settings.json"
-t "dangling link removed"          "$([ -L "${a}/models.json" ] && echo yes || echo no)" no
+t "replaced file relinked"         "$(linked "${a}/settings.json" "${PI_AGENT_DIR}/settings.json")" "${PI_AGENT_DIR}/settings.json"
+t "dangling link removed"          "$([ -L "${a}/models.json" ] || [ -e "${a}/models.json" ] && echo yes || echo no)" no
 t "no reinstall"                   "$(wc -l < "${NPM_LOG}" | tr -d ' ')" 1
 t "old skill and runner removed"   "$([ -e "${REA_DIR}/skill" ] || [ -e "${REA_DIR}/run" ] && echo yes || echo no)" no
 
@@ -97,15 +108,15 @@ t "files: agent file, no agent dir" "$([ -e "${af}" ] && echo yes):$([ -e "${a}"
 t "files: setup script"            "$([ -x "${REA_DIR}/setup" ] && echo yes)" yes
 t "files: setup --no-install says not installed" "$(bash "${REA_DIR}/setup" --no-install >/dev/null 2>&1; echo $?)" 3
 bash "${REA_DIR}/setup" 2>/dev/null
-t "setup by itself installs"       "$([ -f "${REA_DIR}/runtime/node_modules/rea-agents/package.json" ] && [ -L "${a}/settings.json" ] && echo yes)" yes
+t "setup by itself installs"       "$([ -f "${REA_DIR}/runtime/node_modules/rea-agents/package.json" ] && [ -n "$(linked "${a}/settings.json" "${PI_AGENT_DIR}/settings.json")" ] && echo yes)" yes
 rm -f "${a}/settings.json"
 pi_write_rea files >/dev/null
-t "files: an installed one is refreshed" "$([ -L "${a}/settings.json" ] && echo yes):$(wc -l < "${NPM_LOG}" | tr -d ' ')" "yes:1"
+t "files: an installed one is refreshed" "$([ -n "$(linked "${a}/settings.json" "${PI_AGENT_DIR}/settings.json")" ] && echo yes):$(wc -l < "${NPM_LOG}" | tr -d ' ')" "yes:1"
 
 # install fails: a note; the agent file is there but hidden (requires)
 rm -rf "${REA_DIR}" "${af}"
 mkdir -p "${work}/badbin"; printf '#!/bin/sh\nexit 1\n' > "${work}/badbin/npm"; chmod +x "${work}/badbin/npm"
-PATH="${work}/badbin:${PATH}" pi_write_rea on >/dev/null 2>&1
+PATH="$(pdir "${work}/badbin"):${PATH}" pi_write_rea on >/dev/null 2>&1
 t "install fails -> note"          "$(echo "${REA_NOTE}" | grep -c 'install failed')" 1
 t "not installed -> no runtime"    "$([ -e "${PI_AGENT_DIR}/$(sed -n 's/^requires: //p' "${af}")" ] && echo yes || echo no)" no
 

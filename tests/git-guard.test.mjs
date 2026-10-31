@@ -27,8 +27,9 @@ const extCopy = join(work, "gitguard.ts");
 writeFileSync(extCopy, src);
 const { default: register } = await import(pathToFileURL(extCopy).href);
 
-let handler;
-register({ on: (ev, h) => { if (ev === "tool_call") handler = h; return () => {}; } });
+let handler; const commands = {};
+const extMod = await import(pathToFileURL(extCopy).href);
+register({ on: (ev, h) => { if (ev === "tool_call") handler = h; return () => {}; }, registerCommand: (name, c) => { commands[name] = c; } });
 if (!handler) throw new Error("extension did not register a tool_call handler");
 
 const git = (cwd, ...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd, stdio: "pipe" }).toString();
@@ -793,6 +794,42 @@ if (WIN) {
 		await bash(`rm -rf ${fwd(short)}/.git`, main, true);
 		await check(`8.3 name ${short} -> write blocked`, call("write", { path: join(short, "a.txt"), content: "x" }, pi), true);
 	} else console.log(`(no 8.3 short name for ${main}; skipped)`);
+}
+
+// /git-guard: off by default (a launch without LETS_CODE_GIT_GUARD_ON), on and
+// off in the session, the launch's pi/* branch switch done when turned on,
+// the choice remembered in the state file
+{
+	console.log("# /git-guard");
+	const said = [];
+	const ctxAt = (cwd) => ({ cwd, hasUI: true, ui: { notify: (m) => said.push(m) } });
+	const state = join(work, "state.json");
+	process.env.LETS_CODE_METRICS_SAVE = state;
+	const cmd = commands["git-guard"];
+	await check("/git-guard registered", Promise.resolve(cmd && typeof cmd.handler === "function" ? undefined : { block: true, reason: "no command" }), false);
+	const m = repo("main");
+	await cmd.handler("off", ctxAt(m));
+	await check("off: a write off a pi/* branch passes", call("write", { path: join(m, "a.txt"), content: "x" }, m), false);
+	await check("off: remembered false", Promise.resolve(JSON.parse(readFileSync(state, "utf8")).gitGuard === false ? undefined : { block: true, reason: "not remembered" }), false);
+	await cmd.handler("on", ctxAt(m));
+	const br = git(m, "branch", "--show-current").trim();
+	await check(`on: switched to a pi/* branch (${br})`, Promise.resolve(br.startsWith("pi/") ? undefined : { block: true, reason: br }), false);
+	await check("on: remembered true", Promise.resolve(JSON.parse(readFileSync(state, "utf8")).gitGuard === true ? undefined : { block: true, reason: "not remembered" }), false);
+	await check("on: the message names the branch", Promise.resolve(said.at(-1)?.includes(br) ? undefined : { block: true, reason: said.at(-1) ?? "" }), false);
+	git(m, "switch", "-q", "main");
+	await check("on: a write off a pi/* branch is blocked", call("write", { path: join(m, "a.txt"), content: "x" }, m), true);
+	await check("on: reset --hard refused", call("bash", { command: "git reset --hard" }, m), true);
+	const n2 = repo("main");
+	git(n2, "switch", "-q", "-c", "pi/x");
+	await check("startBranch: already on pi/*", Promise.resolve(extMod.startBranch(n2) === "on pi/x" ? undefined : { block: true, reason: extMod.startBranch(n2) }), false);
+	await check("startBranch: not a repo", Promise.resolve(/not a git repo/.test(extMod.startBranch(work)) ? undefined : { block: true, reason: extMod.startBranch(work) }), false);
+	await cmd.handler("status", ctxAt(m));
+	await check("status: says on", Promise.resolve(/git guard: on/.test(said.at(-1) ?? "") ? undefined : { block: true, reason: said.at(-1) ?? "" }), false);
+	await cmd.handler("off", ctxAt(m));
+	git(m, "switch", "-q", "main");
+	await check("off again: the write passes", call("write", { path: join(m, "a.txt"), content: "x" }, m), false);
+	await cmd.handler("on", ctxAt(m));   // the rest of the run, if any, as before
+	git(m, "switch", "-q", "main");
 }
 
 console.log(`\n${n} cases, ${fail ? "FAILURES" : "all passed"}`);

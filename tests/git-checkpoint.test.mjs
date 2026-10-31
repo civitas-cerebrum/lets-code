@@ -21,7 +21,7 @@ writeFileSync(join(work, "gitguard.ts"), src);
 const { default: register } = await import(pathToFileURL(join(work, "gitguard.ts")).href);
 
 const handlers = {};
-register({ on: (ev, h) => { handlers[ev] = h; return () => {}; } });
+register({ on: (ev, h) => { handlers[ev] = h; return () => {}; }, registerCommand: () => {} });
 for (const ev of ["tool_call", "tool_result", "session_shutdown"]) if (!handlers[ev]) throw new Error(`no ${ev} handler`);
 
 const git = (cwd, ...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd, stdio: "pipe" }).toString();

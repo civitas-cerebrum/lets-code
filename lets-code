@@ -4481,8 +4481,11 @@ pi_write_gitguard_extension() {
     tmp="$(mktemp "${dir}/.git-guard.XXXXXX")"
     cat > "${tmp}" <<'TS'
 // Written by lets-code (git guard); regenerated on launch, edits are overwritten.
-// Active only in a pi launched by lets-code with the git guard on
-// (LETS_CODE_GIT_GUARD_ON=1). Checked before edit/write/bash:
+// Off by default. Active in a pi launched by lets-code with the git guard on
+// (LETS_CODE_GIT_GUARD_ON=1), or once /git-guard on is given in the session,
+// which does the launch's pi/* branch switch then and is remembered for later
+// launches (lets-code-state.json, key gitGuard; /git-guard off likewise).
+// Checked before edit/write/bash:
 //   1. the target repo's HEAD must be on a pi/* branch (a rebase/bisect/merge in
 //      progress on one counts), else only git inspection, finishing/aborting the
 //      operation, or a switch to a pi/* branch may run;
@@ -4498,11 +4501,12 @@ pi_write_gitguard_extension() {
 // system prompt or to tool results; a blocked call gets one short line.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile, execFileSync } from "node:child_process";
-import { appendFileSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-const ACTIVE = process.env.LETS_CODE_GIT_GUARD_ON === "1";
+// on at launch; /git-guard turns it on and off in the session
+let active = process.env.LETS_CODE_GIT_GUARD_ON === "1";
 const PREFIX = "pi/";
 const MAX_CMDS = 500;
 
@@ -5235,7 +5239,7 @@ function judgeBashOnce(cmd: string, cwd0: string): Verdict {
 //   recover:  git for-each-ref refs/pi-checkpoints/   git show <ref>:<path>
 //   off: LETS_CODE_GIT_CHECKPOINTS=0  keep: LETS_CODE_GIT_CHECKPOINT_KEEP (200)
 //   log of failures: .git/lets-code-checkpoint.log
-const CHECKPOINTS = ACTIVE && process.env.LETS_CODE_GIT_CHECKPOINTS !== "0";
+const checkpointsOn = () => active && process.env.LETS_CODE_GIT_CHECKPOINTS !== "0";
 const CP_DEBOUNCE = Number(process.env.LETS_CODE_GIT_CHECKPOINT_DEBOUNCE_MS ?? 3000);
 const CP_KEEP = Number(process.env.LETS_CODE_GIT_CHECKPOINT_KEEP ?? 200);
 const CP_MAX_FILE = Number(process.env.LETS_CODE_GIT_CHECKPOINT_MAX_FILE_MB ?? 20) * 2 ** 20;    // bigger untracked files are left out
@@ -5322,10 +5326,65 @@ async function flushCheckpoints(): Promise<void> {
 const targetDir = (toolName: string, input: Record<string, unknown>, cwd: string) =>
 	toolName === "edit" || toolName === "write" ? dirname(realPath(piPath(String(input.path ?? "")), cwd)) : realDir(cwd, cwd);
 
+// ================================================================ /git-guard
+// The /git-guard choice, remembered for later launches (a launch whose
+// GIT_GUARD is set, by the config, LETS_CODE_GIT_GUARD or a flag, goes by that).
+const statePath = () => lcwNative(process.env.LETS_CODE_METRICS_SAVE) || join(lcwNative(process.env.PI_CODING_AGENT_DIR) || join(lcwHome(), ".pi", "agent"), "lets-code-state.json");
+export function remember(on: boolean, file = statePath()): void {
+	let st: Record<string, unknown> = {};
+	try { st = JSON.parse(readFileSync(file, "utf8")) ?? {}; } catch { /* none yet */ }
+	st.gitGuard = on;
+	mkdirSync(dirname(file), { recursive: true });
+	const tmp = `${file}.${process.pid}.tmp`;
+	writeFileSync(tmp, JSON.stringify(st, null, 2) + "\n");
+	lcwRename(tmp, file);
+}
+// What the launch does in the repo at <cwd>: HEAD onto a fresh pi/* branch,
+// unless it is on one, or a merge/rebase/cherry-pick/revert/bisect is in
+// progress (which a switch would drop). Says what it did.
+export function startBranch(cwd: string, now = new Date()): string {
+	const g = (args: string[]) => { try { return String(execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"], timeout: 10_000, windowsHide: true })).trim(); } catch { return null; } };
+	if (g(["rev-parse", "--is-inside-work-tree"]) !== "true") return "not a git repo here; edits that reach a repo need its pi/* branch";
+	const head = g(["symbolic-ref", "--short", "-q", "HEAD"]) ?? "";
+	if (head.startsWith(PREFIX)) return `on ${head}`;
+	const gd = g(["rev-parse", "--git-path", "."]);
+	if (gd) for (const op of ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"]) {
+		if (existsSync(resolve(cwd, gd, op))) return `${op.split("_")[0]} in progress on '${head || "detached HEAD"}': finish or abort it, then switch to a pi/* branch; until then only git inspection runs`;
+	}
+	const p2 = (n: number) => String(n).padStart(2, "0");
+	const base = `${PREFIX}${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}-${p2(now.getHours())}${p2(now.getMinutes())}`;
+	let name = base;
+	for (let n = 2; g(["show-ref", "--verify", "-q", `refs/heads/${name}`]) !== null; n++) name = `${base}-${n}`;
+	// always a fresh branch: switching to an existing one can fail on a dirty file, creating never does
+	if (g(["switch", "-q", "-c", name]) === null) g(["checkout", "-q", "-b", name]);
+	const now2 = g(["symbolic-ref", "--short", "-q", "HEAD"]) ?? "";
+	return now2.startsWith(PREFIX) ? `switched to ${now2} (from ${head || "detached HEAD"})` : `could not create ${name} from '${head || "detached HEAD"}'; a pi/* branch is needed before edits`;
+}
+
 export default function (pi: ExtensionAPI) {
-	if (!ACTIVE) return;
+	const child = Number(process.env.LETS_CODE_SUBAGENT_DEPTH ?? "0") > 0;
+	pi.registerCommand("git-guard", {
+		description: "The git guard: on (this repo onto a pi/* branch now, edits off it and irreversible git commands blocked, checkpoints) or off; remembered for later launches",
+		getArgumentCompletions: (prefix: string) => ["on", "off", "status"].filter((a) => a.startsWith(prefix.trim())).map((a) => ({ value: a, label: a })),
+		handler: async (args: string, ctx: any) => {
+			const a = args.trim().toLowerCase();
+			const say = (m: string, t = "info") => (ctx?.hasUI && ctx.ui ? ctx.ui.notify(m, t) : console.error(`[lets-code] ${m}`));
+			if (a && !["on", "off", "status"].includes(a)) { say("usage: /git-guard [on|off|status]", "warning"); return; }
+			const pin = process.env.LETS_CODE_GIT_GUARD_PIN ?? "";
+			const pinNote = pin ? ` (GIT_GUARD=${pin} is set, so it decides at launch; this choice applies once that is removed)` : "";
+			if (!a || a === "status") { say(active ? `git guard: on${pinNote}` : `git guard: off — /git-guard on turns it on${pinNote}`); return; }
+			const on = a === "on";
+			let what = "";
+			if (on) { what = startBranch(ctx?.cwd ?? process.cwd()); active = true; process.env.LETS_CODE_GIT_GUARD_ON = "1"; }
+			else { active = false; delete process.env.LETS_CODE_GIT_GUARD_ON; }
+			let saved = "";
+			if (!child) { try { remember(on); saved = ", and for later launches"; } catch (e) { saved = ` (not remembered: ${e instanceof Error ? e.message : String(e)})`; } }
+			say(`git guard: ${on ? "on" : "off"} for this session${saved}${on && what ? ` — ${what}` : ""}${pinNote}`);
+		},
+	});
 
 	pi.on("tool_call", async (event, ctx) => {
+		if (!active) return undefined;
 		const input = event.input as Record<string, unknown>;
 		let verdict: Verdict;
 		switch (event.toolName) {
@@ -5340,17 +5399,18 @@ export default function (pi: ExtensionAPI) {
 				break;
 			default: return undefined;  // read-only tools and custom tools are never blocked
 		}
-		if (!verdict && CHECKPOINTS) await checkpointNow(targetDir(event.toolName, input, ctx.cwd));
+		if (!verdict && checkpointsOn()) await checkpointNow(targetDir(event.toolName, input, ctx.cwd));
 		return verdict;
 	});
 
-	if (CHECKPOINTS) {
+	{
 		pi.on("tool_result", async (event, ctx) => {
+			if (!checkpointsOn()) return undefined;
 			const name = (event as { toolName?: string }).toolName ?? "";
 			if (!event.isError && /^(edit|write|bash|powershell)$/.test(name)) checkpointSoon(targetDir(name, event.input as Record<string, unknown>, ctx.cwd));
 			return undefined;
 		});
-		pi.on("session_shutdown", async () => { await flushCheckpoints(); });
+		pi.on("session_shutdown", async () => { if (checkpointsOn()) await flushCheckpoints(); });
 	}
 }
 TS
@@ -21215,6 +21275,8 @@ esac
 GG_BRANCH=""
 git_guard_plan
 # the module is written either way: off, its /git-guard command turns it on
+# (GIT_GUARD set for this launch is named there: it decides the next one too)
+if [ -n "${GIT_GUARD}" ]; then LETS_CODE_GIT_GUARD_PIN="${GIT_GUARD}"; export LETS_CODE_GIT_GUARD_PIN; else unset LETS_CODE_GIT_GUARD_PIN; fi
 pi_write_gitguard_extension
 case "${GG_MODE}" in
     off) GG_DESC="git guard is off (${GG_NOTE})" ;;

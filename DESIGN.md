@@ -55,19 +55,52 @@ half of the output cap.
 
 ## Memory guard
 
-A pi extension watches free RAM and acts only on processes this session
-started: descendants of pi, or members of the `lets-code-<pid>.scope`
-systemd user scope the launcher creates. Thresholds: warn at 20 %, block
-non-cleanup bash at 10 %, stop the largest process at 5 % (SIGINT, SIGTERM,
-SIGKILL), kill it at 2.5 %.
+A pi extension acts only on processes this session started: descendants of
+pi, or members of the `lets-code-<pid>.scope` systemd user scope the
+launcher creates. Never pi, its node, Claude Code or tmux. Two rules.
 
-There are no memory caps. An earlier cap-based design (`MemoryMax`,
-`ulimit -d`) limited sessions even when the machine had RAM to spare, and
-taught three things: the default `OOMPolicy=stop` kills the whole scope
-after one OOM kill (so the scope sets `continue`); swap at a cap livelocks
-instead of triggering the OOM killer; a scope must not be created inside an
-already limited cgroup, because it would escape that limit. The extension
-defers to a machine-wide memguard daemon when `/run/memguard` exists.
+**Size limits.** Free-RAM thresholds come too late on a small machine: on
+an 8 GB Raspberry Pi two runaway `python3` processes reached 1.5 GB each in
+seconds, the box thrashed, systemd missed its 1-minute hardware watchdog
+and the board reset, twice, with the guard on. So once a second the
+extension reads `/proc/*/stat` (parent and RSS; argv only for the session's
+own processes) and SIGKILLs any process over `MEM_GUARD_PROCESS` (20 % of
+MemTotal), then the largest of the rest while together they are over
+`MEM_GUARD_SESSION` (45 %). 20 % lets a normal build or test suite run; two
+runaways stay under 45 % together; the machine keeps more than half. The
+same rule, run as a harness thread at 1.5 GB / 3.5 GB, held a 4.5-hour
+benchmark on that Pi with 12 kills and no reset. It kills at once: a process
+growing at hundreds of MB a second has no time for SIGINT. RSS from `/proc`
+is used because a cgroup cap does not work there: the user's systemd
+delegates only `cpu` and `pids`, and a `MemoryMax` on a user scope is
+silently ignored.
+
+A bare "Killed, exit 137" cost the agent ten minutes of re-running the same
+test, so the kill is told. The notice goes into the inbox of the session
+that owns the process (its nearest ancestor with a registry entry, so a
+subagent's process goes to the subagent), through the same files the
+`message` tool writes. It is marked `from.kind = "guard"`: it never starts
+a turn and steers a busy session, so the agent reads it right after the
+command that died, not after the turn. It says the command, pid, size,
+limit, and to bound the input instead of running it again. The same
+command for the same session is told once per 5 minutes and killed every
+time. Every kill and stop is a JSON line in
+`<agent dir>/lets-code-memory-guard.log` (moved to `.1` past 1 MB). Without
+sessions the notice comes with the next tool result.
+
+**Free RAM.** Thresholds: warn at 20 %, block non-cleanup bash at 10 %,
+stop the largest process at 5 % (SIGINT, SIGTERM, SIGKILL), kill it at
+2.5 %.
+
+An earlier cap-based design (`MemoryMax`, `ulimit -d`) limited sessions
+even when the machine had RAM to spare, and taught three things: the
+default `OOMPolicy=stop` kills the whole scope after one OOM kill (so the
+scope sets `continue`); swap at a cap livelocks instead of triggering the
+OOM killer; a scope must not be created inside an already limited cgroup,
+because it would escape that limit. The size limits are not caps: nothing
+is slowed or swapped, a process is killed and the agent told. The
+extension defers to a machine-wide memguard daemon when `/run/memguard`
+exists.
 
 ## Git guard
 
@@ -1039,7 +1072,9 @@ run accounting. Loops: each message carries `hops`. While a run that a
 message started or continued is going, whatever the session sends has
 that message's hops + 1, and a message with hops >= 1 never triggers a
 turn (pi appends it at the end of the current turn instead), even with
-auto-turn on, so A and B cannot keep waking each other. The receiver then
+auto-turn on, so A and B cannot keep waking each other. A notice from
+the memory guard (`from.kind` `guard`) never starts a turn and is a steer
+when busy, so it lands right after the tool call that died. The receiver then
 writes `<id>.ack` with `seenAt` and removes the message; an id once shown
 is kept in a per-process set, so a message whose file could not be
 removed is not shown twice. The sender polls for the acks until `wait`

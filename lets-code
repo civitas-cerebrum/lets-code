@@ -226,7 +226,10 @@ have_python() {  # true when python3 runs (on Windows: a real interpreter was fo
     if on_windows; then [ -n "${LC_PY:-}" ]; else command -v python3 >/dev/null 2>&1; fi
 }
 if on_windows; then
-    HOME="$(cygpath -m -- "${USERPROFILE:-${HOME}}")"; export HOME
+    # Git Bash's HOME is the profile directory unless set otherwise; a HOME
+    # set otherwise is kept (and the agent dir pi uses is then exported as
+    # PI_CODING_AGENT_DIR below, as pi's own home is always the profile)
+    HOME="$(cygpath -m -- "${HOME:-${USERPROFILE}}")"; export HOME
     TMPDIR="$(cygpath -m -- "${TEMP:-${TMP:-${TMPDIR:-/tmp}}}")"; export TMPDIR
     export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
     # the Git Bash pi and lets-code's modules run scripts with: Git's
@@ -286,7 +289,9 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lets-code"
 CONFIG_FILE="${CONFIG_DIR}/config"
 SETUP_FILE="${CONFIG_FILE}"          # where setup saves (a preset file under setup --preset)
 PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"   # pi's config home (overridable)
-if on_windows; then PI_AGENT_DIR="$(native_path "${PI_AGENT_DIR}")"; fi   # a /c/... value, as pi (native) reads it
+# on Windows in the form pi (native) reads, and told to pi: its home is the
+# profile directory, which a HOME set otherwise in Git Bash is not
+if on_windows; then PI_AGENT_DIR="$(native_path "${PI_AGENT_DIR}")"; PI_CODING_AGENT_DIR="${PI_AGENT_DIR}"; export PI_CODING_AGENT_DIR; fi
 PRESET_DIR="${CONFIG_DIR}/presets"
 PROVIDER_ID="lets-code"          # provider id we upsert into pi's files (lets-code-<preset> for a preset)
 DEFAULT_CONTEXT=128000
@@ -1231,6 +1236,18 @@ export const FEATURES = ["agent-guard", "backend", "claude", "claude-code", "cor
 
 export function moduleFile(dir: string, name: string): string | undefined {
 	return [join(dir, `${name}.ts`), join(dir, name, "index.ts")].find((f) => existsSync(f));
+}
+
+// On Windows lets-code starts pi with Git Bash's argument conversion off
+// (MSYS2_ARG_CONV_EXCL, MSYS_NO_PATHCONV), so a prompt like "/review" reaches
+// pi as typed. pi's own bash commands must convert as usual: the switches
+// are taken back here, before anything is started, to what they were.
+if (process.env.LETS_CODE_ARGCONV_SET === "1") {
+	delete process.env.MSYS2_ARG_CONV_EXCL;
+	delete process.env.MSYS_NO_PATHCONV;
+	if (process.env.LETS_CODE_ARGCONV_PRIOR_EXCL !== undefined) process.env.MSYS2_ARG_CONV_EXCL = process.env.LETS_CODE_ARGCONV_PRIOR_EXCL;
+	if (process.env.LETS_CODE_ARGCONV_PRIOR_NOPATHCONV !== undefined) process.env.MSYS_NO_PATHCONV = process.env.LETS_CODE_ARGCONV_PRIOR_NOPATHCONV;
+	for (const k of ["LETS_CODE_ARGCONV_SET", "LETS_CODE_ARGCONV_PRIOR_EXCL", "LETS_CODE_ARGCONV_PRIOR_NOPATHCONV"]) delete process.env[k];
 }
 
 export default async function (pi: ExtensionAPI) {

@@ -7846,7 +7846,6 @@ export class Child {
 		else if (r.exitCode === 0 && t.stopReason === "error") { r.exitCode = 1; r.stderr ||= String(t.error ?? "the model request failed"); }
 		if (t.stopped && !r.timedOut) r.stopped = true;
 		finishRun(rec, r, !r.timedOut && (t.stopped || t.aborting || t.stopReason === "aborted")); saveRun(rec, true); pruneRuns(rec.session); notifyRuns(rec);
-		import(pathToFileURL(join(HERE, "core-memory.ts")).href).then((cm) => cm.noteSubagentRun?.(rec)).catch(() => { /* no core memory here */ });
 		t.resolve(r);
 		if (!t.first) reportContinuation(rec, r);
 		if (!this.alive) return;
@@ -9974,7 +9973,6 @@ export async function advance(L: Ledger, deps: Deps): Promise<Ledger> {
 		await step(L, deps); saveLedger(L, (deps.now ?? Date.now)());
 		deps.progress?.(summary(L).split("\n").pop() ?? "");
 	}
-	if (L.status === "done" || L.status === "stopped") { try { const cm = await import(pathToFileURL(join(HERE, "core-memory.ts")).href); cm.noteFactoryRun?.(L); } catch { /* no core memory here */ } }
 	return L;
 }
 
@@ -10373,17 +10371,22 @@ pi_write_core_memory_extension() {
 // entries, a row each, that opens an entry with its pointers and actions;
 // edit opens the rendered file in the editor.
 //
-// Writers: the model (remember), the user through the model ("remember
-// that ...", in their words), and the harness without a model call: a
-// factory run that ends, a subagent or expert run that ends, and the
-// session itself (a pointer to its file and its first message), from the
-// top session only. An entry that matches an existing one (the same
-// session, run or factory pointer, or the same gist) updates it. The store
+// Writers: the model (remember) and the user through the model ("remember
+// that ...", in their words). The memory is for what outlasts the session:
+// decisions, non-obvious facts, preferences, where something lives. Never a
+// log of the work: what a session, subagent, expert or factory run did, a
+// task done, a section written, tests passing. That stays in the session
+// (its transcript, the run records), so the harness writes no entries of
+// its own and remember refuses kind "work". Entries an earlier version's
+// harness wrote (by "harness": a run or session that ended) move to the
+// archive when a store is opened. An entry that matches an existing one
+// (the same pointer, or the same gist) updates it. The store
 // is JSONL (memory.jsonl), the truth; memory.md next to it is rendered
 // from it for the user and read back by id when it is newer. Entries are
 // data, never instructions; one that looks like a token or key is refused.
 // Work and pointer entries untouched for ARCHIVE_DAYS move to archive.jsonl
-// (searched on request) so the live store stays small.
+// (searched on request) so the live store stays small; so does every entry
+// the harness wrote, whatever its age.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -10533,10 +10536,12 @@ export class Store {
 		return { entry, updated: false };
 	}
 	forget(id: string): Entry | undefined { const i = this.entries.findIndex((e) => e.id === id); return i < 0 ? undefined : this.entries.splice(i, 1)[0]; }
-	// work and pointer entries untouched for `days` go to the archive; true when any did
+	// work and pointer entries untouched for `days` go to the archive, and
+	// whatever the harness wrote (an earlier version's run and session
+	// entries: work logs, not memory); the number that did
 	archive(days: number, now = Date.now()): number {
 		const cut = now - days * 86_400_000;
-		const gone = this.entries.filter((e) => (e.kind === "work" || e.kind === "pointer") && e.u < cut);
+		const gone = this.entries.filter((e) => e.by === "harness" || ((e.kind === "work" || e.kind === "pointer") && e.u < cut));
 		if (!gone.length) return 0;
 		mkdirSync(this.dir, { recursive: true, mode: 0o700 });
 		appendFileSync(this.archiveFile, gone.map((e) => JSON.stringify(e)).join("\n") + "\n", { mode: 0o600 });
@@ -10621,13 +10626,13 @@ export function sectionText(p: Store | undefined, g: Store, headlines = HEADLINE
 	while (heads.length && est(heads.join("\n")) > HEADLINE_BUDGET) heads.pop();
 	return heads.length ? `${line}\nNewest:\n${heads.join("\n")}` : line;
 }
-export const TOOL_DESCRIPTION = "Core memory (project + global), kept out of context. search: entries by words, path, run or session id, date, kind, with their pointers. open: what a pointer names (file:line, run:<id>, factory:<id>, session file). remember: a decision, a non-obvious fact, where something lives, what was done, or what the user asks to keep (their words, by: user); never what the repo or git already shows, never a secret. forget: ref is the #id.";
+export const TOOL_DESCRIPTION = "Core memory (project + global), kept out of context. search: entries by words, path, run or session id, date, kind, with their pointers. open: what a pointer names (file:line, run:<id>, factory:<id>, session file). remember: only what a later session needs: a decision and why, a non-obvious fact, a preference, where something lives, or what the user asks to keep (their words, by: user). Never progress or completion (a task or subagent done, a section written, tests passing: the session keeps that), never what the repo or git already shows, never a secret. forget: ref is the #id.";
 export const TOOL_SNIPPET = "memory: core memory (project + global), searched on demand: search | open | remember | forget";
 export const PARAMS = Type.Object({
 	action: Type.String({ description: "search | open | remember | forget" }),
 	query: Type.Optional(Type.String()),
 	ref: Type.Optional(Type.String()),
-	kind: Type.Optional(Type.String({ description: "work|decision|fact|preference|pointer" })),
+	kind: Type.Optional(Type.String({ description: "decision|fact|preference|pointer" })),
 	gist: Type.Optional(Type.String()),
 	refs: Type.Optional(Type.Array(Type.String())),
 	scope: Type.Optional(Type.String({ description: "project|global|all|archive" })),
@@ -10697,57 +10702,6 @@ export function stores(cwd: string): Stores {
 }
 export function reset(): void { delete G[KEY]; }
 
-// ------------------------------------------------------------------ the harness writers
-// A factory run that ended: its ticket's title, the last verdict per stage,
-// the branch and worktree, the files it changed (pointers, so a later read
-// of one says so). Called by factory.ts; a child session writes nothing.
-export function noteFactoryRun(L: any, now = Date.now()): Entry | undefined {
-	if (!ACTIVE || DEPTH > 0 || !L || !(L.status === "done" || L.status === "stopped")) return;
-	const s = stores(L.repo || process.cwd()).project!;
-	const title = short(oneLine((String(L.ticket ?? "").split("\n").find((l: string) => l.trim()) ?? "").replace(/^#+\s*/, "")), 80) || "(untitled)";
-	const last = new Map<string, string>();
-	for (const e of L.entries ?? []) if (e.stage !== "intake" && e.verdict) last.set(e.stage, e.verdict);
-	const verdicts = [...last].map(([k, v]) => `${k} ${v}`).join(", ");
-	let files: string[] = [];
-	try { files = [...new Set([...readFileSync(join(L.dir, "artifacts", "change.patch"), "utf8").matchAll(/^diff --git a\/\S+ b\/(\S+)$/gm)].map((m) => m[1]))].slice(0, 6); } catch { /* no diff yet */ }
-	const gist = `factory ${L.id} ${L.status}${L.note ? ` (${short(oneLine(L.note), 60)})` : ""}: ${title}; branch ${L.branch}${verdicts ? `; ${verdicts}` : ""}${files.length ? `; ${files.length} files` : ""}`;
-	const r = s.upsert({ kind: "work", gist, refs: [`factory:${L.id}`, L.work, ...files.map((f) => join(L.repo, f))], by: "harness" }, now);
-	s.save(now);
-	return r.entry;
-}
-// A subagent or expert run that ended, from subagents.ts. A factory stage's
-// run is covered by the factory's own entry.
-export function noteSubagentRun(rec: any, now = Date.now()): Entry | undefined {
-	if (!ACTIVE || DEPTH > 0 || !rec || rec.status === "running" || rec.parent?.tool === "factory") return;
-	const s = stores(rec.cwd || process.cwd()).project!;
-	const record = join(agentDir(), "lets-code-runs", rec.session || "no-session", `${rec.id}.json`);
-	const gist = `${rec.kind ?? "subagent"} ${rec.agent} ${rec.status}: ${short(oneLine(String(rec.task ?? "")), 100)}`;
-	const r = s.upsert({ kind: "work", gist, refs: [`run:${rec.id}`, record, ...(rec.sessionFile ? [rec.sessionFile] : [])], by: "harness" }, now);
-	s.save(now);
-	return r.entry;
-}
-const isChildSession = (f: string) => /[\\/]lets-code-runs[\\/][^\\/]+[\\/][^\\/]+\.(pi|view)\.jsonl$/.test(f);
-// The session itself: a pointer to its file with its first message, written
-// after the first turn and refreshed when the session ends. The top session
-// only; a run's own session (opened from /subagents) is not this session's.
-export function noteSession(ctx: any, now = Date.now()): Entry | undefined {
-	if (!ACTIVE || DEPTH > 0) return;
-	const file = String(ctx?.sessionManager?.getSessionFile?.() ?? "");
-	if (!file || isChildSession(file)) return;
-	const entries: any[] = ctx.sessionManager.getEntries?.() ?? [];
-	let first = "", turns = 0;
-	for (const e of entries) {
-		if (e?.type !== "message" || e.message?.role !== "user") continue;
-		const text = messageText(e.message.content); if (!text || /^\[lets-code\]/.test(text)) continue;
-		turns++; if (!first) first = text;
-	}
-	if (!first) return;
-	const s = stores(ctx.cwd || process.cwd()).project!;
-	const r = s.upsert({ kind: "pointer", gist: `session (${turns} ${turns === 1 ? "prompt" : "prompts"}): ${short(first, 100)}`, refs: [file], by: "harness" }, now);
-	s.save(now);
-	return r.entry;
-}
-
 // ------------------------------------------------------------------ the hint
 // The file, run or session a tool call touched, as index keys: the path of
 // read, edit, write, grep, find and ls; the factory id of an expert call
@@ -10770,14 +10724,13 @@ const text = (t: string, isError = false) => ({ content: [{ type: "text" as cons
 export default function (pi: ExtensionAPI) {
 	if (!ACTIVE) return;
 	let section = "";          // this session's system-prompt section, once
-	let pointerWritten = false;
 	let cwd = process.cwd();
 	const current = () => stores(cwd);
 	const scopeOf = (st: Stores, s: string | undefined): Store[] => (s === "global" ? [st.global] : s === "all" || s === "archive" ? [st.project!, st.global] : [st.project!]);
 	const lines = (st: Stores, es: { s: Store; e: Entry }[]) => es.map(({ s, e }) => `${s.line(e)}${s.scope === "global" ? " (global)" : ""}`).join("\n");
 
 	pi.on("session_start", async (_e, ctx) => {
-		cwd = ctx.cwd; section = ""; pointerWritten = false; reset();
+		cwd = ctx.cwd; section = ""; reset();
 		const st = current();
 		const bad = (st.project?.bad ?? 0) + st.global.bad;
 		if (bad && ctx.hasUI) ctx.ui.notify(`core memory: ${bad} unreadable ${bad === 1 ? "line" : "lines"} skipped in ${bad === st.global.bad ? st.global.file : st.project!.file}; the rest is in use.`, "warning");
@@ -10790,8 +10743,6 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	});
 	// the session pointer: after the first turn, then refreshed at the end
-	pi.on("agent_end", async (_e: any, ctx: any) => { if (!pointerWritten) { try { pointerWritten = !!noteSession(ctx); } catch { /* never fatal */ } } });
-	pi.on("session_shutdown", async (event: any, ctx: any) => { if (event?.reason !== "reload" && pointerWritten) { try { noteSession(ctx); } catch { /* never fatal */ } } });
 	pi.on("tool_result", async (event: any) => {
 		if (event?.isError || event?.toolName === "memory") return undefined;
 		const keys = hintKeys(event?.toolName, event?.input, cwd); if (!keys.length) return undefined;
@@ -10830,6 +10781,7 @@ export default function (pi: ExtensionAPI) {
 				const gist = oneLine(String(params.gist ?? ""));
 				if (!gist) return text("Give the gist (one dense line) and, when there are any, refs (file:line, run:<id>, factory:<id>, session file).", true);
 				if (looksSecret(gist) || (params.refs ?? []).some((r: unknown) => looksSecret(String(r)))) return text("Not remembered: that looks like a token, key or password. Core memory keeps no secrets; describe where it lives instead.", true);
+				if (params.kind === "work") return text("Not remembered: core memory is for what outlasts the session (a decision, a non-obvious fact, a preference, where something lives), not a record of work done; the session keeps that. If something learned here matters later, remember that fact or decision instead.", true);
 				const s = params.scope === "global" ? st.global : st.project!;
 				const r = s.upsert({ kind: params.kind, gist, refs: Array.isArray(params.refs) ? params.refs.map(String) : [], by: params.by === "user" ? "user" : "model" }); s.save();
 				return text(`${r.updated ? "Updated" : "Remembered"}${s.scope === "global" ? " (global)" : ""}${gist.length > GIST_MAX ? `, gist cut to ${GIST_MAX} characters` : ""}:\n${s.line(r.entry)}`);
@@ -20111,8 +20063,8 @@ run_setup() {  # run_setup [full|granular]
             echo "EXPERTS=\"true\""
             echo ""
             echo "# Core memory: a long-term memory per project (and a global one) the"
-            echo "# agent searches on demand and adds to; lets-code adds pointers to"
-            echo "# factory runs, subagent runs and sessions. On by default; /memories in a"
+            echo "# agent searches on demand and adds decisions, facts, preferences and"
+            echo "# pointers to (never a log of work done). On by default; /memories in a"
             echo "# session. CORE_MEMORY_HEADLINES: how many of the newest entries (0..5)"
             echo "# a session starts with in its prompt."
             echo "CORE_MEMORY=\"${feat_core_memory}\""
@@ -20812,7 +20764,7 @@ SUBAGENTS="true"      # on by default; SUBAGENTS=false (config or env) or --no-s
 CLAUDE_CODE="auto"    # auto (default, also "true"): only where the project's .claude has hooks or workflows; all: also ~/.claude; false or --no-claude-code: off
 SANDBOX="false"
 EXPERTS="true"        # on by default (with subagents); EXPERTS=false or --no-experts turns the expert tool off
-CORE_MEMORY="true"    # on by default; CORE_MEMORY=false or --no-core-memory turns the memory tool and the harness's entries off
+CORE_MEMORY="true"    # on by default; CORE_MEMORY=false or --no-core-memory turns the memory tool off
 CORE_MEMORY_HEADLINES="3"   # the newest project entries a session starts with in its prompt (0..5)
 SESSIONS="true"       # on by default; SESSIONS=false or --no-sessions turns the message tool and /sessions off
 TERMUX=""; REA=""     # no longer switches: read only to migrate TERMUX=true / REA=true (see lc_migrate_expert_switches)
@@ -21539,8 +21491,8 @@ case "$(lc "${EXPERTS}")" in
             fi
         fi ;;
 esac
-# Core memory (on by default): the memory tool, the always-on line and the
-# harness's own entries; headlines are the newest entries a session starts with
+# Core memory (on by default): the memory tool and the always-on line;
+# headlines are the newest entries a session starts with
 unset LETS_CODE_CORE_MEMORY_ON LETS_CODE_CORE_MEMORY_HEADLINES
 case "$(lc "${CORE_MEMORY}")" in
     true|yes|1|on)

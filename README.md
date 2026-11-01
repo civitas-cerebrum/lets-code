@@ -141,7 +141,7 @@ it, not a Claude Code clone. Where it stands:
 | 🧭 **Modes** (optional; `/plan` always) | `plan` explores read-only and ends in a numbered plan you approve before it runs (`/plan` works without the mandate too), `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
 | 🤝 **Claude Code projects** (automatic) | A project whose `.claude/` has hooks or workflow scripts works as it is: its hooks, workflows, skills, `/commands`, agents, permission rules, MCP servers and CLAUDE.md, read live at each start. Your own `~/.claude` stays out unless `CLAUDE_CODE=all`. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
-| 🗂 **Core memory** (on by default) | A long-term memory per project and one across projects, kept out of context: the agent searches it with a `memory` tool when it needs to and adds what is worth keeping (decisions, non-obvious facts, where things live, what was done, and "remember that ..." in your words); lets-code itself adds a pointer when a factory run, a subagent run or a session ends, so the next session can open the ledger, the run record or the transcript instead of carrying it. Always on: one line saying the memory exists and how many entries it holds, plus the three newest headlines; a file the agent reads that an entry points at gets one line saying so. `/memories` lists them, a row each that opens into its pointers and actions; it edits, forgets and archives too. |
+| 🗂 **Core memory** (on by default) | A long-term memory per project and one across projects, kept out of context: the agent searches it with a `memory` tool when it needs to and adds what a later session needs (decisions, non-obvious facts, preferences, where things live, and "remember that ..." in your words), never a log of the work done: that stays in the session. Always on: one line saying the memory exists and how many entries it holds, plus the three newest headlines; a file the agent reads that an entry points at gets one line saying so. `/memories` lists them, a row each that opens into its pointers and actions; it edits, forgets and archives too. |
 | 📨 **Sessions and messages** (on by default) | Sessions on one machine can talk: a `message` tool sends a note to another session by pid, session id or name, to every other session in the same repository (`repo`), or between an orchestrator and its subagents (`parent`, `children`, an agent's name). The note shows up in the other session's conversation (never in the middle of a turn, and without starting one on its own unless you allow it or it comes from the session's own subagent), marked as coming from another session rather than from you, and the sender learns whether it was seen. `/sessions` and `lets-code sessions` list the live sessions; `lets-code message` sends from a shell. Local files only, no network. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
@@ -199,7 +199,7 @@ lets-code --git-guard             # the git guard for one launch (off by default
 | `--orchestration` | Start in orchestration mode (`--mandate orchestration`): the session plans and hands the work to experts, has every delivery reviewed, and changes no file itself (`--orchestrator`, the old name, still works) |
 | `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
 | `--experts` / `--no-experts` | The `expert` tool (on by default, needs subagents; see [Experts](#experts)) |
-| `--core-memory` / `--no-core-memory` | The `memory` tool and the entries lets-code adds on its own (on by default; see [Core memory](#core-memory)) |
+| `--core-memory` / `--no-core-memory` | The `memory` tool (on by default; see [Core memory](#core-memory)) |
 | `--sessions` / `--no-sessions` | The `message` tool and `/sessions` (on by default; see [Sessions and messages](#sessions-and-messages)) |
 | `--claude-code` / `--no-claude-code` | The Claude Code adapter with your `~/.claude` too (`CLAUDE_CODE=all`) / off; by default it switches on by itself where needed (see [Claude Code projects](#claude-code-projects)) |
 | `--sandbox` / `--no-sandbox` | The OS sandbox for bash |
@@ -410,7 +410,7 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS` | On by default; `false` turns the `subagent` tool off. |
 | `EXPERTS` | On by default (with subagents); `false` turns the `expert` tool off and lists no expert. Each expert is enabled in a session, not here (see [Experts](#experts)); `TERMUX=true` / `REA=true` from earlier versions are migrated once and then ignored. |
-| `CORE_MEMORY`, `CORE_MEMORY_HEADLINES` | On by default; `false` turns the `memory` tool and lets-code's own entries off. `CORE_MEMORY_HEADLINES` (0..5, default 3) is how many of the newest entries a session starts with in its prompt; a subagent's session starts with none (see [Core memory](#core-memory)). |
+| `CORE_MEMORY`, `CORE_MEMORY_HEADLINES` | On by default; `false` turns the `memory` tool off. `CORE_MEMORY_HEADLINES` (0..5, default 3) is how many of the newest entries a session starts with in its prompt; a subagent's session starts with none (see [Core memory](#core-memory)). |
 | `SESSIONS` | On by default; `false` turns the `message` tool and `/sessions` off (see [Sessions and messages](#sessions-and-messages)). |
 | `SANDBOX` | `true` turns the feature on. |
 | `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with the latest request's cache hit rate, cost, and the latest response's time to first token and output tokens (two lines that keep their height: `↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012` and `⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out`; on a narrow terminal the cache shortens to its hit rate, then cost, cache, output and TTFT drop; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi, and the size picked there is remembered (`~/.pi/agent/lets-code-state.json`): later sessions start in it, ahead of `METRICS`; `--metrics` / `--no-metrics` / `LETS_CODE_METRICS` decide for one launch without changing it. tok/s counts from each response's first streamed token, so prompt processing is not in it. The footer follows the session on screen: in a subagent's session (`/subagents`) its numbers, model and thinking level are that subagent's own (the minimal size starts with its name and level, `scout • low · ↑10k ↓3.0k · …`), and back in the main session they are the main session's again. |
@@ -1007,28 +1007,33 @@ window: one per project (keyed by the git root, a worktree by its main
 checkout's, or the working folder without one) and one global, under
 `~/.pi/agent/core-memory/` next to pi's
 own sessions, since entries point at local session files and run records.
-An entry is one line: a date, a kind (`work`, `decision`, `fact`,
-`preference`, `pointer`), a short gist and its pointers (`file:line`,
-`run:<id>`, `factory:<id>`, a session file):
+An entry is one line: a date, a kind (`decision`, `fact`, `preference`,
+`pointer`), a short gist and its pointers (`file:line`, `run:<id>`,
+`factory:<id>`, a session file):
 
 ```
-- 2026-10-21 work #m4k2 factory m4k2 done: Add a login form; branch factory/m4k2; build DONE, expert-review APPROVE, judge ACCEPT; 3 files — factory:m4k2, ~/.cache/wt-m4k2, src/login.ts, src/login.test.ts
 - 2026-10-21 decision #m4k9 sessions stay on port 8796 in tests; 8795 serves the phone — tests/claude.test.mjs:12
-- 2026-10-22 pointer #m5a1 session (14 prompts): add core memory to lets-code — ~/.pi/agent/sessions/--home-ay-github-lets-code--/2026-10-22T09-12-03Z_….jsonl
+- 2026-10-22 preference #m5a1 the user wants commit messages as one plain sentence, no prefixes
+- 2026-10-23 pointer #m6c3 the staging deploy config lives outside the repo — ~/ops/staging/deploy.yaml
 ```
 
-Three writers. The model, through the `memory` tool (`remember`), when it
-judges something worth keeping: decisions, non-obvious facts, where things
-live, what was done; never what the repo or git history already shows,
-never a secret (an entry that looks like a token, key or password is
-refused). You, by asking: "remember that the staging box is slow on
-Mondays" is written with your words as the gist and marked as yours. And
-lets-code itself, without a model call: a software factory run that
-finishes or stops (title, branch, the last verdict per stage, the files it
-changed), a subagent or expert run that ends (agent, task, the run record
-and its session), and the session itself (its file and your first
-message), from the main session only. An entry that matches an existing one
-(the same run, factory or session pointer, or the same gist) updates it.
+It holds what a later session needs: decisions and why, non-obvious facts,
+preferences, where something lives. It is not a log of the work: what a
+session, a subagent, an expert or a factory run did, a task done, a
+section written, tests passing. That stays with the session (its
+transcript, the run records under `~/.pi/agent/lets-code-runs/`), so
+lets-code writes no entries of its own.
+
+Two writers. The model, through the `memory` tool (`remember`), when it
+judges something worth keeping; never progress or completion, never what
+the repo or git history already shows, never a secret (an entry that looks
+like a token, key or password is refused, and so is a `work` entry). You,
+by asking: "remember that the staging box is slow on Mondays" is written
+with your words as the gist and marked as yours. An entry that matches an
+existing one (the same pointer, or the same gist) updates it. Entries an
+earlier lets-code wrote on its own (a run or session that ended) move to
+the archive the next time the store is opened, still found by
+`memory search` with `scope: archive`.
 
 What the model carries is one line per turn: that the memory exists, how
 many entries it holds and when the last was written, and that the tool

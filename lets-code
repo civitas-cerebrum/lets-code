@@ -1576,6 +1576,8 @@ mem_guard_plan() {  # sets MG_MODE (scope|process|off) and MG_NOTE
 mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
     # exec replaces the shell, so the EXIT trap never runs: drop the probe file now
     rm -f "${PROBE_OUT:-}"
+    # RPC mode: pi gets the real stdout back (lets-code's own lines went to stderr)
+    if [ -n "${LC_RPC_OUT:-}" ]; then exec 1>&3 3>&-; fi
     # a lets-code started from inside another session is its own run
     unset LETS_CODE_PI LETS_CODE_RUN
     if [ "${MG_MODE}" != off ]; then
@@ -20944,6 +20946,23 @@ lc_print_mode() {
     return "${want}"
 }
 if lc_print_mode; then LC_LOG_FD=2; fi
+# pi's RPC mode (--mode rpc): its stdout is the protocol a client reads (an
+# app driving pi, such as an Even bridge), so nothing of lets-code's may reach
+# it: until pi starts, the script's stdout is its stderr (fd 3 keeps the
+# real one, handed back to pi in mem_guard_exec)
+lc_rpc_mode() {
+    local a i=0
+    for a in "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"; do
+        i=$((i + 1))
+        case "${a}" in
+            --mode=rpc) return 0 ;;
+            --mode) [ "${PASSTHROUGH[${i}]:-}" = rpc ] && return 0 ;;
+        esac
+    done
+    return 1
+}
+LC_RPC_OUT=""
+if lc_rpc_mode; then LC_LOG_FD=2; exec 3>&1 1>&2; LC_RPC_OUT=1; fi
 
 harness_gate "${HARNESS}"
 

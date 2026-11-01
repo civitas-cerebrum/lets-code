@@ -996,7 +996,7 @@ the judge and the suite, while the user switched into the running stages
 in place and back.
 
 **Core memory.** A memory the harness keeps so a session can find what
-earlier ones did without carrying it: one store per project (the nearest
+earlier ones decided and learned without carrying it: one store per project (the nearest
 `.git` up from cwd; a worktree's `.git` is a file naming the main
 repository, read without a subprocess, so a factory run's worktree and
 the user's checkout share one memory and the worktree's paths are read
@@ -1037,22 +1037,34 @@ and esc backs out one level, so the whole thing is two loops over
 lookup in the index after `read`, `edit`, `write`, `grep`, `find`, `ls`
 (their `path`) and an `expert` call that resumes a factory run: a hit adds
 one trailing line to the tool result naming the count, not the entries.
-`bash` is not lexed for paths. Writers: the model's `remember` (with
-`by: user` when the user asked, their words as the gist), and the harness
-without a model call: `factory.ts` after `advance` ends done or stopped,
-`subagents.ts` when a run finishes (a factory stage's run is left to the
-factory's entry), and the module itself after the first turn and at
-`session_shutdown` for the session pointer; both other modules reach it
-through a guarded dynamic import, as factory imports subagents, so a build
-without the module loses nothing. Dedupe is by identity pointer (a run,
-factory or session file) or by normalised gist, updating in place. Work
+`bash` is not lexed for paths. The memory holds what is significant
+later: decisions, non-obvious facts, preferences, where something lives,
+and a significant goal reached or a piece of work wrapped up. Never the
+steps on the way. A first design had the harness write an entry, without
+a model call, whenever a factory run, a subagent or expert run, or a
+session ended. On real work that filled the store with steps: a
+10,000-word essay written by ten subagents left ten "subagent general
+done: Write section N" entries, crowding out the decisions and
+preferences the memory is for, while the same facts already live in the
+run records and session files. Significance needs judgement, so the
+writers are now: the model's `remember` (with `by: user` when the user
+asked, their words as the gist), steered by the tool's description and by
+the always-on line, which asks the top session for decisions, facts,
+preferences and, once a request is wrapped up, its result if significant,
+never the steps; and the harness alone where work is wrapped up with no
+model in the loop: `factory.ts` when `advance` ends done (planned, built,
+reviewed, judged, committed; a stopped run is not wrapped up). A child
+session's task is a step of its parent's: its line says so and its
+`remember` refuses `kind: work` (the parent records the result). The step
+entries an earlier version's harness wrote (a `run:` pointer, a session
+pointer, a stopped factory run) move to `archive.jsonl` when a store is
+opened, whatever their age, so nothing is deleted. Dedupe is by identity pointer (a
+run, factory or session file) or by normalised gist, updating in place. Work
 and pointer entries untouched for 120 days move to `archive.jsonl` at load
 (decisions, facts and preferences stay; searched with `archive: true`). A
-child session (`LETS_CODE_SUBAGENT_DEPTH > 0`) reads and may `remember`
-but writes no pointers. Not done: the agent guard's wrap-up moment does not
-write (the session pointer after the first turn and at shutdown covers
-it, and a nudge turn is not a better moment than the end), and entries are
-not scored by priority (dates and kinds are enough to archive by).
+child session (`LETS_CODE_SUBAGENT_DEPTH > 0`) reads and may `remember` a
+decision, a fact or a preference. Not done: entries are not scored by priority (dates
+and kinds are enough to archive by).
 
 **Sessions and messages (#79).** Two sessions in one repository had no
 way to tell each other anything: one's edits were reverted around the

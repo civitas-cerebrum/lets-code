@@ -43,6 +43,15 @@ model on your own hardware:
   local proxy sidecar, usable from another machine with a Claude Code token
 - the Claude Code adapter: a project's `.claude/` hooks, commands, skills,
   agents, permission rules, MCP servers and workflows, read at each start
+- core memory: per project and global, searched on demand with the
+  `memory` tool and `/memories`; it keeps what is significant later
+  (decisions, non-obvious facts, preferences, where things live, a goal
+  reached or work wrapped up), never the steps on the way. lets-code no
+  longer adds an entry for every subagent, expert run or session that ended,
+  only for a factory run that ends done; a subagent's `remember` refuses a
+  `work` entry (its task is a step of the parent's); the step entries
+  lets-code wrote before move to the archive the next time the store is
+  opened
 - presets for more backends, an OS sandbox, MCP import, a footer with
   tokens, speed and cost, a session tag for proxy logs, `update`
 - sessions and messages (#79): a `message` tool, `/sessions`, `lets-code

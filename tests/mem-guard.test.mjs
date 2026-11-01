@@ -417,18 +417,18 @@ const fresh = () => { resetInbox(); register(process.pid); rmSync(log, { force: 
 	await stopGuard(h);
 }
 
-// --- the watcher: suggests at 85 %, once per crossing, kills nothing
+// --- the watcher: asks at 85 % (here the answer is "Not now"), once per crossing, kills nothing
 {
 	fresh();
-	const notes = [];
-	const h = await load({}, { hasUI: true, ui: { notify: (t, lv) => notes.push([t, lv]) } });
+	const notes = [], asks = [];
+	const h = await load({}, { hasUI: true, ui: { notify: (t, lv) => notes.push([t, lv]), select: async (q, opts) => { asks.push([q, opts]); return opts[1]; } } });
 	const pid = await startHog(30);
 	setMem(totalFor(pid, 0.6), 0.84);
 	await sleep(300);
-	check("watcher: nothing at 84 %", [notes.length, inbox(process.pid).length], [0, 0]);
+	check("watcher: nothing at 84 %", [asks.length, notes.length, inbox(process.pid).length], [0, 0, 0]);
 	setMem(totalFor(pid, 0.6), 0.85);
-	check("watcher: at 85 % the UI is told", await until(() => notes.length === 1), true);
-	check("watcher: the notice suggests /memguard on", /^RAM 85 % used\. \/memguard on turns on the memory guard/.test(notes[0]?.[0] ?? "") && notes[0]?.[1] === "warning", true);
+	check("watcher: at 85 % the user is asked", await until(() => asks.length === 1), true);
+	check("watcher: the question: turn the guard on, or not now", [/^RAM 85 % used\. Turn on the memory guard for this session\?/.test(asks[0]?.[0] ?? ""), asks[0]?.[1]], [true, ["Turn on the memory guard", "Not now"]]);
 	await until(() => inbox(process.pid).length === 1);
 	const m = inbox(process.pid)[0] ?? {};
 	check("watcher: the agent's inbox has it, from the watcher", [m.from?.kind, m.from?.name, /RAM is 85 % used .* Memory is tight/.test(m.text ?? "")], ["guard", "lets-code memory watcher", true]);
@@ -436,17 +436,19 @@ const fresh = () => { resetInbox(); register(process.pid); rmSync(log, { force: 
 	setMem(totalFor(pid, 0.6), 0.95); await sleep(200);
 	setMem(totalFor(pid, 0.6), 0.80); await sleep(200);
 	setMem(totalFor(pid, 0.6), 0.90); await sleep(200);
-	check("watcher: once per crossing (no reset above 75 %)", [notes.length, inbox(process.pid).length], [1, 1]);
+	check("watcher: once per crossing (no reset above 75 %)", [asks.length, inbox(process.pid).length], [1, 1]);
+	let st = ""; await h.commands.memguard.handler("", { hasUI: true, ui: { notify: (t) => { st = t; } } });
+	check("watcher: \"Not now\" leaves the guard off", /^memory guard off/.test(st), true);
 	setMem(totalFor(pid, 0.6), 0.74); await sleep(200);
 	setMem(totalFor(pid, 0.6), 0.86);
-	check("watcher: below 75 % and back over 85 %: told again", await until(() => notes.length === 2 && inbox(process.pid).length === 2), true);
+	check("watcher: below 75 % and back over 85 %: asked again", await until(() => asks.length === 2 && inbox(process.pid).length === 2), true);
 	check("watcher: still kills nothing", alive(pid), true);
 	check("log: watcher notices logged", logLines().filter((l) => l.event === "watch").map((l) => [l.guard, l.told]), [[false, "inbox"], [false, "inbox"]]);
 	await h.commands.memguard.handler("on", { hasUI: true, ui: { notify: () => {} } });
 	setMem(totalFor(pid, 0.3), 0.70); await sleep(200);
 	setMem(totalFor(pid, 0.3), 0.88);
-	check("watcher: with the guard on, the notice says it is on", await until(() => notes.length === 3), true);
-	check("watcher: ... in the UI and to the agent", [notes[2]?.[0], /The memory guard is on/.test(inbox(process.pid).at(-1)?.text ?? "")], ["RAM 88 % used; the memory guard is on.", true]);
+	check("watcher: with the guard on, a notice says it is on (no question)", await until(() => notes.length === 1), true);
+	check("watcher: ... in the UI and to the agent", [notes[0]?.[0], asks.length, /The memory guard is on/.test(inbox(process.pid).at(-1)?.text ?? "")], ["RAM 88 % used; the memory guard is on.", 2, true]);
 	await stopGuard(h);
 }
 {

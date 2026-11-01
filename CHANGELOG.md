@@ -44,12 +44,14 @@ model on your own hardware:
 - the Claude Code adapter: a project's `.claude/` hooks, commands, skills,
   agents, permission rules, MCP servers and workflows, read at each start
 - core memory: per project and global, searched on demand with the
-  `memory` tool and `/memories`; it keeps what a later session needs
-  (decisions, non-obvious facts, preferences, where things live), never a
-  log of work done. lets-code writes no entries of its own any more (a
-  subagent, expert, factory run or session that ended used to add one each)
-  and `remember` refuses a `work` entry; entries lets-code wrote before move
-  to the archive the next time the store is opened
+  `memory` tool and `/memories`; it keeps what is significant later
+  (decisions, non-obvious facts, preferences, where things live, a goal
+  reached or work wrapped up), never the steps on the way. lets-code no
+  longer adds an entry for every subagent, expert run or session that ended,
+  only for a factory run that ends done; a subagent's `remember` refuses a
+  `work` entry (its task is a step of the parent's); the step entries
+  lets-code wrote before move to the archive the next time the store is
+  opened
 - presets for more backends, an OS sandbox, MCP import, a footer with
   tokens, speed and cost, a session tag for proxy logs, `update`
 - sessions and messages (#79): a `message` tool, `/sessions`, `lets-code

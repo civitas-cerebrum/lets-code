@@ -332,47 +332,59 @@ const textOf = (r) => r.content.map((c) => c.text).join("\n");
 	t("  as a warning", h.notices[0]?.[1], "warning");
 }
 
-// --- no work logs: core memory keeps what outlasts the session (decisions,
-// facts, preferences, where things live), never a record of work done, so
-// the harness writes no entries of its own and remember refuses kind "work"
+// --- significant entries only: decisions, facts, preferences, and work once
+// it is wrapped up; never the steps on the way (a subagent's or expert's
+// run, a section written, a session that ended)
 {
 	const h = await load();
 	const r = repo("harness");
 	await h.handlers.session_start({}, h.ctx(r));
-	t("no harness writers left", [h.mod.noteFactoryRun, h.mod.noteSubagentRun, h.mod.noteSession], [undefined, undefined, undefined]);
+	t("no step writers: subagent runs and sessions write nothing", [typeof h.mod.noteSubagentRun, typeof h.mod.noteSession, typeof h.mod.noteFactoryRun], ["undefined", "undefined", "function"]);
 	const st = h.mod.stores(r);
-	const before = existsSync(st.project.file) ? readFileSync(st.project.file, "utf8") : "";
 	// a session's turns and its end write nothing
 	const file = join(work, "main.jsonl");
 	const entries = [{ type: "message", message: { role: "user", content: [{ type: "text", text: "write a 10,000 word essay on horror films" }] } }, { type: "message", message: { role: "assistant", content: "ok" } }];
 	await h.handlers.agent_end?.({}, h.ctx(r, { file, entries }));
 	await h.handlers.session_shutdown?.({ reason: "quit" }, h.ctx(r, { file, entries }));
-	t("a session's turns and its end: no entry", [st.project.entries.length, existsSync(st.project.file) ? readFileSync(st.project.file, "utf8") : ""], [0, before]);
-	// the model: a record of work done is refused, with what to keep instead
-	const w = await h.run(r, { action: "remember", kind: "work", gist: "subagent general done: wrote section 3 of the essay" });
-	t("remember kind work: refused", [w.isError, st.project.entries.length], [true, 0]);
-	has("  says what core memory is for", textOf(w), "not a record of work done");
-	t("the tool asks for what outlasts the session", [/only what a later session needs/.test(h.mod.TOOL_DESCRIPTION), /Never progress or completion/.test(h.mod.TOOL_DESCRIPTION), /what was done/.test(h.mod.TOOL_DESCRIPTION)], [true, true, false]);
-	t("the kinds offered leave work out", JSON.stringify(h.mod.PARAMS).includes("decision|fact|preference|pointer") && !JSON.stringify(h.mod.PARAMS).includes("work|"), true);
-	const d = await h.run(r, { action: "remember", kind: "decision", gist: "essays are drafted section by section, then merged in one pass", refs: ["factory:k3f"] });
-	t("remember a decision: kept", [d.isError ?? false, st.project.entries.length, st.project.entries[0]?.by], [false, 1, "model"]);
+	t("a session's turns and its end: no entry", st.project.entries.length, 0);
+	// the factory: wrapped up when done; a stopped or running run is not
+	const fdir = join(agentDir, "lets-code-factory", "k3f"); mkdirSync(join(fdir, "artifacts"), { recursive: true });
+	writeFileSync(join(fdir, "artifacts", "change.patch"), "diff --git a/src/a.ts b/src/a.ts\n--- a\n+++ b\ndiff --git a/src/new.ts b/src/new.ts\n");
+	const L = { v: 1, id: "k3f", repo: r, work: join(work, "wt-k3f"), branch: "factory/k3f", dir: fdir, ticket: "# Add a login form\n\nDetails.", status: "done", note: "", entries: [{ stage: "intake", verdict: "2 criteria" }, { stage: "build", verdict: "DONE" }, { stage: "expert-review", verdict: "REVISE" }, { stage: "build", round: 1, verdict: "DONE" }, { stage: "expert-review", round: 1, verdict: "APPROVE" }, { stage: "judge", verdict: "ACCEPT" }] };
+	t("factory: a running run writes nothing", h.mod.noteFactoryRun({ ...L, status: "running" }), undefined);
+	t("factory: a stopped run is not wrapped up: nothing", h.mod.noteFactoryRun({ ...L, status: "stopped", note: "the user stopped it" }), undefined);
+	const e = h.mod.noteFactoryRun(L);
+	t("factory done: title, branch, the last verdict per stage, files", e.gist, "factory k3f done: Add a login form; branch factory/k3f; build DONE, expert-review APPROVE, judge ACCEPT; 2 files");
+	t("factory done: pointers to the run, the worktree and the files", e.refs, ["factory:k3f", join(work, "wt-k3f"), P(`${r}/src/a.ts`), P(`${r}/src/new.ts`)]);
+	t("factory done: by the harness, kind work, on disk", [e.by, e.kind, readFileSync(st.project.file, "utf8").includes('"factory:k3f"')], ["harness", "work", true]);
+	// the model: a wrapped-up result is kept (kind work), and a decision
+	const w = await h.run(r, { action: "remember", kind: "work", gist: "the 10,000-word horror film essay is finished: essay.md (10 sections, merged)", refs: ["essay.md"] });
+	t("remember kind work in the main session: kept", [w.isError ?? false, st.project.entries.at(-1)?.kind], [false, "work"]);
+	const d = await h.run(r, { action: "remember", kind: "decision", gist: "essays are drafted section by section, then merged in one pass" });
+	t("remember a decision: kept", [d.isError ?? false, st.project.entries.at(-1)?.by], [false, "model"]);
+	t("the tool asks for what is significant, not the steps", [/what is significant later/.test(h.mod.TOOL_DESCRIPTION), /a significant goal reached or work wrapped up/.test(h.mod.TOOL_DESCRIPTION), /Never the steps/.test(h.mod.TOOL_DESCRIPTION), /what was done/.test(h.mod.TOOL_DESCRIPTION)], [true, true, true, false]);
+	t("the kind work is offered for wrapped-up work", JSON.stringify(h.mod.PARAMS).includes("work (work: a significant goal reached or work wrapped up)"), true);
 	// the hint for an expert call that resumes a factory run an entry points at
 	const out = await h.handlers.tool_result({ toolName: "expert", input: { action: "run", name: "software-factory", brief: { resume: "k3f" } }, content: [{ type: "text", text: "..." }], isError: false });
 	t("hint: an expert call resuming a factory run", out?.content?.[1]?.text, "core memory: 1 entry mentions this (memory search factory:k3f)");
-	// the section after an entry exists, from a fresh session
+	// the section after entries exist, from a fresh session
 	const h2 = await load();
 	await h2.handlers.session_start({}, h2.ctx(r));
 	const sec = { systemPromptOptions: { sections: {} } };
 	await h2.handlers.before_agent_start(sec);
 	const text = sec.systemPromptOptions.sections.lets_code_core_memory;
-	has("the next session's line counts them", text, "1 entry for this project");
+	has("the next session's line counts them", text, "3 entries for this project");
+	has("the line asks for significant entries, never the steps", text, "once a request is wrapped up its result if significant, never the steps");
 	has("the next session's headlines", text, "Newest:\n- ");
+	t("the headlines are the three newest, one line each", text.split("\n").length, 5);
 	t("the section stays as it was for the session", (await h2.run(r, { action: "remember", gist: "later" }), await h2.handlers.before_agent_start(sec), sec.systemPromptOptions.sections.lets_code_core_memory === text), true);
 	t("headlines off by the setting", await (async () => { const h3 = await load({ LETS_CODE_CORE_MEMORY_HEADLINES: "0" }); await h3.handlers.session_start({}, h3.ctx(r)); const s3 = { systemPromptOptions: { sections: {} } }; await h3.handlers.before_agent_start(s3); return s3.systemPromptOptions.sections.lets_code_core_memory.split("\n").length; })(), 1);
 }
 
-// --- entries an earlier version's harness wrote (run and session logs) move
-// to the archive when the store is opened; the model's and the user's stay
+// --- the step entries an earlier version's harness wrote (subagent and
+// expert runs, session pointers, stopped factory runs) move to the archive
+// when the store is opened; a factory run that ended done, and the model's
+// and the user's entries, stay
 {
 	const r = repo("legacy");
 	const h0 = await load();
@@ -380,17 +392,19 @@ const textOf = (r) => r.content.map((c) => c.text).join("\n");
 	mkdirSync(dir, { recursive: true });
 	const now = Date.now();
 	writeFileSync(join(dir, "memory.jsonl"), [
-		{ id: "aa01", t: now - 5000, u: now - 5000, kind: "work", gist: "subagent general done: Write section 1 of a 10,000-word essay", refs: ["run:r1"], by: "harness", n: 1 },
-		{ id: "aa02", t: now - 4000, u: now - 4000, kind: "pointer", gist: "session (11 prompts): system diagnosis", refs: ["/s/a.jsonl"], by: "harness", n: 1 },
+		{ id: "aa01", t: now - 6000, u: now - 6000, kind: "work", gist: "subagent general done: Write section 1 of a 10,000-word essay", refs: ["run:r1"], by: "harness", n: 1 },
+		{ id: "aa02", t: now - 5000, u: now - 5000, kind: "pointer", gist: "session (11 prompts): system diagnosis", refs: ["/s/a.jsonl"], by: "harness", n: 1 },
+		{ id: "aa05", t: now - 4500, u: now - 4500, kind: "work", gist: "factory z9 stopped (the user stopped it): Add search; branch factory/z9", refs: ["factory:z9"], by: "harness", n: 1 },
+		{ id: "aa06", t: now - 4000, u: now - 4000, kind: "work", gist: "factory k1 done: Add a login form; branch factory/k1", refs: ["factory:k1"], by: "harness", n: 1 },
 		{ id: "aa03", t: now - 3000, u: now - 3000, kind: "decision", gist: "the essay keeps one voice across sections", refs: [], by: "model", n: 1 },
 		{ id: "aa04", t: now - 2000, u: now - 2000, kind: "preference", gist: "the user wants no bullet lists in essays", refs: [], by: "user", n: 1 },
 	].map((e) => JSON.stringify(e)).join("\n") + "\n");
 	const h = await load();
 	await h.handlers.session_start({}, h.ctx(r));
 	const st = h.mod.stores(r);
-	t("legacy: the harness's entries are archived, the rest stay", st.project.entries.map((e) => e.id).sort(), ["aa03", "aa04"]);
-	t("legacy: counted as archived", st.project.archived, 2);
-	t("legacy: on disk too", readFileSync(st.project.file, "utf8").includes("aa01"), false);
+	t("legacy: the steps are archived; a finished factory run and the rest stay", st.project.entries.map((e) => e.id).sort(), ["aa03", "aa04", "aa06"]);
+	t("legacy: counted as archived", st.project.archived, 3);
+	t("legacy: on disk too", ["aa01", "aa02", "aa05"].some((id) => readFileSync(st.project.file, "utf8").includes(id)), false);
 	has("legacy: still found in the archive", textOf(await h.run(r, { action: "search", query: "section 1", scope: "archive" })), "Write section 1");
 }
 
@@ -408,6 +422,11 @@ const textOf = (r) => r.content.map((c) => c.text).join("\n");
 	await h.handlers.agent_end?.({}, h.ctx(r, { file, entries: [{ type: "message", message: { role: "user", content: "child task" } }] }));
 	await h.handlers.session_shutdown?.({ reason: "quit" }, h.ctx(r, { file, entries: [{ type: "message", message: { role: "user", content: "child task" } }] }));
 	t("child: its turns and its end write nothing", readFileSync(h.mod.stores(r).project.file, "utf8") === before, true);
+	t("child: no factory entry either", h.mod.noteFactoryRun({ id: "z", status: "done", repo: r, entries: [], ticket: "x" }), undefined);
+	const cw = await h.run(r, { action: "remember", kind: "work", gist: "subagent done: wrote section 2" });
+	t("child: remember kind work is refused (a step of the parent's work)", [cw.isError, readFileSync(h.mod.stores(r).project.file, "utf8") === before], [true, true]);
+	has("  says the parent records the result", textOf(cw), "the parent records the result once the work is wrapped up");
+	has("child: its line says its task is a step", sec.systemPromptOptions.sections.lets_code_core_memory, "your task is a step of your parent's work");
 	has("child: search still works", textOf(await h.run(r, { action: "search", query: "factory" })), "factory:k3f");
 	const h4 = await load({ LETS_CODE_SUBAGENT_DEPTH: "1", LETS_CODE_CORE_MEMORY_HEADLINES: "3" });
 	await h4.handlers.session_start({}, h4.ctx(r));

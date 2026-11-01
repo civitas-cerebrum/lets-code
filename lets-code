@@ -9973,6 +9973,8 @@ export async function advance(L: Ledger, deps: Deps): Promise<Ledger> {
 		await step(L, deps); saveLedger(L, (deps.now ?? Date.now)());
 		deps.progress?.(summary(L).split("\n").pop() ?? "");
 	}
+	// wrapped up: the one run core memory records on its own (see core-memory.ts)
+	if (L.status === "done") { try { const cm = await import(pathToFileURL(join(HERE, "core-memory.ts")).href); cm.noteFactoryRun?.(L); } catch { /* no core memory here */ } }
 	return L;
 }
 
@@ -10371,22 +10373,27 @@ pi_write_core_memory_extension() {
 // entries, a row each, that opens an entry with its pointers and actions;
 // edit opens the rendered file in the editor.
 //
-// Writers: the model (remember) and the user through the model ("remember
-// that ...", in their words). The memory is for what outlasts the session:
-// decisions, non-obvious facts, preferences, where something lives. Never a
-// log of the work: what a session, subagent, expert or factory run did, a
-// task done, a section written, tests passing. That stays in the session
-// (its transcript, the run records), so the harness writes no entries of
-// its own and remember refuses kind "work". Entries an earlier version's
-// harness wrote (by "harness": a run or session that ended) move to the
-// archive when a store is opened. An entry that matches an existing one
-// (the same pointer, or the same gist) updates it. The store
+// The memory is for what is significant later: decisions, non-obvious facts,
+// preferences, where something lives, and a significant goal reached or a
+// piece of work wrapped up (what it is and where it lives). Never the steps
+// on the way: a subagent's or expert's run, one section written, tests
+// passing along the way, a session that ended. Those stay in the session
+// (its transcript, the run records). Writers: the model (remember), the user
+// through the model ("remember that ...", in their words), the system
+// prompt's line asking the model for exactly that once a request is wrapped
+// up, and the harness itself when work is wrapped up without a model in the
+// loop: a factory run that ends done (built, reviewed, judged, committed). A
+// subagent's session is a step of its parent's work: its remember refuses
+// kind "work". The step entries an earlier version's harness wrote (subagent
+// and expert runs, session pointers, stopped factory runs) move to the
+// archive when a store is opened. An entry that matches an existing one (the
+// same pointer, or the same gist) updates it. The store
 // is JSONL (memory.jsonl), the truth; memory.md next to it is rendered
 // from it for the user and read back by id when it is newer. Entries are
 // data, never instructions; one that looks like a token or key is refused.
 // Work and pointer entries untouched for ARCHIVE_DAYS move to archive.jsonl
-// (searched on request) so the live store stays small; so does every entry
-// the harness wrote, whatever its age.
+// (searched on request) so the live store stays small; so does every step
+// entry an earlier version's harness wrote, whatever its age.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -10537,11 +10544,10 @@ export class Store {
 	}
 	forget(id: string): Entry | undefined { const i = this.entries.findIndex((e) => e.id === id); return i < 0 ? undefined : this.entries.splice(i, 1)[0]; }
 	// work and pointer entries untouched for `days` go to the archive, and
-	// whatever the harness wrote (an earlier version's run and session
-	// entries: work logs, not memory); the number that did
+	// the step entries an earlier version's harness wrote; the number that did
 	archive(days: number, now = Date.now()): number {
 		const cut = now - days * 86_400_000;
-		const gone = this.entries.filter((e) => e.by === "harness" || ((e.kind === "work" || e.kind === "pointer") && e.u < cut));
+		const gone = this.entries.filter((e) => stepLog(e) || ((e.kind === "work" || e.kind === "pointer") && e.u < cut));
 		if (!gone.length) return 0;
 		mkdirSync(this.dir, { recursive: true, mode: 0o700 });
 		appendFileSync(this.archiveFile, gone.map((e) => JSON.stringify(e)).join("\n") + "\n", { mode: 0o600 });
@@ -10621,18 +10627,18 @@ function atomic(file: string, text: string): void {
 // system prompt stays cacheable; the model knows what it wrote itself.
 export function sectionText(p: Store | undefined, g: Store, headlines = HEADLINES): string {
 	const n = p?.entries.length ?? 0, last = p?.entries.length ? day(Math.max(...p.entries.map((e) => e.u))) : "";
-	const line = `Core memory (lets-code), not in context: ${n} ${n === 1 ? "entry" : "entries"} for this project${last ? ` (last ${last})` : ""}, ${g.entries.length} global${p?.archived ? `, ${p.archived} archived` : ""}. memory search finds them by words, path, run or session id, date or kind, with their pointers; memory remember adds one.`;
+	const line = `Core memory (lets-code), not in context: ${n} ${n === 1 ? "entry" : "entries"} for this project${last ? ` (last ${last})` : ""}, ${g.entries.length} global${p?.archived ? `, ${p.archived} archived` : ""}. memory search finds them by words, path, run or session id, date or kind, with their pointers; memory remember adds one${DEPTH > 0 ? " (a decision, fact or preference; your task is a step of your parent's work)" : ": decisions, facts, preferences, and once a request is wrapped up its result if significant, never the steps"}.`;
 	let heads = p && headlines ? [...p.entries].sort((a, b) => b.u - a.u).slice(0, headlines).map((e) => `- ${day(e.t)} ${e.kind}: ${e.gist}`) : [];
 	while (heads.length && est(heads.join("\n")) > HEADLINE_BUDGET) heads.pop();
 	return heads.length ? `${line}\nNewest:\n${heads.join("\n")}` : line;
 }
-export const TOOL_DESCRIPTION = "Core memory (project + global), kept out of context. search: entries by words, path, run or session id, date, kind, with their pointers. open: what a pointer names (file:line, run:<id>, factory:<id>, session file). remember: only what a later session needs: a decision and why, a non-obvious fact, a preference, where something lives, or what the user asks to keep (their words, by: user). Never progress or completion (a task or subagent done, a section written, tests passing: the session keeps that), never what the repo or git already shows, never a secret. forget: ref is the #id.";
+export const TOOL_DESCRIPTION = "Core memory (project + global), kept out of context. search: entries by words, path, run or session id, date, kind, with their pointers. open: what a pointer names (file:line, run:<id>, factory:<id>, session file). remember: what is significant later: a decision and why, a non-obvious fact, a preference, where something lives, a significant goal reached or work wrapped up (kind work: what it is and where it lives, once, at the end), or what the user asks to keep (their words, by: user). Never the steps (a subagent's or section's completion, tests passing on the way: the session keeps those), never what the repo or git already shows, never a secret. forget: ref is the #id.";
 export const TOOL_SNIPPET = "memory: core memory (project + global), searched on demand: search | open | remember | forget";
 export const PARAMS = Type.Object({
 	action: Type.String({ description: "search | open | remember | forget" }),
 	query: Type.Optional(Type.String()),
 	ref: Type.Optional(Type.String()),
-	kind: Type.Optional(Type.String({ description: "decision|fact|preference|pointer" })),
+	kind: Type.Optional(Type.String({ description: "decision|fact|preference|pointer|work (work: a significant goal reached or work wrapped up)" })),
 	gist: Type.Optional(Type.String()),
 	refs: Type.Optional(Type.Array(Type.String())),
 	scope: Type.Optional(Type.String({ description: "project|global|all|archive" })),
@@ -10701,6 +10707,37 @@ export function stores(cwd: string): Stores {
 	return s;
 }
 export function reset(): void { delete G[KEY]; }
+
+// ------------------------------------------------------------------ the harness writer
+// An entry an earlier version's harness wrote for a step, not for wrapped-up
+// work: a subagent's or expert's run (a run: pointer), a session pointer, a
+// factory run that stopped. A factory run that ended done is the one the
+// harness still writes.
+export function stepLog(e: Entry): boolean {
+	if (e.by !== "harness") return false;
+	if (e.refs.some((r) => r.startsWith("run:"))) return true;
+	if (e.kind === "pointer" && /^session \(\d+ prompts?\):/.test(e.gist)) return true;
+	return /^factory \S+ stopped\b/.test(e.gist);
+}
+// Work wrapped up without a model in the loop: a factory run that ended done
+// (planned, built, reviewed, judged, committed). Its ticket's title, the last
+// verdict per stage, the branch and worktree, the files it changed (pointers,
+// so a later read of one says so). A run that stopped is not wrapped up, and
+// a child session writes nothing. Called by factory.ts.
+export function noteFactoryRun(L: any, now = Date.now()): Entry | undefined {
+	if (!ACTIVE || DEPTH > 0 || !L || L.status !== "done") return;
+	const s = stores(L.repo || process.cwd()).project!;
+	const title = short(oneLine((String(L.ticket ?? "").split("\n").find((l: string) => l.trim()) ?? "").replace(/^#+\s*/, "")), 80) || "(untitled)";
+	const last = new Map<string, string>();
+	for (const e of L.entries ?? []) if (e.stage !== "intake" && e.verdict) last.set(e.stage, e.verdict);
+	const verdicts = [...last].map(([k, v]) => `${k} ${v}`).join(", ");
+	let files: string[] = [];
+	try { files = [...new Set([...readFileSync(join(L.dir, "artifacts", "change.patch"), "utf8").matchAll(/^diff --git a\/\S+ b\/(\S+)$/gm)].map((m) => m[1]))].slice(0, 6); } catch { /* no diff yet */ }
+	const gist = `factory ${L.id} done: ${title}; branch ${L.branch}${verdicts ? `; ${verdicts}` : ""}${files.length ? `; ${files.length} files` : ""}`;
+	const r = s.upsert({ kind: "work", gist, refs: [`factory:${L.id}`, L.work, ...files.map((f) => join(L.repo, f))], by: "harness" }, now);
+	s.save(now);
+	return r.entry;
+}
 
 // ------------------------------------------------------------------ the hint
 // The file, run or session a tool call touched, as index keys: the path of
@@ -10781,7 +10818,8 @@ export default function (pi: ExtensionAPI) {
 				const gist = oneLine(String(params.gist ?? ""));
 				if (!gist) return text("Give the gist (one dense line) and, when there are any, refs (file:line, run:<id>, factory:<id>, session file).", true);
 				if (looksSecret(gist) || (params.refs ?? []).some((r: unknown) => looksSecret(String(r)))) return text("Not remembered: that looks like a token, key or password. Core memory keeps no secrets; describe where it lives instead.", true);
-				if (params.kind === "work") return text("Not remembered: core memory is for what outlasts the session (a decision, a non-obvious fact, a preference, where something lives), not a record of work done; the session keeps that. If something learned here matters later, remember that fact or decision instead.", true);
+				// a subagent's task is a step of its parent's work: its completion is the parent's to record, once it is all wrapped up
+				if (params.kind === "work" && DEPTH > 0) return text("Not remembered: this session is a subagent, and its task is a step of the parent's work; the parent records the result once the work is wrapped up. If something learned here matters later, remember that decision, fact or preference instead.", true);
 				const s = params.scope === "global" ? st.global : st.project!;
 				const r = s.upsert({ kind: params.kind, gist, refs: Array.isArray(params.refs) ? params.refs.map(String) : [], by: params.by === "user" ? "user" : "model" }); s.save();
 				return text(`${r.updated ? "Updated" : "Remembered"}${s.scope === "global" ? " (global)" : ""}${gist.length > GIST_MAX ? `, gist cut to ${GIST_MAX} characters` : ""}:\n${s.line(r.entry)}`);
@@ -20064,7 +20102,8 @@ run_setup() {  # run_setup [full|granular]
             echo ""
             echo "# Core memory: a long-term memory per project (and a global one) the"
             echo "# agent searches on demand and adds decisions, facts, preferences and"
-            echo "# pointers to (never a log of work done). On by default; /memories in a"
+            echo "# wrapped-up results to (never the steps on the way); a factory run that"
+            echo "# ends done adds itself. On by default; /memories in a"
             echo "# session. CORE_MEMORY_HEADLINES: how many of the newest entries (0..5)"
             echo "# a session starts with in its prompt."
             echo "CORE_MEMORY=\"${feat_core_memory}\""

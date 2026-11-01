@@ -1037,27 +1037,33 @@ and esc backs out one level, so the whole thing is two loops over
 lookup in the index after `read`, `edit`, `write`, `grep`, `find`, `ls`
 (their `path`) and an `expert` call that resumes a factory run: a hit adds
 one trailing line to the tool result naming the count, not the entries.
-`bash` is not lexed for paths. Writers: the model's `remember` (with
-`by: user` when the user asked, their words as the gist), nothing else.
-The memory holds what outlasts the session (decisions, non-obvious facts,
-preferences, where something lives), never a log of the work. A first
-design had the harness write an entry, without a model call, whenever a
-factory run, a subagent or expert run, or a session ended. On real work
-that filled the store with completion notes: a 10,000-word essay written
-by ten subagents left ten "subagent general done: Write section N"
-entries, crowding out the decisions and preferences the memory is for,
-while the same facts already live in the run records and session files.
-So the harness writes none, the tool's description asks for what a later
-session needs and rules out progress and completion, and `remember`
-refuses `kind: work` with a line saying what to keep instead (the kind
-stays readable for old entries). Entries an earlier version's harness
-wrote (`by: harness`) move to `archive.jsonl` when a store is opened,
-whatever their age, so nothing is deleted. Dedupe is by identity pointer (a
+`bash` is not lexed for paths. The memory holds what is significant
+later: decisions, non-obvious facts, preferences, where something lives,
+and a significant goal reached or a piece of work wrapped up. Never the
+steps on the way. A first design had the harness write an entry, without
+a model call, whenever a factory run, a subagent or expert run, or a
+session ended. On real work that filled the store with steps: a
+10,000-word essay written by ten subagents left ten "subagent general
+done: Write section N" entries, crowding out the decisions and
+preferences the memory is for, while the same facts already live in the
+run records and session files. Significance needs judgement, so the
+writers are now: the model's `remember` (with `by: user` when the user
+asked, their words as the gist), steered by the tool's description and by
+the always-on line, which asks the top session for decisions, facts,
+preferences and, once a request is wrapped up, its result if significant,
+never the steps; and the harness alone where work is wrapped up with no
+model in the loop: `factory.ts` when `advance` ends done (planned, built,
+reviewed, judged, committed; a stopped run is not wrapped up). A child
+session's task is a step of its parent's: its line says so and its
+`remember` refuses `kind: work` (the parent records the result). The step
+entries an earlier version's harness wrote (a `run:` pointer, a session
+pointer, a stopped factory run) move to `archive.jsonl` when a store is
+opened, whatever their age, so nothing is deleted. Dedupe is by identity pointer (a
 run, factory or session file) or by normalised gist, updating in place. Work
 and pointer entries untouched for 120 days move to `archive.jsonl` at load
 (decisions, facts and preferences stay; searched with `archive: true`). A
-child session (`LETS_CODE_SUBAGENT_DEPTH > 0`) reads and may `remember`,
-under the same rule. Not done: entries are not scored by priority (dates
+child session (`LETS_CODE_SUBAGENT_DEPTH > 0`) reads and may `remember` a
+decision, a fact or a preference. Not done: entries are not scored by priority (dates
 and kinds are enough to archive by).
 
 **Sessions and messages (#79).** Two sessions in one repository had no

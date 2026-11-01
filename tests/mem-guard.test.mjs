@@ -61,6 +61,60 @@ const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-co
 	if (bad) process.exit(1);
 }
 
+// The RAM watcher at 85 %, on every platform (a made-up meminfo at 90 % use):
+// with a UI it asks, and a yes turns the guard on; a headless session
+// declines, and the agent is told the guard stays off and not to ask.
+{
+	const d = mkdtempSync(join(tmpdir(), "memguard-ask-"));
+	const mi = join(d, "meminfo");
+	writeFileSync(mi, "MemTotal:       8000000 kB\nMemAvailable:    800000 kB\n");
+	const saved = { ...process.env };
+	let bad = 0;
+	const eq = (name, got, want) => { const ok = JSON.stringify(got) === JSON.stringify(want); if (!ok) { bad++; console.log(`FAIL ${name}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); } };
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const loadOne = async (n) => {
+		for (const k of Object.keys(process.env)) if (k.startsWith("LETS_CODE_")) delete process.env[k];
+		Object.assign(process.env, { LETS_CODE_SESSION: "1", LETS_CODE_MEM_INFO: mi, LETS_CODE_MEM_GUARD_POLL_MS: "50", LETS_CODE_MEM_IGNORE_SYSTEM_GUARD: "1", LETS_CODE_MEM_GUARD_LOG: join(d, "log") });
+		const f = join(d, `mg-${n}.ts`);
+		writeFileSync(f, readFileSync(extPath, "utf8").replace(/^import type .*$/m, ""));
+		const mod = await import(pathToFileURL(f).href);
+		const h = {}, cmds = {};
+		mod.default({ on: (ev, fn) => { h[ev] = fn; }, registerCommand: (name, c) => { cmds[name] = c; } });
+		return { h, cmds };
+	};
+	// with a UI: asked once, "turn it on" turns it on
+	{
+		const { h, cmds } = await loadOne(1);
+		const asked = [], said = [];
+		const ui = { select: async (q, opts) => { asked.push(q); return opts[0]; }, notify: (m) => said.push(m) };
+		await h.session_start?.({}, { hasUI: true, ui });
+		await sleep(400);
+		eq("watcher, UI: asked once", asked.length, 1);
+		eq("watcher, UI: the question names the use and the guard", /RAM 90 % used\. Turn on the memory guard/.test(asked[0] ?? ""), true);
+		let st = ""; await cmds.memguard.handler("", { hasUI: true, ui: { notify: (m) => { st = m; } } });
+		eq("watcher, UI: a yes turns the guard on", /^memory guard on/.test(st), true);
+		await h.session_shutdown?.();
+	}
+	// headless: no question; declined; the agent is told
+	{
+		const { h, cmds } = await loadOne(2);
+		await h.session_start?.({}, { hasUI: false });
+		await sleep(400);
+		const r = await h.tool_result?.({ content: [] });
+		const text = (r?.content ?? []).map((c) => c.text).join("\n");
+		eq("watcher, headless: the agent is told, declined", /stays off: this session runs without a user to ask \(headless\)/.test(text), true);
+		let st = "";
+		const log = console.log; console.log = (m) => { st = m; }; await cmds.memguard.handler("", {}); console.log = log;
+		eq("watcher, headless: the guard stays off", /^memory guard off/.test(st), true);
+		await h.session_shutdown?.();
+	}
+	for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+	Object.assign(process.env, saved);
+	rmSync(d, { recursive: true, force: true });
+	console.log(bad ? `FAIL  RAM watcher: ${bad} checks` : "ok    RAM watcher: asks with a UI, declines headless");
+	if (bad) process.exit(1);
+}
+
 if (process.platform !== "linux") { console.log("skipped: the memory guard is Linux only"); process.exit(0); }
 const work = realpathSync(mkdtempSync(join(tmpdir(), "memguard-test-")));
 const src = readFileSync(extPath, "utf8").replace(/^import type .*$/m, "");

@@ -6,7 +6,7 @@
 //   tests/subagent.test.mjs [path/to/lets-code/subagents.ts]
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, realpathSync, rmSync, chmodSync, readdirSync, existsSync, statSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/subagents.ts");
@@ -18,7 +18,15 @@ process.env.LETS_CODE_SUBAGENTS_ON = "1";
 process.env.LETS_CODE_MODEL = "test-model";
 process.env.LETS_CODE_SUBAGENT_CONCURRENCY = "2";
 process.env.LETS_CODE_SUBAGENT_IDLE_S = "0.5";   // children at rest go soon (each is a process)
-process.env.PATH = `${bin}:${process.env.PATH}`;
+process.env.PATH = `${bin}${delimiter}${process.env.PATH}`;
+// on Windows a shebang script on PATH is no program: the extension starts pi as LETS_CODE_PI says
+const W = process.platform === "win32";
+if (W) process.env.LETS_CODE_PI = JSON.stringify([process.execPath, join(bin, "pi")]);
+// pi's keys for a follow-up and for taking a queued message back: alt+enter and
+// alt+up, ctrl+q and alt+q on Windows (where the terminal keeps the others)
+const FOLLOW_UP = W ? "\x11" : "\x1b\r", DEQUEUE = W ? "\x1bq" : "\x1b[1;3A";
+// Windows has no file modes (node reports 666)
+const MODE600 = W ? "666" : "600";
 
 writeFileSync(join(bin, "pi"), `#!/usr/bin/env node
 // fake pi in RPC mode: records its start (argv, env, instructions) and the
@@ -237,7 +245,7 @@ async function load(env = {}) {
 	const c = calls()[0];
 	t("child argv: RPC mode on its own session file", [c.argv.slice(0, 3), c.argv.slice(4, 6)], [["--mode", "rpc", "--session"], ["--provider", "lets-code"]]);
 	const sf = c.argv[3];
-	t("child session file: under the runs dir, named after the run, created 0600 for pi to fill", [sf.startsWith(join(agentDir, "lets-code-runs") + "/"), sf.endsWith(".pi.jsonl"), existsSync(sf), (statSync(sf).mode & 0o777).toString(8)], [true, true, true, "600"]);
+	t("child session file: under the runs dir, named after the run, created 0600 for pi to fill", [sf.startsWith(join(agentDir, "lets-code-runs") + sep), sf.endsWith(".pi.jsonl"), existsSync(sf), (statSync(sf).mode & 0o777).toString(8)], [true, true, true, MODE600]);
 	t("child model/thinking/tools", [c.argv[c.argv.indexOf("--model") + 1], c.argv[c.argv.indexOf("--thinking") + 1], c.argv[c.argv.indexOf("--tools") + 1]], ["test-model", "low", "read,grep"]);
 	t("the task is the first prompt, not an argument", [c.task, c.argv.includes("Task: find the config")], ["Task: find the config", false]);
 	t("child prompt file content", /"scout" agent\. finds things[\s\S]*You look around\./.test(c.prompt), true);
@@ -452,7 +460,7 @@ async function load(env = {}) {
 	t("stream: tokens and turns", [rec.input, rec.output, rec.turns, rec.live], [250, 30, 2, 0]);
 	t("stream: seen while streaming (partial text, then the rest)", seen.includes("Found it: ") && seen.includes("Found it: line 3."), true);
 	const file = join(agentDir, "lets-code-runs", "sess-1", `${rec.id}.json`);
-	t("disk: saved under the session, 0600", [existsSync(file), (statSync(file).mode & 0o777).toString(8)], [true, "600"]);
+	t("disk: saved under the session, 0600", [existsSync(file), (statSync(file).mode & 0o777).toString(8)], [true, MODE600]);
 	t("disk: the finished run", JSON.parse(readFileSync(file, "utf8")).status, "done");
 	t("hint: shown while it ran, cleared after", [statuses.some(([k, v]) => k === "subagents" && v === "1 subagent running · alt+s or /subagents to switch"), statuses.at(-1)], [true, ["subagents", undefined]]);
 	t("disk: the child's session file next to its transcript", [rec.sessionFile, existsSync(rec.sessionFile)], [join(agentDir, "lets-code-runs", "sess-1", `${rec.id}.pi.jsonl`), true]);
@@ -924,13 +932,13 @@ async function load(env = {}) {
 	// alt+enter then a prompt while the child works: a follow-up, shown as pi shows it
 	await h.handlers.input({ text: "hang deeper", source: "interactive" }, { ui });
 	await wait(() => hr.status === "running");
-	t("alt+enter: left to pi's editor", termHandler("\x1b\r"), undefined);
+	t("alt+enter: left to pi's editor", termHandler(FOLLOW_UP), undefined);
 	await h.handlers.input({ text: "later please", source: "interactive" }, { ui });
 	await wait(() => cmds().some((c) => c.type === "prompt" && c.message === "later please"));
 	t("alt+enter: the prompt goes to the child as a follow-up", [cmds().some((c) => c.message === "later please" && c.streamingBehavior === "followUp"), reg().children.get(hr.id).queued.map((q) => [q.text, q.kind])], [true, [["later please", "followUp"]]]);
 	// alt+up: what was queued comes back to the editor
 	editor = "";
-	t("alt+up: consumed when the child has something queued", termHandler("\x1b[1;3A")?.consume, true);
+	t("alt+up: consumed when the child has something queued", termHandler(DEQUEUE)?.consume, true);
 	await wait(() => editor.includes("later please"));
 	t("alt+up: the queued message is back in the editor, the queue empty", [editor, reg().children.get(hr.id).queued.length, cmds().some((c) => c.type === "clear_queue")], ["later please", 0, true]);
 	termHandler("\x1b"); await wait(() => hr.status !== "running");
@@ -1039,7 +1047,7 @@ async function load(env = {}) {
 	await wait(() => prompts().includes("hang for the child") && r.status === "running");
 	t("in place: the typed message is the child's next turn", [prompts().includes("hang for the child"), r.status], [true, "running"]);
 	editor = "and later";
-	t("in place: alt+enter sends a follow-up to the child itself", [termHandler("\x1b\r")?.consume, editor], [true, ""]);
+	t("in place: alt+enter sends a follow-up to the child itself", [termHandler(FOLLOW_UP)?.consume, editor], [true, ""]);
 	await wait(() => cmds().some((c) => c.message === "and later"));
 	t("in place: the follow-up is the child's, queued in the child", [cmds().some((c) => c.message === "and later" && c.streamingBehavior === "followUp"), mod.childOf(r).queued.map((q) => [q.text, q.kind])], [true, [["and later", "followUp"]]]);
 	editor = "/tpl go";
@@ -1073,6 +1081,14 @@ async function load(env = {}) {
 	await call.catch(() => {});
 }
 
-rmSync(work, { recursive: true, force: true });
+// the children the main session's end stopped go after their grace (input
+// closed, then signals): wait for them, so their folder can go (Windows
+// keeps a live process's working directory)
+{
+	const pids = existsSync(join(fake, "cmds")) ? [...new Set(readFileSync(join(fake, "cmds"), "utf8").trim().split("\n").map((l) => JSON.parse(l).pid))] : [];
+	const alive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
+	for (let i = 0; i < 400 && pids.some(alive); i++) await new Promise((r) => setTimeout(r, 20));
+}
+rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 console.log(`\n${n} checks, ${fail ? "FAILURES" : "all passed"}`);
 process.exit(fail);

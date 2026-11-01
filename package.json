@@ -15,15 +15,16 @@
   },
   "files": [
     "lets-code",
+    "bin/lets-code-windows.js",
     "scripts/postinstall.js",
     "DESIGN.md"
   ],
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
-    "test": "tests/run.sh"
+    "test": "bash tests/run.sh"
   },
   "engines": {
     "node": ">=22.19.0"
   },
-  "os": ["linux", "darwin", "android"]
+  "os": ["linux", "darwin", "android", "win32"]
 }

@@ -7,13 +7,23 @@ set -u
 here="$(cd "$(dirname "$0")" && pwd)"; lc="${here}/../lets-code"
 d="$(mktemp -d "${TMPDIR:-/tmp}/lets-code-sessions.XXXXXX")"
 sleep 60 & live=$!; disown "${live}"   # no "Terminated" line when the trap kills it
-answer=""
-trap 'kill "${live}" ${answer:+"${answer}"} 2>/dev/null; rm -rf "${d}"' EXIT
+answer=""; lpid="${live}"
+trap 'kill "${lpid}" ${answer:+"${answer}"} 2>/dev/null; rm -rf "${d}"' EXIT
+# On Windows the registry holds Windows pids (the module's process.pid, a
+# native node's), and a Git Bash pid is another number: /proc/<pid>/winpid
+# maps it
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) win=true ;; *) win=false ;; esac
+[ "${win}" = false ] || live="$(cat "/proc/${lpid}/winpid")"
 mkdir -p "${d}/config" "${d}/agent" "${d}/home" "${d}/repo"
 export XDG_CONFIG_HOME="${d}/config" PI_CODING_AGENT_DIR="${d}/agent" HOME="${d}/home"
+# (on Windows native python's ~, which the listing shortens paths under, is
+# USERPROFILE, as node's os.homedir() is: the scratch home too)
+[ "${win}" = false ] || { USERPROFILE="$(cygpath -m -- "${HOME}")"; export USERPROFILE; }
 unset LETS_CODE_SESSIONS_DIR
 git -C "${d}/repo" init -q
 repo="$(cd "${d}/repo" && pwd -P)"
+# (on Windows the path as the module writes it: node's realpath, C:\x)
+[ "${win}" = false ] || repo="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${d}/repo")"
 s="${d}/agent/lets-code-sessions"
 fail=0
 check() {  # check <label> <got> <want>
@@ -23,10 +33,12 @@ check() {  # check <label> <got> <want>
 check "sessions: none yet" "$(bash "${lc}" sessions 2>&1)" "No live lets-code session on this machine."
 
 mkdir -p "${s}"
-dead="$(sh -c 'echo $$')"
+if [ "${win}" = true ]; then dead="$(sh -c 'cat /proc/$$/winpid')"; else dead="$(sh -c 'echo $$')"; fi
 printf '{"pid":%s,"name":"ghost","startedAt":1}\n' "${dead}" > "${s}/${dead}.json"
-printf '{"pid":%s,"piSessionId":"abcdef-123","tag":"","name":"worker","cwd":"%s","repoRoot":"%s","repoKey":"%s","mode":"auto","depth":0,"parentPid":null,"agent":"","startedAt":2,"busy":true}\n' \
-    "${live}" "${repo}" "${repo}" "${repo}/.git" > "${s}/${live}.json"
+python3 -c 'import json, os, sys
+pid, repo = int(sys.argv[1]), sys.argv[2]
+print(json.dumps({"pid": pid, "piSessionId": "abcdef-123", "tag": "", "name": "worker", "cwd": repo, "repoRoot": repo, "repoKey": os.path.join(repo, ".git"),
+                  "mode": "auto", "depth": 0, "parentPid": None, "agent": "", "startedAt": 2, "busy": True}))' "${live}" "${repo}" > "${s}/${live}.json"
 out="$(bash "${lc}" sessions 2>&1)"
 check "sessions: the live one listed" "$(printf '%s\n' "${out}" | sed -n 2p)" "pid ${live}  worker  ${repo}  auto  busy"
 check "sessions: the dead one pruned" "$([ -e "${s}/${dead}.json" ] && echo kept || echo pruned)" pruned
@@ -67,9 +79,13 @@ if [ "$(id -u)" != 0 ]; then   # pid 1 is root's: alive, but not ours
     printf '{"pid":1,"name":"init","startedAt":3}\n' > "${s}/1.json"
     check "sessions: another user's pid is not listed" "$(bash "${lc}" sessions 2>&1 | grep -c ' init ')" 0
 fi
-chmod 777 "${s}"
-out="$(bash "${lc}" sessions 2>&1)"; rc=$?
-check "sessions: a directory others can write is refused" "${rc}:$(printf '%s' "${out}" | grep -c 'not yours alone')" "1:1"
-chmod 700 "${s}"
+if [ "${win}" = true ]; then
+    echo "skip  sessions: a directory others can write is refused: skipped on Windows: no mode bits there (chmod does nothing; the profile's ACL keeps the directory private)"
+else
+    chmod 777 "${s}"
+    out="$(bash "${lc}" sessions 2>&1)"; rc=$?
+    check "sessions: a directory others can write is refused" "${rc}:$(printf '%s' "${out}" | grep -c 'not yours alone')" "1:1"
+    chmod 700 "${s}"
+fi
 
 exit "${fail}"

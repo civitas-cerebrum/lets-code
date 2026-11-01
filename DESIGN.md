@@ -55,54 +55,74 @@ half of the output cap.
 
 ## Memory guard
 
-A pi extension acts only on processes this session started: descendants of
-pi, or members of the `lets-code-<pid>.scope` systemd user scope the
-launcher creates. Never pi, its node, Claude Code or tmux. Two rules.
+A pi extension in the session's first pi (subagents' pis are its
+descendants). Two parts.
 
-**Size limits.** Free-RAM thresholds come too late on a small machine: on
-an 8 GB Raspberry Pi two runaway `python3` processes reached 1.5 GB each in
-seconds, the box thrashed, systemd missed its 1-minute hardware watchdog
-and the board reset, twice, with the guard on. So once a second the
-extension reads `/proc/*/stat` (parent and RSS; argv only for the session's
-own processes) and SIGKILLs any process over `MEM_GUARD_PROCESS` (20 % of
-MemTotal), then the largest of the rest while together they are over
-`MEM_GUARD_SESSION` (45 %). 20 % lets a normal build or test suite run; two
-runaways stay under 45 % together; the machine keeps more than half. The
-same rule, run as a harness thread at 1.5 GB / 3.5 GB, held a 4.5-hour
-benchmark on that Pi with 12 kills and no reset. It kills at once: a process
-growing at hundreds of MB a second has no time for SIGINT. RSS from `/proc`
-is used because a cgroup cap does not work there: the user's systemd
-delegates only `cpu` and `pids`, and a `MemoryMax` on a user scope is
-silently ignored.
+**RAM watcher**, on by default. Once a second it reads MemTotal and
+MemAvailable (one small file). At 85 % used it shows a UI notice suggesting
+`/memguard on` and posts a short note to the agent's inbox; then not again
+until use drops below 75 %. It kills nothing.
+
+**Guard**, off by default (`MEM_GUARD=true`, `--mem-guard`, `/memguard on`).
+It acts only on processes this session started: descendants of pi, or
+members of the `lets-code-<pid>.scope` systemd user scope the launcher
+creates. Never pi, its node, Claude Code or tmux. Two rules:
+
+- **Size, under pressure.** While more than 80 % of RAM is used, any such
+  process over 40 % of RAM is SIGKILLed. Below 80 % the process table is
+  not even read. A process growing at hundreds of MB a second has no time
+  for SIGINT. RSS comes from `/proc/*/stat` (argv only for the session's own
+  processes) because a cgroup cap does not work on the Pi: the user's
+  systemd delegates only `cpu` and `pids`, and a `MemoryMax` on a user scope
+  is silently ignored.
+- **Abandoned.** Each pi sets `LETS_CODE_PI=<pid>:<start time>` in its own
+  environment, so everything it starts inherits it; the first pi also sets
+  `LETS_CODE_RUN` (its own marker). Every 10 s the guard reads the
+  environment of processes outside its own tree; one with this run's
+  `LETS_CODE_RUN` whose `LETS_CODE_PI` names a pi no longer running (pid
+  gone, or reused with another start time) gets SIGTERM, then SIGKILL on the
+  next pass. Other users' environments are unreadable, so they never match.
+  A process left by a pi that still runs (a dev server the agent started in
+  the background) is not touched: lets-code cannot tell it from one meant
+  to keep running. The Claude proxy, meant to outlive sessions, is started
+  without the markers. A nested `lets-code` drops them, so it is its own run.
+
+The guard used to be always on, with free-RAM levels (warn at 20 % free,
+block non-cleanup bash at 10 %, stop the largest process at 5 %, kill it at
+2.5 %) and, since #98, size limits checked whatever the free RAM (20 % of
+RAM per process, 45 % per session). Those were too strict for ordinary work.
+The free-RAM levels are folded into the watcher's 85 % warning and the
+guard's 80 % line; the per-process and session limits are gone.
 
 A bare "Killed, exit 137" cost the agent ten minutes of re-running the same
-test, so the kill is told. The notice goes into the inbox of the session
+test, so a kill is told. The notice goes into the inbox of the session
 that owns the process (its nearest ancestor with a registry entry, so a
 subagent's process goes to the subagent), through the same files the
 `message` tool writes. It is marked `from.kind = "guard"`: it never starts
 a turn and steers a busy session, so the agent reads it right after the
-command that died, not after the turn. It says the command, pid, size,
-limit, and to bound the input instead of running it again. The same
-command for the same session is told once per 5 minutes and killed every
-time. Every kill and stop is a JSON line in
+command that died, not after the turn. It says the command, pid, size and
+why, and to bound the input instead of running it again. The same command
+for the same session is told once per 5 minutes and killed every time;
+abandoned processes are told the same way, once per 5 minutes. Kills,
+watcher notices and toggles are JSON lines in
 `<agent dir>/lets-code-memory-guard.log` (moved to `.1` past 1 MB). Without
 sessions the notice comes with the next tool result.
-
-**Free RAM.** Thresholds: warn at 20 %, block non-cleanup bash at 10 %,
-stop the largest process at 5 % (SIGINT, SIGTERM, SIGKILL), kill it at
-2.5 %.
 
 An earlier cap-based design (`MemoryMax`, `ulimit -d`) limited sessions
 even when the machine had RAM to spare, and taught three things: the
 default `OOMPolicy=stop` kills the whole scope after one OOM kill (so the
 scope sets `continue`); swap at a cap livelocks instead of triggering the
 OOM killer; a scope must not be created inside an already limited cgroup,
-because it would escape that limit. The size limits are not caps: nothing
-is slowed or swapped, a process is killed and the agent told. The
-extension defers to a machine-wide memguard daemon when `/run/memguard`
-exists.
+because it would escape that limit. The guard defers to a machine-wide
+memguard daemon when `/run/memguard` exists; the watcher still runs.
 
 ## Git guard
+
+Off by default. `/git-guard on` in a session turns it on there (the launch's
+`pi/*` branch switch, done then) and remembers it for later launches
+(lets-code-state.json, key `gitGuard`); `/git-guard off` the same way.
+`GIT_GUARD=true|false`, `--git-guard` and `--no-git-guard` decide a launch
+when given.
 
 - **Launch:** a repo whose HEAD is not on a `pi/*` branch gets
   `git switch -c pi/<timestamp>`. A merge, rebase or cherry-pick in progress
@@ -1098,8 +1118,8 @@ message started or continued is going, whatever the session sends has
 that message's hops + 1, and a message with hops >= 1 never triggers a
 turn (pi appends it at the end of the current turn instead), even with
 auto-turn on, so A and B cannot keep waking each other. A notice from
-the memory guard (`from.kind` `guard`) never starts a turn and is a steer
-when busy, so it lands right after the tool call that died. The receiver then
+the memory guard or the RAM watcher (`from.kind` `guard`) never starts a turn
+and is a steer when busy, so it lands right after the tool call that died. The receiver then
 writes `<id>.ack` with `seenAt` and removes the message; an id once shown
 is kept in a per-process set, so a message whose file could not be
 removed is not shown twice. The sender polls for the acks until `wait`
@@ -1241,6 +1261,41 @@ main.
 Portability: bash 3.2 (macOS) has no `pipefail` without a guard, cannot
 parse a `case` pattern inside `$(...)`, and `"${array[@]}"` on an empty
 array trips `set -u`, so the final `exec` is an if/else.
+
+Windows: the script runs in Git Bash (MSYS2), the bash pi's own bash tool
+uses, while pi, node, python and git are native programs. The `windows`
+section at the top makes the rest of the script hold there:
+- paths are kept in the `C:/Users/x` form (`cygpath -m`), which bash and
+  native programs both read. HOME and TMPDIR are set so, and with them
+  every path built on them. A path bash itself makes (`$PWD`, `$0`) goes
+  through `native_path` before a native program, or a file one reads, gets it.
+- `python3` is the real interpreter (the Store stub named python3 is
+  passed over), run with UTF-8 and with LF line ends on stdout and in text
+  writes (a sitecustomize), so `$(python3 ...)` never ends in `\r`.
+- pi is started with MSYS argument conversion off (`/review` reaches pi as
+  typed). The extension's index turns it back on for pi's own bash commands.
+- a model may write `C:\Users\x\repo` unquoted in a bash command, which
+  Git Bash reads as `C:Usersxrepo` (backslashes escape). The git guard and
+  the mandate judge such a command both as bash reads it and as written,
+  and refuse it if either reading is refused. Git Bash's `/` (Git's own
+  directory, with `/c` below it) counts as a root.
+
+The modules share one block of plain-JS helpers, `lc_ts_platform`, which a
+writer appends to the module it writes, so each module stays one
+self-contained file. The helpers are:
+- `lcwBash`: Git Bash, found as pi finds it, never WSL's `bash.exe`.
+- `lcwCommand` and `lcwPi`: npm `.cmd` shims run as node plus their script.
+- `lcwKillTree`: `taskkill /T` stops a process tree.
+- `lcwNative`, `lcwKey` and `lcwUnder`: `/c/x`, `/tmp` and `~` mapped to
+  Windows paths, compared without case and with 8.3 short names
+  (`C:\Users\RUNNER~1`, as `%TEMP%` may say) expanded (`lcwLong`).
+- `lcwTmpDir`: `$TMPDIR` when set (node's `tmpdir()` reads `TEMP` there).
+- `lcwRename`: retried while another process holds the file.
+- `lcwSocket`: named pipes for sockets.
+
+On Linux and macOS every helper does what the code did before. npm's
+`.cmd` and `.ps1` shims are pointed by the postinstall at
+`bin/lets-code-windows.js`, which finds Git Bash and runs the script.
 
 ## Roadmap
 

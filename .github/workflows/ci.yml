@@ -2,8 +2,9 @@ name: ✅ CI
 
 # Runs the test suite on every pull request and on every push to main:
 # the shell tests (probes, endpoint parsing, helper prefetch, git guard
-# launch side) and the node tests for the pi extensions, on Linux and macOS
-# (the script targets bash 3.2, which macOS ships).
+# launch side) and the node tests for the pi extensions, on Linux, macOS
+# (the script targets bash 3.2, which macOS ships) and Windows (in Git Bash,
+# where lets-code runs there, with native node, python and git).
 
 on:
   pull_request:
@@ -22,11 +23,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # the suite takes 2 (Linux) to 8 (macOS) minutes; a hang ends here, and
+    # the suite takes 2 (Linux) to 8 (macOS) minutes, longer on Windows, where
+    # every process Git Bash starts is slow; a hang ends here, and
     # tests/run.sh stops a single file after TEST_TIMEOUT with its process tree
-    timeout-minutes: 25
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 25 }}
+    defaults:
+      run:
+        shell: bash   # Git Bash on Windows
     steps:
       - name: 🗂️  Checkout
         uses: actions/checkout@v4
@@ -35,6 +40,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
+
+      - name: 🐍  Set up Python (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
 
       - name: 🔎  Syntax check (bash 3.2 on macOS)
         run: bash -n lets-code && bash --version | head -1

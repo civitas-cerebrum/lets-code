@@ -4,6 +4,8 @@
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 eval "$(sed -n '/^git_guard_plan() {/,/^}/p' "${here}/../lets-code")"
+eval "$(sed -n '/^lc_git_guard_remembered() {/,/^}/p' "${here}/../lets-code")"
+on_windows() { false; }; native_path() { printf '%s\n' "$1"; }
 log_error() { echo "  (log_error) $*" >&2; }
 GIT_GUARD="${GIT_GUARD:-true}"
 
@@ -74,5 +76,21 @@ t "linked worktree: main repo still on main" "$(git -C "${work}/wtmain" branch -
 mkrepo "${work}/off2" main
 out="$(GIT_GUARD=False plan "${work}/off2")"
 t "GIT_GUARD=False (capitalised): off" "${out}" "off||disabled"
+
+# off by default: GIT_GUARD empty and nothing remembered; /git-guard on in a
+# session is remembered in lets-code-state.json (gitGuard) and turns it on
+PI_AGENT_DIR="${work}/agent"; mkdir -p "${PI_AGENT_DIR}"
+mkrepo "${work}/dflt" main
+out="$(GIT_GUARD="" plan "${work}/dflt")"
+t "default: off, branch untouched" "${out}|$(git -C "${work}/dflt" branch --show-current)" "off||off by default; /git-guard turns it on|main"
+printf '{"gitGuard": true}\n' > "${PI_AGENT_DIR}/lets-code-state.json"
+out="$(GIT_GUARD="" plan "${work}/dflt")"
+t "remembered on: on, a pi/* branch" "${out%%|*}|$(git -C "${work}/dflt" branch --show-current | cut -c1-3)" "on|pi/"
+mkrepo "${work}/dflt2" main
+out="$(GIT_GUARD=false plan "${work}/dflt2")"
+t "remembered on, GIT_GUARD=false: off" "${out}" "off||disabled"
+printf '{"gitGuard": false}\n' > "${PI_AGENT_DIR}/lets-code-state.json"
+out="$(GIT_GUARD="" plan "${work}/dflt2")"
+t "remembered off: off" "${out%%|*}" "off"
 
 exit "${fail}"

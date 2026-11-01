@@ -2,17 +2,17 @@
 # Live test of the memory guard: interactive lets-code (pi TUI) in a private
 # tmux server, prompt injected with send-keys, optional leftover memory hogs
 # moved INTO the session scope before they allocate.
-# The guard acts on the machine's free RAM; the real levels (5 % free) would
-# need ~25 GiB filled, so the test uses levels RELATIVE to the RAM free at start
-# (LETS_CODE_MEM_* env), and -- independent of the guard under test -- a hard
+# The guard (turned on here with LETS_CODE_MEM_GUARD=true) kills only while
+# more than 80 % of RAM is used, a process over 40 % of RAM; the hogs must
+# take the machine there. Independent of the guard under test: a hard
 # MemoryMax on the session scope plus a watchdog (a guard-only memory test
-# global-OOMed the host once, 2026-09-26).
+# global-OOMed the host once, 2026-09-26). Not run by tests/run.sh.
 #   tests/mem-guard-live.sh <task-dir> [hog-GiB[,GiB...]]   env: PROMPT, LIMIT_S
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd); task=${1:?task dir}; hogs=${2:-0}
 free_mib=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
-lv="-e LETS_CODE_MEM_WARN=$((free_mib-2048))M -e LETS_CODE_MEM_CRITICAL=$((free_mib-4096))M -e LETS_CODE_MEM_STOP=$((free_mib-6144))M -e LETS_CODE_MEM_EMERGENCY=$((free_mib-9216))M -e LETS_CODE_MEM_IGNORE_SYSTEM_GUARD=1"
-echo "free now ${free_mib} MiB -> warn<$((free_mib-2048))M critical<$((free_mib-4096))M stop<$((free_mib-6144))M emergency<$((free_mib-9216))M"
+lv="-e LETS_CODE_MEM_GUARD=true -e LETS_CODE_MEM_IGNORE_SYSTEM_GUARD=1"
+echo "free now ${free_mib} MiB; the guard acts above 80 % used, on a process over 40 % of RAM"
 sock=lcmemtest; out=$(mktemp -d); LIMIT_S=${LIMIT_S:-420}
 prompt="${PROMPT:-Run the test suite in this directory ONCE with: python3 -m unittest tests_chess   Do not modify, debug or rerun anything. Then tell me what happened and why, in 2-3 sentences, and end your reply with the word REPORT-END.}"
 tmux -L $sock new-session -d -s t -x 200 -y 50 -c "$task" $lv "$here/../lets-code --thinking-level low"

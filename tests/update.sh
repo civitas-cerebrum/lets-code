@@ -11,6 +11,10 @@ d="$(mktemp -d "${TMPDIR:-/tmp}/lets-code-update.XXXXXX")"
 srv=""
 trap '[ -z "${srv}" ] || kill "${srv}" 2>/dev/null; rm -rf "${d}"' EXIT
 fail=0
+# pdir <dir>: the dir as a PATH entry (on Windows Git Bash's /c/x form: the
+# C: of a C:/x path would split PATH)
+pdir() { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) cygpath -u -- "$1" ;; *) printf '%s\n' "$1" ;; esac; }
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) win=true ;; *) win=false ;; esac
 check() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: got '$2', want '$3'"; fail=1; fi; }
 
 # what the fake servers hand out: this checkout's script, marked
@@ -31,7 +35,8 @@ class H(http.server.BaseHTTPRequestHandler):
         mode = open(os.path.join(root, "mode")).read().strip()
         host = "http://%s:%d" % self.server.server_address
         tgz = open(os.path.join(root, "pkg.tgz"), "rb").read()
-        if self.path == "/@civitas-cerebrum%2flets-code/latest":
+        # (in any case: Windows' curl sends the %2f as %2F)
+        if self.path.lower() == "/@civitas-cerebrum%2flets-code/latest":
             if mode == "no-release": return self.send(404, b"{}")
             digest = hashlib.sha512(tgz if mode != "bad-sum" else b"other").digest()
             return self.send(200, json.dumps({"version": "9.9.9", "dist": {"tarball": host + "/pkg.tgz",
@@ -69,14 +74,20 @@ check "release: still executable" "$(test -x "${d}/bin/lets-code" && echo yes)" 
 check "release: nothing left behind" "$(ls -A "${d}/bin")" "lets-code"
 check "release: second run is a no-op" "$(bash "${d}/bin/lets-code" update 2>&1 | grep -c 'already up to date')" 1
 
-# snapshot, through a symlink
-fresh; ln -s "${d}/bin/lets-code" "${d}/link"
-bash "${d}/link" update --snapshot > "${d}/out" 2>&1 || { cat "${d}/out"; echo "FAIL  update --snapshot"; exit 1; }
+# snapshot, through a symlink (on Windows the script itself: Git Bash's
+# ln -s makes a copy, which update would replace instead)
+fresh
+if [ "${win}" = true ]; then link="${d}/bin/lets-code"; else ln -s "${d}/bin/lets-code" "${d}/link"; link="${d}/link"; fi
+bash "${link}" update --snapshot > "${d}/out" 2>&1 || { cat "${d}/out"; echo "FAIL  update --snapshot"; exit 1; }
 check "snapshot: stamped with the commit" "$(ver)" "lets-code main-0123456"
-check "snapshot: symlink kept" "$(test -L "${d}/link" && echo yes)" yes
-check "snapshot: second run is a no-op" "$(bash "${d}/link" update --snapshot 2>&1 | grep -c 'already up to date')" 1
+if [ "${win}" = true ]; then
+    echo "skip  snapshot: symlink kept: skipped on Windows: ln -s copies in Git Bash (no symlink to keep)"
+else
+    check "snapshot: symlink kept" "$(test -L "${d}/link" && echo yes)" yes
+fi
+check "snapshot: second run is a no-op" "$(bash "${link}" update --snapshot 2>&1 | grep -c 'already up to date')" 1
 echo "fedcba9876543210fedcba9876543210fedcba98" > "${d}/www/sha"
-bash "${d}/link" update --snapshot > /dev/null 2>&1
+bash "${link}" update --snapshot > /dev/null 2>&1
 check "snapshot: a new commit updates" "$(ver)" "lets-code main-fedcba9"
 
 # refusals leave the script alone
@@ -98,10 +109,13 @@ check "checkout: refused" "$(bash "${d}/repo/lets-code" update > /dev/null 2>&1 
 mkdir -p "${d}/npm/lib/node_modules/@civitas-cerebrum/lets-code" "${d}/fakebin"
 cp "${src}" "${d}/npm/lib/node_modules/@civitas-cerebrum/lets-code/lets-code"
 printf '#!/bin/sh\necho "$*" > "%s/npm-args"\n' "${d}" > "${d}/fakebin/npm"; chmod +x "${d}/fakebin/npm"
-PATH="${d}/fakebin:${PATH}" bash "${d}/npm/lib/node_modules/@civitas-cerebrum/lets-code/lets-code" update > /dev/null 2>&1
-check "npm: release" "$(cat "${d}/npm-args")" "install -g @civitas-cerebrum/lets-code@latest"
-PATH="${d}/fakebin:${PATH}" bash "${d}/npm/lib/node_modules/@civitas-cerebrum/lets-code/lets-code" update --snapshot > /dev/null 2>&1
-check "npm: snapshot" "$(cat "${d}/npm-args")" "install -g github:civitas-cerebrum/lets-code"
+PATH="$(pdir "${d}/fakebin"):${PATH}" bash "${d}/npm/lib/node_modules/@civitas-cerebrum/lets-code/lets-code" update > /dev/null 2>&1
+# (on Windows npm is allowed the package's postinstall, which points npm's
+# .cmd/.ps1 shims at Git Bash)
+allow=""; [ "${win}" = false ] || allow="--allow-scripts=@civitas-cerebrum/lets-code "
+check "npm: release" "$(cat "${d}/npm-args")" "install -g ${allow}@civitas-cerebrum/lets-code@latest"
+PATH="$(pdir "${d}/fakebin"):${PATH}" bash "${d}/npm/lib/node_modules/@civitas-cerebrum/lets-code/lets-code" update --snapshot > /dev/null 2>&1
+check "npm: snapshot" "$(cat "${d}/npm-args")" "install -g ${allow}github:civitas-cerebrum/lets-code"
 
 check "unknown option refused" "$(bash "${src}" update --nope > /dev/null 2>&1 && echo ran || echo refused)" refused
 exit "${fail}"

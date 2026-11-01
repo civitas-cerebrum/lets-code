@@ -10,8 +10,22 @@ here="$(cd "$(dirname "$0")" && pwd)"
 lc="${here}/../lets-code"
 work="$(mktemp -d)"
 # the stand-in servers and the sidecar claude-remote starts go too, also when a check fails
-trap 'kill ${srv:-} ${rsrv:-} ${rpid:-} 2>/dev/null; rm -rf "${work}"' EXIT
+# (the sidecar's pid is node's own: on Windows a Windows pid, which Git Bash's
+# kill does not know, and a sidecar left running there holds the caller's
+# console, an ssh session's output with it, open)
+stop_sidecar() {
+    [ -n "${rpid:-}" ] || return 0
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) MSYS2_ARG_CONV_EXCL='*' taskkill /PID "${rpid}" /T /F >/dev/null 2>&1 ;;
+        *) kill "${rpid}" 2>/dev/null ;;
+    esac
+    return 0
+}
+trap 'kill ${srv:-} ${rsrv:-} 2>/dev/null; stop_sidecar; rm -rf "${work}"' EXIT
 fail=0
+# pdir <dir>: the dir as a PATH entry (on Windows Git Bash's /c/x form: the
+# C: of a C:/x path would split PATH)
+pdir() { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) cygpath -u -- "$1" ;; *) printf '%s\n' "$1" ;; esac; }
 t() { if [ "$2" = "$3" ]; then echo "ok    $1 -> $2"; else echo "FAIL  $1 -> '$2' (want '$3')"; fail=1; fi; }
 
 mkdir -p "${work}/bin" "${work}/proj"
@@ -28,6 +42,10 @@ chmod +x "${work}/bin/pi" "${work}/bin/claude"
 # a PATH without claude: the fake pi, python3 and curl only
 noclaude="${work}/noclaude"; mkdir -p "${noclaude}"; cp "${work}/bin/pi" "${noclaude}/pi"
 ln -s "$(command -v python3)" "${noclaude}/python3"; ln -s "$(command -v curl)" "${noclaude}/curl"
+# the system's own directories; on Windows also curl's (Git's mingw64/bin: its
+# curl.exe needs the DLLs beside it, which a copy in noclaude has not)
+sysbin="/usr/bin:/bin"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) sysbin="${sysbin}:$(dirname "$(command -v curl)")" ;; esac
 
 # launch <home> [lets-code args...]: one launch, output in <home>/out, status in <home>/rc
 launch() {
@@ -35,7 +53,7 @@ launch() {
     mkdir -p "${h}"
     # config and agent dir pinned under the scratch HOME (a CI runner sets XDG_CONFIG_HOME)
     ( cd "${work}/proj" && HOME="${h}" XDG_CONFIG_HOME="${h}/.config" PI_CODING_AGENT_DIR="${h}/.pi/agent" \
-        PATH="${LC_PATH:-${work}/bin:${PATH}}" LC_TEST_OUT="${h}/pi-args" PI_OFFLINE=1 \
+        PATH="${LC_PATH:-$(pdir "${work}/bin"):${PATH}}" LC_TEST_OUT="${h}/pi-args" PI_OFFLINE=1 \
         LETS_CODE_MEM_GUARD=false LETS_CODE_GIT_GUARD=false LETS_CODE_SUBAGENTS=false NO_COLOR=1 \
         bash "${lc}" "$@" -p hi > "${h}/out" 2>&1 < /dev/null; echo $? > "${h}/rc" )
 }
@@ -158,18 +176,18 @@ t "server launch: pi gets the server" "$(args "${h}")" "--provider lets-code --m
 t "server launch: Claude models in /model too" "$(models "${h}" Anthropic)" "claude-haiku claude-sonnet claude-opus claude-fable"
 t "server launch: the module is on" "$(sed -n 2p "${h}/pi-args")" "claude-provider=Anthropic"
 h="${work}/h7"; mkdir -p "${h}/.config/lets-code"; cp "${work}/h6/.config/lets-code/config" "${h}/.config/lets-code/config"
-LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
+LC_PATH="$(pdir "${noclaude}"):${sysbin}" launch "${h}"
 t "server launch without Claude Code: no Claude models" "$(models "${h}" Anthropic)|$(sed -n 2p "${h}/pi-args")" "|claude-provider="
-LC_PATH="${noclaude}:/usr/bin:/bin" launch "${work}/h6"
+LC_PATH="$(pdir "${noclaude}"):${sysbin}" launch "${work}/h6"
 t "Claude Code gone: the Claude models leave /model" "$(models "${work}/h6" Anthropic)" ""
 # Claude saved as pi's default, but nothing to run it with: the configured
 # server, so pi still opens (and Ctrl+S there can change the default)
 printf '{"defaultProvider": "Anthropic", "defaultModel": "claude-opus"}\n' > "${work}/h7/.pi/agent/settings.json"
-LC_PATH="${noclaude}:/usr/bin:/bin" launch "${work}/h7"
+LC_PATH="$(pdir "${noclaude}"):${sysbin}" launch "${work}/h7"
 t "pi default on Claude without Claude Code: the server" "$(cat "${work}/h7/rc")|$(args "${work}/h7")" "0|--provider lets-code --model srv-model -p hi"
 
 # --claude without Claude Code
-LC_PATH="${noclaude}:/usr/bin:/bin" launch "${work}/h8" --claude
+LC_PATH="$(pdir "${noclaude}"):${sysbin}" launch "${work}/h8" --claude
 t "--claude without Claude Code: refused" "$(cat "${work}/h8/rc")|$(grep -c 'needs Claude Code' "${work}/h8/out")" "1|1"
 
 # CLAUDE_URL: another machine's proxy (a stand-in that wants this Claude
@@ -190,17 +208,17 @@ rurl="http://127.0.0.1:$(cat "${work}/rport")"
 h="${work}/h9"; mkdir -p "${h}/.config/lets-code"
 # the address without its scheme, as typed in setup: http:// added for an IP
 printf 'BACKEND="claude"\nCLAUDE_URL="%s/"\nCLAUDE_TOKEN="%s"\n' "${rurl#http://}" "${tok}" > "${h}/.config/lets-code/config"
-LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
+LC_PATH="$(pdir "${noclaude}"):${sysbin}" launch "${h}"
 t "CLAUDE_URL: launches Claude without Claude Code here" "$(cat "${h}/rc")|$(args "${h}")" "0|--provider Anthropic --model claude-haiku -p hi"
 t "CLAUDE_URL: provider points there, key from the environment" "$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1]))["providers"]["Anthropic"]; print(p["baseUrl"], p["apiKey"])' "${h}/.pi/agent/models.json")" "${rurl}/v1 \$LETS_CODE_CLAUDE_TOKEN"
 t "CLAUDE_URL: the module gets URL and token" "$(sed -n 3p "${h}/pi-args")" "claude-url=${rurl} token=${tok}"
 t "CLAUDE_URL: banner" "$(grep -o "claude-haiku @ Claude Code via 127.0.0.1:[0-9]*" "${h}/out" | sed 's/:[0-9]*$//')" "claude-haiku @ Claude Code via 127.0.0.1"
 printf 'BACKEND="claude"\nCLAUDE_URL="%s"\nCLAUDE_TOKEN="sk-ant-oat01-notthetokenitwantsatall"\n' "${rurl}" > "${h}/.config/lets-code/config"
-LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
+LC_PATH="$(pdir "${noclaude}"):${sysbin}" launch "${h}"
 t "CLAUDE_URL, wrong token: refused, pointing at claude setup-token" "$(cat "${h}/rc")|$(grep -c "run 'claude setup-token'" "${h}/out")" "1|1"
 kill "${rsrv}" 2>/dev/null
 printf 'BACKEND="claude"\nCLAUDE_URL="%s"\nCLAUDE_TOKEN="%s"\n' "${rurl}" "${tok}" > "${h}/.config/lets-code/config"
-LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
+LC_PATH="$(pdir "${noclaude}"):${sysbin}" launch "${h}"
 t "CLAUDE_URL, nothing there: refused" "$(cat "${h}/rc")|$(grep -c 'not reachable' "${h}/out")" "1|1"
 
 # what setup writes with a Claude Code token at its Token prompt: ENDPOINTS
@@ -209,7 +227,7 @@ stub "${work}/remote.py" "${work}/rport2"; rsrv="${STUB_PID}"
 rurl="http://127.0.0.1:$(cat "${work}/rport2")"
 h="${work}/h12"; mkdir -p "${h}/.config/lets-code"
 printf 'ENDPOINTS="%s"\nTOKEN="%s"\n' "${rurl#http://}" "${tok}" > "${h}/.config/lets-code/config"
-LC_PATH="${noclaude}:/usr/bin:/bin" launch "${h}"
+LC_PATH="$(pdir "${noclaude}"):${sysbin}" launch "${h}"
 t "Claude Code token as TOKEN: the endpoint is a Claude proxy" "$(cat "${h}/rc")|$(args "${h}")|$(sed -n 3p "${h}/pi-args")" "0|--provider Anthropic --model claude-haiku -p hi|claude-url=${rurl} token=${tok}"
 kill "${rsrv}" 2>/dev/null
 
@@ -230,7 +248,7 @@ t "CLAUDE_TOKEN cut off when copied: refused with its length" "$(cat "${h}/rc")|
 # through a reverse proxy need a Claude Code token
 h="${work}/h10"; mkdir -p "${h}"
 port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-( cd "${work}/proj" && HOME="${h}" XDG_CONFIG_HOME="${h}/.config" PI_CODING_AGENT_DIR="${h}/.pi/agent" PATH="${work}/bin:${PATH}" LETS_CODE_CLAUDE_PORT="${port}" bash "${lc}" claude-remote > "${h}/out" 2>&1 < /dev/null; echo $? > "${h}/rc" )
+( cd "${work}/proj" && HOME="${h}" XDG_CONFIG_HOME="${h}/.config" PI_CODING_AGENT_DIR="${h}/.pi/agent" PATH="$(pdir "${work}/bin"):${PATH}" LETS_CODE_CLAUDE_PORT="${port}" bash "${lc}" claude-remote > "${h}/out" 2>&1 < /dev/null; echo $? > "${h}/rc" )
 t "claude-remote: exit status" "$(cat "${h}/rc")" 0
 rpid="$(curl -s "http://127.0.0.1:${port}/health" | python3 -c 'import json, sys; print(json.load(sys.stdin)["pid"])' 2>/dev/null)"
 t "claude-remote: says how to get the token" "$(grep -c "claude setup-token" "${h}/out")|$(grep -c 'CLAUDE_URL=' "${h}/out")" "1|1"

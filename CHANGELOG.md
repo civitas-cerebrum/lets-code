@@ -9,7 +9,13 @@ model on your own hardware:
   (with per-level budgets the server enforces) and vision, probed from the
   server; the output cap reserved in pi's compaction settings so a session
   never overflows
-- guards: memory (Linux), git (a `pi/*` branch, refused irreversible
+- Windows: runs in Git Bash (as pi does) from PowerShell, cmd, Windows
+  Terminal or Git Bash, installed with `npm install -g
+  --allow-scripts=@civitas-cerebrum/lets-code @civitas-cerebrum/lets-code`;
+  every feature but the sandbox (macOS and Linux only), with a lighter
+  memory guard; the test suite runs on windows-latest in CI
+- guards: memory (off by default; a RAM watcher asks at 85 % use, a headless
+  session declines), git (off by default, `/git-guard on`: a `pi/*` branch, refused irreversible
   commands, checkpoints before every tool call), agent (bash timeouts,
   cut-off recovery, test reminders, dynamic thinking), grounding
 - modes and roles (`plan`, `auto`, `ask`, `orchestrator`, `yolo`) enforced
@@ -49,3 +55,6 @@ model on your own hardware:
   sessions` and `lets-code message` are now subcommands: a first word of
   `sessions` or `message` no longer passes to pi as a prompt (use
   `lets-code -p "..."` for one)
+- runs on pi 1.4.0 (the latest; checked by hand: subagent sessions switch
+  from an idle main session, in place while it works, between subagents
+  and back); pi 0.85+ still works, as before

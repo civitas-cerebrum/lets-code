@@ -15,7 +15,8 @@ import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 
 const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/factory.ts");
-const work = realpathSync(mkdtempSync(join(tmpdir(), "factory-test-")));
+// on Windows the long names (C:\Users\runneradmin, not RUNNER~1), as git prints them
+const work = (process.platform === "win32" ? realpathSync.native : realpathSync)(mkdtempSync(join(tmpdir(), "factory-test-")));
 process.on("exit", () => rmSync(work, { recursive: true, force: true }));
 const agentDir = join(work, "agent"); mkdirSync(join(agentDir, "extensions"), { recursive: true });
 process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -77,6 +78,8 @@ function makeRepo(name) {
 	git(r, "add", "-A"); git(r, "commit", "-qm", "base");
 	return r;
 }
+// a path as the briefs name it: with "/" (Windows paths have "\")
+const px = (p) => p.replace(/\\/g, "/");
 const SECRET = "SECRET-CONVERSATION-7731";
 // a fake expert per stage, scripted: each call pops the next reply of its stage
 function fakeDeps(script, { decisions = {}, available = () => false } = {}) {
@@ -133,7 +136,7 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("tester: the goal carries the ticket and the every-example rule", [/Ticket \(Check every example and rule in the ticket too/.test(tgoal), tgoal.includes(readFileSync(join(rt, "TICKET.md"), "utf8").trim().split("\n")[0])], [true, true]);
 	t("budget: the reviewers, tester and judge start with the verdict", ["expert-review", "design-review", "judge"].map((x) => /start your final reply with the verdict line, then one line per finding/.test(brief(x))), [true, true, true]);
 	t("budget: the build a step at a time", /Build the plan one step at a time, reading only what the current step needs: about 619 lines/.test(brief("build")), true);
-	t("budget: the reviewers and the judge read the change file by file", ["expert-review", "design-review", "judge"].map((s) => brief(s).includes(`git -C ${L.work} diff ${L.base} -- <file>`)), [true, true, true]);
+	t("budget: the reviewers and the judge read the change file by file", ["expert-review", "design-review", "judge"].map((s) => brief(s).includes(`git -C '${px(L.work)}' diff ${L.base} -- <file>`)), [true, true, true]);
 	t("budget: nothing cut when nothing ran short", [/already cut/.test(brief("build")), L.entries.some((e) => e.short)], [false, false]);
 	// not sized: no window given
 	const r2 = makeRepo("nobudget"); const fd2 = fakeDeps({ ...OK, build: [build()] });
@@ -314,6 +317,23 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("orchestrated run, judge rejects: not committed by itself", [!!Lr.commit, Lr.status], [false, "waiting"]);
 }
 
+// ------------------------------------------------------------------ line ends, stderr, the timeout, Windows
+{
+	// a git that converts line ends (Git for Windows' core.autocrlf=true) prints
+	// "LF will be replaced by CRLF": never into the patch, the sha or the fingerprint
+	const repo = makeRepo("crlf"); git(repo, "config", "core.autocrlf", "true"); git(repo, "config", "core.safecrlf", "warn");
+	const L = await F.startRun(opts(repo), fakeDeps({ ...OK, build: [build("feature\n")] }));
+	const patch = readFileSync(F.diffPath(L), "utf8");
+	t("crlf: done and committed", [L.status, /^[0-9a-f]{40,64}$/.test(L.commit)], ["done", true]);
+	t("crlf: no git warning in the patch", [/warning|CRLF/i.test(patch), patch.includes("+feature")], [false, true]);
+	t("crlf: the worktree's files keep LF", readFileSync(join(L.work, "src", "a.txt"), "utf8"), "ok\n");
+	const r = await F.shellExec("echo out; echo err >&2", work);
+	t("shellExec: out has both, stdout only stdout", [r.out.includes("out") && r.out.includes("err"), r.stdout], [true, "out\n"]);
+	const t0 = Date.now(); const k = await F.shellExec("sleep 30 & sleep 30; echo never", work, 300);
+	t("shellExec: the timeout stops the tree", [k.out.includes("never"), Date.now() - t0 < 10000], [false, true]);
+	t("no python: the Store stub's exit 9009 is named", [F.noPython(9009, ""), F.noPython(1, "Python was not found; run without arguments to install from the Microsoft Store"), F.noPython(1, "FAILED (failures=1)")], [true, true, false]);
+}
+
 // ------------------------------------------------------------------ the happy path
 {
 	const repo = makeRepo("happy"); const statusBefore = git(repo, "status", "--porcelain"); const head = git(repo, "rev-parse", "HEAD");
@@ -333,7 +353,7 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 	t("happy: the work tree is clean", git(L.work, "status", "--porcelain"), "");
 	t("happy: the user's checkout untouched", [git(repo, "status", "--porcelain"), git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "--abbrev-ref", "HEAD")], [statusBefore, head, "main"]);
 	t("happy: baseline and regression", [L.baseline.code, L.entries.at(-1).verdict], [0, "PASS"]);
-	t("happy: the developer is told the ticket's repo is its worktree", [fd.calls[0].brief.workspace.includes(L.work), fd.calls[0].brief.workspace.includes(`${repo} (branch`), fd.calls[2].brief.diff.includes(`worktree of ${repo}`)], [true, true, true]);
+	t("happy: the developer is told the ticket's repo is its worktree", [fd.calls[0].brief.workspace.includes(px(L.work)), fd.calls[0].brief.workspace.includes(`${px(repo)} (branch`), fd.calls[2].brief.diff.includes(`worktree of ${px(repo)}`)], [true, true, true]);
 	t("happy: plan mode, then build with the plan", [fd.calls[0].brief.mode, fd.calls[1].brief.mode, fd.calls[1].brief.plan], ["plan", "build", "## Plan\n1. add feature.txt (C1)\n## Tests\n## Risks\nnone"]);
 	t("happy: reviewers get the diff and the criteria", [fd.calls[2].brief.diff.includes(L.base), fd.calls[2].brief.criteria], [true, "C1. feature.txt exists\nC2. a.txt still says ok"]);
 	t("happy: the judge gets the developer's report as the claim", fd.calls[4].brief.claim.startsWith("## Changes"), true);
@@ -358,7 +378,7 @@ const opts = (repo, extra = {}) => ({ ticket: readFileSync(join(repo, "TICKET.md
 		t("new: git has no identity here", (await F.shellExec("git var GIT_AUTHOR_IDENT", work)).code !== 0, true);
 		const fd = fakeDeps({ ...OK, judge: ["## Verdict\nACCEPT\n## Criteria\nC1: PASS x"] });
 		const L = await F.startRun({ ticket, repo: fresh, root }, fd);
-		t("new: a folder that did not exist becomes the project", [L.status, existsSync(join(fresh, ".git")), L.repo], ["done", true, fresh]);
+		t("new: a folder that did not exist becomes the project", [L.status, existsSync(join(fresh, ".git")), L.repo], ["done", true, px(fresh)]);   // as git names it: with "/" on Windows
 		t("new: the log says so", [L.entries[0].verdict, /created .*made it a git repo, added an empty first commit/.test(L.entries[0].summary)], ["new project", true]);
 		t("new: the base is the empty first commit", [git(fresh, "rev-list", "--count", "HEAD"), git(fresh, "ls-tree", "HEAD")], ["1", ""]);
 		t("new: committed with the factory's identity", [L.commit.length >= 40, git(L.work, "log", "-1", "--format=%an <%ae>")], [true, "lets-code factory <factory@lets-code.invalid>"]);

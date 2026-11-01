@@ -19,6 +19,8 @@ sys.stdout.write(s[i:j + len("\n}  # end of pi_write_researcher\n")])
 PY
 )"
 PI_AGENT_DIR="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/researcher-test.XXXXXX")" && pwd)"
+# on Windows in the C:/Users/x form the native python helper is handed and logs
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) PI_AGENT_DIR="$(cygpath -m -- "${PI_AGENT_DIR}")" ;; esac
 srv=""; trap '[ -z "${srv}" ] || kill "${srv}" 2>/dev/null; rm -rf "${PI_AGENT_DIR}"' EXIT
 fail=0
 t() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1 -> $2 (want $3)"; fail=1; fi; }

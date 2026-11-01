@@ -10,6 +10,10 @@ d="$(mktemp -d "${TMPDIR:-/tmp}/lets-code-presets.XXXXXX")"
 srv=""
 trap '[ -z "${srv}" ] || kill "${srv}" 2>/dev/null; rm -rf "${d}"' EXIT
 fail=0
+# pdir <dir>: the dir as a PATH entry (on Windows Git Bash's /c/x form: the
+# C: of a C:/x path would split PATH)
+pdir() { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) cygpath -u -- "$1" ;; *) printf '%s\n' "$1" ;; esac; }
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) win=true ;; *) win=false ;; esac
 check() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: got '$2', want '$3'"; fail=1; fi; }
 
 # a server with one vLLM-style model and one gateway-style model; no chat
@@ -47,7 +51,7 @@ if [ "${1:-}" = "--help" ]; then echo "  --print, -p   Non-interactive mode"; ex
 SH
 chmod +x "${d}/bin/pi"
 
-export PATH="${d}/bin:${PATH}" XDG_CONFIG_HOME="${d}/config" PI_CODING_AGENT_DIR="${d}/agent" PI_OFFLINE=1 PI_RECORD="${d}/record"
+export PATH="$(pdir "${d}/bin"):${PATH}" XDG_CONFIG_HOME="${d}/config" PI_CODING_AGENT_DIR="${d}/agent" PI_OFFLINE=1 PI_RECORD="${d}/record"
 mkdir -p "${d}/config/lets-code"
 cat > "${d}/config/lets-code/config" <<EOF
 ENDPOINTS="${url}"
@@ -64,7 +68,11 @@ printf 'qwen\n%s\npreset-token\nvendor/big\n\nn\n' "${url}" | bash "${lc}" setup
     || { cat "${d}/setup.log"; echo "FAIL  setup preset exited non-zero"; exit 1; }
 p="${d}/config/lets-code/presets/qwen"
 check "preset file written" "$(test -f "${p}" && echo yes)" yes
-check "preset file mode 600" "$(stat -c %a "${p}" 2>/dev/null || stat -f %Lp "${p}")" 600
+if [ "${win}" = true ]; then
+    echo "skip  preset file mode 600: skipped on Windows: no mode bits there (chmod does nothing; the profile's ACL keeps the file private)"
+else
+    check "preset file mode 600" "$(stat -c %a "${p}" 2>/dev/null || stat -f %Lp "${p}")" 600
+fi
 check "preset model" "$(. "${p}"; echo "${MODEL}")" vendor/big
 check "preset token" "$(. "${p}"; echo "${TOKEN}")" preset-token
 check "preset vision pinned from the answer" "$(. "${p}"; echo "${VISION}")" false

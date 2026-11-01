@@ -82,7 +82,7 @@ try {
 	t("ls passes", await x.call("ls", { path: "." }), "allowed");
 
 	// namedFiles: flags, variables and globs are skipped
-	t("namedFiles", x.mod.namedFiles(`cat -n e.txt "src/d.py" $HOME/x *.txt nope.txt`, proj).map((p) => p.slice(proj.length + 1)), ["e.txt", "src/d.py"]);
+	t("namedFiles", x.mod.namedFiles(`cat -n e.txt "src/d.py" $HOME/x *.txt nope.txt`, proj).map((p) => p.slice(proj.length + 1).replace(/\\/g, "/")), ["e.txt", "src/d.py"]);   // native paths (src\d.py on Windows)
 } finally {
 	rmSync(work, { recursive: true, force: true });
 }

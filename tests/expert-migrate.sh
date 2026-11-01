@@ -17,7 +17,10 @@ t "TERMUX=true: remembered enabled"  "$(experts)" '{"termux-device": true}'
 t "REA=manual: ignored"              "$(echo "${out}" | grep -c reverse-engineer || true)" 0
 t "one-line note"                    "$(echo "${out}" | grep -c '^note: TERMUX=true in /cfg is now remembered as the termux-device expert enabled')" 1
 t "other keys kept"                  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["metrics"])' "${st}")" True
-t "mode 600"                         "$(ls -l "${st}" | cut -c1-10)" "-rw-------"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) echo "skip  mode 600: skipped on Windows: no mode bits there (chmod does nothing; the profile's ACL keeps the file private)" ;;
+    *) t "mode 600"                  "$(ls -l "${st}" | cut -c1-10)" "-rw-------" ;;
+esac
 t "second launch: no note"           "$(lc_migrate_expert_switches | wc -l | tr -d ' ')" 0
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["experts"]["termux-device"]=False; json.dump(d,open(sys.argv[1],"w"))' "${st}"
 lc_migrate_expert_switches >/dev/null

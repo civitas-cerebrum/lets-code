@@ -42,11 +42,12 @@ cat > "${d}/bin/pi" <<'SH'
 #!/bin/sh
 if [ "${1:-}" = "--help" ]; then echo "  --print, -p   Non-interactive mode"; exit 0; fi
 echo "session=${LETS_CODE_SESSION:-} guard=${LETS_CODE_MEM_GUARD:-} watch=${LETS_CODE_MEM_WATCH:-} pi=${LETS_CODE_PI_MARK:-} run=${LETS_CODE_RUN:-}" > "${PI_RECORD}"
+echo "${LETS_CODE_PI:-}" > "${PI_RECORD}.launch"
 SH
 chmod +x "${d}/bin/pi"
 
 export PATH="${d}/bin:${PATH}" XDG_CONFIG_HOME="${d}/config" PI_CODING_AGENT_DIR="${d}/agent" PI_OFFLINE=1 PI_RECORD="${d}/record"
-unset LETS_CODE_MEM_GUARD LETS_CODE_MEM_WATCH LETS_CODE_PI_MARK LETS_CODE_RUN
+unset LETS_CODE_MEM_GUARD LETS_CODE_MEM_WATCH LETS_CODE_PI_MARK LETS_CODE_RUN LETS_CODE_PI
 mkdir -p "${d}/config/lets-code"
 config() {
     cat > "${d}/config/lets-code/config" <<EOF
@@ -81,6 +82,15 @@ config 'MEM_GUARD_PROCESS="20%"
 MEM_GUARD_SESSION="45%"'
 check "the old size keys are ignored" "$(launch)" "session=1 guard=false watch=true pi= run="
 check "an outer session's markers are dropped" "$(LETS_CODE_PI_MARK=1:1 LETS_CODE_RUN=1:1 launch)" "session=1 guard=false watch=true pi= run="
+# #105: builds of 2026-11-01..02 wrote the marker as LETS_CODE_PI, the name the
+# modules start pi by; a launch from inside such a session drops it, and keeps
+# a real LETS_CODE_PI (a command: a path or a JSON array)
+LETS_CODE_PI=79615:473363 LETS_CODE_RUN=79615:473363 launch >/dev/null
+check "#105: an old build's marker in LETS_CODE_PI is dropped" "$(cat "${d}/record.launch")" ""
+LETS_CODE_PI=/opt/pi/bin/pi launch >/dev/null
+check "#105: a real LETS_CODE_PI (a path) is kept" "$(cat "${d}/record.launch")" "/opt/pi/bin/pi"
+LETS_CODE_PI='["node","/x/cli.js"]' launch >/dev/null
+check "#105: a real LETS_CODE_PI (a JSON array) is kept" "$(cat "${d}/record.launch")" '["node","/x/cli.js"]'
 
 config 'MEM_GUARD="lots"'
 check "a bad value: pi is not started" "$(launch)" "(pi not started)"

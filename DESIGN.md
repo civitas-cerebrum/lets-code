@@ -75,11 +75,11 @@ creates. Never pi, its node, Claude Code or tmux. Two rules:
   processes) because a cgroup cap does not work on the Pi: the user's
   systemd delegates only `cpu` and `pids`, and a `MemoryMax` on a user scope
   is silently ignored.
-- **Abandoned.** Each pi sets `LETS_CODE_PI=<pid>:<start time>` in its own
+- **Abandoned.** Each pi sets `LETS_CODE_PI_MARK=<pid>:<start time>` in its own
   environment, so everything it starts inherits it; the first pi also sets
   `LETS_CODE_RUN` (its own marker). Every 10 s the guard reads the
   environment of processes outside its own tree; one with this run's
-  `LETS_CODE_RUN` whose `LETS_CODE_PI` names a pi no longer running (pid
+  `LETS_CODE_RUN` whose `LETS_CODE_PI_MARK` names a pi no longer running (pid
   gone, or reused with another start time) gets SIGTERM, then SIGKILL on the
   next pass. Other users' environments are unreadable, so they never match.
   A process left by a pi that still runs (a dev server the agent started in

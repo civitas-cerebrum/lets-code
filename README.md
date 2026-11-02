@@ -519,9 +519,9 @@ for any ordinary build or test suite. Sizes are read from `/proc`, so this
 holds where systemd gives the user no memory controller.
 
 Left behind ("abandoned"): every pi marks what it starts with
-`LETS_CODE_PI=<its pid>:<start time>`, and the session's first pi adds
+`LETS_CODE_PI_MARK=<its pid>:<start time>`, and the session's first pi adds
 `LETS_CODE_RUN`. A process with this session's `LETS_CODE_RUN` whose
-`LETS_CODE_PI` names a pi that has exited (a subagent that quit, say) is
+`LETS_CODE_PI_MARK` names a pi that has exited (a subagent that quit, say) is
 ended. Without the markers, from another session, or while its pi still runs
 (a server the agent started in the background on purpose), it is left alone.
 

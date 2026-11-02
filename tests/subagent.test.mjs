@@ -1089,6 +1089,25 @@ async function load(env = {}) {
 	const alive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
 	for (let i = 0; i < 400 && pids.some(alive); i++) await new Promise((r) => setTimeout(r, 20));
 }
+// --- #105: LETS_CODE_PI is how the modules start pi. Builds of 2026-11-01..02
+// also wrote the memory guard's "<pid>:<start>" marker there, and every
+// subagent spawn ran that marker as a program (spawn 79615:473363 ENOENT). A
+// session of such a build passes it on: a run with it in the environment
+// still starts pi, and the child gets no marker under the old name. (Off
+// Windows: there the tests set LETS_CODE_PI to start the fake pi.)
+if (!W) {
+	const h = await load();
+	const before = new Set(readdirSync(fake).filter((f) => f.startsWith("call-")));
+	process.env.LETS_CODE_PI = "79615:473363";
+	try {
+		const r = await h.run({ agent: "worker", task: "marker run" });
+		const text = (r?.content ?? []).map((c) => c.text).join("\n");
+		t("#105: an old marker in LETS_CODE_PI: the child pi starts and answers", [r?.isError ?? false, /Result for: marker run/.test(text), /ENOENT/.test(text)], [false, true, false]);
+		const call = readdirSync(fake).filter((f) => f.startsWith("call-") && !before.has(f)).map((f) => JSON.parse(readFileSync(join(fake, f), "utf8")))[0];
+		t("#105: the child was spawned (its first prompt reached it)", /marker run/.test(call?.task ?? ""), true);
+	} finally { delete process.env.LETS_CODE_PI; }
+}
+
 rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 console.log(`\n${n} checks, ${fail ? "FAILURES" : "all passed"}`);
 process.exit(fail);

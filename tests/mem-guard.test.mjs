@@ -90,6 +90,9 @@ const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-co
 		await h.session_start?.({}, { hasUI: true, ui });
 		await sleep(400);
 		eq("watcher, UI: asked once", asked.length, 1);
+		// the abandoned-process marker has its own name: LETS_CODE_PI is how the
+		// modules start pi (a marker there made every subagent spawn "<pid>:<start>")
+		eq("markers: LETS_CODE_PI_MARK is set, LETS_CODE_PI is left alone", [/^\d+:\d+$/.test(process.env.LETS_CODE_PI_MARK ?? ""), process.env.LETS_CODE_PI], [true, undefined]);
 		eq("watcher, UI: the question names the use and the guard", /RAM 90 % used\. Turn on the memory guard/.test(asked[0] ?? ""), true);
 		let st = ""; await cmds.memguard.handler("", { hasUI: true, ui: { notify: (m) => { st = m; } } });
 		eq("watcher, UI: a yes turns the guard on", /^memory guard on/.test(st), true);
@@ -235,8 +238,8 @@ const fresh = () => { resetInbox(); register(process.pid); rmSync(log, { force: 
 		[56, { pid: 56, ppid: 1, bytes: MB, start: 1 }],                 // unreadable (another user's)
 		[57, { pid: 57, ppid: 1, bytes: MB, start: 1 }],                 // only the run marker
 	]);
-	const env = { 50: { LETS_CODE_RUN: RUN, LETS_CODE_PI: "2000:7" }, 51: { LETS_CODE_RUN: RUN, LETS_CODE_PI: "3000:9" }, 52: { LETS_CODE_RUN: "999:1", LETS_CODE_PI: "2000:7" },
-		53: {}, 54: { LETS_CODE_RUN: RUN, LETS_CODE_PI: "2000:7" }, 55: { LETS_CODE_RUN: RUN, LETS_CODE_PI: "2000:7" }, 56: null, 57: { LETS_CODE_RUN: RUN } };
+	const env = { 50: { LETS_CODE_RUN: RUN, LETS_CODE_PI_MARK: "2000:7" }, 51: { LETS_CODE_RUN: RUN, LETS_CODE_PI_MARK: "3000:9" }, 52: { LETS_CODE_RUN: "999:1", LETS_CODE_PI_MARK: "2000:7" },
+		53: {}, 54: { LETS_CODE_RUN: RUN, LETS_CODE_PI_MARK: "2000:7" }, 55: { LETS_CODE_RUN: RUN, LETS_CODE_PI_MARK: "2000:7" }, 56: null, 57: { LETS_CODE_RUN: RUN } };
 	const argv = (pid) => (pid === 54 ? ["pi"] : ["sleep", "60"]);
 	const got = h.mod.abandonedOf(t, RUN, process.pid, (pid) => env[pid], (m) => m === "3000:9", argv).map((p) => p.pid);
 	check("abandoned: only this run's process whose pi is gone", got, [50]);
@@ -323,7 +326,7 @@ const fresh = () => { resetInbox(); register(process.pid); rmSync(log, { force: 
 	fresh();
 	const h = await load({ LETS_CODE_MEM_GUARD: "true", ...noWatch });
 	// no markers either: env -u, so it is not "abandoned"
-	const c = spawn("sh", ["-c", `env -u LETS_CODE_RUN -u LETS_CODE_PI python3 ${hog} 30 >/dev/null 2>&1 & echo $!`], { stdio: ["ignore", "pipe", "ignore"] });
+	const c = spawn("sh", ["-c", `env -u LETS_CODE_RUN -u LETS_CODE_PI_MARK python3 ${hog} 30 >/dev/null 2>&1 & echo $!`], { stdio: ["ignore", "pipe", "ignore"] });
 	let out = ""; c.stdout.on("data", (d) => { out += d; });
 	await new Promise((r) => c.on("exit", r));
 	const outsider = Number(out.trim());
@@ -474,9 +477,9 @@ const fresh = () => { resetInbox(); register(process.pid); rmSync(log, { force: 
 {
 	fresh();
 	const h = await load({});
-	check("markers: LETS_CODE_PI and LETS_CODE_RUN are this pi", [process.env.LETS_CODE_PI, process.env.LETS_CODE_RUN], [h.mod.SELF, h.mod.SELF]);
+	check("markers: LETS_CODE_PI_MARK and LETS_CODE_RUN are this pi", [process.env.LETS_CODE_PI_MARK, process.env.LETS_CODE_RUN], [h.mod.SELF, h.mod.SELF]);
 	const sub = await load({ LETS_CODE_RUN: "1:1" });
-	check("markers: a subagent's pi sets its own LETS_CODE_PI, keeps the run", [process.env.LETS_CODE_PI, process.env.LETS_CODE_RUN], [sub.mod.SELF, "1:1"]);
+	check("markers: a subagent's pi sets its own LETS_CODE_PI_MARK, keeps the run", [process.env.LETS_CODE_PI_MARK, process.env.LETS_CODE_RUN], [sub.mod.SELF, "1:1"]);
 	check("markers: a subagent's pi runs no watcher or guard", [Object.keys(sub.handlers).length, Object.keys(sub.commands).length], [0, 0]);
 	await stopGuard(h);
 }
@@ -496,12 +499,12 @@ const orphan = async (env, cmd = "sleep 60") => {
 	const h = await load({ ...noWatch });
 	const RUN = process.env.LETS_CODE_RUN;
 	const deadPi = "999999999:1";
-	const left = await orphan(`LETS_CODE_PI=${deadPi}`);
-	const stubborn = await orphan(`LETS_CODE_PI=${deadPi}`, `python3 -c "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(60)"`);
-	const ownPiAlive = await orphan("");                                                // LETS_CODE_PI = this pi (alive)
-	const otherRun = await orphan(`LETS_CODE_RUN=1:1 LETS_CODE_PI=${deadPi}`);
-	const unmarked = await orphan("env -u LETS_CODE_RUN -u LETS_CODE_PI");
-	const namedPi = await (async () => { const c = spawn("bash", ["-c", `(export LETS_CODE_PI=${deadPi}; exec -a pi sleep 60) >/dev/null 2>&1 & echo $!`], { stdio: ["ignore", "pipe", "ignore"] }); let o = ""; c.stdout.on("data", (d) => { o += d; }); await new Promise((r) => c.on("exit", r)); const p = Number(o.trim()); kids.add(p); return p; })();
+	const left = await orphan(`LETS_CODE_PI_MARK=${deadPi}`);
+	const stubborn = await orphan(`LETS_CODE_PI_MARK=${deadPi}`, `python3 -c "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(60)"`);
+	const ownPiAlive = await orphan("");                                                // LETS_CODE_PI_MARK = this pi (alive)
+	const otherRun = await orphan(`LETS_CODE_RUN=1:1 LETS_CODE_PI_MARK=${deadPi}`);
+	const unmarked = await orphan("env -u LETS_CODE_RUN -u LETS_CODE_PI_MARK");
+	const namedPi = await (async () => { const c = spawn("bash", ["-c", `(export LETS_CODE_PI_MARK=${deadPi}; exec -a pi sleep 60) >/dev/null 2>&1 & echo $!`], { stdio: ["ignore", "pipe", "ignore"] }); let o = ""; c.stdout.on("data", (d) => { o += d; }); await new Promise((r) => c.on("exit", r)); const p = Number(o.trim()); kids.add(p); return p; })();
 	// the stubborn one ignores SIGTERM before the guard looks
 	await until(() => { const m = /SigIgn:\s+([0-9a-f]+)/.exec(readFileSync(`/proc/${stubborn}/status`, "utf8")); return !!m && (BigInt(`0x${m[1]}`) & (1n << 14n)) !== 0n; });
 	setMem(8 * GB, 0.3);   // abandoned processes go whatever the memory use
@@ -519,7 +522,7 @@ const orphan = async (env, cmd = "sleep 60") => {
 	const msgs = inbox(process.pid).filter((m) => /abandoned/.test(m.text));
 	check("abandoned: the agent is told once (rate-limited)", msgs.length, 1);
 	check("abandoned: the notice names them", /ended 2 abandoned processes left running by a pi of this session that has exited/.test(msgs[0]?.text ?? ""), true);
-	const again = await orphan(`LETS_CODE_PI=${deadPi}`);
+	const again = await orphan(`LETS_CODE_PI_MARK=${deadPi}`);
 	check("abandoned: a later one is ended too", await until(() => !alive(again)), true);
 	await sleep(200);
 	check("abandoned: ... without a second notice", inbox(process.pid).filter((m) => /abandoned/.test(m.text)).length, 1);
@@ -528,7 +531,7 @@ const orphan = async (env, cmd = "sleep 60") => {
 {
 	fresh();
 	const h = await load({});
-	const left = await orphan("LETS_CODE_PI=999999999:1");
+	const left = await orphan("LETS_CODE_PI_MARK=999999999:1");
 	await sleep(400);
 	check("abandoned: with the guard off, left alone", alive(left), true);
 	await stopGuard(h);

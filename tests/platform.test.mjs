@@ -114,6 +114,7 @@ try {
 		const exe = join(bin, "tool.exe");
 		t("win: lcwCommand(.exe path) as is", P.lcwCommand(exe), [exe]);
 		t("lcwPi: LETS_CODE_PI as a JSON array", (() => { process.env.LETS_CODE_PI = '["node","/x/cli.js"]'; try { return P.lcwPi(); } finally { delete process.env.LETS_CODE_PI; } })(), ["node", "/x/cli.js"]);
+		t("lcwPi: a <pid>:<start> value (the memory guard's marker in builds of 2026-11-01..02) is no command", (() => { process.env.LETS_CODE_PI = "79615:473363"; try { return P.lcwPi(); } finally { delete process.env.LETS_CODE_PI; } })(), P.lcwPi());
 		t("lcwPi: LETS_CODE_PI as a path", (() => { process.env.LETS_CODE_PI = "C:\\pi\\pi.exe"; try { return P.lcwPi(); } finally { delete process.env.LETS_CODE_PI; } })(), ["C:\\pi\\pi.exe"]);
 	});
 

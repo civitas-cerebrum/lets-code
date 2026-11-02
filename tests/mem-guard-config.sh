@@ -2,7 +2,7 @@
 # The memory guard and RAM watcher settings reach pi: the guard off and the
 # watcher on by default, MEM_GUARD / MEM_WATCH from the config, env and flags
 # over it, a bad value refused at launch, nothing exported with both off, and
-# an outer session's markers (LETS_CODE_PI, LETS_CODE_RUN) dropped. Runs
+# an outer session's markers (LETS_CODE_PI_MARK, LETS_CODE_RUN) dropped. Runs
 # against a fake /v1/models server and a fake pi that records its env.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -41,12 +41,12 @@ mkdir -p "${d}/bin"
 cat > "${d}/bin/pi" <<'SH'
 #!/bin/sh
 if [ "${1:-}" = "--help" ]; then echo "  --print, -p   Non-interactive mode"; exit 0; fi
-echo "session=${LETS_CODE_SESSION:-} guard=${LETS_CODE_MEM_GUARD:-} watch=${LETS_CODE_MEM_WATCH:-} pi=${LETS_CODE_PI:-} run=${LETS_CODE_RUN:-}" > "${PI_RECORD}"
+echo "session=${LETS_CODE_SESSION:-} guard=${LETS_CODE_MEM_GUARD:-} watch=${LETS_CODE_MEM_WATCH:-} pi=${LETS_CODE_PI_MARK:-} run=${LETS_CODE_RUN:-}" > "${PI_RECORD}"
 SH
 chmod +x "${d}/bin/pi"
 
 export PATH="${d}/bin:${PATH}" XDG_CONFIG_HOME="${d}/config" PI_CODING_AGENT_DIR="${d}/agent" PI_OFFLINE=1 PI_RECORD="${d}/record"
-unset LETS_CODE_MEM_GUARD LETS_CODE_MEM_WATCH LETS_CODE_PI LETS_CODE_RUN
+unset LETS_CODE_MEM_GUARD LETS_CODE_MEM_WATCH LETS_CODE_PI_MARK LETS_CODE_RUN
 mkdir -p "${d}/config/lets-code"
 config() {
     cat > "${d}/config/lets-code/config" <<EOF
@@ -80,7 +80,7 @@ check "--no-mem-guard --no-mem-watch" "$(launch --no-mem-guard --no-mem-watch)" 
 config 'MEM_GUARD_PROCESS="20%"
 MEM_GUARD_SESSION="45%"'
 check "the old size keys are ignored" "$(launch)" "session=1 guard=false watch=true pi= run="
-check "an outer session's markers are dropped" "$(LETS_CODE_PI=1:1 LETS_CODE_RUN=1:1 launch)" "session=1 guard=false watch=true pi= run="
+check "an outer session's markers are dropped" "$(LETS_CODE_PI_MARK=1:1 LETS_CODE_RUN=1:1 launch)" "session=1 guard=false watch=true pi= run="
 
 config 'MEM_GUARD="lots"'
 check "a bad value: pi is not started" "$(launch)" "(pi not started)"

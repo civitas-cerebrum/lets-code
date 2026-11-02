@@ -1181,7 +1181,9 @@ function lcwCommand(name) {
 // found as lcwCommand finds it.
 function lcwPi() {
 	const o = process.env.LETS_CODE_PI;
-	if (o) { try { const a = JSON.parse(o); if (Array.isArray(a) && a.length) return a.map(String); } catch {} return [o]; }
+	// (a "<pid>:<start>" value is no command: builds of 2026-11-01..02 also used
+	// this name for the memory guard's marker, now LETS_CODE_PI_MARK)
+	if (o && !/^\d+:\d+$/.test(o)) { try { const a = JSON.parse(o); if (Array.isArray(a) && a.length) return a.map(String); } catch {} return [o]; }
 	if (!lcwIsWin()) return ["pi"];
 	const a = process.argv[1] || "";
 	if (/pi-coding-agent[\\/]/i.test(a) && lcwFs.existsSync(a)) return [process.execPath, a];
@@ -1512,9 +1514,9 @@ PY
 # its systemd user scope (lets-code-<pid>.scope, no root needed; it also sets
 # OOMPolicy=continue, so a kernel OOM kill of one process does not stop the
 # session). Never pi, the node running pi, claude or tmux.
-# Abandoned: each pi exports LETS_CODE_PI=<pid>:<start time> to what it starts,
+# Abandoned: each pi exports LETS_CODE_PI_MARK=<pid>:<start time> to what it starts,
 # and the first pi also LETS_CODE_RUN (the same, its own). A process whose
-# environment carries this run's LETS_CODE_RUN and a LETS_CODE_PI that names a
+# environment carries this run's LETS_CODE_RUN and a LETS_CODE_PI_MARK that names a
 # pi that has exited (a subagent's, say) was left behind: SIGTERM, then
 # SIGKILL 10 s later. No markers, another run's, or a pi still running: left
 # alone (a background server the agent started on purpose keeps running).
@@ -1579,7 +1581,10 @@ mem_guard_exec() {  # mem_guard_exec <cmd> [args...] -- replaces this process
     # RPC mode: pi gets the real stdout back (lets-code's own lines went to stderr)
     if [ -n "${LC_RPC_OUT:-}" ]; then exec 1>&3 3>&-; fi
     # a lets-code started from inside another session is its own run
-    unset LETS_CODE_PI LETS_CODE_RUN
+    unset LETS_CODE_PI_MARK LETS_CODE_RUN
+    # (and the marker under its old name, from a session of a build that used
+    # LETS_CODE_PI for it: that name is how the modules start pi)
+    case "${LETS_CODE_PI:-}" in *[!0-9:]*|"") ;; *:*) unset LETS_CODE_PI ;; esac
     if [ "${MG_MODE}" != off ]; then
         export LETS_CODE_SESSION=1 LETS_CODE_MEM_GUARD="${MEM_GUARD}" LETS_CODE_MEM_WATCH="${MEM_WATCH}"
     fi
@@ -3325,7 +3330,7 @@ export async function ensureProxy(env: Record<string, string | undefined> = proc
 		cwd: state,       // not pi's project directory
 		stdio: ["ignore", logFd, logFd],
 		// without the memory guard's markers: a pi exiting must not make it "abandoned"
-		env: { ...env, LETS_CODE_PI: undefined, LETS_CODE_RUN: undefined, PORT: String(port), HOST: "127.0.0.1", STATE_DIR: state },
+		env: { ...env, LETS_CODE_PI_MARK: undefined, LETS_CODE_RUN: undefined, PORT: String(port), HOST: "127.0.0.1", STATE_DIR: state },
 	}).unref();
 	closeSync(logFd);   // the sidecar has its own copy
 	// a second pi starting at the same moment loses the port and exits; either
@@ -3959,7 +3964,7 @@ pi_write_memguard_extension() {
 //            than 80 % of RAM is used it SIGKILLs any process of this session
 //            (descendants of this pi, members of its scope) over 40 % of RAM.
 //            Every 10 s it also ends abandoned processes: ones that carry this
-//            run's marker (LETS_CODE_RUN) and whose own pi (LETS_CODE_PI) has
+//            run's marker (LETS_CODE_RUN) and whose own pi (LETS_CODE_PI_MARK) has
 //            exited; SIGTERM, then SIGKILL on the next pass.
 // Never pi, the node running pi, claude or tmux. A kill is told to the session
 // that owns the process through its inbox (the sessions module), once per
@@ -4089,7 +4094,7 @@ export function overLimit(mine: Proc[], m: Mem): Kill[] {
 }
 // Abandoned: a process that carries this run's marker (LETS_CODE_RUN, set by
 // the session's first pi and inherited by everything under it) and whose own
-// pi (LETS_CODE_PI, set by each pi for what it starts) has exited. Without
+// pi (LETS_CODE_PI_MARK, set by each pi for what it starts) has exited. Without
 // both markers, or with another run's, it is not provably ours: left alone.
 // A pi that is still running, its descendants, and agents are never abandoned.
 export function abandonedOf(t: Map<number, Lite>, run: string, root = process.pid,
@@ -4098,7 +4103,7 @@ export function abandonedOf(t: Map<number, Lite>, run: string, root = process.pi
 	for (const p of t.values()) {
 		if (p.pid === root || p.pid === process.pid || under.has(p.pid)) continue;
 		const e = envOf(p.pid);
-		if (!e || e.LETS_CODE_RUN !== run || !e.LETS_CODE_PI || alive(e.LETS_CODE_PI)) continue;
+		if (!e || e.LETS_CODE_RUN !== run || !e.LETS_CODE_PI_MARK || alive(e.LETS_CODE_PI_MARK)) continue;
 		const argv = argvOf(p.pid);
 		if (!argv.length || isAgent(argv)) continue;
 		out.push({ ...p, argv, cmd: argv.join(" ").slice(0, 60) });
@@ -4225,7 +4230,7 @@ export default function (pi: ExtensionAPI) {
 	// the markers abandoned processes are told by: everything this pi starts
 	// inherits them (pi's bash tool passes process.env on)
 	const root = !process.env.LETS_CODE_RUN;
-	process.env.LETS_CODE_PI = SELF;
+	process.env.LETS_CODE_PI_MARK = SELF;
 	if (!root) return;   // a subagent's pi: the session's first pi covers it
 	const RUN = (process.env.LETS_CODE_RUN = SELF);
 

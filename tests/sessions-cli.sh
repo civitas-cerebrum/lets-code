@@ -104,7 +104,8 @@ claude_record() {  # claude_record <pid> <session id> <name> <status> <startedAt
 }
 claude_record "${claude}" "${sid}" qa-claude idle 5
 out="$(bash "${lc}" sessions 2>&1)"
-check "claude: listed" "$(printf '%s\n' "${out}" | grep -c "^pid ${claude}  qa-claude  ${repo}  idle$")" 1
+# (a whole line, as a fixed string: a Windows path's backslashes would be regex escapes)
+check "claude: listed" "$(printf '%s\n' "${out}" | grep -cxF "pid ${claude}  qa-claude  ${repo}  idle")" 1
 check "claude: the list says the hook is missing" "$(printf '%s\n' "${out}" | grep -c 'lets-code claude-hook install')" 1
 out="$(bash "${lc}" message claude:qa-claude -- hi 2>&1)"; rc=$?
 check "claude: without the hook, undeliverable" "${rc}:$(printf '%s' "${out}" | grep -c 'turn on Claude Code messages in /extensions')" "1:1"

@@ -98,7 +98,8 @@ const ok = (name) => `export default function (pi) { globalThis.__loaded.push(${
 {
 	const r = await load({});
 	const m = r.mod;
-	const fake = join(work, "fake-launcher"), calls = join(work, "launcher-calls"), state = join(work, "hook-on");
+	// (the fake is a sh script, run with Git Bash on Windows: its paths with /)
+	const fake = join(work, "fake-launcher"), sh = (p) => p.replace(/\\/g, "/"), calls = sh(join(work, "launcher-calls")), state = sh(join(work, "hook-on"));
 	writeFileSync(fake, `#!/bin/sh\necho "$*" >> ${calls}\ncase "$2" in status) [ -e ${state} ] && { echo installed; exit 0; }; echo "not installed"; exit 3 ;; install) touch ${state}; echo "installed in settings"; exit 0 ;; uninstall) rm -f ${state}; echo "removed"; exit 0 ;; esac\n`, { mode: 0o755 });
 	process.env.LETS_CODE_LAUNCHER = fake; process.env.LETS_CODE_SESSIONS_ON = "1";
 	const commands = {};

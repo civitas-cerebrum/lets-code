@@ -98,7 +98,11 @@ sleep 60 & cpid=$!; disown "${cpid}"; claude="${cpid}"
 [ "${win}" = false ] || claude="$(cat "/proc/${cpid}/winpid")"   # the registry's pids are Windows ones (see the top)
 cc="${HOME}/.claude"; mkdir -p "${cc}/sessions"
 sid="0bebde69-52eb-4fc1-9b44-379a01674071"
-printf '{"pid":%s,"sessionId":"%s","cwd":"%s","kind":"interactive","name":"qa-claude","status":"idle","startedAt":5}\n' "${claude}" "${sid}" "${repo}" > "${cc}/sessions/${claude}.json"
+# (json.dumps: a Windows path's backslashes are no JSON escapes)
+claude_record() {  # claude_record <pid> <session id> <name> <status> <startedAt>: a Claude Code session record
+    python3 -c 'import json,sys; p,i,n,st,t=sys.argv[1:6]; print(json.dumps({"pid": int(p), "sessionId": i, "cwd": sys.argv[6], "kind": "interactive", "name": n, "status": st, "startedAt": int(t)}))' "$@" "${repo}" > "${cc}/sessions/$1.json"
+}
+claude_record "${claude}" "${sid}" qa-claude idle 5
 out="$(bash "${lc}" sessions 2>&1)"
 check "claude: listed" "$(printf '%s\n' "${out}" | grep -c "^pid ${claude}  qa-claude  ${repo}  idle$")" 1
 check "claude: the list says the hook is missing" "$(printf '%s\n' "${out}" | grep -c 'lets-code claude-hook install')" 1
@@ -159,7 +163,7 @@ rm -f "${s}/${live}/inbox/"*
 # (not on Windows: the ancestry walk asks ps for a parent pid, which Git Bash's ps does not give;
 # a reply from there is signed as a shell's)
 if [ "${win}" = false ]; then
-printf '{"pid":%s,"sessionId":"1cafe000-0000-4000-8000-000000000001","cwd":"%s","kind":"interactive","name":"asker","status":"busy","startedAt":6}\n' "$$" "${repo}" > "${cc}/sessions/$$.json"
+claude_record "$$" 1cafe000-0000-4000-8000-000000000001 asker busy 6
 CLAUDECODE=1 bash "${lc}" message worker --wait 0 -- from claude >/dev/null 2>&1
 check "claude: a reply from a Claude Code session is signed by it" "$(python3 -c 'import json,glob,sys; m=json.load(open(glob.glob(sys.argv[1])[0])); print(m["from"]["name"], m["from"]["pid"])' "${s}/${live}/inbox/*.json")" "asker (Claude Code) $$"
 rm -f "${cc}/sessions/$$.json"

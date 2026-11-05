@@ -27,6 +27,9 @@ const agentDir = join(work, "agent"); const ext = join(agentDir, "extensions"); 
 process.env.PI_CODING_AGENT_DIR = agentDir;
 delete process.env.LETS_CODE_SESSIONS_DIR;
 process.env.LETS_CODE_SESSIONS_POLL_MS = "50";
+// Claude Code sessions come from records in a scratch config dir, never from this machine's claude
+process.env.LETS_CODE_CLAUDE_BIN = join(work, "no-claude");
+process.env.CLAUDE_CONFIG_DIR = join(work, "claude");
 // typebox comes from the pi host; point the temp copies at pi's own, or a stub (CI)
 {
 	let piRoot = "";
@@ -145,9 +148,12 @@ await B.start({ cwd: repoA, id: "22222222-bbbb", mode: "rpc", file: join(agentDi
 // B -> parent while A is busy: a follow-up, never an interruption
 {
 	A.s.idle = false;
+	const nb = A.s.notices.length;
 	const r = await B.send({ to: "parent", text: "progress: half done", wait: 5 });
 	has("parent: delivered", textOf(r), `delivered: main-work (pid ${process.pid})`);
 	t("busy parent: follow-up with a turn", A.sent.at(-1)?.opts, { triggerTurn: true, deliverAs: "followUp" });
+	// the follow-up waits for the turn to end: a notice says it came (a reply looked lost for 90 s without one)
+	t("busy parent: a notice at once, saying when it shows", A.s.notices.slice(nb), ["message from developer: progress: half done (shown when this turn ends)"]);
 	has("parent: the text", A.sent.at(-1)?.m.content, "\nprogress: half done\n");
 	A.s.idle = true;
 	// that follow-up continued A's run: what A sends in it is one hop further
@@ -195,7 +201,7 @@ const D = await load({ pid: pidD, name: "other-repo" }); await D.start({ cwd: re
 // --- undeliverable
 {
 	const r = await A.send({ to: "nobody-here", text: "x", wait: 1 });
-	t("undeliverable: no such session", [textOf(r), r.isError], ["undeliverable: nobody-here: no live session matches (action list shows them)", true]);
+	t("undeliverable: no such session", [textOf(r), r.isError], ["undeliverable: nobody-here: no live lets-code or Claude Code session matches (action list shows them). Do not reach it another way (its terminal, its files): tell the user.", true]);
 	const p = await A.send({ to: "parent", text: "x", wait: 1 });
 	t("undeliverable: a top session has no parent", textOf(p), "undeliverable: parent: this session is not a subagent");
 	const own = await A.send({ to: String(process.pid), text: "x", wait: 1 });
@@ -356,6 +362,82 @@ t("alive: a dead pid", A.mod.alive(deadPid()), false);
 {
 	t("wait max", A.mod.WAIT_MAX, 60);
 	t("tool description under 450 characters", A.mod.TOOL_DESCRIPTION.length < 450, true);
+}
+
+// --- an outside child (another extension's agent in A's session): registered even headless, under A
+{
+	const pidO = livePid(), fileO = join(work, "outside.jsonl");
+	const O = await load({ pid: pidO, env: { LETS_CODE_OUTSIDE_OF: String(process.pid), LETS_CODE_OUTSIDE_NAME: "achilles-orchestrator" } });
+	await O.start({ cwd: repoA, mode: "json", file: fileO });
+	const e = JSON.parse(readFileSync(join(dir, `${pidO}.json`), "utf8"));
+	t("outside: registered in json mode, under its owner", [e.outside, e.parentPid, e.agent, e.sessionFile, e.depth], [true, process.pid, "achilles-orchestrator", fileO, 0]);
+	has("outside: listed as started in the owner's session", textOf(await A.send({ action: "list" })), `pid ${pidO}  achilles-orchestrator`);
+	has("outside: the owner reaches it as a child", textOf(await A.send({ to: "achilles-orchestrator", text: "how far?", wait: 5 })), "delivered: achilles-orchestrator");
+	t("outside: a message is a steer-free note for it, no turn of its own", O.sent.at(-1)?.opts, { triggerTurn: false });
+	writeFileSync(fileO, [
+		{ type: "session", id: "x", timestamp: "2026-11-05T10:00:00.000Z" },
+		{ type: "message", timestamp: "2026-11-05T10:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "Re-verify the five bugs" }] } },
+		{ type: "message", timestamp: "2026-11-05T10:00:02.000Z", message: { role: "assistant", content: [{ type: "text", text: "Reading the plan" }, { type: "toolCall", id: "c1", name: "read", arguments: {} }] } },
+	].map((x) => JSON.stringify(x)).join("\n") + "\n");
+	const r = A.mod.inspectText(String(pidO), A.mod.liveSessions().find((x) => x.pid === process.pid));
+	has("inspect: a lets-code session's last messages", r.text, "assistant: Reading the plan [tools: read]");
+	has("inspect: its task", r.text, "user: Re-verify the five bugs");
+	await O.handlers.session_shutdown({ reason: "quit" });
+}
+
+// --- Claude Code sessions, every one on the machine
+{
+	const cc = process.env.CLAUDE_CONFIG_DIR, pidK = livePid(), sid = "0bebde69-52eb-4fc1-9b44-379a01674071";
+	mkdirSync(join(cc, "sessions"), { recursive: true });
+	writeFileSync(join(cc, "sessions", `${pidK}.json`), JSON.stringify({ pid: pidK, sessionId: sid, cwd: repoB, kind: "interactive", name: "qa-claude", status: "busy", startedAt: 9 }));
+	writeFileSync(join(cc, "sessions", `${deadPid()}.json`), JSON.stringify({ pid: deadPid(), sessionId: "dead-0000", cwd: repoB, name: "gone", startedAt: 1 }));
+	const tdir = join(cc, "projects", repoB.replace(/[^A-Za-z0-9]/g, "-")); mkdirSync(tdir, { recursive: true });
+	writeFileSync(join(tdir, `${sid}.jsonl`), [
+		{ type: "user", timestamp: "2026-11-05T09:00:00.000Z", message: { content: "check the J15 bugs" } },
+		{ type: "user", isMeta: true, message: { content: "<local-command-caveat>" } },
+		{ type: "assistant", timestamp: "2026-11-05T09:00:05.000Z", message: { content: [{ type: "text", text: "Two still reproduce." }, { type: "tool_use", name: "Bash" }] } },
+		{ type: "user", message: { content: [{ type: "tool_result", content: "ok" }] } },
+	].map((x) => JSON.stringify(x)).join("\n") + "\n");
+	A.mod.resetClaudeCache();
+	const list = textOf(await A.send({ action: "list" }));
+	has("claude: listed, whatever its folder", list, `pid ${pidK}  qa-claude  ${repoB}  busy`);
+	t("claude: a dead one is not listed", list.includes("gone"), false);
+	has("claude: the list says the hook is needed", list, "lets-code claude-hook install");
+	const ins = await A.send({ action: "inspect", to: "claude:qa-claude" });
+	has("claude inspect: state", textOf(ins), `Claude Code session qa-claude (pid ${pidK}, busy)`);
+	has("claude inspect: the last messages, meta and tool results left out", textOf(ins), "user: check the J15 bugs\nassistant: Two still reproduce. [tools: Bash]");
+	t("claude inspect: unknown is an error", (await A.send({ action: "inspect", to: "claude:nobody" })).isError, true);
+	const no = await A.send({ to: "claude:qa-claude", text: "compare?" });
+	t("claude: without the hook, undeliverable", [no.isError, textOf(no).includes("turns on Claude Code messages in /extensions")], [true, true]);
+	writeFileSync(join(cc, "settings.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "python3 -I /x/lets-code-claude-inbox.py deliver" }] }] } }));
+	const box = A.mod.claudeInbox(sid);
+	const acker = setInterval(() => { try { for (const f of readdirSync(box)) if (f.endsWith(".json")) { writeFileSync(join(box, f.replace(/\.json$/, ".ack")), "{\"seenAt\":1}"); rmSync(join(box, f)); } } catch { /* not yet */ } }, 30);
+	has("claude: delivered once its hook takes it", textOf(await A.send({ to: "claude:qa-claude", text: "compare your verdicts", wait: 3 })), `delivered: qa-claude (Claude Code, pid ${pidK}) has it`);
+	has("claude: a bare name no lets-code session has reaches it too", textOf(await A.send({ to: "qa-claude", text: "again", wait: 3 })), "delivered: qa-claude (Claude Code");
+	has("claude: by pid", textOf(await A.send({ to: `claude:${pidK}`, text: "by pid", wait: 3 })), "delivered: qa-claude");
+	clearInterval(acker);
+	has("claude: not taken yet is queued, with when it will be", textOf(await A.send({ to: "claude:qa-claude", text: "later", wait: 0 })), "at its next tool call, the end of its turn or its next prompt");
+	const m = JSON.parse(readFileSync(join(box, readdirSync(box).find((f) => f.endsWith(".json"))), "utf8"));
+	t("claude: the message names the sender for a reply", [m.from.pid, m.from.name, m.hops], [process.pid, "main-work", 0]);
+	has("claude: a lets-code name wins over a Claude one", textOf(await A.send({ to: "developer", text: "x", wait: 5 })), "delivered: developer");
+	t("claude: the repo keyword is lets-code's", textOf(await A.send({ to: "claude:repo", text: "x", wait: 0 })).includes("no Claude Code session matches"), true);
+}
+
+// --- no typing into another session's terminal (what a model did when its message was undeliverable)
+{
+	const call = (toolName, input) => A.handlers.tool_call({ toolName, input });
+	const real = "python3 - <<'EOF'\nimport os\nmsg = (\"Message from the lets-code session\")\nf = os.open('/dev/ttys004', os.O_WRONLY)\nn = os.write(f, msg.encode('utf-8') + b'\\r')\nEOF";
+	t("terminal: the os.write to /dev/ttys004 is refused", (await call("bash", { command: real }))?.block, true);
+	t("terminal: and says to use message", /message tool/.test((await call("bash", { command: real }))?.reason ?? ""), true);
+	t("terminal: echo > /dev/pts/3 refused", (await call("bash", { command: "echo hi > /dev/pts/3" }))?.block, true);
+	t("terminal: osascript keystroke refused", (await call("bash", { command: `osascript -e 'tell application "System Events" to keystroke "hi"'` }))?.block, true);
+	t("terminal: TIOCSTI refused", (await call("bash", { command: "python3 -c 'import fcntl,termios; fcntl.ioctl(fd, termios.TIOCSTI, c)'" }))?.block, true);
+	t("terminal: the write tool on a tty refused", (await call("write", { path: "/dev/ttys004", content: "x" }))?.block, true);
+	t("terminal: what reads or names its own is fine", await Promise.all([
+		call("bash", { command: "ps -o pid,tty -p 98202" }), call("bash", { command: "ls -la /dev/ttys004" }), call("bash", { command: "make > /dev/null 2>&1" }),
+		call("bash", { command: "read -r x < /dev/tty" }), call("bash", { command: "tmux send-keys -t test:0 'lets-code' Enter" }), call("write", { path: join(work, "notes.txt"), content: "x" }),
+	]), [undefined, undefined, undefined, undefined, undefined, undefined]);
+	has("undeliverable: says not to reach it another way", textOf(await A.send({ to: "nobody-anywhere", text: "x" })), "Do not reach it another way (its terminal, its files): tell the user.");
 }
 
 for (const h of [A, B, C]) await h.handlers.session_shutdown({ reason: "quit" });

@@ -1100,6 +1100,82 @@ registered only where scripts exist, and its section joins the prompt only
 when a prompt matches a script (strict: 0 of 124 real prompts matched five
 sample workflows).
 
+**Outside children.** A pi package (a QA tool) ran its orchestrator and
+experts as `pi -p --mode json` processes of its own. They inherited the
+session's environment, so each loaded lets-code whole and behaved as a
+main session of its own: no entry in the registry (print mode did not
+register), nothing in the view (it knows only `runAgent`'s children, so
+`/subagents` said there were no runs while the user asked "status?"
+three times), and Claude Code hooks fired SessionStart, UserPromptSubmit
+and Stop per expert. The fix is a lineage decided once per process in the
+extension index, before any module loads: every lets-code pi exports
+`LETS_CODE_OWNER_PID` (itself); a pi that inherits a live owner other than
+itself, at depth 0 and headless (`-p`, `--mode json|rpc`), is that owner's
+outside child (`LETS_CODE_OUTSIDE_OF`, `LETS_CODE_OUTSIDE_NAME` from its
+`--name`). The environment carries it through whatever started the process
+(an extension's `spawn`, a tool's shell), which a process-tree scan from the
+owner would not: it would have to guess which session file belongs to which
+pid when several share a directory, as an orchestrator and its experts do.
+The launcher clears the lineage, so `lets-code -p` run from a tool is a
+session of its own, as `claude -p` from Claude Code's Bash is. An outside
+child registers even headless, with `outside: true`, its owner as
+`parentPid` and its session file. The owner's subagents module polls the
+registry (1 s) for outside children below it, transitively (an expert's
+parent is its orchestrator), and adds each as a run whose events come from
+its session file, read from the last offset and up to the last complete
+line; it ends when the pid is gone. Such a run is shown in place only,
+never through `switchSession`: the view's copy is `<file minus .pi.jsonl>
+.view.jsonl`, which for another tool's file name is the file itself, and
+pi would then append to it. It is read-only (no RPC channel; what would
+act on it gets a notice), and `x` sends SIGTERM. It is not persisted under
+`lets-code-runs` (the file is its tool's).
+
+**Hooks for agents.** Claude Code fires a subagent's hooks in the main
+session's context: its `session_id` and `transcript_path`, with `agent_id`
+and `agent_type`, SubagentStart/SubagentStop (matchers on `agent_type`,
+`agent_transcript_path` on SubagentStop) and no SessionStart, Stop or
+UserPromptSubmit for it. lets-code's children run their hooks in their own
+process (the only place their tool calls are), so the main session exports
+`LETS_CODE_HOOK_SESSION_ID` and `LETS_CODE_HOOK_TRANSCRIPT` at its
+`session_start` (and again on `/new` or `/resume`), the subagent tool sets
+`LETS_CODE_RUN_ID`, and a child (depth > 0, or an outside child) builds the
+payload from them. A hook that keeps state per session (a ledger, a phase
+tracker) now sees one session with agents in it rather than unrelated
+sessions. SubagentStart's context goes to the agent and SubagentStop's
+block keeps it going, as in Claude Code. The `expert` tool is `Agent` when
+it starts one (`run`), so an `Agent`/`Task` matcher sees expert dispatches
+as it sees `subagent` ones; `list` and `enable` keep the tool's own name.
+
+**Claude Code sessions.** The user asked a lets-code session to message a
+Claude Code session in the same folder; `message` knew only lets-code's
+registry, and the agent fell back to writing into the session's tty, which
+is its output, not its input. Listing uses `claude agents --json`
+(documented for scripting; every interactive and background session,
+whatever its folder; 0.1 s), falling back to Claude Code's records
+(`~/.claude/sessions/<pid>.json`) when `claude` is not on the PATH, and
+inspect reads the transcript under `~/.claude/projects`. Delivery does not
+use Claude Code's messaging socket: its documentation gives the socket and
+an auth line but not the message format, and its peer channel tells human
+turns from peer ones, which a guessed frame must not get wrong. Hooks are
+the documented way in, so lets-code writes the message to a file inbox per
+Claude session id (`<sessions dir>/claude/<id>/inbox`, the same files and
+acks as its own) and `lets-code claude-hook install` adds one small script
+to Claude Code's user settings: PostToolUse and UserPromptSubmit return it
+as `additionalContext`, Stop returns `decision: "block"` with it as the
+reason (not when `stop_hook_active`; not for a reply, hops >= 1, the same
+rule that keeps two lets-code sessions from answering each other forever),
+and an `asyncRewake` watcher started at SessionStart and Stop exits 2 with
+it, which wakes an idle session (one watcher per session id: a newer one
+replaces the older through `watch.pid`). Each message is claimed by a
+rename before it is shown, so two hooks that run together never show it
+twice. The script is its own file because Claude Code runs it on every
+tool call: parsing the 20,000-line launcher each time would cost more than
+the check (one `isdir` when the inbox is empty). The text is framed as
+data, with the command that answers it; run from that session's Bash
+(`CLAUDECODE=1`), `lets-code message` finds the Claude Code process among
+its ancestors and signs the reply as that session, so the lets-code side
+can answer by pid.
+
 ### Researcher
 
 The researcher expert answers open questions from the web, so it needs

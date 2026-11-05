@@ -49,3 +49,50 @@ model on your own hardware:
   sessions` and `lets-code message` are now subcommands: a first word of
   `sessions` or `message` no longer passes to pi as a prompt (use
   `lets-code -p "..."` for one)
+- outside runs: agents another extension starts inside a session (a QA
+  package's `pi -p` orchestrator and experts) are now the session's outside
+  children (lineage through `LETS_CODE_OWNER_PID`; a lets-code launch starts
+  a fresh one): listed under it, shown in the subagent view (alt+s,
+  `/subagents`) live from their own session files, read-only and in place
+  (their files are never opened as a session or written to), stoppable with
+  `x`, and in `subagent({action: "status"})` with their pid. Before, such a
+  session's view stayed empty while they worked
+- Claude Code hooks see lets-code's agents as Claude Code's subagents: a
+  subagent's and an outside child's hooks get the main session's
+  `session_id` and `transcript_path`, `agent_id` (the run) and `agent_type`;
+  SubagentStart / SubagentStop (with `agent_transcript_path`) replace
+  SessionStart, Stop and SessionEnd there, and its task is no
+  UserPromptSubmit (an outside child used to fire all of those as a second
+  main session); the `expert` tool is `Agent` (and `Task`) to matchers
+  when it starts one
+- Claude Code sessions, machine-wide: `message` (`action: "list"`), `/sessions`
+  and `lets-code sessions` list them; `action: "inspect"` shows a session's
+  state and latest messages (lets-code's sessions too); a message reaches
+  one (`claude:<pid|name>`) through `lets-code claude-hook install`, a hook
+  on Claude Code's documented contract (PostToolUse context, a Stop block,
+  an asyncRewake watcher for an idle session), with replies through
+  `lets-code message`, signed as that Claude Code session. Before, a
+  message to a Claude Code session was always undeliverable
+- `/extensions`: lets-code's optional extensions in a menu, each turned on
+  or off there (or `/extensions <name> on|off`) and kept for later
+  sessions; the first is Claude Code messages (`claude-hook`)
+- launch: no more `Extension ".../lets-code/index.ts" project_trust error:
+  Cannot read properties of undefined (reading 'trusted')` in a project with
+  pi resources of its own (a `.pi/settings.json` package). pi 1.0 asks
+  extensions to vote on trust (`project_trust` must return `{trusted}`)
+  before it decides; the mandate's handler was a reload that returned
+  nothing, and ran before trust was known. It is gone: the mandate reloads
+  at `session_start`, with the decided trust
+- no typing into another session's terminal: a bash command that writes to
+  a terminal device (`/dev/ttys*`, `/dev/pts/*`) or injects input (TIOCSTI,
+  AppleScript keystrokes), and the write and edit tools on one, are refused
+  with a pointer to the `message` tool. A model whose message to a Claude
+  Code session was undeliverable wrote it into that session's tty, which put
+  the text in the user's input box; it never reached Claude. An
+  undeliverable message now says not to reach the session another way
+- a message delivered to a Claude Code session also shows the user a line
+  there (the hook's `systemMessage`), as Claude Code's own messages do; the
+  model gets the whole message as context
+- a message that reaches a busy session says so at once (a notice: "...
+  (shown when this turn ends)"); it used to appear only when the turn
+  ended, so a reply that had been delivered looked lost meanwhile

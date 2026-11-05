@@ -80,5 +80,57 @@ const ok = (name) => `export default function (pi) { globalThis.__loaded.push(${
 	t("<feature>.ts wins over <feature>/index.ts", r.loaded, ["footer"]);
 }
 
+// --- lineage: who an outside child is (a headless pi below another lets-code pi, not one of its subagents)
+{
+	const r = await load({});
+	const { lineage } = r.mod ?? await import(pathToFileURL(join(work, `ext-${n - 1}`, "index.ts")).href);
+	const up = () => true, down = () => false;
+	t("lineage: a json pi under a live owner is its outside child, named by --name", lineage({ LETS_CODE_OWNER_PID: "100" }, ["node", "pi", "--mode", "json", "-p", "--name", "achilles-inspector"], 200, up), { outsideOf: 100, name: "achilles-inspector" });
+	t("lineage: --name=x, and no name is pi", [lineage({ LETS_CODE_OWNER_PID: "100" }, ["pi", "-p", "--name=qa"], 200, up), lineage({ LETS_CODE_OWNER_PID: "100" }, ["pi", "--print"], 200, up)], [{ outsideOf: 100, name: "qa" }, { outsideOf: 100, name: "pi" }]);
+	t("lineage: one of lets-code's own subagents is not", lineage({ LETS_CODE_OWNER_PID: "100", LETS_CODE_SUBAGENT_DEPTH: "1" }, ["pi", "--mode", "rpc"], 200, up), {});
+	t("lineage: an interactive pi is not", lineage({ LETS_CODE_OWNER_PID: "100" }, ["pi"], 200, up), {});
+	t("lineage: no owner, itself, or a dead one: not", [lineage({}, ["pi", "-p"], 200, up), lineage({ LETS_CODE_OWNER_PID: "200" }, ["pi", "-p"], 200, up), lineage({ LETS_CODE_OWNER_PID: "100" }, ["pi", "-p"], 200, down)], [{}, {}, {}]);
+	t("lineage: a name is cleaned", lineage({ LETS_CODE_OWNER_PID: "100" }, ["pi", "-p", "--name", "a b;c\n"], 200, up).name, "a-b-c-");
+	t("lineage: this process names itself the owner of what it starts", process.env.LETS_CODE_OWNER_PID, String(process.pid));
+}
+
+// --- /extensions: a menu of lets-code's optional extensions, toggled through the launcher
+{
+	const r = await load({});
+	const m = r.mod;
+	const fake = join(work, "fake-launcher"), calls = join(work, "launcher-calls"), state = join(work, "hook-on");
+	writeFileSync(fake, `#!/bin/sh\necho "$*" >> ${calls}\ncase "$2" in status) [ -e ${state} ] && { echo installed; exit 0; }; echo "not installed"; exit 3 ;; install) touch ${state}; echo "installed in settings"; exit 0 ;; uninstall) rm -f ${state}; echo "removed"; exit 0 ;; esac\n`, { mode: 0o755 });
+	process.env.LETS_CODE_LAUNCHER = fake; process.env.LETS_CODE_SESSIONS_ON = "1";
+	const commands = {};
+	await m.default({ on() {}, registerCommand: (name, c) => { commands[name] = c; } });
+	t("extensions: /extensions is registered", typeof commands.extensions?.handler, "function");
+	t("extensions: claude-hook is one", m.EXTENSIONS.map((x) => x.id), ["claude-hook"]);
+	const logs = []; const origLog = console.log; console.log = (x) => logs.push(String(x));
+	await commands.extensions.handler("", { hasUI: false });
+	console.log = origLog;
+	t("extensions: without a UI, the list with its state", logs.at(-1), "○ Claude Code messages (claude-hook): off");
+	const notes = [];
+	const ui = (answers) => ({ hasUI: true, ui: { notify: (msg, ty) => notes.push([ty, msg]), select: async (_title, opts) => { const a = answers.shift(); return typeof a === "number" ? opts[a] : a; } } });
+	await commands.extensions.handler("", ui([0, 0]));
+	t("extensions: menu, pick, confirm: turned on through the launcher", [readFileSync(calls, "utf8").includes("claude-hook install"), notes.at(-1)], [true, ["info", "installed in settings"]]);
+	await commands.extensions.handler("", ui([0, 1]));
+	t("extensions: leave it: nothing changes", [readFileSync(calls, "utf8").includes("uninstall"), (await m.extensionState(m.EXTENSIONS[0]))], [false, "on"]);
+	await commands.extensions.handler("claude-hook off", ui([]));
+	t("extensions: /extensions claude-hook off", [readFileSync(calls, "utf8").includes("claude-hook uninstall"), await m.extensionState(m.EXTENSIONS[0])], [true, "off"]);
+	await commands.extensions.handler("nope on", ui([]));
+	t("extensions: an unknown name says so", notes.at(-1)[0], "warning");
+	process.env.LETS_CODE_SESSIONS_ON = "";
+	await commands.extensions.handler("claude-hook on", ui([]));
+	t("extensions: claude-hook needs sessions on", [notes.at(-1)[1], await m.extensionState(m.EXTENSIONS[0])], ["Claude Code messages needs sessions (SESSIONS=true).", "off"]);
+	process.env.LETS_CODE_LAUNCHER = join(work, "missing");
+	t("extensions: no launcher: unknown, not a crash", await m.extensionState(m.EXTENSIONS[0]), "unknown");
+	delete process.env.LETS_CODE_LAUNCHER; delete process.env.LETS_CODE_SESSIONS_ON;
+	const subCommands = {};
+	process.env.LETS_CODE_SUBAGENT_DEPTH = "1";
+	await m.default({ on() {}, registerCommand: (name, c) => { subCommands[name] = c; } });
+	t("extensions: not in a subagent", "extensions" in subCommands, false);
+	delete process.env.LETS_CODE_SUBAGENT_DEPTH;
+}
+
 rmSync(work, { recursive: true, force: true });
 process.exit(fail);

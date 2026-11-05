@@ -7,7 +7,7 @@
 
 <p align="center">
   <img alt="bash" src="https://img.shields.io/badge/bash-3.2%2B-4EAA25?logo=gnubash&logoColor=white">
-  <img alt="platforms" src="https://img.shields.io/badge/linux%20%7C%20macOS%20%7C%20Termux-supported-blue">
+  <img alt="platforms" src="https://img.shields.io/badge/linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Termux-supported-blue">
   <img alt="servers" src="https://img.shields.io/badge/vLLM%20%7C%20SGLang%20%7C%20Ollama%20%7C%20LM%20Studio-OpenAI--compatible-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
@@ -52,9 +52,46 @@ granular` asks about each one. Flags lets-code does not know are passed
 to pi, so `lets-code -p "..."` and the rest of pi's options work as they are.
 
 Needs `bash` 3.2+, `curl`, `python3`; `node`/`npm` only if it installs pi
-for you. Linux and macOS (the test suite runs on both in CI). Termux on
-Android runs it too, against a server on the LAN or on Claude, and is where
-the `termux-device` expert lives; it is verified by hand, not in CI.
+for you. Linux, macOS and Windows (the test suite runs on all three in CI).
+Termux on Android runs it too, against a server on the LAN or on Claude, and
+is where the `termux-device` expert lives; it is verified by hand, not in CI.
+
+### Windows
+
+lets-code runs in Git Bash, the bash pi itself uses on Windows; pi, node,
+python and git stay native Windows programs. Install the three it needs and
+lets-code from npm, then run it from PowerShell, cmd, Windows Terminal or
+Git Bash alike:
+
+```powershell
+winget install Git.Git OpenJS.NodeJS.LTS Python.Python.3.13
+# open a new terminal, then:
+npm install -g --allow-scripts=@civitas-cerebrum/lets-code @civitas-cerebrum/lets-code
+lets-code setup
+```
+
+`--allow-scripts` lets the package's postinstall point npm's `lets-code.cmd`
+and `lets-code.ps1` at a small launcher that finds Git Bash (pi's
+`shellPath` setting, then Git for Windows, then a `bash.exe` on PATH that is
+not WSL's). npm 12 runs no install scripts without it; if they were skipped,
+run `lets-code` once from Git Bash and it puts the shims right itself. A
+`python3` that is only the Microsoft Store stub is passed over for the real
+interpreter (`python` or `py -3`), for lets-code and for what pi runs.
+
+What differs on Windows:
+
+- **sandbox**: not available (it confines with macOS Seatbelt or Linux
+  bubblewrap); the launch says so and bash commands run unconfined. Run
+  lets-code inside WSL for a sandbox.
+- **memory guard**: the RAM watcher and the guard work as elsewhere, the
+  process sizes from PowerShell's process list every 3 s (only while over
+  80 % is used), kills with `taskkill /T`. The sweep of abandoned processes
+  is Linux-only: Windows shows no other process's environment.
+- **git guard** also reads `cmd /c` and PowerShell commands (`rd /s`,
+  `Remove-Item -Recurse`, `Set-Content` ...) and Git Bash paths (`/c/...`).
+- the TUI needs a real console: Windows Terminal, PowerShell, cmd, or Git
+  Bash's mintty with ConPTY (the default in current Git for Windows); under an
+  old mintty lets-code runs pi through `winpty` when it is installed.
 
 ## Compared with Claude Code
 
@@ -69,7 +106,7 @@ it, not a Claude Code clone. Where it stands:
   so a session never overflows. The guards catch what a small model gets
   wrong: a `reset --hard`, an untested refactor, a bash call that never
   returns, a fact guessed instead of looked up.
-- **Modes as policy, not prompts.** `plan`, `ask`, `orchestrator` and roles
+- **Modes as policy, not prompts.** `plan`, `ask`, `orchestration` and roles
   for subagents are enforced on every tool call, with zero tokens on
   allowed calls. Claude Code's permission rules and `.claude/` hooks keep
   working here through the adapter.
@@ -96,15 +133,15 @@ it, not a Claude Code clone. Where it stands:
 | 🧠 **Thinking probe** | One tiny request with thinking forced on. Reasoning tokens in the reply mean pi gets a thinking model, with per-level budgets vLLM enforces. |
 | 👁 **Vision probe** | One tiny request with a red 64×64 image. "Red" in the reply means pi may send screenshots. Setup asks you if the probe can't tell. |
 | 📏 **Overflow-proof** | The output cap is reserved in pi's compaction settings, so `input + max_tokens` can never exceed the server window. |
-| 🧯 **Memory guard** | When the box runs low on RAM, the session's own runaway process is stopped. Nothing else on the machine is touched. |
+| 🧯 **Memory guard** | A RAM watcher warns at 85 % use. The guard (off by default, `/memguard on`) kills a process the session started that is over 40 % of RAM while more than 80 % is used, and processes it left behind; the agent is told why. Nothing else on the machine is touched. |
 | 🔍 **Grounding guard** | pi looks facts up with its tools instead of guessing them (file contents, paths, names, versions, config, command output), invents nothing and says what it could not verify. An empty grep is not proof that something is missing, and an action the system "accepted" is checked against a control that must fail. Overwriting an existing file it has not read is blocked once: read first, or write again. |
 | 🧭 **Backend facts** | The agent knows its backend (server, model, API, context, thinking, vision) without discovering it, at no cost until it needs it: a prompt about the backend adds a short section, or the first command probing it gets the facts in its result. The API key is never written out. |
-| 🛟 **Git guard** | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
+| 🛟 **Git guard** (off by default: `/git-guard on`) | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
 | 🧭 **Agent guard** | Default bash timeout, a nudge to run tests after untested edits, a wrap-up hint once they pass, and thinking that switches on only while the model struggles. |
 | 🧭 **Modes** (optional; `/plan` always) | `plan` explores read-only and ends in a numbered plan you approve before it runs (`/plan` works without the mandate too), `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
 | 🤝 **Claude Code projects** (automatic) | A project whose `.claude/` has hooks or workflow scripts works as it is: its hooks, workflows, skills, `/commands`, agents, permission rules, MCP servers and CLAUDE.md, read live at each start. Your own `~/.claude` stays out unless `CLAUDE_CODE=all`. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
-| 🗂 **Core memory** (on by default) | A long-term memory per project and one across projects, kept out of context: the agent searches it with a `memory` tool when it needs to and adds what is worth keeping (decisions, non-obvious facts, where things live, what was done, and "remember that ..." in your words); lets-code itself adds a pointer when a factory run, a subagent run or a session ends, so the next session can open the ledger, the run record or the transcript instead of carrying it. Always on: one line saying the memory exists and how many entries it holds, plus the three newest headlines; a file the agent reads that an entry points at gets one line saying so. `/memories` lists them, a row each that opens into its pointers and actions; it edits, forgets and archives too. |
+| 🗂 **Core memory** (on by default) | A long-term memory per project and one across projects, kept out of context: the agent searches it with a `memory` tool when it needs to and adds what is significant later (decisions, non-obvious facts, preferences, where things live, a goal reached or work wrapped up, and "remember that ..." in your words), never the steps on the way; lets-code itself adds a factory run that ends done. Always on: one line saying the memory exists and how many entries it holds, plus the three newest headlines; a file the agent reads that an entry points at gets one line saying so. `/memories` lists them, a row each that opens into its pointers and actions; it edits, forgets and archives too. |
 | 📨 **Sessions and messages** (on by default) | Sessions on one machine can talk: a `message` tool sends a note to another session by pid, session id or name, to every other session in the same repository (`repo`), or between an orchestrator and its subagents (`parent`, `children`, an agent's name). The note shows up in the other session's conversation (never in the middle of a turn, and without starting one on its own unless you allow it or it comes from the session's own subagent), marked as coming from another session rather than from you, and the sender learns whether it was seen. `/sessions` and `lets-code sessions` list the live sessions; `lets-code message` sends from a shell. Claude Code sessions are in reach too, in any folder: listed, inspected (their state and latest messages) and, once the Claude Code messages extension is on (`/extensions`, or `lets-code claude-hook install`: a small hook in Claude Code's settings), messaged (`claude:<pid or name>`), with a reply back through `lets-code message`. Local files only, no network. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
@@ -137,7 +174,7 @@ lets-code --openrouter            # a saved preset (see Presets below)
 lets-code --claude                # Claude through Claude Code (see Claude below)
 lets-code update                  # latest release from npm (--snapshot: latest main)
 lets-code --thinking-level low    # quieter model
-lets-code --no-git-guard          # you know what you're doing
+lets-code --git-guard             # the git guard for one launch (off by default; /git-guard in a session)
 ```
 
 | Flag | Meaning |
@@ -152,15 +189,17 @@ lets-code --no-git-guard          # you know what you're doing
 | `--thinking-level <lvl>` | `off`, `minimal`, `low`, `medium`, `high` (default `medium`, or the default you set in pi; this flag decides for one launch), `xhigh` (opt-in, 32k budget, also selectable in-session; see server setup), `adaptive[:<lvl>]` (medium, low once the tests pass, bursts up on struggle), or `auto[:<lvl>]` (off, bursts up on struggle); see [Choosing a thinking level](#choosing-a-thinking-level) |
 | `--vision` / `--no-vision` | Pin image input instead of probing |
 | `--insecure` | Skip TLS verification |
+| `--git-guard` | Launch with the git guard (off by default; `/git-guard on` in a session turns it on and remembers it) |
 | `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` / `--no-grounding` | Launch without a guard |
+| `--mem-guard` / `--no-mem-watch` | Launch with the memory guard on / without the RAM watcher |
 | `--no-session-tag` | Send no session tag with model requests |
 | `--metrics` / `--no-metrics` | Start this launch with the full / minimal footer (`/metrics` switches inside pi, and the size picked there is where later sessions start) |
 | `--metrics-log <file>` | Append the footer's numbers to `<file>` as JSON lines, also without a UI (see [Metrics log](#metrics-log)) |
-| `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `orchestrator`, `yolo` or a role of yours (`--no-mandate` also turns off `/plan` and the orchestrator mode a factory run switches to) |
-| `--orchestrator` | Start in orchestrator mode (`--mandate orchestrator`): the session plans and hands the work to experts, and changes no file itself |
+| `--mandate [<mode>]` / `--no-mandate` | Modes on, optionally starting in `plan`, `auto`, `ask`, `orchestration`, `yolo` or a role of yours (`--no-mandate` also turns off `/plan` and the orchestration mode a factory run switches to) |
+| `--orchestration` | Start in orchestration mode (`--mandate orchestration`): the session plans and hands the work to experts, has every delivery reviewed, and changes no file itself (`--orchestrator`, the old name, still works) |
 | `--subagents` / `--no-subagents` | The `subagent` tool (on by default) |
 | `--experts` / `--no-experts` | The `expert` tool (on by default, needs subagents; see [Experts](#experts)) |
-| `--core-memory` / `--no-core-memory` | The `memory` tool and the entries lets-code adds on its own (on by default; see [Core memory](#core-memory)) |
+| `--core-memory` / `--no-core-memory` | The `memory` tool (on by default; see [Core memory](#core-memory)) |
 | `--sessions` / `--no-sessions` | The `message` tool and `/sessions` (on by default; see [Sessions and messages](#sessions-and-messages)) |
 | `--claude-code` / `--no-claude-code` | The Claude Code adapter with your `~/.claude` too (`CLAUDE_CODE=all`) / off; by default it switches on by itself where needed (see [Claude Code projects](#claude-code-projects)) |
 | `--sandbox` / `--no-sandbox` | The OS sandbox for bash |
@@ -364,12 +403,14 @@ Every key has an environment override, `LETS_CODE_<KEY>`, which wins.
 | `MODEL`, `CONTEXT`, `OUTPUT_CAP`, `API` | Pins; empty means discovered or default. |
 | `VISION`, `REASONING` | `true`/`false` pins; empty means probed at launch. |
 | `THINKING` | Startup thinking level. Setup suggests one from the context window. |
-| `MEM_GUARD`, `GIT_GUARD`, `AGENT_GUARD`, `GROUNDING` | `false` turns a guard off. |
+| `GIT_GUARD`, `AGENT_GUARD`, `GROUNDING` | `false` turns a guard off. |
+| `MEM_GUARD` | `true` turns the memory guard on (default `false`; `/memguard on` does it for one session). |
+| `MEM_WATCH` | `false` turns the RAM watcher off (default `true`). |
 | `TEMPLATE_EFFORT` | `off` skips the chat-template effort probe, `neutral` maps every level to the least-instruction value (see server setup). |
 | `MANDATE`, `MODE` | `true` turns modes on; `MODE` is the start mode (empty = `auto`). |
 | `SUBAGENTS` | On by default; `false` turns the `subagent` tool off. |
 | `EXPERTS` | On by default (with subagents); `false` turns the `expert` tool off and lists no expert. Each expert is enabled in a session, not here (see [Experts](#experts)); `TERMUX=true` / `REA=true` from earlier versions are migrated once and then ignored. |
-| `CORE_MEMORY`, `CORE_MEMORY_HEADLINES` | On by default; `false` turns the `memory` tool and lets-code's own entries off. `CORE_MEMORY_HEADLINES` (0..5, default 3) is how many of the newest entries a session starts with in its prompt; a subagent's session starts with none (see [Core memory](#core-memory)). |
+| `CORE_MEMORY`, `CORE_MEMORY_HEADLINES` | On by default; `false` turns the `memory` tool off. `CORE_MEMORY_HEADLINES` (0..5, default 3) is how many of the newest entries a session starts with in its prompt; a subagent's session starts with none (see [Core memory](#core-memory)). |
 | `SESSIONS` | On by default; `false` turns the `message` tool and `/sessions` off (see [Sessions and messages](#sessions-and-messages)). |
 | `SANDBOX` | `true` turns the feature on. |
 | `METRICS` | lets-code draws pi's footer in one style, in two sizes. Minimal (default): `↑222k ↓25k · 161.7 tok/s · 22.0%/262k (auto)`: tokens sent (cached included) and received, the session's generation speed with a small spinner while a response streams, context use. Full: the directory and branch with the model and thinking level on a first line, then the same line with the latest request's cache hit rate, cost, and the latest response's time to first token and output tokens (two lines that keep their height: `↑222k ↓25k · 22.0%/262k (auto) · cache 198k (86%) · $0.012` and `⠸ 161.7 tok/s · TTFT 1.0s · 2.7k out`; on a narrow terminal the cache shortens to its hit rate, then cost, cache, output and TTFT drop; TTFT is the time to the first token; a line too wide for the terminal breaks between parts onto a second line; only if two lines are not enough do cost, cache, output and TTFT drop, in that order). `true` starts in the full size; `/metrics` (or `/metrics on\|off`) switches inside pi, and the size picked there is remembered (`~/.pi/agent/lets-code-state.json`): later sessions start in it, ahead of `METRICS`; `--metrics` / `--no-metrics` / `LETS_CODE_METRICS` decide for one launch without changing it. tok/s counts from each response's first streamed token, so prompt processing is not in it. The footer follows the session on screen: in a subagent's session (`/subagents`) its numbers, model and thinking level are that subagent's own (the minimal size starts with its name and level, `scout • low · ↑10k ↓3.0k · …`), and back in the main session they are the main session's again. |
@@ -452,17 +493,55 @@ only in budget.
 <summary><b>Memory guard (Linux)</b></summary>
 
 A test with an unbounded search can take all RAM and freeze the machine
-that serves the model. The guard watches free RAM and only ever acts on
-processes this session started:
+that serves the model. On a small one it is over in seconds: on an 8 GB
+Raspberry Pi, two `python3` runs of `10 ** 10 ** 10` reached 1.5 GB each,
+the box thrashed, and its hardware watchdog reset it. Two parts:
 
-| Free RAM | Action |
+**RAM watcher** (on; `MEM_WATCH=false` turns it off). Every second it reads
+the machine's used RAM. At 85 % it asks whether to turn the memory guard on
+(a dialog; the answer holds for the session) and tells the agent memory is
+tight. A headless session (`-p`, JSON or RPC mode) has no one to ask and
+declines: the guard stays off and the agent is told not to ask for it
+(`MEM_GUARD=true` or `--mem-guard` turns it on there). Once per crossing:
+again only after use drops below 75 %. It kills nothing.
+
+**Memory guard** (off; `MEM_GUARD=true`, `--mem-guard`, or `/memguard on`
+in a session). It only acts on processes this session started, never on pi,
+its node, Claude Code or tmux:
+
+| Rule | Action |
 |---|---|
-| under 20 % | pi is warned, with the session's largest processes listed |
-| under 10 % | new bash commands are blocked, except cleanup (`kill`, `ps`, `free`) |
-| under 5 % for 3 s | the largest process is stopped: SIGINT, SIGTERM, SIGKILL, 10 s apart |
-| under 2.5 % | the largest process is killed at once |
+| more than 80 % of RAM used, and a process over 40 % of RAM | that process is killed |
+| a process left behind by a pi of this session that has exited | SIGTERM, SIGKILL 10 s later |
 
-Nothing is capped; pi is told what was stopped and why. The guard is a pi
+Below 80 % nothing is killed, however big; 40 % (3.2 GB on 8 GB) leaves room
+for any ordinary build or test suite. Sizes are read from `/proc`, so this
+holds where systemd gives the user no memory controller.
+
+Left behind ("abandoned"): every pi marks what it starts with
+`LETS_CODE_PI_MARK=<its pid>:<start time>`, and the session's first pi adds
+`LETS_CODE_RUN`. A process with this session's `LETS_CODE_RUN` whose
+`LETS_CODE_PI_MARK` names a pi that has exited (a subagent that quit, say) is
+ended. Without the markers, from another session, or while its pi still runs
+(a server the agent started in the background on purpose), it is left alone.
+
+The session that started a killed process is told through its
+[inbox](#sessions-and-messages), right after the command that died:
+
+```
+[lets-code memory guard] stopped `python3 tests/test_calc.py` (pid 4242) at 3400 MB:
+over 40 % of this machine's RAM (3277 MB of 8.0 GiB) while 91 % of it was in use. ...
+If a command ended with "Killed", exit 137 or output cut short, this is why; ...
+Don't run it again as it is: bound the input or the test ...
+```
+
+The same command killed again within 5 minutes is not told twice. Kills,
+watcher notices and `/memguard` toggles go to
+`~/.pi/agent/lets-code-memory-guard.log` (JSON lines;
+`LETS_CODE_MEM_GUARD_LOG` moves it). With sessions off, the note comes with
+the next tool result instead.
+
+The guard is a pi
 extension (part of lets-code's, `~/.pi/agent/extensions/lets-code/memory-guard.ts`) and is inert in
 sessions not started by lets-code. It defers to a machine-wide
 [memguard](https://github.com/civitas-cerebrum/memguard) daemon when one runs.
@@ -628,39 +707,38 @@ such as `readonly`, `reviewer` and `developer`, are for subagents):
 |---|---|
 | `auto` | Nothing. Guards as always, no prompts. The default. |
 | `ask` | `sudo`, recursive deletes, package installs, `curl \| sh` and writes outside the project are confirmed first: allow once, allow for the session, or deny. |
-| `plan` | Edit and write are off, bash is read-only, and the model is told to end with a numbered `Plan:`. When it does, you choose: execute the plan (back to the mode you came from, and the plan is kept in the session), refine it (edit it and send it back), or stay. Leaving plan mode by hand offers to execute it too. |
-| `orchestrator` | The software factory's mode. The session plans with you and orchestrates: it reads the code, agrees the ticket and its acceptance criteria with you, and hands every change to experts: code goes through `software-factory` however small, `general` does setup chores and checks, `researcher` open questions; the `worker` subagent is off. It decides the factory's checkpoints (criteria, plan, fix rounds, the commit on the run's branch) and asks you only for significant design decisions. Edit and write are off, bash is read-only (tests are the experts' job too) and MCP is denied. A blocked run is retried, or sharpened into a new ticket, never patched by hand; merging or pushing a run's branch is yours. |
+| `plan` | Edit and write are off, bash is read-only, and the model is told to end with a numbered `Plan:`. Where orchestration is there (the experts on), the plan is written for it: each step a self-contained task for one expert, small enough for a fresh context, with who does it and how it is reviewed. When the plan is ready, you choose: execute it with orchestration (the first choice where it is there: the session switches to `orchestration` and hands the steps out; leaving goes back to the mode plan was entered from), execute it here (back to the mode you came from), refine it (edit it and send it back), or stay. The plan is kept in the session either way. Leaving plan mode by hand offers to execute it too. |
+| `orchestration` | The software factory's mode (it was called `orchestrator`; the old name is still taken). The session plans with you and orchestrates: it reads the code, agrees the ticket and its acceptance criteria with you, and hands every change to experts: code goes through `software-factory` however small, `general` does setup chores, `researcher` open questions; the `worker` subagent is off. It never tests or verifies a delivery itself, not even by reading the diff: a factory run comes reviewed (its reviewers, tester and acceptance judge), anything else goes to `expert-reviewer` (and `design-reviewer` for structure), and it acts on the verdict. It decides the factory's checkpoints (criteria, plan, fix rounds, the commit on the run's branch) and asks you only for significant design decisions. Edit and write are off, bash is read-only (tests are the experts' job too) and MCP is denied. A blocked run is retried, or sharpened into a new ticket, never patched by hand; merging or pushing a run's branch is yours. |
 | `yolo` | The mandate steps aside (the git and memory guards stay unless launched without them). |
 
 Switch with `/mode` (a menu of the modes there are, each with a line on
 what it does, the current one marked), `/mode <name>`, `/plan`,
-`/orchestrator`, `alt+m` (cycle) or `ctrl+alt+p`.
+`/orchestration`, `alt+m` (cycle) or `ctrl+alt+p`.
 
 The model can ask too, with its `mode` tool: you see the switch it wants
-and why, and confirm or decline. It asks to leave plan mode once you have
-approved the changes, to enter plan mode before a risky or unclear change,
-and to enter `orchestrator` for large or long work, where experts and
-subagents do the work and the session's context stays small. A refused
+and why, and confirm or decline. It asks to enter plan mode first when a
+task looks medium or large (several files or steps, a feature, a refactor,
+a migration) or is risky or unclear; to leave plan mode once you have
+approved the changes (to `orchestration` to carry out a plan, `auto` for a
+change of a few lines); and to enter `orchestration` for large or long
+work, where experts and subagents do the work and the session's context
+stays small. A refused
 call points it there as well. It never gets `yolo` (that one is yours to
-pick), and a subagent has no `mode` tool.
-
-To let it switch without asking, pick "switch without asking from now on"
-in that dialog, or the last line of the `/mode` menu (the same line turns
-asking back on). The choice is remembered in
-`~/.pi/agent/lets-code-state.json` (`modeSwitch`);
-`LETS_CODE_MODE_SWITCH=auto|ask` decides for one launch. A switch made
-without asking still shows a notice with the model's reason, and `yolo`
-stays yours either way. That includes leaving plan mode: once you approve
-a change in the conversation, the model leaves plan and makes it.
+pick), and a subagent has no `mode` tool. `LETS_CODE_MODE_SWITCH=auto`
+lets it switch without asking for one launch; you still see a notice with
+each switch and its reason.
 Starting or resuming a software factory run (`/factory`, or the
-`software-factory` expert) switches the session into `orchestrator` and keeps
-it there until you leave it with `/orchestrator` (back to the mode you came
+`software-factory` expert) switches the session into `orchestration` and keeps
+it there until you leave it with `/orchestration` (back to the mode you came
 from) or `/mode`. That works with `MANDATE=false` too: wherever the experts
-are on, the orchestrator mode is there, dormant until a run or
-`/orchestrator` starts it (`--no-mandate` turns it off). Plan mode is there
+are on, the orchestration mode is there, dormant until a run or
+`/orchestration` starts it (`--no-mandate` turns it off). Plan mode is there
 with `MANDATE=false` as well: `/plan` and `ctrl+alt+p` enter it, leaving it
-returns to the unrestricted session (`--no-mandate` turns it off). A subagent never
-inherits the orchestrator: a child that would gets the default mode. You
+returns to the unrestricted session (`--no-mandate` turns it off). There
+`/mode` lists `yolo` (the unrestricted session), `auto` (the built-in
+rails, taken up for the session) and the dormant modes; the model may ask
+for `auto`, never `yolo`. A subagent never
+inherits orchestration: a child that would gets the default mode. You
 talk to the main session only, so a subagent never asks you to approve
 anything: under `ask` (or a Claude Code `ask` rule) what would be asked
 about is refused, and the subagent reports that instead. A denied
@@ -944,28 +1022,41 @@ window: one per project (keyed by the git root, a worktree by its main
 checkout's, or the working folder without one) and one global, under
 `~/.pi/agent/core-memory/` next to pi's
 own sessions, since entries point at local session files and run records.
-An entry is one line: a date, a kind (`work`, `decision`, `fact`,
-`preference`, `pointer`), a short gist and its pointers (`file:line`,
-`run:<id>`, `factory:<id>`, a session file):
+An entry is one line: a date, a kind (`decision`, `fact`, `preference`,
+`pointer`, `work`), a short gist and its pointers (`file:line`, `run:<id>`,
+`factory:<id>`, a session file):
 
 ```
-- 2026-10-21 work #m4k2 factory m4k2 done: Add a login form; branch factory/m4k2; build DONE, expert-review APPROVE, judge ACCEPT; 3 files — factory:m4k2, ~/.cache/wt-m4k2, src/login.ts, src/login.test.ts
 - 2026-10-21 decision #m4k9 sessions stay on port 8796 in tests; 8795 serves the phone — tests/claude.test.mjs:12
-- 2026-10-22 pointer #m5a1 session (14 prompts): add core memory to lets-code — ~/.pi/agent/sessions/--home-ay-github-lets-code--/2026-10-22T09-12-03Z_….jsonl
+- 2026-10-22 preference #m5a1 the user wants commit messages as one plain sentence, no prefixes
+- 2026-10-23 work #m6c3 factory m6c3 done: Add a login form; branch factory/m6c3; build DONE, expert-review APPROVE, judge ACCEPT; 3 files — factory:m6c3, src/login.ts
 ```
+
+It holds what is significant later: decisions and why, non-obvious facts,
+preferences, where something lives, and a significant goal reached or a
+piece of work wrapped up (what it is and where it lives, once, at the
+end). Not the steps on the way: a subagent's or expert's run, one section
+written, tests passing along the way, a session that ended. Those stay
+with the session (its transcript, the run records under
+`~/.pi/agent/lets-code-runs/`).
 
 Three writers. The model, through the `memory` tool (`remember`), when it
-judges something worth keeping: decisions, non-obvious facts, where things
-live, what was done; never what the repo or git history already shows,
-never a secret (an entry that looks like a token, key or password is
-refused). You, by asking: "remember that the staging box is slow on
-Mondays" is written with your words as the gist and marked as yours. And
-lets-code itself, without a model call: a software factory run that
-finishes or stops (title, branch, the last verdict per stage, the files it
-changed), a subagent or expert run that ends (agent, task, the run record
-and its session), and the session itself (its file and your first
-message), from the main session only. An entry that matches an existing one
-(the same run, factory or session pointer, or the same gist) updates it.
+judges something significant; the always-on line asks it for decisions,
+facts, preferences and, once a request is wrapped up, its result if
+significant, never the steps. A subagent's session is itself a step of
+its parent's work: it may remember a decision, a fact or a preference, and
+its `work` entries are refused (the parent records the result). Never what
+the repo or git history already shows, never a secret (an entry that looks
+like a token, key or password is refused). You, by asking: "remember that
+the staging box is slow on Mondays" is written with your words as the gist
+and marked as yours. And lets-code itself, for work wrapped up without a
+model in the loop: a software factory run that ends done (planned, built,
+reviewed, judged and committed: its title, branch, the last verdict per
+stage, the files it changed). An entry that matches an existing one (the
+same pointer, or the same gist) updates it. The step entries an earlier
+lets-code wrote on its own (subagent and expert runs, session pointers,
+stopped factory runs) move to the archive the next time the store is
+opened, still found by `memory search` with `scope: archive`.
 
 What the model carries is one line per turn: that the memory exists, how
 many entries it holds and when the last was written, and that the tool
@@ -1839,7 +1930,8 @@ probe and the OpenRouter config, the move into the one extension, node tests
 for that extension's index, the git guard, checkpoints, agent guard, mandate,
 subagents, experts (and a lint of every built-in expert with the expert
 builder's `expert-lint`), the Claude Code adapter and sandbox config.
-`tests/mem-guard-live.sh` is a tmux-driven end-to-end run for the memory
+`tests/mem-guard.test.mjs` runs the watcher and the guard against a made-up
+`/proc/meminfo` and real children of at most 30 MB. `tests/mem-guard-live.sh` is a tmux-driven end-to-end run for the memory
 guard.
 
 A release is a GitHub release tagged `vX.Y.Z`: the publish workflow runs the

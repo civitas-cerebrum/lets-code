@@ -9,8 +9,11 @@ here="$(cd "$(dirname "$0")" && pwd)"
 lc="${here}/../lets-code"
 d="$(mktemp -d "${TMPDIR:-/tmp}/lets-code-stdin.XXXXXX")"
 srv=""; holder=""
-trap '[ -z "${srv}" ] || kill "${srv}" 2>/dev/null; [ -z "${holder}" ] || kill "${holder}" 2>/dev/null; rm -rf "${d}"' EXIT
+trap '[ -z "${srv}" ] || kill "${srv}" 2>/dev/null; holder="$(cat "${d}/holder" 2>/dev/null || true)"; [ -z "${holder}" ] || kill "${holder}" 2>/dev/null; rm -rf "${d}"' EXIT
 fail=0
+# pdir <dir>: the dir as a PATH entry (on Windows Git Bash's /c/x form: the
+# C: of a C:/x path would split PATH)
+pdir() { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) cygpath -u -- "$1" ;; *) printf '%s\n' "$1" ;; esac; }
 check() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: got '$2', want '$3'"; fail=1; fi; }
 
 cat > "${d}/server.py" <<'PY'
@@ -47,7 +50,7 @@ echo PI-OUT
 SH
 chmod +x "${d}/bin/pi"
 
-export PATH="${d}/bin:${PATH}" XDG_CONFIG_HOME="${d}/config" PI_CODING_AGENT_DIR="${d}/agent" PI_OFFLINE=1 PI_RECORD="${d}/record" LETS_CODE_STDIN_WAIT=1
+export PATH="$(pdir "${d}/bin"):${PATH}" XDG_CONFIG_HOME="${d}/config" PI_CODING_AGENT_DIR="${d}/agent" PI_OFFLINE=1 PI_RECORD="${d}/record" LETS_CODE_STDIN_WAIT=1
 mkdir -p "${d}/config/lets-code"
 cat > "${d}/config/lets-code/config" <<EOF
 ENDPOINTS="${url}"
@@ -58,20 +61,21 @@ MEM_GUARD="false"
 GIT_GUARD="false"
 EOF
 cd "${d}"
-# an open pipe no one writes: a fifo whose writer only holds it open
-open_pipe() { rm -f "${d}/fifo"; mkfifo "${d}/fifo"; sleep 60 > "${d}/fifo" & holder=$!; }
-done_pipe() { kill "${holder}" 2>/dev/null || true; wait "${holder}" 2>/dev/null || true; holder=""; }
+# idle <cmd...>: cmd with stdin an open pipe no one writes, as a subprocess
+# spawner leaves it: a background sleep holds the write end open (a pipe, not
+# a fifo: Git Bash's fifos are no pipes to test -p, and a native spawner's
+# pipe is one); done_pipe stops it
+idle() { ( sleep 60 & echo $! > "${d}/holder" ) | "$@"; }
+done_pipe() { holder="$(cat "${d}/holder" 2>/dev/null || true)"; [ -z "${holder}" ] || kill "${holder}" 2>/dev/null || true; rm -f "${d}/holder"; holder=""; }
 secs() { python3 -c 'import time; print(time.time())'; }
 
-open_pipe
-t0=$(secs); bash "${lc}" -p hi < "${d}/fifo" > "${d}/out" 2> "${d}/err" || true; t1=$(secs)
+t0=$(secs); idle bash "${lc}" -p hi > "${d}/out" 2> "${d}/err" || true; t1=$(secs)
 done_pipe
 check "-p on an open, idle pipe: starts after the wait, not hung" "$(python3 -c "print($t1 - $t0 < 20)")" True
 check "-p on an open, idle pipe: pi gets a closed stdin" "$(cat "${d}/record")" "stdin="
 check "-p on an open, idle pipe: says so on stderr" "$(grep -c 'stdin is an open pipe' "${d}/err")" 1
 
-open_pipe
-t0=$(secs); bash "${lc}" --mode json -p hi < "${d}/fifo" > "${d}/out" 2> "${d}/err" || true; t1=$(secs)
+t0=$(secs); idle bash "${lc}" --mode json -p hi > "${d}/out" 2> "${d}/err" || true; t1=$(secs)
 done_pipe
 check "--mode json on an open, idle pipe: not hung" "$(python3 -c "print($t1 - $t0 < 20)"; cat "${d}/record")" "True
 stdin="
@@ -84,8 +88,7 @@ check "piped input: no note" "$(grep -c 'stdin is an open pipe' "${d}/err" || tr
 bash "${lc}" -p hi < /dev/null > "${d}/out" 2> "${d}/err"
 check "</dev/null: no wait, no note" "$(grep -c 'stdin is an open pipe' "${d}/err" || true)" 0
 
-open_pipe
-bash "${lc}" --mode rpc < "${d}/fifo" > "${d}/out" 2> "${d}/err" || true
+idle bash "${lc}" --mode rpc > "${d}/out" 2> "${d}/err" || true
 done_pipe
 check "--mode rpc keeps its stdin (no note)" "$(cat "${d}/record"; grep -c 'stdin is an open pipe' "${d}/err" || true)" "stdin=(rpc)
 0"

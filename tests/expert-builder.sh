@@ -17,6 +17,9 @@ sys.stdout.write(s[i:j + len(end)])
 PY
 )"
 work="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/eb-test.XXXXXX")" && pwd)"   # macOS TMPDIR ends in /
+# on Windows in the C:/Users/x form node reads and prints (expert-lint and
+# expert-new print paths with "/" there): the paths the checks look for
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) work="$(cygpath -m -- "${work}")" ;; esac
 trap 'rm -rf "${work}"' EXIT
 PI_AGENT_DIR="${work}/agent"; mkdir -p "${PI_AGENT_DIR}"
 D="${PI_AGENT_DIR}/expert-builder"; af="${PI_AGENT_DIR}/agents/expert-builder.md"

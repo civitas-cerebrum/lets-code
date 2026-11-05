@@ -67,6 +67,8 @@ typo --no-expert --no-experts
 typo --thinking-levle --thinking-level
 typo --claud --claude
 typo --orchestrator=1 --orchestrator
+typo --orchestration=1 --orchestration
+typo --orchestratoin --orchestration
 passes() {  # passes <flag...>: pi's own flag, or one far from any of ours
     out="$(bash "${lc}" "$@" </dev/null 2>&1)"
     check "$*: passes to pi" "$(printf '%s\n' "${out}" | grep -c 'did you mean')|$(printf '%s\n' "${out}" | grep -c 'lets-code setup')" "0|1"

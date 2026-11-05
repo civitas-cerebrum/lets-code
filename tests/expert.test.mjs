@@ -7,27 +7,31 @@
 //   tests/experts.test.mjs [path/to/lets-code/experts.ts]
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, realpathSync, rmSync, chmodSync, readdirSync, existsSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 
 const extPath = process.argv[2] ?? join(homedir(), ".pi/agent/extensions/lets-code/experts.ts");
 const subPath = join(dirname(extPath), "subagents.ts");
 const work = realpathSync(mkdtempSync(join(tmpdir(), "expert-test-")));
-process.on("exit", () => rmSync(work, { recursive: true, force: true }));
+process.on("exit", () => rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 const agentDir = join(work, "agent"); const ext = join(agentDir, "extensions"); mkdirSync(ext, { recursive: true }); mkdirSync(join(agentDir, "agents"));
 const bin = join(work, "bin"); mkdirSync(bin);
 process.env.PI_CODING_AGENT_DIR = agentDir;
 process.env.LETS_CODE_SUBAGENTS_ON = "1";
 process.env.LETS_CODE_EXPERTS_ON = "1";
 process.env.LETS_CODE_MODEL = "test-model";
-process.env.PATH = `${bin}:${process.env.PATH}`;
+process.env.PATH = `${bin}${delimiter}${process.env.PATH}`;
+const W = process.platform === "win32";
+// on Windows a shebang script on PATH is no program: the extension starts pi as LETS_CODE_PI says
+if (W) process.env.LETS_CODE_PI = JSON.stringify([process.execPath, join(bin, "pi")]);
 for (const k of ["LETS_CODE_SUBAGENT_DEPTH", "LETS_CODE_ROLE", "LETS_CODE_MODE"]) delete process.env[k];
 
 // fake pi in RPC mode: records argv and the first prompt (the task), replies with it
 writeFileSync(join(bin, "pi"), `#!/usr/bin/env node
 const fs = require("fs"); const path = require("path");
 const id = Date.now() + "-" + Math.random().toString(36).slice(2);
+fs.appendFileSync(path.join(process.env.FAKE_PI_DIR, "..", "pids"), process.pid + "\\n");   // for the end of the test to wait on
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 let buf = "", first = true;
 process.stdin.setEncoding("utf8");
@@ -188,7 +192,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	const r = await run(fresh.tool, { action: "enable", name: "helper" }, c);
 	t("enable: the user said yes", [r.isError, out(r)], [false, "The helper expert is enabled."]);
 	t("enable: remembered, other keys kept", state(), { thinkingLevels: { "p/m": "low" }, metrics: true, experts: { helper: true } });
-	t("enable: state file mode 600", (statSync(join(agentDir, "lets-code-state.json")).mode & 0o777).toString(8), "600");
+	t("enable: state file mode 600 (Windows has no modes: 666)", (statSync(join(agentDir, "lets-code-state.json")).mode & 0o777).toString(8), W ? "666" : "600");
 	has("list: enabled", out(await run(fresh.tool, { action: "list" }, ctx([]))), "[enabled]");
 }
 
@@ -286,7 +290,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 
 
 // the ui-tester expert as lets-code writes it (ui_tester_write_agent): its fields parse,
-// its brief has the two required fields, it is listed only on Linux and macOS,
+// its brief has the two required fields, it is listed on Linux, macOS and Windows (not Termux),
 // and it is not set up until ui-tester/setup has run
 {
 	const sub = await import(pathToFileURL(join(ext, "subagents.ts")).href);
@@ -299,7 +303,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	t("ui-tester: no agent dir of its own; its prompt", [a?.agentDir, a?.appendPrompt, a?.timeout], [undefined, join(agentDir, "ui-tester", "prompt.md"), 3600]);
 	t("ui-tester: setup under the agent dir", a?.expert?.setup, join(agentDir, "ui-tester", "setup"));
 	t("ui-tester: not set up before its setup", a?.expert?.ready, false);
-	t("ui-tester: Linux and macOS only (not Termux: process.platform android)", [sub.platformOk(a?.expert?.platform), a?.expert?.platform.split(/[,\s]+/).includes("android")], [["linux", "darwin"].includes(process.platform), false]);
+	t("ui-tester: Linux, macOS and Windows only (not Termux: process.platform android)", [sub.platformOk(a?.expert?.platform), a?.expert?.platform.split(/[,\s]+/).includes("android")], [["linux", "darwin", "win32"].includes(process.platform), false]);
 	t("ui-tester: use_for whole in the line", a?.expert?.useFor, body.match(/^use_for: (.*)$/m)[1]);
 	t("ui-tester: pi's tools", a?.tools, ["bash", "read", "edit", "write", "grep", "find", "ls"]);
 	t("ui-tester: the tester's specialist, not in the main session's line", a?.expert?.routed, false);
@@ -355,7 +359,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 		t(`${name}: an expert`, [a?.name, !!a?.expert], [name, true]);
 		t(`${name}: brief`, a?.expert?.brief.map((f) => `${f.name}${f.required ? "*" : ""}`), w.brief);
 		t(`${name}: tools, role, timeout`, [a?.tools, a?.role, a?.timeout], [w.tools, w.role, w.timeout]);
-		if (name === "researcher") t(`${name}: its browser setup gates it, every platform`, [a?.expert?.ready, String(a?.expert?.setup).endsWith("researcher/setup"), a?.expert?.platform], [false, true, undefined]);
+		if (name === "researcher") t(`${name}: its browser setup gates it, every platform`, [a?.expert?.ready, /[\\/]researcher[\\/]setup$/.test(String(a?.expert?.setup)), a?.expert?.platform], [false, true, undefined]);
 		else t(`${name}: ready, no setup, every platform`, [a?.expert?.ready, a?.expert?.setup, a?.expert?.platform], [true, undefined, undefined]);
 		t(`${name}: use_for kept`, a?.expert?.useFor, body.match(/^use_for: (.*)$/m)[1]);
 		t(`${name}: in the always-on line`, a?.expert?.routed, !routedNot.includes(name));
@@ -397,6 +401,19 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	has("runner: alone, never in runs:[..]", out(await run(tool, { action: "run", runs: [{ name: "sf", brief: { ticket: "T" } }, { name: "helper", brief: { target: "x", question: "y" } }] }, ctx([true]))), "sf runs alone");
 	has("runner: a brief without its ticket runs nothing", out(await run(tool, { action: "run", name: "sf", brief: {} }, ctx([true]))), "lacks ticket");
 	t("runner: nothing more ran", [fac.got.length, calls().length], [1, 0]);
+	// a factory call without the name (small models drop it on a resume): a resume or a ticket is the factory's
+	has("no name, no software-factory expert: a resume is not guessed", out(await run(tool, { action: "run", brief: { resume: "X", decision: "approve" } }, ctx([true]))), "Give {name, brief}");
+	A("software-factory.md", "---\nname: software-factory\ndescription: the factory\nrunner: factory\nexpert: true\nuse_for: tickets\nbrief:\n  - ticket: the ticket\n  - resume: a run to go on with\n  - decision: the decision\n---\nDocumentation only.\n");
+	const { tool: t2 } = await load();
+	const n0 = fac.got.length;
+	const r2 = await run(t2, { action: "run", brief: { resume: "20261030-x", decision: "approve" } }, ctx([true]));
+	t("no name, a resume: the factory's", [out(r2), fac.got.length - n0, fac.got.at(-1)?.brief.resume], ["factory run X: done", 1, "20261030-x"]);
+	await run(t2, { action: "run", brief: { ticket: "T-2" } }, ctx([true]));
+	t("no name, a ticket: the factory's", [fac.got.length - n0, fac.got.at(-1)?.brief.ticket], [2, "T-2"]);
+	has("no name, any other brief: still asked for the name", out(await run(t2, { action: "run", brief: { target: "x", question: "y" } }, ctx([true]))), "Give {name, brief}");
+	has("no name, no brief: still asked for the name", out(await run(t2, { action: "run" }, ctx([true]))), "Give {name, brief}");
+	t("a named call is not changed by it", [out(await run(t2, { action: "run", name: "sf", brief: { ticket: "T-3" } }, ctx([true]))), fac.got.at(-1)?.brief.ticket], ["factory run X: done", "T-3"]);
+	rmSync(join(agentDir, "agents", "software-factory.md"));
 	rmSync(join(agentDir, "agents", "sf.md")); rmSync(join(ext, "factory.ts"));
 }
 
@@ -425,5 +442,13 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	rmSync(join(agentDir, "agents", "spec.md")); rmSync(join(agentDir, "agents", "lead.md"));
 }
 
+// the children stop on their own (input closed, then signals after a grace):
+// wait for them, so the folder can go at exit (Windows keeps a live
+// process's working directory)
+{
+	const pids = existsSync(join(work, "pids")) ? readFileSync(join(work, "pids"), "utf8").split("\n").filter(Boolean).map(Number) : [];
+	const alive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
+	for (let i = 0; i < 400 && pids.some(alive); i++) await new Promise((r) => setTimeout(r, 20));
+}
 console.log(`\n${n} checks, ${fail ? "FAILURES" : "all passed"}`);
 process.exit(fail);

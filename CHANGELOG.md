@@ -9,7 +9,13 @@ model on your own hardware:
   (with per-level budgets the server enforces) and vision, probed from the
   server; the output cap reserved in pi's compaction settings so a session
   never overflows
-- guards: memory (Linux), git (a `pi/*` branch, refused irreversible
+- Windows: runs in Git Bash (as pi does) from PowerShell, cmd, Windows
+  Terminal or Git Bash, installed with `npm install -g
+  --allow-scripts=@civitas-cerebrum/lets-code @civitas-cerebrum/lets-code`;
+  every feature but the sandbox (macOS and Linux only), with a lighter
+  memory guard; the test suite runs on windows-latest in CI
+- guards: memory (off by default; a RAM watcher asks at 85 % use, a headless
+  session declines), git (off by default, `/git-guard on`: a `pi/*` branch, refused irreversible
   commands, checkpoints before every tool call), agent (bash timeouts,
   cut-off recovery, test reminders, dynamic thinking), grounding
 - modes and roles (`plan`, `auto`, `ask`, `orchestrator`, `yolo`) enforced
@@ -37,6 +43,15 @@ model on your own hardware:
   local proxy sidecar, usable from another machine with a Claude Code token
 - the Claude Code adapter: a project's `.claude/` hooks, commands, skills,
   agents, permission rules, MCP servers and workflows, read at each start
+- core memory: per project and global, searched on demand with the
+  `memory` tool and `/memories`; it keeps what is significant later
+  (decisions, non-obvious facts, preferences, where things live, a goal
+  reached or work wrapped up), never the steps on the way. lets-code no
+  longer adds an entry for every subagent, expert run or session that ended,
+  only for a factory run that ends done; a subagent's `remember` refuses a
+  `work` entry (its task is a step of the parent's); the step entries
+  lets-code wrote before move to the archive the next time the store is
+  opened
 - presets for more backends, an OS sandbox, MCP import, a footer with
   tokens, speed and cost, a session tag for proxy logs, `update`
 - sessions and messages (#79): a `message` tool, `/sessions`, `lets-code
@@ -49,6 +64,9 @@ model on your own hardware:
   sessions` and `lets-code message` are now subcommands: a first word of
   `sessions` or `message` no longer passes to pi as a prompt (use
   `lets-code -p "..."` for one)
+- runs on pi 1.4.0 (the latest; checked by hand: subagent sessions switch
+  from an idle main session, in place while it works, between subagents
+  and back); pi 0.85+ still works, as before
 - outside runs: agents another extension starts inside a session (a QA
   package's `pi -p` orchestrator and experts) are now the session's outside
   children (lineage through `LETS_CODE_OWNER_PID`; a lets-code launch starts

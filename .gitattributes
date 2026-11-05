@@ -1,0 +1,6 @@
+# lets-code is bash and its tests are bash and node: LF everywhere, also
+# in a Windows checkout (Git for Windows checks out CRLF by default, and bash
+# reads a CRLF script as commands ending in \r).
+* text=auto eol=lf
+*.png binary
+*.jpg binary

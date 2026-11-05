@@ -26,8 +26,13 @@ const freePort = () => new Promise((r) => { const s = createServer().listen(0, "
 const records = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
 
 // fake claude: stream-json in and out, MCP client of the bridge
-const fake = join(work, "claude");
-writeFileSync(fake, `#!/usr/bin/env node
+// (on Windows a script is started through a shim, as npm installs claude
+// there: claude.cmd running node on claude.js)
+const WIN = process.platform === "win32";
+const fakeJs = join(work, WIN ? "claude.js" : "claude");
+const fake = WIN ? join(work, "claude.cmd") : fakeJs;
+if (WIN) writeFileSync(fake, `@ECHO off\r\nnode "%~dp0\\claude.js" %*\r\n`);
+writeFileSync(fakeJs, `#!/usr/bin/env node
 const fs = require("fs"); const cp = require("child_process"); const rl = require("readline");
 const argv = process.argv.slice(2); const arg = (k) => { const i = argv.indexOf(k); return i < 0 ? null : argv[i + 1]; };
 let model = arg("--model"); const effort = arg("--effort");
@@ -76,7 +81,7 @@ async function handle(m) {
   out({ type: "result", subtype: "success", is_error: false });
 }
 `);
-chmodSync(fake, 0o755);
+chmodSync(fakeJs, 0o755);
 
 const port = await freePort();
 const env = {
@@ -246,6 +251,16 @@ try {
 	t("a stopped sidecar is back before the next Claude request", [after?.version === mod.proxyVersion(), after?.pid !== before?.pid], [true, true]);
 	await hooks.before_provider_request({}, { model: { provider: "lets-code" } });
 	t("a request to another provider leaves the sidecar alone", (await mod.health(port))?.pid, after?.pid);
+
+	// the stop Windows uses (a signal there kills at once): POST /shutdown with
+	// the key the proxy keeps in its state dir; without the key it is refused
+	const state = mod.stateDir(env);
+	t("the proxy keeps its control key in its state dir", /^[0-9a-f]{32}$/.test(readFileSync(join(state, "control.key"), "utf8").trim()), true);
+	const refused = await fetch(`${base}/shutdown`, { method: "POST", headers: { "X-Lets-Code-Control": "wrong" } });
+	t("/shutdown without the key: refused, still up", [refused.status, (await mod.health(port))?.pid], [403, after?.pid]);
+	await mod.stopProxy(port, after.pid, state);
+	t("stopProxy: the proxy is gone", await mod.health(port), null);
+	t("ensureProxy after stopProxy starts it again", await mod.ensureProxy(env), "");
 
 	// a port taken by something else is reported, not fought over
 	const other = await freePort();

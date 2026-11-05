@@ -142,7 +142,7 @@ it, not a Claude Code clone. Where it stands:
 | 🤝 **Claude Code projects** (automatic) | A project whose `.claude/` has hooks or workflow scripts works as it is: its hooks, workflows, skills, `/commands`, agents, permission rules, MCP servers and CLAUDE.md, read live at each start. Your own `~/.claude` stays out unless `CLAUDE_CODE=all`. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
 | 🐝 **Subagents** (on by default) | A `subagent` tool runs agent files in their own pi process through the same server and guards: one, several in parallel, or a chain. Costs a few hundred tokens, not thousands. |
 | 🗂 **Core memory** (on by default) | A long-term memory per project and one across projects, kept out of context: the agent searches it with a `memory` tool when it needs to and adds what is significant later (decisions, non-obvious facts, preferences, where things live, a goal reached or work wrapped up, and "remember that ..." in your words), never the steps on the way; lets-code itself adds a factory run that ends done. Always on: one line saying the memory exists and how many entries it holds, plus the three newest headlines; a file the agent reads that an entry points at gets one line saying so. `/memories` lists them, a row each that opens into its pointers and actions; it edits, forgets and archives too. |
-| 📨 **Sessions and messages** (on by default) | Sessions on one machine can talk: a `message` tool sends a note to another session by pid, session id or name, to every other session in the same repository (`repo`), or between an orchestrator and its subagents (`parent`, `children`, an agent's name). The note shows up in the other session's conversation (never in the middle of a turn, and without starting one on its own unless you allow it or it comes from the session's own subagent), marked as coming from another session rather than from you, and the sender learns whether it was seen. `/sessions` and `lets-code sessions` list the live sessions; `lets-code message` sends from a shell. Local files only, no network. |
+| 📨 **Sessions and messages** (on by default) | Sessions on one machine can talk: a `message` tool sends a note to another session by pid, session id or name, to every other session in the same repository (`repo`), or between an orchestrator and its subagents (`parent`, `children`, an agent's name). The note shows up in the other session's conversation (never in the middle of a turn, and without starting one on its own unless you allow it or it comes from the session's own subagent), marked as coming from another session rather than from you, and the sender learns whether it was seen. `/sessions` and `lets-code sessions` list the live sessions; `lets-code message` sends from a shell. Claude Code sessions are in reach too, in any folder: listed, inspected (their state and latest messages) and, once the Claude Code messages extension is on (`/extensions`, or `lets-code claude-hook install`: a small hook in Claude Code's settings), messaged (`claude:<pid or name>`), with a reply back through `lets-code message`. Local files only, no network. |
 | 📦 **Sandbox** (optional) | Bash runs in bubblewrap (Linux) or Seatbelt (macOS) via sandbox-runtime: writes confined to the project, secrets unreadable, network allowlisted. |
 | 🔌 **MCP** (optional) | pi has MCP built in; setup imports the servers other clients already have in `.mcp.json` and their own config files. |
 | 🧑‍🔬 **Experts** (on by default) | Subagents with their own knowledge behind one `expert` tool that costs one line of context: the model sees each expert's name and what it is for, asks for a job and a brief template when it needs one, and runs it with a filled-in brief. Every expert is dormant until you say yes (a dialog the first time, remembered); one that needs an install gets it then. |
@@ -985,6 +985,21 @@ says `2 subagents running · alt+s or /subagents to switch`. None of this
 costs context: nothing in it reaches the model (the requests of the main
 session and of its children are the same byte for byte).
 
+Agents another extension starts inside the session are in the list too.
+A pi package such as a QA tool that runs its orchestrator and experts as
+`pi -p` processes of its own (not through the `subagent` tool) used to be
+invisible here: lets-code now knows each such process as an *outside
+child* of the session it was started in (it inherits the session's
+`LETS_CODE_OWNER_PID` and runs headless; the experts an orchestrator starts
+nest under it), and the main session lists it as a run with its name
+(`--name`), task, tool calls and tokens, read live from its own session
+file. It is shown in place and read-only: what you type there, <kbd>Esc</kbd>
+and the model and thinking keys get a notice instead of reaching it (its
+tool is the one talking to it), and its session file is never opened as a
+session or written to. `x` in the list (or `/subagents stop <name>`) ends
+its process, and `subagent({action: "status"})` reports it with its pid.
+It needs sessions on (the default).
+
 `LETS_CODE_SUBAGENT_KEY` picks another key (pi's key syntax, e.g.
 `ctrl+alt+w`), and `none` turns the key off. Each run is kept in
 `~/.pi/agent/lets-code-runs/<session id>/`: its session file
@@ -1161,6 +1176,44 @@ by others is refused (the session then runs unlisted, with one warning).
 `sessions` and `message` as its own commands, a one-shot prompt that
 starts with either word needs `lets-code -p "..."`.
 
+**Claude Code sessions.** `message` with `action: "list"`, `/sessions`
+and `lets-code sessions` list every Claude Code session on the machine as
+well, whatever its folder (from `claude agents --json`, Claude Code's own
+scripting interface, or its session records when `claude` is not on the
+PATH). `action: "inspect"` with `to` (a lets-code session or
+`claude:<pid|name>`) shows a session's state and its latest messages, read
+from its transcript, as data. A message reaches a Claude Code session when
+`to` names it (`claude:<pid|name|session id>`, or a name no lets-code
+session has), through a hook lets-code installs once:
+
+In pi, `/extensions` lists lets-code's optional extensions and turns one
+on or off (pick it, then confirm; or `/extensions claude-hook on|off`).
+From a shell:
+
+```bash
+lets-code claude-hook install     # into ~/.claude/settings.json (a backup is kept); status, uninstall
+lets-code message claude:qa-claude -- "compare your verdicts on the five J15 bugs with mine: ..."
+```
+
+The hook uses only Claude Code's documented hook contract, not its private
+messaging socket. A busy session gets the message at its next tool call
+(PostToolUse context); one ending its turn goes on with it (a Stop hook
+that blocks once, never while `stop_hook_active`); an idle one is woken
+for it (an `asyncRewake` watcher, one per session); otherwise it comes with
+the next prompt. A message that is itself a reply never starts a turn, so
+the two sides cannot answer each other forever. Claude sees it framed like
+a lets-code message, as information from another session, with the
+command to answer it: `lets-code message <pid> -- "..."`, which, run from
+that session's Bash, is signed as that Claude Code session. A session
+started before the install may need `/hooks` or a restart to pick it up.
+You see a line in that Claude Code session when a message arrives
+(`lets-code: a message from ...`); the full text goes to Claude, never into
+your input box. Until the hook is installed, a message to a Claude Code
+session is `undeliverable` and says how to install it. No session reaches
+another through its terminal: a command that writes to a terminal device
+(`/dev/ttys*`, `/dev/pts/*`) or fakes keystrokes into one is refused, since
+that text lands on your screen and in your input, not in the session.
+
 </details>
 
 <details>
@@ -1224,7 +1277,7 @@ What is read (the `~/.claude` parts only with `CLAUDE_CODE=all`):
 | `.claude/skills/` (up to the git root), `~/.claude/skills/` | pi skills: name and description in the prompt, the body read on use; also `/<name> [args]` |
 | `.claude/commands/**/*.md`, `~/.claude/commands/` | `/<name>`, `/<dir>:<name>`; `$ARGUMENTS`, `$ARGUMENTS[N]`, `$N` (from 0), named `arguments`, `` !`cmd` `` and ```` ```! ```` blocks run first, `@file` attached; the project's wins over yours |
 | `.claude/agents/*.md`, `~/.claude/agents/` | Agents of the `subagent` tool; `tools`/`disallowedTools` mapped to pi's (`Glob` is `find`; tools pi lacks are dropped), `effort` is the thinking level, `permissionMode: plan` the readonly role; `model` and `color` are ignored. A pi agent of the same name wins |
-| `hooks` in `~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json` | Run on pi's events: PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, SessionStart (startup, resume, clear, compact, fork), Stop, SubagentStop (in subagents), SubagentStart, PreCompact, SessionEnd, Notification (when lets-code waits for an answer). Claude's stdin JSON (tool names and arguments in Claude's names, `transcript_path` is pi's session file), `sh -c` in the project with `CLAUDE_PROJECT_DIR`, in parallel, identical commands once, Claude's timeouts; exit 0 / 2 / other and the JSON output (`continue`, `decision`, `permissionDecision`, `updatedInput`, `additionalContext`, `updatedToolOutput`, `systemMessage`) as Claude defines them. `disableAllHooks` is honoured. A snapshot is taken at session start |
+| `hooks` in `~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json` | Run on pi's events: PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, SessionStart (startup, resume, clear, compact, fork), Stop, SubagentStop (in subagents), SubagentStart, PreCompact, SessionEnd, Notification (when lets-code waits for an answer). Claude's stdin JSON (tool names and arguments in Claude's names, `transcript_path` is pi's session file); lets-code's agents are Claude Code's subagents to hooks: in a subagent, and in an outside child (another extension's agent in the session), every hook gets the main session's `session_id` and `transcript_path` with `agent_id` (the run) and `agent_type` (the agent's name), SubagentStart and SubagentStop (with `agent_transcript_path`, the agent's own file; matchers match `agent_type`) take the place of SessionStart, Stop and SessionEnd, and its task is no UserPromptSubmit; the `subagent` tool, and the `expert` tool when it starts one, are `Agent` to matchers (`Task` matches too), `sh -c` in the project with `CLAUDE_PROJECT_DIR`, in parallel, identical commands once, Claude's timeouts; exit 0 / 2 / other and the JSON output (`continue`, `decision`, `permissionDecision`, `updatedInput`, `additionalContext`, `updatedToolOutput`, `systemMessage`) as Claude defines them. `disableAllHooks` is honoured. A snapshot is taken at session start |
 | `permissions.allow` / `ask` / `deny` | deny blocks the call, ask asks you (blocks without a UI), allow skips the mandate's question; a bare tool name in deny removes the tool. `Bash(npm run test *)`, `Bash(git:*)`, `Read(./secrets/**)`, `Edit(/src/**)`, `//abs`, `~/`, `mcp__server`, `Agent(name)`. lets-code's guards and mandate denials still apply on top |
 | `.mcp.json`, `mcpServers` in `~/.claude.json` (user and local scope) | Registered with pi's MCP; `${VAR}` / `${VAR:-default}` expanded; `.mcp.json` servers need the folder trusted and Claude's approval (`enableAllProjectMcpServers`, `enabledMcpjsonServers`, `disabledMcpjsonServers`) or a yes to lets-code's question |
 | `.claude/workflows/*.js`, `~/.claude/workflows/` | A `workflow` tool and `/<name> [args]` / `/workflow <name>`; `agent()` (one child pi each, `schema` for JSON answers), `parallel()`, `pipeline()`, `phase()`, `log()`, `args`, at `LETS_CODE_SUBAGENT_CONCURRENCY` agents at a time. Needs subagents on |

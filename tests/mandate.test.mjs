@@ -828,6 +828,13 @@ const sh = (p) => (process.platform === "win32" ? p.replace(/\\/g, "/") : p);
 	await h.commands.mode.handler("auto", h.ctx(d));
 	t("back to auto: everything from before, and the late tool", ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent", "codemode", "mcp__late__x"].every((x) => h.tools().includes(x)), true);
 }
+// --- pi's project_trust is a vote taken before the decision ({trusted: yes|no|undecided});
+// a handler that returns nothing makes pi warn at every launch in a project with .pi resources
+{
+	const h = await load({});
+	const vote = h.handlers.project_trust ? await h.handlers.project_trust({ type: "project_trust", cwd: work }, { cwd: work, mode: "tui", hasUI: true, ui: {} }) : { trusted: "undecided" };
+	t("project_trust: no handler, or a valid vote", ["yes", "no", "undecided"].includes(vote?.trusted), true);
+}
 // --- Windows forms of commands (harmless elsewhere)
 {
 	const { mod } = await load({});

@@ -318,7 +318,7 @@ return { files: files.files, notes, both, bad, args };`;
 // --- the extension on a fake pi API
 async function load(cwd, env = {}) {
 	const saved = process.cwd(); process.chdir(cwd);
-	for (const k of ["LETS_CODE_SUBAGENT_DEPTH", "LETS_CODE_CLAUDE_TRUST", "LETS_CODE_CLAUDE_ENV", "LETS_CODE_SUBAGENTS_ON"]) delete process.env[k];
+	for (const k of ["LETS_CODE_SUBAGENT_DEPTH", "LETS_CODE_CLAUDE_TRUST", "LETS_CODE_CLAUDE_ENV", "LETS_CODE_SUBAGENTS_ON", "LETS_CODE_OUTSIDE_OF", "LETS_CODE_OUTSIDE_NAME", "LETS_CODE_HOOK_SESSION_ID", "LETS_CODE_HOOK_TRANSCRIPT", "LETS_CODE_RUN_ID", "LETS_CODE_AGENT_NAME"]) delete process.env[k];
 	Object.assign(process.env, env);
 	const mod = await importModule();
 	const handlers = {}; const commands = {}; const tools = {}; const mcp = []; const sent = []; const messages = []; const listeners = {};
@@ -441,6 +441,59 @@ async function load(cwd, env = {}) {
 	await x.emit("session_start", { reason: "startup" }, x.ctx(null));
 	t("bare deny rules take the tools away", x.active(), ["read", "grep"]);
 	rmSync(join(claude, "settings.json"));
+}
+
+// --- hooks see lets-code's agents as Claude Code's subagents: the main session's
+// session_id and transcript, agent_id and agent_type; SubagentStart/Stop instead of
+// SessionStart/Stop/SessionEnd; the expert tool is Agent (Task) when it starts one
+{
+	const proj = join(work, "agents"); mkdirSync(proj);
+	const trustFile = join(agentDir, "trust.json"), trustWas = existsSync(trustFile) ? readFileSync(trustFile, "utf8") : undefined;
+	writeFileSync(trustFile, JSON.stringify({ ...(trustWas ? JSON.parse(trustWas) : {}), [proj]: true }));   // the user trusted it in pi
+	const log = join(proj, "hooks.jsonl");
+	// the recorder: a script of its own, named with / (the hook runs in Git Bash on Windows: C:/x, not C:\x)
+	const recorder = join(proj, "record.mjs");
+	writeFileSync(recorder, 'import { appendFileSync } from "node:fs"; let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => appendFileSync(process.argv[2], s.replace(/\\n/g, " ") + "\\n"));\n');
+	const rec = { type: "command", command: `node "${recorder.replace(/\\/g, "/")}" "${log.replace(/\\/g, "/")}"` };
+	const all = (matcher) => [{ ...(matcher ? { matcher } : {}), hooks: [rec] }];
+	w(join(proj, ".claude", "settings.json"), JSON.stringify({ hooks: { SessionStart: all(), SessionEnd: all(), UserPromptSubmit: all(), Stop: all(), SubagentStart: all("^achilles-inspector$|scout"), SubagentStop: all(), PreToolUse: [...all("Task"), ...all("expert")] } }));
+	const events = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+	const take = () => { const e = events(); rmSync(log, { force: true }); return e; };
+	const settle = { outcome: "completed", continue: false, entries: [], context: { llmMessages: [{ role: "assistant", content: [{ type: "text", text: "done here" }] }] } };
+
+	// the main session: its own ids, exported for its agents
+	let x = await load(proj, { LETS_CODE_CLAUDE_TRUST: "1" });
+	await x.emit("session_start", { reason: "startup" }, x.ctx(null));
+	t("main: SessionStart", take().map((e) => [e.hook_event_name, e.session_id, "agent_id" in e]), [["SessionStart", "sess-1", false]]);
+	t("main: its session exported for its agents' hooks", [process.env.LETS_CODE_HOOK_SESSION_ID, process.env.LETS_CODE_HOOK_TRANSCRIPT], ["sess-1", "/s.jsonl"]);
+	await x.emit("tool_call", { toolName: "expert", toolCallId: "e1", input: { action: "run", name: "tester", brief: { task: "the login form" } } }, x.ctx(null));
+	t("expert run: PreToolUse as Agent, a Task matcher sees it", take().map((e) => [e.tool_name, e.tool_input.subagent_type, e.tool_input.prompt]), [["Agent", "tester", '{"task":"the login form"}']]);
+	await x.emit("tool_call", { toolName: "expert", toolCallId: "e2", input: { action: "list" } }, x.ctx(null));
+	t("expert list: not an Agent call", take().map((e) => e.tool_name), ["expert"]);
+
+	// a lets-code subagent: the main session's ids, its run as agent_id
+	x = await load(proj, { LETS_CODE_SUBAGENT_DEPTH: "1", LETS_CODE_CLAUDE_TRUST: "1", LETS_CODE_AGENT_NAME: "scout", LETS_CODE_RUN_ID: "run-7", LETS_CODE_HOOK_SESSION_ID: "main-sess", LETS_CODE_HOOK_TRANSCRIPT: "/main.jsonl" });
+	await x.emit("session_start", { reason: "startup" }, x.ctx(null));
+	await x.emit("tool_call", { toolName: "subagent", toolCallId: "s1", input: { agent: "deep", task: "t" } }, x.ctx(null));
+	await x.emit("agent_before_settle", settle, x.ctx(null));
+	const sub = take();
+	t("subagent: SubagentStart (matched on agent_type), its tool call, SubagentStop", sub.map((e) => e.hook_event_name), ["SubagentStart", "PreToolUse", "SubagentStop"]);
+	t("subagent: the main session's session_id and transcript on every event", sub.map((e) => [e.session_id, e.transcript_path]), [["main-sess", "/main.jsonl"], ["main-sess", "/main.jsonl"], ["main-sess", "/main.jsonl"]]);
+	t("subagent: agent_id is its run, agent_type its name", sub.map((e) => [e.agent_id, e.agent_type]), [["run-7", "scout"], ["run-7", "scout"], ["run-7", "scout"]]);
+	t("subagent: SubagentStop has its own transcript and last message", [sub[2].agent_transcript_path, sub[2].last_assistant_message, sub[2].stop_hook_active], ["/s.jsonl", "done here", false]);
+	t("subagent: the main session's ids are not moved by it", process.env.LETS_CODE_HOOK_SESSION_ID, "main-sess");
+
+	// an outside child (another extension's agent in the session): a subagent too, never a second main session
+	x = await load(proj, { LETS_CODE_OUTSIDE_OF: String(process.pid), LETS_CODE_OUTSIDE_NAME: "achilles-inspector", LETS_CODE_CLAUDE_TRUST: "1", LETS_CODE_HOOK_SESSION_ID: "main-sess", LETS_CODE_HOOK_TRANSCRIPT: "/main.jsonl" });
+	await x.emit("session_start", { reason: "startup" }, x.ctx(null));
+	t("outside: its task is not a UserPromptSubmit", await x.emit("input", { text: "inspect the form" }, x.ctx(null)), undefined);
+	await x.emit("agent_before_settle", settle, x.ctx(null));
+	await x.emit("session_shutdown", { reason: "quit" }, x.ctx(null));
+	const out = take();
+	t("outside: SubagentStart and SubagentStop only (no SessionStart, UserPromptSubmit, Stop, SessionEnd)", out.map((e) => e.hook_event_name), ["SubagentStart", "SubagentStop"]);
+	t("outside: as a subagent of the main session", out.map((e) => [e.session_id, e.agent_type, e.agent_id]), [["main-sess", "achilles-inspector", String(process.pid)], ["main-sess", "achilles-inspector", String(process.pid)]]);
+	t("outside: the project's trust is its parent's (no question)", x.selects.length, 0);
+	if (trustWas === undefined) rmSync(trustFile); else writeFileSync(trustFile, trustWas);
 }
 
 // --- auto (the default): the project's .claude only, never the user's own

@@ -1361,7 +1361,9 @@ export function runLauncher(args: string[], timeoutMs = 20000): Promise<{ code: 
 	return new Promise((done) => {
 		let out = "";
 		let p;
-		try { p = spawn(launcher(), args, { stdio: ["ignore", "pipe", "pipe"], env: process.env }); }
+		// the launcher is a bash script: on Windows Git Bash runs it (node cannot start a script there)
+		const [cmd, pre] = lcwIsWin() && /[\\/]/.test(launcher()) ? [lcwBash(), [lcwPosix(launcher())]] : [launcher(), [] as string[]];
+		try { p = spawn(cmd, [...pre, ...args], lcwSpawnOpts({ stdio: ["ignore", "pipe", "pipe"], env: process.env })); }
 		catch (e) { done({ code: 127, out: e instanceof Error ? e.message : String(e) }); return; }
 		const timer = setTimeout(() => { try { p.kill("SIGTERM"); } catch { /* gone */ } }, timeoutMs);
 		p.stdout?.on("data", (d: Buffer) => { out += d; }); p.stderr?.on("data", (d: Buffer) => { out += d; });
@@ -1433,6 +1435,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 }
 TS
+    lc_ts_platform >> "${tmp}"
     chmod 644 "${tmp}"
     if cmp -s "${tmp}" "${f}"; then rm -f "${tmp}"; else mv "${tmp}" "${f}"; fi
 }
@@ -3849,7 +3852,8 @@ export function claudeSessions(isAlive: (pid: number) => boolean = alive, now = 
 	if (now - claudeMemo.at < 2000 && claudeMemo.at > 0) return claudeMemo.list;
 	let raw: any[] | undefined;
 	try {
-		const out = execFileSync(process.env.LETS_CODE_CLAUDE_BIN || "claude", ["agents", "--json"], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, cwd: homedir() }).toString();
+		const [bin, ...pre] = lcwCommand(process.env.LETS_CODE_CLAUDE_BIN || "claude");
+		const out = execFileSync(bin, [...pre, "agents", "--json"], lcwSpawnOpts({ stdio: ["ignore", "pipe", "ignore"], timeout: 5000, cwd: homedir() })).toString();
 		const j = JSON.parse(out); if (Array.isArray(j)) raw = j;
 	} catch { /* no claude on PATH, or an older one: its records */ }
 	if (!raw) {
@@ -20417,9 +20421,12 @@ PY
 CLAUDE_INBOX_HOOK="lets-code-claude-inbox"   # the sessions module's HOOK_MARK
 claude_hook_cli() {
     local action="${1:-status}" script="${PI_AGENT_DIR}/${CLAUDE_INBOX_HOOK}.py" self tmp
-    local sdir="${LETS_CODE_SESSIONS_DIR:-${PI_AGENT_DIR}/lets-code-sessions}"
+    # paths as the hook's python reads them (C:/x on Windows, where Claude Code runs it with native python)
+    local sdir; sdir="$(native_path "${LETS_CODE_SESSIONS_DIR:-${PI_AGENT_DIR}/lets-code-sessions}")"
     local settings="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/settings.json"
-    self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    local py="python3"; [ -z "${LC_PY:-}" ] || py="${LC_PY}"   # Windows: the interpreter the launcher found
+    self="$(native_path "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")")"
+    script="$(native_path "${script}")"
     case "${action}" in install|uninstall|status) ;; *) log_error "usage: lets-code claude-hook [install|uninstall|status]"; exit 1 ;; esac
     if [ "${action}" = install ]; then
         mkdir -p "${PI_AGENT_DIR}"
@@ -20588,9 +20595,9 @@ open(p, "w").write(s)
 PYS
         chmod 755 "${tmp}" && mv "${tmp}" "${script}"
     fi
-    python3 - "${action}" "${settings}" "${script}" "${CLAUDE_INBOX_HOOK}" <<'PY'
+    python3 - "${action}" "${settings}" "${script}" "${CLAUDE_INBOX_HOOK}" "${py}" <<'PY'
 import json, os, shutil, sys
-action, path, script, mark = sys.argv[1:5]
+action, path, script, mark, py = sys.argv[1:6]
 def load():
     try:
         with open(path, encoding="utf-8") as f:
@@ -20617,7 +20624,7 @@ for ev in list(hooks):
             del hooks[ev]
 if action == "install":
     q = "'" + script.replace("'", "'\\''") + "'"
-    run = lambda mode: "python3 -I %s %s" % (q, mode)
+    run = lambda mode: "%s -I %s %s" % (py, q, mode)
     add = {
         "PostToolUse": {"matcher": "*", "hooks": [{"type": "command", "command": run("deliver"), "timeout": 10}]},
         "UserPromptSubmit": {"hooks": [{"type": "command", "command": run("deliver"), "timeout": 10}]},

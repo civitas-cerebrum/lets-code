@@ -437,7 +437,8 @@ t("alive: a dead pid", A.mod.alive(deadPid()), false);
 	].map((x) => JSON.stringify(x)).join("\n") + "\n");
 	A.mod.resetClaudeCache();
 	const list = textOf(await A.send({ action: "list" }));
-	has("claude: listed, whatever its folder", list, `pid ${pidK}  qa-claude  ${repoB}  busy`);
+	// (the folder as the list shows it: under the home dir as ~, with Windows' separators there)
+	t("claude: listed, whatever its folder", list.split("\n").some((l) => l.startsWith(`pid ${pidK}  qa-claude  `) && l.endsWith("repo-b  busy")), true);
 	t("claude: a dead one is not listed", list.includes("gone"), false);
 	has("claude: the list says the hook is needed", list, "lets-code claude-hook install");
 	const ins = await A.send({ action: "inspect", to: "claude:qa-claude" });

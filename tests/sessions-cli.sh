@@ -94,7 +94,8 @@ fi
 
 # ---- Claude Code sessions: listed from their records, reached through lets-code's hook
 kill "${answer}" 2>/dev/null; answer=""
-sleep 60 & claude=$!; disown "${claude}"
+sleep 60 & cpid=$!; disown "${cpid}"; claude="${cpid}"
+[ "${win}" = false ] || claude="$(cat "/proc/${cpid}/winpid")"   # the registry's pids are Windows ones (see the top)
 cc="${HOME}/.claude"; mkdir -p "${cc}/sessions"
 sid="0bebde69-52eb-4fc1-9b44-379a01674071"
 printf '{"pid":%s,"sessionId":"%s","cwd":"%s","kind":"interactive","name":"qa-claude","status":"idle","startedAt":5}\n' "${claude}" "${sid}" "${repo}" > "${cc}/sessions/${claude}.json"
@@ -155,13 +156,17 @@ out="$(CLAUDECODE=1 python3 -c 'import os,sys; os.execvp("bash", ["bash"] + sys.
 check "claude: a reply from a plain shell is the shell's" "$(python3 -c 'import json,glob,sys; m=json.load(open(glob.glob(sys.argv[1])[0])); print(m["from"]["name"])' "${s}/${live}/inbox/*.json")" "a shell, via lets-code message"
 rm -f "${s}/${live}/inbox/"*
 # this test's shell stands in for the Claude Code process the Bash tool runs under
+# (not on Windows: the ancestry walk asks ps for a parent pid, which Git Bash's ps does not give;
+# a reply from there is signed as a shell's)
+if [ "${win}" = false ]; then
 printf '{"pid":%s,"sessionId":"1cafe000-0000-4000-8000-000000000001","cwd":"%s","kind":"interactive","name":"asker","status":"busy","startedAt":6}\n' "$$" "${repo}" > "${cc}/sessions/$$.json"
 CLAUDECODE=1 bash "${lc}" message worker --wait 0 -- from claude >/dev/null 2>&1
 check "claude: a reply from a Claude Code session is signed by it" "$(python3 -c 'import json,glob,sys; m=json.load(open(glob.glob(sys.argv[1])[0])); print(m["from"]["name"], m["from"]["pid"])' "${s}/${live}/inbox/*.json")" "asker (Claude Code) $$"
 rm -f "${cc}/sessions/$$.json"
+fi
 out="$(bash "${lc}" claude-hook uninstall 2>&1)"; rc=$?
 check "claude-hook: uninstall keeps the user's own" "${rc}:$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d["hooks"]))' "${cc}/settings.json")" '0:{"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "keep-me"}]}]}'
 check "claude-hook: uninstall removes the script" "$([ -e "${hook}" ] && echo kept || echo gone)" gone
-kill "${claude}" 2>/dev/null
+kill "${cpid}" 2>/dev/null
 
 exit "${fail}"

@@ -451,7 +451,10 @@ async function load(cwd, env = {}) {
 	const trustFile = join(agentDir, "trust.json"), trustWas = existsSync(trustFile) ? readFileSync(trustFile, "utf8") : undefined;
 	writeFileSync(trustFile, JSON.stringify({ ...(trustWas ? JSON.parse(trustWas) : {}), [proj]: true }));   // the user trusted it in pi
 	const log = join(proj, "hooks.jsonl");
-	const rec = { type: "command", command: `node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>require("fs").appendFileSync(${JSON.stringify(log)},s.replace(/\\n/g," ")+"\\n"))'` };
+	// the recorder: a script of its own, named with / (the hook runs in Git Bash on Windows: C:/x, not C:\x)
+	const recorder = join(proj, "record.mjs");
+	writeFileSync(recorder, 'import { appendFileSync } from "node:fs"; let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => appendFileSync(process.argv[2], s.replace(/\\n/g, " ") + "\\n"));\n');
+	const rec = { type: "command", command: `node "${recorder.replace(/\\/g, "/")}" "${log.replace(/\\/g, "/")}"` };
 	const all = (matcher) => [{ ...(matcher ? { matcher } : {}), hooks: [rec] }];
 	w(join(proj, ".claude", "settings.json"), JSON.stringify({ hooks: { SessionStart: all(), SessionEnd: all(), UserPromptSubmit: all(), Stop: all(), SubagentStart: all("^achilles-inspector$|scout"), SubagentStop: all(), PreToolUse: [...all("Task"), ...all("expert")] } }));
 	const events = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);

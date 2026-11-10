@@ -1327,6 +1327,136 @@ registry per install, so the dashboard and the helper must use the same
 CLI. The setup never fails the expert: on Termux, without npm or when a
 download fails it records why and the helper falls back to plain HTTP.
 
+### Video scan
+
+The video-scan expert checks a screen recording with the model the user
+already serves. lets-code knows that server (endpoint, model id, whether
+the model sees images: the `vision` probe), and a hosted video check is
+metered, so a scan on the user's own box is the fallback, or the default.
+Its `bin/video-scan` is one Python file on the standard library, as the
+researcher's `bin/web` is; decoding is ffmpeg's, found on PATH and named
+in the error when missing (lets-code installs no system packages).
+
+The interface is a hosted scan service's, so a caller can swap it in:
+`submit` prints an id and starts a detached worker, `status` and `result`
+are polled, `run` is all three in one process. The state is a folder per
+scan, and each stage leaves what the next one and a later resume read:
+the sample plan (`samples.json`), the sample images, one file per
+reading, then `scan.json` and `report.md`. A worker rewrites
+`status.json` every 5 s; a scan whose status is 30 s old and not final
+is shown as interrupted, without asking the operating system about a pid
+(which Windows cannot do safely). `resume` reads only the samples that
+have no reading yet.
+
+Sampling compares, it does not hash. A perceptual hash of 64 bits does
+not see a caption change, which is the thing to time; so one ffmpeg pass
+scales every 0.1 s of video to a 160x90 grey grid (area averaging, 14 kB
+a grid, streamed: a few dozen grids are in memory at most), and two grids
+differ when more than 0.2 % of the cells moved by more than 16 of 255: a
+new caption line or a toast does, a cursor, a clock or compression noise
+does not. Each grid is compared with the first grid of its segment (not
+with the one before it, so a slow drift cannot pass unnoticed). At a
+regular sample (every 0.5 s) the dedupe threshold applies, between them
+the scene threshold (the same by default); with `--scene 0` only the
+regular samples are decoded. That one mechanism is both the dedupe (a
+static minute is one segment, one call) and the scene detection (a screen
+of 0.3 s between two samples is a segment of its own). What it would cost
+on moving pictures is bounded by a rule on segment length: a segment as
+long as the interval, or a shorter one standing alone between two such
+segments, is a screen and gets one sample from its middle; shorter
+segments in a row are motion and are read at the regular samples only,
+and a run with no regular sample in it is a transition nobody reads. A
+screen whose grid matches one of the last 64 sampled reuses that sample.
+Sample times come from grid indices, so the same video and options give
+the same plan; the images are cut afterwards by time (`-ss`, 50 ms into
+the grid's cell). Times are therefore known to one step, and a hold
+within half a step of its limit is not flagged.
+
+Reading is one `chat/completions` request per sample: a fixed prompt, the
+image as a data URL (JPEG by default, PNG on request), temperature 0,
+thinking off as in the vision probe (dropped and retried once if the
+server refuses the field). The answer is parsed leniently (code fences
+and prose around the JSON object are dropped); an answer with no JSON
+object is kept as a `scan-gap` finding instead of being counted as a
+clean frame, so a model that cannot follow the format never yields
+`pass`. Requests go through an opener that refuses redirects: frames
+reach the configured endpoint or nothing. The key comes from the
+environment (`LETS_CODE_TOKEN`) and is in no file of the scan. The cost
+guard is a count taken after the plan and before the first request
+(samples without a reading, plus one for step matching); over the cap
+the scan fails having sent nothing.
+
+The checks are arithmetic on the timeline, except two. The first real
+run (three 100 s reproduction videos with storyboards, a 27B vision model
+on vLLM: 27 to 37 calls a video, every caption read verbatim) changed
+three of them. A caption's hold was the span of segments whose `caption`
+field read the same; but when a title card and a step caption share a
+frame the model puts one of them under another field, and which one
+varies, so both `short-caption` findings of that run were false. Now the
+model is asked for `captions` as a list, and a caption is on screen in
+every segment whose reading holds its text in any field (equal, contained,
+or 0.9 similar, without case and punctuation); a caption absent for a
+second at most is one stretch, and the hold is the time it showed. The
+expected captions seed the table, so a caption the model never filed as
+one is still timed. A dead stretch was any static segment over 10 s, and
+all seven in that run were captions of 25 to 33 words still being read;
+now the time the captions on the segment still need is taken off first
+and the limit is 5 s, which left the two real waits. A flashing screen
+must hold a static segment: a page whose title is read once while it
+loads is not a screen that flashed by. The screen runs are still built
+from titles, and the prompt asks for the page's own heading rather than
+the product name, which varied.
+
+The two judgments are text-only requests. Matching a plain expected step
+to a segment is one request over the timeline, with a shared-words match
+as the fallback when it fails; a storyboard's captions, screens and card
+titles are matched without the model, and one that is not found is not
+handed to it. The claim check answers what a reviewer of a reproduction
+video asks first: the caption is there, but does the screen show what it
+says? One request per step caption carries the caption and the readings
+of its segments; the model lists the caption's factual claims and marks
+each shown (with the segment and the text), contradicted or not visible.
+Contradicted fails the video, as a missing step does; not visible is a
+finding only, since a reading is not the whole frame. On the same real
+video it confirmed all ten claims of six captions with the right segment
+("the status card says Pending": segment 26) once the prompt said
+that an instruction claims nothing: before that, "click Add new item"
+became a claim that the button is shown. A second run on all three videos found one wrong "shown" and two
+wrong "not shown", each fixed in the request rather than by more calls.
+The wrong "shown": "the downloaded file ends with {signature_employee}"
+had been cut down to "the screen shows {signature_employee}" and found on
+the app's own paste list; the prompt now keeps a claim's subject and
+place, and counts a segment only when its reading is that subject. The
+proof was on the evidence card shown after the steps, titled "Step 6:
+...", so a later segment whose title or card text carries the caption's
+step label is added to that step's readings, marked as its card; that
+also settled a claim the step's own screens could not show. And the
+helper checks the citation itself: a "shown" whose quoted text is not in
+the reading of the segment it names becomes not visible. A claim about
+colour ("the yellow badge") is `cannot_tell`, with no finding: the
+readings hold text, and an image call per such claim is not in the cost
+guard's count. After that the three videos gave 25 claims shown, each
+quoting text that is in the segment it names (the three earlier mistakes
+among them, now right), and that one `cannot_tell`. The answers are kept in
+`checks/`, so a resume asks none twice, and they are counted in the cost
+guard, which a storyboard makes possible: the captions are known before
+the first call. Without a storyboard there is no claim check.
+
+Outside a session, `lets-code video-scan ...` runs the launch's own
+discovery (endpoint, model, vision probe; no thinking probe, no pi) and
+hands the result to the helper in the same two variables a session's
+children get, so there is one code path. Only flags may stand before
+`video-scan`, so a prompt that is the word stays a prompt. The expert
+runs under the `reviewer` role: bash and the network on, writes only
+under the temp dir, where the scan folders are. Its entry in the
+always-on expert line is `video-scan (screen recording checks)`, 11
+tokens by expert-lint's estimate: with it the Termux line is 999 of its
+1000 characters, which is why the entry is that short. Not measured yet:
+routing (route-check needs a live model), and readings by a model other
+than the one above. Not in
+this version: a local HTTP service over the same verbs (`--serve`), and
+audio.
+
 ## Script layout
 
 The script is one file, built in order: header and logging; probing

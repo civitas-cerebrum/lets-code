@@ -181,6 +181,7 @@ out.write(cut("\npi_write_expert_reviewer() {", "\npi_write_expert_reviewer() {"
 out.write(cut("\npi_write_software_factory() {", "\npi_write_software_factory() {", "\n}  # end of pi_write_software_factory\n"))
 out.write(cut("\npi_write_design_reviewer() {", "\npi_write_design_reviewer() {", "\n}  # end of pi_write_design_reviewer\n"))
 out.write(cut("\nRESEARCHER_PINS=", "\npi_write_researcher() {", "\n}  # end of pi_write_researcher\n"))
+out.write(cut("\npi_write_video_scan() {", "\npi_write_video_scan() {", "\n}  # end of pi_write_video_scan\n"))
 out.close()
 PYX
 (
@@ -188,7 +189,7 @@ PYX
     PI_AGENT_DIR="${agent}/builtin"; mkdir -p "${PI_AGENT_DIR}"
     LOG_PREFIX="[lets-code]"; log() { :; }
     . "${agent}/experts.sh"
-    pi_write_rea files; pi_write_tester; pi_write_api_tester; pi_write_ui_tester files; pi_write_judge; write_termux_agent; pi_write_expert_builder; pi_write_developer; pi_write_expert_reviewer; pi_write_design_reviewer; pi_write_software_factory; pi_write_researcher
+    pi_write_rea files; pi_write_tester; pi_write_api_tester; pi_write_ui_tester files; pi_write_judge; write_termux_agent; pi_write_expert_builder; pi_write_developer; pi_write_expert_reviewer; pi_write_design_reviewer; pi_write_software_factory; pi_write_researcher; pi_write_video_scan
 ) || { echo "could not write the built-in experts from lets-code"; exit 1; }
 picked builtin && run "built-in experts: expert-lint --builtin" node "${agent}/builtin/expert-builder/bin/expert-lint" --builtin "${agent}/builtin/agents"
 

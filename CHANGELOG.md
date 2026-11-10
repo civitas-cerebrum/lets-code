@@ -37,6 +37,10 @@ model on your own hardware:
   `expert-reviewer`, `design-reviewer`, `acceptance-judge`, `developer`,
   `software-factory`, `researcher`, `reverse-engineer`, `expert-builder`,
   `termux-device`
+- the `video-scan` expert and `lets-code video-scan`: a screen recording
+  scanned by the vision model on your own server (ffmpeg samples it, each
+  distinct frame is read once), as a job you submit and poll: a timeline,
+  a caption table, findings with timestamps and a verdict
 - the software factory: a ticket through plan, build, two reviews, tests,
   a judge and the suite in its own worktree, with checkpoints
 - the Claude backend: Claude models on a Claude subscription through a

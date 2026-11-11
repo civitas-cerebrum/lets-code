@@ -170,7 +170,7 @@ printf '{"steps": [{"id": "a", "caption": "Open the login page"}, {"id": "b", "s
 
 # ---- a fake model endpoint: reads the top-left pixel of the PNG it is sent
 cat > "${F}/server.py" <<'PY'
-import base64, http.server, json, os, re, socketserver, struct, sys, zlib
+import base64, http.server, json, os, re, socketserver, struct, sys, threading, zlib
 here = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, here)
 from colours import COLOURS
 READ = {"red": {"title": "Login", "caption": "Open the login page", "headings": ["Sign in"], "buttons": ["Log in"], "fields": [{"label": "Email", "value": ""}], "summary": "A login form.", "confidence": 0.9},
@@ -182,6 +182,10 @@ READ = {"red": {"title": "Login", "caption": "Open the login page", "headings": 
         "white": {"title": "Idle", "caption": "", "summary": "Nothing happens.", "confidence": 0.9},
         "black": {"title": "Step 1: The saved list", "captions": ["Step 1: The saved list", "3 rows saved"], "summary": "A card with the saved list.", "confidence": 0.9}}
 seen = {}
+# one request a line: the server answers on threads, and two appends at once lose a line on Windows
+noting = threading.Lock()
+def note(entry):
+    with noting, open(os.path.join(here, "requests.jsonl"), "a") as f: f.write(json.dumps(entry) + "\n")
 def colour(url):
     png = base64.b64decode(url.split(",", 1)[1]); i, idat = 8, b""
     while i < len(png):
@@ -207,8 +211,8 @@ class H(http.server.BaseHTTPRequestHandler):
             fields = dict(re.findall(rb'name="([^"]+)"\r\n\r\n([^\r]*)\r\n', body))
             i = body.find(b"data", body.find(b"WAVEfmt ")); w = body.find(b"WAVEfmt "); ch, rate = struct.unpack("<HI", body[w + 14:w + 20]) if w >= 0 else (0, 0)
             j = body.find(b'{"lines"'); clip = json.loads(body[j:body.find(b"}", j) + 1]) if j >= 0 else {"lines": [[0.0, "(a tone)"]]}
-            open(os.path.join(here, "requests.jsonl"), "a").write(json.dumps({"path": self.path, "kind": "speech", "route": route, "auth": self.headers.get("Authorization"),
-                "fields": {k.decode(): v.decode() for k, v in fields.items()}, "rate": rate, "channels": ch, "ss": clip.get("ss")}) + "\n")
+            note({"path": self.path, "kind": "speech", "route": route, "auth": self.headers.get("Authorization"),
+                "fields": {k.decode(): v.decode() for k, v in fields.items()}, "rate": rate, "channels": ch, "ss": clip.get("ss")})
             if mode == "no-stt" or (mode == "inference-only" and route == "openai"): return self.reply(404, {"detail": "Not Found"})
             if route == "inference":   # whisper.cpp: t0/t1 in centiseconds
                 return self.reply(200, {"text": " ".join(x for _, x in clip["lines"]), "segments": [{"t0": int(t * 100), "t1": int((t + 2) * 100), "text": " " + x} for t, x in clip["lines"]]})
@@ -221,7 +225,7 @@ class H(http.server.BaseHTTPRequestHandler):
         kind = ("probe" if "What color" in text else "look" if img and "frame of a video." in text else "read" if img else "claims" if "fact the caption states" in text
                 else "summary" if "Write, from these only" in text else "join" if "consecutive parts" in text else "script" if "Divide this part into scenes" in text
                 else "answer" if "Answer the question" in text else "match")
-        open(os.path.join(here, "requests.jsonl"), "a").write(json.dumps({"path": self.path, "kind": kind, "colour": c, "auth": self.headers.get("Authorization"), "kwargs": req.get("chat_template_kwargs"), "model": req.get("model"), "mime": img[0][:22] if img else None}) + "\n")
+        note({"path": self.path, "kind": kind, "colour": c, "auth": self.headers.get("Authorization"), "kwargs": req.get("chat_template_kwargs"), "model": req.get("model"), "mime": img[0][:22] if img else None})
         chat = lambda s: {"choices": [{"message": {"role": "assistant", "content": s}, "finish_reason": "stop"}]}
         if self.path.startswith("/redir"):
             self.send_response(307); self.send_header("Location", "http://127.0.0.1:1/v1/chat/completions"); self.end_headers(); return

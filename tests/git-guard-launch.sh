@@ -4,7 +4,8 @@
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 eval "$(sed -n '/^git_guard_plan() {/,/^}/p' "${here}/../lets-code")"
-eval "$(sed -n '/^lc_git_guard_remembered() {/,/^}/p' "${here}/../lets-code")"
+eval "$(sed -n '/^lc_git_guard_remembered() {/p' "${here}/../lets-code")"
+eval "$(sed -n '/^lc_remembered() {/,/^}/p' "${here}/../lets-code")"
 on_windows() { false; }; native_path() { printf '%s\n' "$1"; }
 log_error() { echo "  (log_error) $*" >&2; }
 GIT_GUARD="${GIT_GUARD:-true}"

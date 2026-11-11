@@ -122,7 +122,9 @@ check "claude-hook: status" "$(bash "${lc}" claude-hook status 2>&1 | cut -c1-9)
 hook="${d}/agent/lets-code-claude-inbox.py"
 box="${s}/claude/${sid}/inbox"
 # a busy Claude session: the next tool call's hook takes it, and the sender hears delivered
-( sleep 0.4; printf '{"session_id":"%s","hook_event_name":"PostToolUse"}' "${sid}" | python3 -I "${hook}" deliver > "${d}/post.out" ) &
+# (the hook runs once the message is in the inbox, not after a fixed pause: on Windows the launcher takes longer to start than any pause chosen here)
+( n=0; while [ -z "$(ls "${box}"/*.json 2>/dev/null)" ] && [ "${n}" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+  printf '{"session_id":"%s","hook_event_name":"PostToolUse"}' "${sid}" | python3 -I "${hook}" deliver > "${d}/post.out" ) &
 out="$(bash "${lc}" message claude:qa-claude --wait 5 -- compare your verdicts 2>&1)"; rc=$?
 wait
 check "claude: delivered through the hook" "${rc}:${out}" "0:delivered: qa-claude (Claude Code) (pid ${claude}) has it"

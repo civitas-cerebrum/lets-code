@@ -116,6 +116,38 @@ OOM killer; a scope must not be created inside an already limited cgroup,
 because it would escape that limit. The guard defers to a machine-wide
 memguard daemon when `/run/memguard` exists; the watcher still runs.
 
+## Disposable thinking
+
+pi sends every earlier turn's thinking back to the model with each request.
+Measured on a 262k window at thinking `high`: a subagent that read 13k
+tokens of source reached 80 % of the window and compacted, 77k of it its
+own thinking; a turn that produced 16.5k tokens (13k thinking) grew the
+next request by 17.2k.
+
+On by default. `/disposable-thinking off` in a session turns it off there
+and remembers it for later launches (lets-code-state.json, key
+`disposableThinking`); `/disposable-thinking on` the same way, and
+`/disposable-thinking` alone says which it is and how much the last request
+left out. `DISPOSABLE_THINKING=true|false` in the config,
+`LETS_CODE_DISPOSABLE_THINKING`, `--disposable-thinking` and
+`--no-disposable-thinking` decide a launch when given.
+
+- **What is dropped:** in the `context` event, the thinking blocks of every
+  assistant message but the latest (`LETS_CODE_THINKING_REPLAY=<n>` keeps
+  the latest n, and `all` turns the feature off for the launch, which is
+  what an unset window meant when it belonged to the agent guard). The latest keeps its thinking
+  because its tool result is what the model reads next.
+- **What is not changed:** the session file, what pi shows, and every
+  message that is not an assistant's. Each message is dropped from once, when
+  it stops being the latest, so the unchanged prefix of the prompt stays the
+  same from request to request and the server's prompt cache still holds.
+- **Children:** the switch is an environment variable, so a subagent or
+  another extension's agent started from the session follows it, including
+  after `/disposable-thinking on|off`. A subagent's own choice is not
+  remembered.
+- It is a module of its own (`disposable-thinking.ts`), written at every
+  launch, so it works with the agent guard off.
+
 ## Git guard
 
 Off by default. `/git-guard on` in a session turns it on there (the launch's
@@ -1326,6 +1358,184 @@ it in testing), and closes the dashboard again. The CLI keeps a session
 registry per install, so the dashboard and the helper must use the same
 CLI. The setup never fails the expert: on Termux, without npm or when a
 download fails it records why and the helper falls back to plain HTTP.
+
+### Video
+
+The video expert works on a video file with the models the user already
+serves: a scan checks a screen recording, an analysis turns any video into
+a transcript, a summary and a script. lets-code knows that server
+(endpoint, model id, whether the model sees images: the `vision` probe),
+and hosted video checks and transcription are metered, so a job on the
+user's own box is the fallback, or the default. It was `video-scan` while
+it only scanned; the old agent file and helper are removed on launch when
+lets-code wrote them, and `lets-code video-scan` still dispatches.
+Its `bin/video` is one Python file on the standard library, as the
+researcher's `bin/web` is; decoding is ffmpeg's, found on PATH and named
+in the error when missing (lets-code installs no system packages).
+
+The interface is a hosted scan service's, so a caller can swap it in:
+`submit` prints an id and starts a detached worker, `status` and `result`
+are polled, `run` is all three in one process. The state is a folder per
+scan, and each stage leaves what the next one and a later resume read:
+the sample plan (`samples.json`), the sample images, one file per
+reading, then `scan.json` and `report.md`. A worker rewrites
+`status.json` every 5 s; a scan whose status is 30 s old and not final
+is shown as interrupted, without asking the operating system about a pid
+(which Windows cannot do safely). `resume` reads only the samples that
+have no reading yet.
+
+Sampling compares, it does not hash. A perceptual hash of 64 bits does
+not see a caption change, which is the thing to time; so one ffmpeg pass
+scales every 0.1 s of video to a 160x90 grey grid (area averaging, 14 kB
+a grid, streamed: a few dozen grids are in memory at most), and two grids
+differ when more than 0.2 % of the cells moved by more than 16 of 255: a
+new caption line or a toast does, a cursor, a clock or compression noise
+does not. Each grid is compared with the first grid of its segment (not
+with the one before it, so a slow drift cannot pass unnoticed). At a
+regular sample (every 0.5 s) the dedupe threshold applies, between them
+the scene threshold (the same by default); with `--scene 0` only the
+regular samples are decoded. That one mechanism is both the dedupe (a
+static minute is one segment, one call) and the scene detection (a screen
+of 0.3 s between two samples is a segment of its own). What it would cost
+on moving pictures is bounded by a rule on segment length: a segment as
+long as the interval, or a shorter one standing alone between two such
+segments, is a screen and gets one sample from its middle; shorter
+segments in a row are motion and are read at the regular samples only,
+and a run with no regular sample in it is a transition nobody reads. A
+screen whose grid matches one of the last 64 sampled reuses that sample.
+Sample times come from grid indices, so the same video and options give
+the same plan; the images are cut afterwards by time (`-ss`, 50 ms into
+the grid's cell). Times are therefore known to one step, and a hold
+within half a step of its limit is not flagged.
+
+Reading is one `chat/completions` request per sample: a fixed prompt, the
+image as a data URL (JPEG by default, PNG on request), temperature 0,
+thinking off as in the vision probe (dropped and retried once if the
+server refuses the field). The answer is parsed leniently (code fences
+and prose around the JSON object are dropped); an answer with no JSON
+object is kept as a `scan-gap` finding instead of being counted as a
+clean frame, so a model that cannot follow the format never yields
+`pass`. Requests go through an opener that refuses redirects: frames
+reach the configured endpoint or nothing. The key comes from the
+environment (`LETS_CODE_TOKEN`) and is in no file of the scan. The cost
+guard is a count taken after the plan and before the first request
+(samples without a reading, plus one for step matching); over the cap
+the scan fails having sent nothing.
+
+The checks are arithmetic on the timeline, except two. The first real
+run (three 100 s reproduction videos with storyboards, a 27B vision model
+on vLLM: 27 to 37 calls a video, every caption read verbatim) changed
+three of them. A caption's hold was the span of segments whose `caption`
+field read the same; but when a title card and a step caption share a
+frame the model puts one of them under another field, and which one
+varies, so both `short-caption` findings of that run were false. Now the
+model is asked for `captions` as a list, and a caption is on screen in
+every segment whose reading holds its text in any field (equal, contained,
+or 0.9 similar, without case and punctuation); a caption absent for a
+second at most is one stretch, and the hold is the time it showed. The
+expected captions seed the table, so a caption the model never filed as
+one is still timed. A dead stretch was any static segment over 10 s, and
+all seven in that run were captions of 25 to 33 words still being read;
+now the time the captions on the segment still need is taken off first
+and the limit is 5 s, which left the two real waits. A flashing screen
+must hold a static segment: a page whose title is read once while it
+loads is not a screen that flashed by. The screen runs are still built
+from titles, and the prompt asks for the page's own heading rather than
+the product name, which varied.
+
+The two judgments are text-only requests. Matching a plain expected step
+to a segment is one request over the timeline, with a shared-words match
+as the fallback when it fails; a storyboard's captions, screens and card
+titles are matched without the model, and one that is not found is not
+handed to it. The claim check answers what a reviewer of a reproduction
+video asks first: the caption is there, but does the screen show what it
+says? One request per step caption carries the caption and the readings
+of its segments; the model lists the caption's factual claims and marks
+each shown (with the segment and the text), contradicted or not visible.
+Contradicted fails the video, as a missing step does; not visible is a
+finding only, since a reading is not the whole frame. On the same real
+video it confirmed all ten claims of six captions with the right segment
+("the status card says Pending": segment 26) once the prompt said
+that an instruction claims nothing: before that, "click Add new item"
+became a claim that the button is shown. A second run on all three videos found one wrong "shown" and two
+wrong "not shown", each fixed in the request rather than by more calls.
+The wrong "shown": "the downloaded file ends with {signature_employee}"
+had been cut down to "the screen shows {signature_employee}" and found on
+the app's own paste list; the prompt now keeps a claim's subject and
+place, and counts a segment only when its reading is that subject. The
+proof was on the evidence card shown after the steps, titled "Step 6:
+...", so a later segment whose title or card text carries the caption's
+step label is added to that step's readings, marked as its card; that
+also settled a claim the step's own screens could not show. And the
+helper checks the citation itself: a "shown" whose quoted text is not in
+the reading of the segment it names becomes not visible. A claim about
+colour ("the yellow badge") is `cannot_tell`, with no finding: the
+readings hold text, and an image call per such claim is not in the cost
+guard's count. After that the three videos gave 25 claims shown, each
+quoting text that is in the segment it names (the three earlier mistakes
+among them, now right), and that one `cannot_tell`. The answers are kept in
+`checks/`, so a resume asks none twice, and they are counted in the cost
+guard, which a storyboard makes possible: the captions are known before
+the first call. Without a storyboard there is no claim check.
+
+#### An analysis
+
+The analysis reuses the scan's machinery and adds two sources and three
+texts. Pictures: the same sampling, with a coarser change test (2 % of the
+cells: filmed footage is never still, and 0.2 % would make every tick a
+segment) and an interval from a frame budget (the length over 150, at
+least 1 s), so a ten-minute video costs about 150 readings however much
+moves; each reading is one image call with a prompt for any picture (kind,
+title, captions, other text, what is seen), and consecutive readings that
+say the same are one shot. Sound: ffmpeg cuts 16 kHz mono 16-bit WAV
+chunks of 10 minutes (about 19 MB, under the 25 MB OpenAI limit) and each
+goes to the speech endpoint as multipart; the OpenAI route
+(`/audio/transcriptions`, `verbose_json` with segments) first, a
+whisper.cpp server's `/inference` (times in centiseconds) when the first
+answers 404, and the route that worked is kept for the next chunk. The
+speech endpoint is lets-code's `SPEECH_URL` (with `SPEECH_MODEL`,
+`SPEECH_TOKEN`), handed to the helper as `VIDEO_SPEECH_*`; with none, the
+chat server is asked, since vLLM serves Whisper on the same route, and a
+404 there means no transcript, said in the notes, not a failure. A speech
+URL given by hand that has neither route fails the job: that is a wrong
+setting, not a missing feature. The chunks' answers are kept (`speech/`),
+the WAV files are not.
+
+The texts are text calls whose answers are kept (`writing/`), so a resume
+asks none twice. The summary is one call over the transcript and the
+timeline as timed lines; past `VIDEO_TEXT_LIMIT` characters (120 000) the
+video is cut into parts at a line's time, each part summarised with its
+chapters, and one more call joins the parts' summaries (the chapters are
+the parts', in order, not rewritten). The script is one call per five
+minutes, which divides that part into scenes (heading, what is seen, text
+on screen); the transcript is then placed into the scenes by its start
+times by code, so the script's spoken lines are the transcript's, word for
+word. Without pictures (`--no-frames`, a text-only model) the chapters are
+the scenes and no script call is made. The answer to `--question` is one
+call over the same lines, thinned to fit. The cost guard counts readings
+and an estimate of the text calls (the parts from the length and the
+number of readings) before the first call; transcription is not counted,
+it is not a model call on the chat endpoint. Not done: speaker names
+(Whisper does not diarize; the script says `VOICE`), audio events,
+translation.
+
+#### Outside a session
+
+Outside a session, `lets-code video ...` runs the launch's own
+discovery (endpoint, model, vision probe; no thinking probe, no pi) and
+hands the result to the helper in the same two variables a session's
+children get (and the speech settings as `VIDEO_SPEECH_*`), so there is
+one code path. Only flags may stand before `video`, so a prompt that is
+the word stays a prompt. The expert runs under the `reviewer` role: bash
+and the network on, writes only under the temp dir, where the job folders
+are. Its entry in the always-on expert line is `video (video transcripts
+and checks)`, the same 36 characters as the old `video-scan (screen
+recording checks)`: with it the Termux line was 999 of its 1000
+characters, and past that every entry shrinks to its keywords, which is
+why the entry is that short. Not measured yet: routing (route-check needs
+a live model), readings by a model other than the one above, and an
+analysis on a real speech server. Not in this version: a local HTTP
+service over the same verbs (`--serve`).
 
 ## Script layout
 

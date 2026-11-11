@@ -131,7 +131,7 @@ if i >= 0:
 i = s.find("\n# ------------------------------------------------------------ extension dirs\n")
 if i >= 0:
     out.write(s[i:s.find("\n# ------------------------------------------------------------------ themes\n", i)])
-for name in ("pi_write_gitguard_extension", "pi_write_memguard_extension", "pi_write_agentguard_extension", "pi_write_mandate_extension", "pi_write_subagent_extension", "pi_write_subagent_view_extension", "pi_write_experts_extension", "pi_write_factory_extension", "pi_write_core_memory_extension", "pi_write_sandbox_extension", "pi_write_sessiontag_extension", "pi_write_sessions_extension", "pi_write_metrics_extension", "pi_write_grounding_extension", "pi_write_backend_extension", "pi_write_claude_extension", "pi_write_claudecode_extension"):
+for name in ("pi_write_gitguard_extension", "pi_write_disposable_thinking_extension", "pi_write_memguard_extension", "pi_write_agentguard_extension", "pi_write_mandate_extension", "pi_write_subagent_extension", "pi_write_subagent_view_extension", "pi_write_experts_extension", "pi_write_factory_extension", "pi_write_core_memory_extension", "pi_write_sandbox_extension", "pi_write_sessiontag_extension", "pi_write_sessions_extension", "pi_write_metrics_extension", "pi_write_grounding_extension", "pi_write_backend_extension", "pi_write_claude_extension", "pi_write_claudecode_extension"):
     i = s.find("\n%s() {" % name)
     if i < 0:
         continue
@@ -147,7 +147,7 @@ PYX
     npm() { return 1; }     # the sandbox writer would install its runtime; not here
     SANDBOX_RUNTIME_VERSION="test"; SB_NOTE=""
     . "${agent}/writers.sh"
-    for f in pi_write_lets_code_extension pi_write_gitguard_extension pi_write_memguard_extension pi_write_agentguard_extension pi_write_mandate_extension pi_write_subagent_extension pi_write_experts_extension pi_write_factory_extension pi_write_core_memory_extension pi_write_sandbox_extension pi_write_sessiontag_extension pi_write_sessions_extension pi_write_metrics_extension pi_write_grounding_extension pi_write_backend_extension pi_write_claude_extension pi_write_claudecode_extension; do
+    for f in pi_write_lets_code_extension pi_write_gitguard_extension pi_write_disposable_thinking_extension pi_write_memguard_extension pi_write_agentguard_extension pi_write_mandate_extension pi_write_subagent_extension pi_write_experts_extension pi_write_factory_extension pi_write_core_memory_extension pi_write_sandbox_extension pi_write_sessiontag_extension pi_write_sessions_extension pi_write_metrics_extension pi_write_grounding_extension pi_write_backend_extension pi_write_claude_extension pi_write_claudecode_extension; do
         if declare -F "${f}" >/dev/null; then "${f}"; fi
     done
 ) || { echo "could not extract the extensions from lets-code"; exit 1; }
@@ -181,7 +181,7 @@ out.write(cut("\npi_write_expert_reviewer() {", "\npi_write_expert_reviewer() {"
 out.write(cut("\npi_write_software_factory() {", "\npi_write_software_factory() {", "\n}  # end of pi_write_software_factory\n"))
 out.write(cut("\npi_write_design_reviewer() {", "\npi_write_design_reviewer() {", "\n}  # end of pi_write_design_reviewer\n"))
 out.write(cut("\nRESEARCHER_PINS=", "\npi_write_researcher() {", "\n}  # end of pi_write_researcher\n"))
-out.write(cut("\npi_write_video_scan() {", "\npi_write_video_scan() {", "\n}  # end of pi_write_video_scan\n"))
+out.write(cut("\npi_write_video() {", "\npi_write_video() {", "\n}  # end of pi_write_video\n"))
 out.close()
 PYX
 (
@@ -189,7 +189,7 @@ PYX
     PI_AGENT_DIR="${agent}/builtin"; mkdir -p "${PI_AGENT_DIR}"
     LOG_PREFIX="[lets-code]"; log() { :; }
     . "${agent}/experts.sh"
-    pi_write_rea files; pi_write_tester; pi_write_api_tester; pi_write_ui_tester files; pi_write_judge; write_termux_agent; pi_write_expert_builder; pi_write_developer; pi_write_expert_reviewer; pi_write_design_reviewer; pi_write_software_factory; pi_write_researcher; pi_write_video_scan
+    pi_write_rea files; pi_write_tester; pi_write_api_tester; pi_write_ui_tester files; pi_write_judge; write_termux_agent; pi_write_expert_builder; pi_write_developer; pi_write_expert_reviewer; pi_write_design_reviewer; pi_write_software_factory; pi_write_researcher; pi_write_video
 ) || { echo "could not write the built-in experts from lets-code"; exit 1; }
 picked builtin && run "built-in experts: expert-lint --builtin" node "${agent}/builtin/expert-builder/bin/expert-lint" --builtin "${agent}/builtin/agents"
 
@@ -200,6 +200,7 @@ for t in "${here}"/*.test.mjs; do
         lets-code*)                 ext="${agent}/extensions/lets-code/index.ts" ;;
         git-guard*|git-checkpoint*) ext="${agent}/extensions/lets-code/git-guard.ts" ;;
         agent-guard*)               ext="${agent}/extensions/lets-code/agent-guard.ts" ;;
+        disposable-thinking*)       ext="${agent}/extensions/lets-code/disposable-thinking.ts" ;;
         mem-guard*)                 ext="${agent}/extensions/lets-code/memory-guard.ts" ;;
         mandate*)                   ext="${agent}/extensions/lets-code/mandate.ts" ;;
         subagent*)                  ext="${agent}/extensions/lets-code/subagents.ts" ;;

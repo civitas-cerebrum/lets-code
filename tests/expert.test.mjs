@@ -349,7 +349,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 		"expert-reviewer": { tools: ["read", "bash", "grep", "find", "ls"], role: "reviewer", timeout: 1800, brief: ["diff*", "criteria", "context", "previous_findings", "how_to_run", "constraints"] },
 		"design-reviewer": { tools: ["read", "bash", "grep", "find", "ls"], role: "reviewer", timeout: 1800, brief: ["diff*", "context", "conventions", "previous_findings", "constraints"] },
 		researcher: { tools: ["read", "bash", "grep", "find", "ls"], role: "researcher", timeout: 2700, brief: ["question*", "scope", "criteria", "known", "state"] },
-		"video-scan": { tools: ["read", "bash", "grep", "find", "ls"], role: "reviewer", timeout: 2700, brief: ["video*", "claims", "question", "options", "scan"] },
+		"video": { tools: ["read", "bash", "grep", "find", "ls"], role: "reviewer", timeout: 3600, brief: ["video*", "task", "claims", "question", "outputs", "options", "job"] },
 		tester: { tools: ["read", "bash", "edit", "write", "grep", "find", "ls", "expert"], role: "tester", timeout: 3600, brief: ["target*", "goal*", "criteria", "how_to_run", "scope", "constraints", "report"] },
 		"api-tester": { tools: ["read", "bash", "edit", "write", "grep", "find", "ls"], role: "developer", timeout: 3600, brief: ["target*", "goal*", "spec", "auth", "how_to_run", "scope", "constraints"] },
 	};
@@ -371,7 +371,7 @@ const brief = { target: "/bin/true", question: "what does --version print", purp
 	const builtins = [...lc.matchAll(/\n---\n(?:#[^\n]*\n)*name: ([\w-]+)\n[\s\S]*?\n---\n/g)].map((m) => m[0]).filter((fm) => /\nexpert: true\n/.test(fm))
 		.map((fm) => ({ name: fm.match(/\nname: ([\w-]+)\n/)[1], platform: (fm.match(/\nplatform: (.*)\n/) || [])[1], expert: { useFor: (fm.match(/\nuse_for: (.*)\n/) || [])[1], keywords: (fm.match(/\nkeywords: (.*)\n/) || [])[1], routed: !/\nroute: false\n/.test(fm) } }));
 	const names = builtins.map((b) => b.name).sort();
-	t("built-ins found", names, ["acceptance-judge", "api-tester", "design-reviewer", "developer", "expert-builder", "expert-reviewer", "researcher", "reverse-engineer", "software-factory", "termux-device", "tester", "ui-tester", "video-scan"]);
+	t("built-ins found", names, ["acceptance-judge", "api-tester", "design-reviewer", "developer", "expert-builder", "expert-reviewer", "researcher", "reverse-engineer", "software-factory", "termux-device", "tester", "ui-tester", "video"]);
 	const linux = builtins.filter((b) => b.platform !== "termux"), termux = builtins.filter((b) => !b.platform || b.platform === "termux");
 	for (const [where, set] of [["Linux", linux], ["Termux", termux]]) {
 		const line = mod.snippet(set);

@@ -29,7 +29,7 @@ function check(name, got, want) {
 // Each load gets its own copy so module-level env reads see that load's env.
 let loads = 0;
 async function load(env) {
-	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_THINKING_REPLAY", "LETS_CODE_FINAL_REVIEW", "LETS_CODE_PLAN_BURST", "LETS_CODE_PLAN_LEVEL", "LETS_CODE_THINKING_BASE", "LETS_CODE_THINKING_DOWN", "LETS_CODE_FIRM_STOP"]) delete process.env[k];
+	for (const k of ["LETS_CODE_AGENT_GUARD_ON", "LETS_CODE_THINKING_AUTO", "LETS_CODE_BASH_TIMEOUT", "LETS_CODE_WRAP_TURNS", "LETS_CODE_WRAP_MINUTES", "LETS_CODE_AGENT_GUARD_LOG", "LETS_CODE_BURST_TURNS", "LETS_CODE_MAX_BURSTS", "LETS_CODE_FINAL_REVIEW", "LETS_CODE_PLAN_BURST", "LETS_CODE_PLAN_LEVEL", "LETS_CODE_THINKING_BASE", "LETS_CODE_THINKING_DOWN", "LETS_CODE_FIRM_STOP"]) delete process.env[k];
 	Object.assign(process.env, env);
 	const f = join(work, `agentguard-${loads++}.ts`);
 	writeFileSync(f, src);
@@ -250,25 +250,6 @@ for (const off of ["0", "off"]) {
 	await h.emit("session_start", {});
 	await edit(h, "calc.py", false); await edit(h, "calc.py", false);
 	check("fixed level untouched without auto", h.pi.level, "medium");
-}
-
-// --- thinking replay window
-{
-	const { mod } = await load({});
-	const strip = mod.stripOldThinking;
-	const a = (i) => ({ role: "assistant", content: [{ type: "thinking", thinking: "t" + i }, { type: "text", text: "a" + i }] });
-	const msgs = [{ role: "user", content: "q" }, a(1), { role: "toolResult", content: [] }, a(2), a(3)];
-	check("replay all: untouched", strip(msgs, Infinity), null);
-	const out = strip(msgs, 1);
-	check("keep 1: older thinking dropped", out[1].content.length === 1 && out[3].content.length === 1 && out[4].content.length === 2, true);
-	check("keep 1: other messages intact", out[0] === msgs[0] && out[2] === msgs[2], true);
-	check("keep 0: all thinking dropped", strip(msgs, 0).every((m) => m.role !== "assistant" || m.content.every((c) => c.type !== "thinking")), true);
-	check("nothing to strip: null", strip([{ role: "user", content: "q" }, { role: "assistant", content: [{ type: "text", text: "a" }] }], 1), null);
-	const h = await load({ LETS_CODE_AGENT_GUARD_ON: "1", LETS_CODE_THINKING_REPLAY: "2" });
-	const r = await h.emit("context", { messages: msgs });
-	check("context hook applies the window", r?.messages?.[1]?.content?.length, 1);
-	const h2 = await load({ LETS_CODE_AGENT_GUARD_ON: "1" });
-	check("default: context untouched", await h2.emit("context", { messages: msgs }), undefined);
 }
 
 // --- v6/v8: final review (after a struggle), heredoc syntax errors ignored

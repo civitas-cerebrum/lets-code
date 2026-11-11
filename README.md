@@ -112,7 +112,7 @@ it, not a Claude Code clone. Where it stands:
   working here through the adapter.
 - **Experts and the factory.** Specialists that cost one line of context
   until used (a tester with its team, two reviewers, an acceptance judge, a
-  researcher, a video scanner, a reverse engineer, an expert builder) and a
+  researcher, a video expert, a reverse engineer, an expert builder) and a
   software factory
   that takes a ticket through plan, build, reviews, tests and a judge in its
   own worktree. Claude Code has subagents and plugins; it has no pipeline.
@@ -138,6 +138,7 @@ it, not a Claude Code clone. Where it stands:
 | 🔍 **Grounding guard** | pi looks facts up with its tools instead of guessing them (file contents, paths, names, versions, config, command output), invents nothing and says what it could not verify. An empty grep is not proof that something is missing, and an action the system "accepted" is checked against a control that must fail. Overwriting an existing file it has not read is blocked once: read first, or write again. |
 | 🧭 **Backend facts** | The agent knows its backend (server, model, API, context, thinking, vision) without discovering it, at no cost until it needs it: a prompt about the backend adds a short section, or the first command probing it gets the facts in its result. The API key is never written out. |
 | 🛟 **Git guard** (off by default: `/git-guard on`) | All work on a `pi/*` branch. `reset --hard`, force pushes and friends are refused. The tree is checkpointed before every tool call. |
+| 🧹 **Disposable thinking** (`/disposable-thinking off` turns it off) | pi sends every earlier turn's thinking back to the model with each request. Here only the latest turn keeps its thinking, so a long tool loop fills the context far slower. The session file keeps all of it. |
 | 🧭 **Agent guard** | Default bash timeout, a nudge to run tests after untested edits, a wrap-up hint once they pass, and thinking that switches on only while the model struggles. |
 | 🧭 **Modes** (optional; `/plan` always) | `plan` explores read-only and ends in a numbered plan you approve before it runs (`/plan` works without the mandate too), `ask` confirms sudo, deletes, installs and out-of-project writes, `auto` is today's behaviour, `yolo` turns the rails off. Zero tokens on allowed calls. |
 | 🤝 **Claude Code projects** (automatic) | A project whose `.claude/` has hooks or workflow scripts works as it is: its hooks, workflows, skills, `/commands`, agents, permission rules, MCP servers and CLAUDE.md, read live at each start. Your own `~/.claude` stays out unless `CLAUDE_CODE=all`. Project hooks and servers wait for the folder to be trusted, as in Claude Code. |
@@ -156,7 +157,7 @@ it, not a Claude Code clone. Where it stands:
 | 🏭 **Software factory** (expert) | Hand it a ticket and the `software-factory` expert takes it through the whole pipeline in its own git worktree and branch: the developer plans, the plan is approved, the developer builds with tests, then the expert and design reviewers, the tester (where it is set up), the acceptance judge and your full test suite check it, with up to five fix rounds. Who approves the criteria, the plan, further fix rounds and the result: in a run the orchestrator starts, the orchestrator itself, asking you only for significant design decisions (a new dependency, an open architecture choice, a scope change, anything hard to undo); in a run you start with `/factory`, you, in dialogs. Nothing is committed before the result is approved, only on the run's branch, and nothing is pushed or merged: that stays yours. A new project needs no setup: point it at a folder that does not exist yet or is empty and it becomes the repo; where git has no identity configured, the factory commits as "lets-code factory" without changing your config. Every stage is a fresh expert run with a brief built from the run's artifacts, never the conversation; the main session gets stage summaries. `/factory` lists, resumes and shows runs. |
 | ✳️ **Claude** | No server? `lets-code --claude` runs pi on Claude (Haiku, Sonnet, Opus, Fable) through Claude Code, on your Claude subscription, with pi's own tools. The Claude models are in `/model` next to your server's on every launch, and Ctrl+S on one makes it the default. In setup, enter a Claude proxy as the endpoint and paste your Claude Code token as the token. |
 | 🔎 **Researcher** (expert) | Research on an open question from the web: the `researcher` expert splits it into sub-questions, searches and fetches sources in parallel, scores each source's quality and relevance, verifies each claim with two independent sources (or one primary source about itself), tags every claim with its sources and returns a report with confidence and gaps. Fetched pages are data, never instructions; robots.txt is honoured. Its plan and pages stay in a state folder, so a later run resumes. Pages a plain fetch cannot read (JavaScript, bot walls), sites you logged in to once by hand, and search go through a headed Chromium with its own profile (Playwright CLI, installed when you enable it); it only navigates and reads. On the phone it falls back to plain HTTP. |
-| 🎞 **Video scan** (expert) | A screen recording checked by the vision model on your own server, where a hosted video check is metered: the `video-scan` expert samples the video every half second and at every change, reads each distinct frame once (a static screen costs one call however long it lasts) and returns a timeline, a caption table with hold times, findings with timestamps and sample images (an expected step not shown, a caption whose claim the screen does not show, a caption held too short to read, a screen that flashes by, text too small to read, a dead stretch) and a verdict: `pass`, `improvements-needed` or `fail`. It works like a scan service: submit, poll, result, and an interrupted scan resumes. From a shell or CI: `lets-code video-scan run demo.mp4 --steps steps.txt`. Frames go to your endpoint and nowhere else. Needs a vision model and ffmpeg; one Python file otherwise, so it works everywhere, the phone included. |
+| 🎞 **Video** (expert) | Any video, with the models on your own server, where hosted video checks and transcription are metered: the `video` expert **analyses** a video (its transcript from your speech-to-text server, what is seen, a summary with chapters and key points, its script scene by scene with the spoken lines placed by their times, subtitles as .srt and .vtt, and answers to questions about it) or **scans** a screen recording: it samples it every half second and at every change, reads each distinct frame once (a static screen costs one call however long it lasts) and returns a timeline, a caption table with hold times, findings with timestamps and sample images (an expected step not shown, a caption whose claim the screen does not show, a caption held too short to read, a screen that flashes by, text too small to read, a dead stretch) and a verdict: `pass`, `improvements-needed` or `fail`. It works like a hosted service: submit, poll, result, and an interrupted job resumes. From a shell or CI: `lets-code video analyse talk.mp4`, `lets-code video scan demo.mp4 --steps steps.txt`. Frames and sound go to your endpoints and nowhere else. Needs ffmpeg, a vision model for the pictures and a speech-to-text endpoint for the transcript (`SPEECH_URL`); one Python file otherwise, so it works everywhere, the phone included. |
 | 🎛 **Presets** | Save more backends under names (`lets-code setup preset`), then launch one with `lets-code --openrouter` or `lets-code --qwen`. Each is its own pi provider, so sessions on different presets run side by side. |
 | 🎨 **lets-code theme** | A pastel take on pi's dark theme that looks the same in every terminal, in tmux and over ssh, next to pi's built-in `dark`, `light` and auto (`system`, the default). The first launch asks which one to use; switch any time in `/settings`. |
 | 🔒 **No secrets on disk** | The token lives in a mode-600 config and reaches pi through the environment. pi's telemetry is off unless you turn it on. |
@@ -177,6 +178,7 @@ lets-code --claude                # Claude through Claude Code (see Claude below
 lets-code update                  # latest release from npm (--snapshot: latest main)
 lets-code --thinking-level low    # quieter model
 lets-code --git-guard             # the git guard for one launch (off by default; /git-guard in a session)
+lets-code --no-disposable-thinking  # send every turn's thinking back to the model, as pi does (/disposable-thinking in a session)
 ```
 
 | Flag | Meaning |
@@ -192,6 +194,7 @@ lets-code --git-guard             # the git guard for one launch (off by default
 | `--vision` / `--no-vision` | Pin image input instead of probing |
 | `--insecure` | Skip TLS verification |
 | `--git-guard` | Launch with the git guard (off by default; `/git-guard on` in a session turns it on and remembers it) |
+| `--disposable-thinking` / `--no-disposable-thinking` | Launch with or without disposable thinking (on by default; `/disposable-thinking off` in a session turns it off and remembers it) |
 | `--no-mem-guard` / `--no-git-guard` / `--no-agent-guard` / `--no-grounding` | Launch without a guard |
 | `--mem-guard` / `--no-mem-watch` | Launch with the memory guard on / without the RAM watcher |
 | `--no-session-tag` | Send no session tag with model requests |
@@ -646,10 +649,6 @@ the wrap-up is advice, and the firm stop is opt-in.
   `LETS_CODE_PLAN_LEVEL` (default `low`) for the first turn(s), until the
   first source file is written, plus a prompt line asking for a
   rule-by-rule test plan. At the ceiling one plan turn thought 27-54k chars.
-- **Thinking replay window** (`LETS_CODE_THINKING_REPLAY=<n>`, default
-  all). pi replays every earlier turn's thinking, about 40% of the prompt by
-  the end of a high-thinking session; with a window only the last n turns
-  keep theirs.
 
 Test results are read from the usual runners (unittest, pytest, "N passed,
 M failed" summaries) and from runs of a test file that print no summary:
@@ -1336,13 +1335,13 @@ An expert is a subagent with knowledge of its own: standing instructions
 (recipes, traps, a report format), a brief template that says what its
 caller must tell it, and, where it needs one, a setup. lets-code ships thirteen,
 `acceptance-judge`, `api-tester`, `design-reviewer`, `developer`, `expert-builder`,
-`expert-reviewer`, `researcher`, `reverse-engineer`, `software-factory`, `tester` and `video-scan` (anywhere),
+`expert-reviewer`, `researcher`, `reverse-engineer`, `software-factory`, `tester` and `video` (anywhere),
 `termux-device` (on Termux only) and `ui-tester` (Linux and macOS), and you can
 add your own (see [Build your own expert](#build-your-own-expert)). They sit behind one tool, `expert`, whose line in the
 context names each expert usable here with a few words on what it is for:
 
 ```text
-expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); design-reviewer (clean-code and design review of a change: patterns, maintainability); expert-builder (making or fixing an expert: from docs, a runbook or scripts; its knowledge, brief and routing); expert-reviewer (bug review of a diff or PR: what breaks, edge cases, severity); researcher (web research: tools, licences, prices, facts; cited, cross-checked report); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); software-factory (the software factory: a ticket taken end to end through its pipeline of experts); tester (testing and QA of any software: tests, a change verified, bugs, failing tests); video-scan (screen recording checks); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
+expert: these tasks go to the expert named, not done by hand, even quick ones: acceptance-judge (is it done? a change, PR or branch checked against its ticket's acceptance criteria); design-reviewer (clean-code and design review of a change: patterns, maintainability); expert-builder (making or fixing an expert: from docs, a runbook or scripts; its knowledge, brief and routing); expert-reviewer (bug review of a diff or PR: what breaks, edge cases, severity); researcher (web research: tools, licences, prices, facts; cited, cross-checked report); reverse-engineer (reverse engineering: what a compiled binary, app, APK, firmware or minified script does); software-factory (the software factory: a ticket taken end to end through its pipeline of experts); tester (testing and QA of any software: tests, a change verified, bugs, failing tests); video (video transcripts and checks); termux-device (phone tasks: apps, files, intents, messages; screen/taps once set up). Actions: list | enable | run
 ```
 
 (On Linux and macOS `termux-device` is not in it. Neither are `developer`,
@@ -1368,7 +1367,7 @@ The templates:
 | `design-reviewer` | `diff`*: the repo path and base..head, a commit, a branch or a PR; `context`: the ticket or plan; `conventions`: style guides, lint config, architecture notes; `previous_findings`: an earlier round's findings to re-check; `constraints`: what must not be run, limits |
 | `expert-builder` | `domain`*: what the new expert is for, in your words; `sources`: docs, repos, a method or scripts to distill; `scope`: `user` (default, your own) or `builtin` (a lets-code contribution on a branch); `name`; `platform`; `constraints`: what it must never do, limits; for builtin, the checkout and whether to push |
 | `researcher` | `question`*: what to find out, in your words; `scope`: options to cover, region, time window, sources to prefer or avoid; `criteria`: what to compare or decide on, hard constraints; `known`: what you already believe, to be checked; `state`: an earlier run's state folder, to resume it |
-| `video-scan` | `video`*: the recording's path (mp4 or webm); `claims`: what the video should show: the path of a storyboard JSON or of a step list, or the steps themselves; `question`: what you want to know beyond the standard checks; `options`: the sampling interval, reading rate, minimum screen time or call cap, when not the defaults; `scan`: an earlier scan's id, to resume it or report it again |
+| `video` | `video`*: the video's path (mp4, webm, mov, mkv, ...); `task`: `scan` (a screen recording checked) or `analyse` (transcript, summary, script); `claims`: for a scan, what the video should show: the path of a storyboard JSON or of a step list, or the steps themselves; `question`: what you want to know; `outputs`: for an analysis, which of transcript, summary, script; `options`: the sampling interval, the spoken language, sound only, or the call cap, when not the defaults; `job`: an earlier job's id, to resume it or report it again |
 | `termux-device` | `goal`*: the user's goal, verbatim; `confirmed`: only after you approved the exact final step it reported (app, recipient, text) |
 | `reverse-engineer` | `target`*: absolute path or URL of the artifact; `question`*: what to find out; `purpose`: what the answer is for |
 | `tester` | `target`*: what to test: a project path, a URL, a command, or a change (a diff or branch); `goal`*: the testing task in your words; `criteria`: acceptance criteria or requirements; `how_to_run`: how to build, start and test it; `scope`: in and out, and how deep (smoke, standard, deep); `constraints`: what not to touch, test data and logins (env var names), time limits; `report`: a final-message format to follow, when a program reads it |
@@ -1591,27 +1590,73 @@ whether the browser is usable and its memory, `web browser close` closes it
 and its Xvfb; `RESEARCH_BROWSER=off` disables it; deleting
 `browser-profile` forgets every login.
 
-**Video scan.** For a screen recording that has to be checked: a
-reproduction video, an evidence video, a demo. Does each step's screen
-appear, is each caption on screen long enough to read, does the video show
-what it claims? `video-scan` answers with the vision model on your own
-server, so no hosted quota is spent and no frame leaves your machines. Its
-helper (`video-scan/bin/video-scan`, Python's standard library, with
-`ffmpeg` and `ffprobe` from your PATH) works like a hosted scan service:
+**Video.** Two jobs on a video file, with the models on your own server, so
+no hosted quota is spent and no frame or sound leaves your machines:
+
+- a **scan** of a screen recording that has to be checked (a reproduction
+  video, an evidence video, a demo): does each step's screen appear, is
+  each caption on screen long enough to read, does the video show what it
+  claims?
+- an **analysis** of any video (a talk, a demo, a meeting, filmed footage):
+  its transcript, what is seen, a summary with chapters and key points,
+  its script, and an answer to a question about it.
+
+Its helper (`video/bin/video`, Python's standard library, with `ffmpeg` and
+`ffprobe` from your PATH) works like a hosted service:
 
 ```bash
-lets-code video-scan submit demo.mp4 --steps steps.txt   # prints a scan id, works in the background
-lets-code video-scan status <id> --wait 60               # queued | sampling | reading 12/40 | assembling | resolved | failed
-lets-code video-scan result <id>                         # the scan as JSON (--md: the Markdown report)
-lets-code video-scan run demo.mp4 --storyboard board.json   # all three in one blocking call, for scripts and CI
-lets-code video-scan resume <id>                         # an interrupted or failed scan goes on; nothing is read twice
+lets-code video scan demo.mp4 --storyboard board.json   # a scan, in one blocking call (for scripts and CI)
+lets-code video analyse talk.mp4 --question "What is decided?"   # an analysis, in one blocking call
+lets-code video transcript talk.mp4                     # the transcript only (.txt, .srt, .vtt, .json)
+lets-code video submit demo.mp4 --steps steps.txt       # a job in the background (--analyse for an analysis); prints its id
+lets-code video status <id> --wait 60                   # queued | transcribing | sampling | reading 12/40 | assembling | writing | resolved | failed
+lets-code video result <id>                             # the job as JSON (--md: the Markdown report)
+lets-code video resume <id>                             # an interrupted or failed job goes on; nothing is read or heard twice
 ```
 
-`lets-code video-scan` resolves the server as a launch does (config,
-preset, `--url`, `--model` before `video-scan`) and needs no pi; inside a
-session the expert calls the same helper with the session's endpoint,
-model and key. A model that fails lets-code's vision probe is refused
-before anything is sampled, and the message says so.
+`lets-code video` resolves the server as a launch does (config, preset,
+`--url`, `--model` before `video`) and needs no pi; inside a session the
+`video` expert calls the same helper with the session's endpoint, model
+and key. (`lets-code video-scan`, its old name, still works.)
+
+**Speech to text.** A transcript needs a speech-to-text endpoint: set
+`SPEECH_URL` in the config (and `SPEECH_MODEL`, `SPEECH_TOKEN` when it
+needs them; `LETS_CODE_SPEECH_URL` and the others override them) to the
+base URL of an OpenAI-compatible `/audio/transcriptions` (faster-whisper
+servers, vLLM serving Whisper, LocalAI) or of a whisper.cpp server
+(`/inference`); the helper tries the first and falls back to the second.
+`lets-code setup` keeps these lines when it runs again. With no
+`SPEECH_URL` the chat server itself is asked, and when it has no such route
+the analysis goes on from the pictures alone and says so. The sound goes in
+16 kHz mono WAV chunks of 10 minutes (`VIDEO_SPEECH_CHUNK`), each answer
+kept, so a resume transcribes nothing twice. `--language nl` names the
+spoken language; otherwise the server detects it.
+
+**An analysis.** The pictures are sampled as for a scan (below), at about
+150 over the video (`--max-frames`; at least 1 s apart; `--every` sets the
+interval by hand) and with a coarser change test (2 % of the picture,
+`--dedupe`), since filmed footage is never still; each sample is read once
+with a prompt for any picture: its kind (screen, slide, camera, card, ...),
+title, captions, other text, and what is seen. Then text calls write:
+
+- the **summary**: a title, a paragraph, three to eight key points, topics
+  and chapters (start, title, one sentence), in one call, or one per part of
+  a long video and one to join them;
+- the **script**: one call per 5 minutes divides the video into scenes (a
+  heading, what is seen, the text on screen); the transcript's lines are
+  placed into the scenes by their times, word for word, never rewritten by
+  the model (`script.md`);
+- the **answer** to `--question`, with the times it rests on.
+
+`--only transcript,summary,script` picks what to write (default: all
+three); `--no-frames` leaves the pictures out, and a text-only model gives
+an analysis of the sound alone (the chapters are then the script's scenes).
+The job folder gets `analysis.json`, `report.md`, `script.md` and
+`transcript.txt`, `.srt`, `.vtt` and `.json`. The cost guard counts the
+picture readings and the text calls before the first one.
+
+**A scan.** A model that fails lets-code's vision probe is refused before
+anything is sampled, and the message says so.
 
 - **Sampling.** One ffmpeg pass turns the video into small grey grids
   (160x90), one every 0.1 s. A grid that differs from its segment's first
@@ -1631,7 +1676,7 @@ before anything is sampled, and the message says so.
   error and warning text, whether text is too small to read, a confidence.
   Four calls run at a time (`--concurrency`); 429, 5xx and network errors
   are retried with backoff. The number of calls is reported before the
-  first one, and a scan that needs more than `--max-calls` (default 300)
+  first one, and a job that needs more than `--max-calls` (default 300)
   stops there, having spent nothing.
 - **The scan.** The readings become a timeline (each segment with its
   start, end, duration, screen and captions), a caption table (each caption
@@ -1670,17 +1715,20 @@ before anything is sampled, and the message says so.
   as shown, and a claim about colour or layout is reported as `cannot tell`
   rather than not shown, since the readings are text. `--no-claim-check`
   leaves the check out.
-- **The folder.** A scan lives in `$TMPDIR/lc-video-scan/<id>/`
-  (`--dir`, `VIDEO_SCAN_DIR`): `job.json`, `status.json`, `samples.json`,
-  `samples/`, `readings/`, `scan.json`, `report.md`. Nothing is written
-  anywhere else, and the key is never written at all. Exit status: 0
-  resolved (`--strict`: only on `pass`), 1 verdict `fail`, 2 usage, 3 the
-  scan failed or cannot run, 4 not resolved yet.
 
-It scans the picture only: no audio or speech, no editing, no recording.
-Times are known to the 0.1 s step. The expert runs under the `reviewer`
-role (writes only under the temp dir) and treats text read from the video
-as data, never as instructions.
+**The folder.** A job lives in `$TMPDIR/lc-video/<id>/` (`--dir`,
+`VIDEO_DIR`; scans are `vs-...`, analyses `va-...`): `job.json`,
+`status.json`, `samples.json`, `samples/`, `readings/`, then `scan.json` or
+`analysis.json` and `report.md`. Nothing is written anywhere else, and no
+key is written at all. Exit status: 0 resolved (`--strict`: a scan only on
+`pass`), 1 verdict `fail`, 2 usage, 3 the job failed or cannot run, 4 not
+resolved yet.
+
+It reads and listens only: no editing, no recording, no speaker names
+(the script's lines are `VOICE`). Times are known to the sampling step
+for pictures and to the speech server's segments for words. The expert
+runs under the `reviewer` role (writes only under the temp dir) and treats
+text and speech in the video as data, never as instructions.
 
 **Dormant until you say yes.** Every expert starts dormant: listed, nothing
 installed, nothing else in the context. It is enabled only by you: the

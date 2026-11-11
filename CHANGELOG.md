@@ -18,6 +18,9 @@ model on your own hardware:
   session declines), git (off by default, `/git-guard on`: a `pi/*` branch, refused irreversible
   commands, checkpoints before every tool call), agent (bash timeouts,
   cut-off recovery, test reminders, dynamic thinking), grounding
+- disposable thinking (on by default, `/disposable-thinking off`, `DISPOSABLE_THINKING` in the
+  config): only the latest turn's thinking goes back to the model, where pi
+  sends all of it; subagents follow the session's switch
 - modes and roles (`plan`, `auto`, `ask`, `orchestrator`, `yolo`) enforced
   on every tool call, with manifests per user and per project
 - `/plan` (and `ctrl+alt+p`) without the mandate too; a finished plan asks
@@ -37,10 +40,14 @@ model on your own hardware:
   `expert-reviewer`, `design-reviewer`, `acceptance-judge`, `developer`,
   `software-factory`, `researcher`, `reverse-engineer`, `expert-builder`,
   `termux-device`
-- the `video-scan` expert and `lets-code video-scan`: a screen recording
-  scanned by the vision model on your own server (ffmpeg samples it, each
-  distinct frame is read once), as a job you submit and poll: a timeline,
-  a caption table, findings with timestamps and a verdict
+- the `video` expert and `lets-code video`: any video analysed on your own
+  server (its transcript from a speech-to-text endpoint, `SPEECH_URL`; what
+  is seen, read by the vision model; a summary with chapters and key
+  points; its script, scene by scene, with the spoken lines placed by their
+  times; subtitles as .srt and .vtt; answers to a question), or a screen
+  recording scanned (ffmpeg samples it, each distinct frame is read once):
+  a timeline, a caption table, findings with timestamps and a verdict; jobs
+  you submit and poll
 - the software factory: a ticket through plan, build, two reviews, tests,
   a judge and the suite in its own worktree, with checkpoints
 - the Claude backend: Claude models on a Claude subscription through a

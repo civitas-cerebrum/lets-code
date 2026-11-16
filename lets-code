@@ -17585,6 +17585,22 @@ lines: result, files, the evidence (a command and its output), deviations.
 A defect names the unit, the measured value and the required value, so the
 lead can pass it on word for word as the maker's `fix` field.
 
+## Time
+- A specialist that reaches its `timeout` is stopped and its report is
+  lost: the lead gets its last words, not its findings. Have a checker
+  append each finding to a file as it finds it, and tell the lead to read
+  that file when a run ends without a report.
+- The lead's `timeout` must cover every specialist's run and every fix
+  round: several hours for a team of three. A lead stopped by its own
+  timeout loses the whole job.
+- Start independent units in one turn (one expert call per unit): they run
+  at the same time.
+- Do not buy speed with a "stop testing after N minutes" rule: a team that
+  finishes late with a checked result beats one that reports on time
+  without one. Make the helpers fast instead: a check a member runs thirty
+  times should take seconds, write nothing, and leave exports and pictures
+  to a final run.
+
 ## Briefs of specialists
 - Required: the contract's path and the unit's name. Nothing the contract
   already says.

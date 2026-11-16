@@ -17553,16 +17553,30 @@ brief: a specialist's brief is the path to it and the name of its unit.
 - One page. What, not how: the maker decides the rest and reports it.
 - Shared numbers in one table, each with a name the units must use.
 - Final text only: no reasoning, no corrections inside it.
-Give its format and one worked example in a ref, on a task that is not the
-one you will measure with.
+Give its format and one worked example in a ref, on a task unlike any you
+will measure with.
+
+## Rules, not answers
+The refs hold rules, things to look out for, techniques and the checks.
+They never describe a particular product of the team's work: no table of
+ready designs, no finished script for "the usual case", no sizes taken
+from a result you liked. A team given the answer to its test passes the
+test and can do nothing else. When an end-to-end run fails, fix it with a
+general rule, a better helper or a review step, and ask of every change:
+would this help on a task I have not thought of? Keep the nouns and
+numbers of your test tasks out of every ref, example and snippet.
+- A reviewer of the plan, before anything is built, earns its place: after
+  the plan nobody questions it; makers build it and the checker checks the
+  result against it. Give it the user's words verbatim and the plan's path.
 
 ## Keep the lead small
 A lead on a small model over-designs and over-thinks. What stopped it:
 - Requirements come from the user's words only. Say so, and write the
   lead's brief hints as "word for word; add nothing": the calling model
   otherwise adds its own design ideas to the brief and the lead builds them.
-- A table of patterns with starting numbers ("a stand for N things: one
-  block, N pockets, 30 deep, pitch 23"), so it picks instead of inventing.
+- A procedure for reaching the plan, in numbered steps (say what it must
+  do; walk through the use; decide how each thing holds), and rules to
+  reason from, so it derives instead of inventing.
 - "Take the first design that works", as a ladder from simplest up.
 - A time box on the contract ("one pass, within 10 minutes") and a ban on
   scripts for calculating: a doubt is a check for the checker.
@@ -17665,8 +17679,10 @@ A helper that reports a failure badly costs more than a weak instruction: a
 member spent twenty minutes bisecting a failed assert that its helper
 printed as an unrelated hint. Make every helper say what failed, where, and
 with what value.
-Then run a second, different task. A team tuned on one task has learned
-that task; the second one shows what the refs really teach.
+Then run a second, different task, one that no ref describes. A team
+tuned on one task has learned that task; the second shows what the refs
+really teach. If it passes only after you described its object in a ref,
+you have measured your ref, not your team.
 One run at a time, thinking medium or low: the GPU is shared.
 MD
     cat > "${d}/bin/expert-lint" <<'JS'

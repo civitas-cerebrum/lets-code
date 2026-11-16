@@ -6938,6 +6938,14 @@ const BUILTIN: Manifest = {
 			label: "tester", tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "tool_search", "expert"], write: [".", lcwTmpDir()], external: "deny", mcp: "deny", dispatch: ["ui-tester", "api-tester"], network: "on",
 			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
 		},
+		// a team lead's (an expert of the user's with a `team`): the developer's
+		// rails plus the expert tool. Which experts it starts is not this role's
+		// to say: a child with a team has an expert tool that lists and runs
+		// only its team (LETS_CODE_EXPERT_TEAM), and it has no subagent tool
+		lead: {
+			label: "lead", tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "tool_search", "expert"], write: [".", lcwTmpDir()], external: "deny", mcp: "deny", dispatch: ["*"], network: "on",
+			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
+		},
 		// the researcher expert's: the reviewer's, and its browser only through
 		// its helper (researcher/bin/web, which allows only navigation and
 		// reading): no Playwright CLI, the runtime that holds it, its daemon,
@@ -7430,7 +7438,7 @@ export default function (pi: ExtensionAPI) {
 	// roles; a subagent role is still taken by name). With it off, "yolo" (no
 	// mode: the dormant state), auto (the rails taken up in the session) and the
 	// dormant modes there are, plan and orchestration
-	const SUBAGENT_ROLES = ["readonly", "reviewer", "developer", "tester", "researcher"];
+	const SUBAGENT_ROLES = ["readonly", "reviewer", "developer", "tester", "lead", "researcher"];
 	const OFF = "yolo";
 	const current = () => (on ? roleName : OFF);
 	const known = (m: string) => (ACTIVE ? !!manifest.roles[m] : m === OFF || m === "auto" || (m === "plan" && (PLAN || ACTIVE)) || (m === "orchestration" && ORCHESTRATOR));
@@ -17004,6 +17012,7 @@ expert's own files are under `@@AGENT@@/<name>/` (`ref/`, `bin/`, `setup`).
   - `@@EB@@/ref/format.md`: every frontmatter field, its meaning and limits
   - `@@EB@@/ref/use-for.md`: use_for, keywords and job that route well; the prompts file
   - `@@EB@@/ref/distill.md`: turning docs, a repo or a method into instructions a 27B model follows
+  - `@@EB@@/ref/team.md`: one expert or a team; a lead, its specialists, their workflows and context budgets
   - `@@EB@@/ref/setup.md`: setup scripts, pinning, helpers, platform gating
   - `@@EB@@/ref/safety.md`: rules for irreversible or outward actions, consent
   - `@@EB@@/ref/contribute.md`: a built-in expert for lets-code (scope builtin)
@@ -17015,6 +17024,10 @@ expert's own files are under `@@AGENT@@/<name>/` (`ref/`, `bin/`, `setup`).
 3. Read the sources the brief names: docs, repo, scripts. Read only what
    the expert needs; note exact commands, flags, traps and versions.
 4. Design, before writing (format.md, use-for.md, safety.md):
+   - one expert or a team (team.md): a team when the job has phases that
+     need different knowledge, makes long output, or must be checked by
+     someone other than its maker; then design the lead and each
+     specialist with the points below, and the workflows that join them
    - name: lower-case, a noun for the job (`config-convert`, not `helper`)
    - use_for: the tasks a user asks for, 6 to 14 words; keywords: 2-3 words
    - job: one line, what it does and how long it may take
@@ -17036,6 +17049,8 @@ expert's own files are under `@@AGENT@@/<name>/` (`ref/`, `bin/`, `setup`).
    once, lint again and rerun once. Keep the better wording of the two and
    report both lines; never run it a third time. Prompts that name files
    need those files: create them in a folder and pass `--cwd`.
+   A team: route-check the lead only (its specialists are `route: false`),
+   and say in the report that an end-to-end run (team.md) is still to do.
 8. Builtin scope only: contribute.md, on a new branch in a git worktree.
 9. Report.
 
@@ -17102,9 +17117,9 @@ entirely (it is not listed anywhere), so lint before you rely on it.
 | `name` | the name in the line and in `expert({name})` | letters, digits, `. _ -`, starts with a letter or digit; default: the file name. Use lower-case with `-`, and name the file `<name>.md` |
 | `description` | one line; the child's prompt starts `You are the "<name>" agent. <description>` | required in practice |
 | `tools` | the child's tools, comma list or block list | pi's: `read, bash, edit, write, grep, find, ls`; MCP tools as `mcp__<server>_<tool>`. None given: all tools. Give the least it needs |
-| `team` | experts this one starts itself (it needs `expert` in tools) | comma list of expert names. The child gets one level more and its expert tool lists and runs only these; they start nothing. A lead and its specialists, as `tester` with `ui-tester` and `api-tester` |
+| `team` | experts this one starts itself (it needs `expert` in tools) | comma list of expert names. The child gets one level more and its expert tool lists and runs only these; they start nothing. A lead and its specialists, as `tester` with `ui-tester` and `api-tester`; team.md says when and how |
 | `thinking` | the child's thinking level | `off minimal low medium high xhigh`; default medium. Avoid xhigh on a local GPU |
-| `role` | the mandate role the child runs under | built-ins: `readonly` (reads and read-only commands only), `reviewer` (runs tests and commands, writes only under the temp dir, no git writes or installs: reviewers and judges), `developer` (edits and runs in its working folder and the temp dir only, no git writes or installs: an expert that changes code), `tester` (the developer's, plus the expert tool for its team: the test lead), `researcher` (the reviewer's, and no Playwright CLI or its runtime from bash: the researcher expert), `plan`, `auto`, `ask`, `yolo`; or a role from your `mandate.json`. Default: the session's mode |
+| `role` | the mandate role the child runs under | built-ins: `readonly` (reads and read-only commands only), `reviewer` (runs tests and commands, writes only under the temp dir, no git writes or installs: reviewers and judges), `developer` (edits and runs in its working folder and the temp dir only, no git writes or installs: an expert that changes code), `tester` (the developer's, plus the expert tool for its team: the test lead), `lead` (the developer's, plus the expert tool: the lead of a team of your own, which starts only the experts its `team` names), `researcher` (the reviewer's, and no Playwright CLI or its runtime from bash: the researcher expert), `plan`, `auto`, `ask`, `yolo`; or a role from your `mandate.json`. Default: the session's mode |
 | `agent_dir` | the child's own `PI_CODING_AGENT_DIR` (own mcp.json, settings) | a directory under the agent dir |
 | `skills` | paths passed as `--skill` | under the agent dir |
 | `append_prompt` | a file appended to the system prompt | under the agent dir. With an empty body, only this file is the prompt |
@@ -17488,6 +17503,153 @@ and work only in `<repo>-<name>`.
 - Installs only in its setup (run when the user enables it), pinned, npm
   with `--ignore-scripts`.
 MD
+    cat > "${d}/ref/team.md" <<'MD'
+# One expert or a team
+
+A child is a small model with one context. Everything it reads, runs and
+writes stays in that context until it ends. A job that fills it gets worse
+towards the end: the model forgets the brief, repeats work, or stops
+delegating and tries to do everything itself. A team splits such a job so
+that no one holds all of it.
+
+## When a team is worth it
+Build one expert unless at least one of these is true:
+- The job has phases that need different knowledge: deciding what to make,
+  making it, checking it, operating something. One body cannot hold all of
+  it under 700 words, and the refs together pass about 6000 words.
+- The work makes long output that later steps do not need: generated code,
+  logs, test output, pictures.
+- The result must be checked by someone who did not make it.
+- The job repeats one unit of work several times (a part, a file, a page):
+  each unit can have a fresh context.
+A team costs time: every dispatch starts a model that reads its refs again.
+A job one context does in ten minutes stays one expert.
+
+## The shape
+- One lead: routed (`use_for`), `team: a, b, c`, `expert` in its tools. It
+  takes the user's brief and owns the result.
+- Two to four specialists: `route: false`, no `team`, no `expert` tool.
+  Each does one kind of work on one unit and returns a report.
+- Depth stops there: a specialist starts nothing.
+- A maker and a checker are different specialists. The checker runs
+  everything itself and changes nothing.
+- The specialists' files point into the lead's folder (`<lead>/ref`,
+  `<lead>/bin`); each names only the refs it reads. One folder, one install.
+
+## Who holds what
+| | holds | never |
+|---|---|---|
+| lead | the contract, the reports, the verdict | reads or writes the product, calculates, simulates |
+| maker | one unit and its refs | another unit, the plan |
+| checker | the contract and its own checks | edits the product, trusts a report |
+A lead that does a specialist's work by hand has lost the benefit: say so
+in its rules, with the reason ("that fills your context").
+
+## The contract
+The lead writes one file before any dispatch: what each unit must do, the
+numbers units share, and the check that proves each requirement. It is the
+brief: a specialist's brief is the path to it and the name of its unit.
+- Paths, not summaries: a summary in a brief is a second, weaker contract.
+- One page. What, not how: the maker decides the rest and reports it.
+- Shared numbers in one table, each with a name the units must use.
+- Final text only: no reasoning, no corrections inside it.
+Give its format and one worked example in a ref, on a task that is not the
+one you will measure with.
+
+## Keep the lead small
+A lead on a small model over-designs and over-thinks. What stopped it:
+- Requirements come from the user's words only. Say so, and write the
+  lead's brief hints as "word for word; add nothing": the calling model
+  otherwise adds its own design ideas to the brief and the lead builds them.
+- A table of patterns with starting numbers ("a stand for N things: one
+  block, N pockets, 30 deep, pitch 23"), so it picks instead of inventing.
+- "Take the first design that works", as a ladder from simplest up.
+- A time box on the contract ("one pass, within 10 minutes") and a ban on
+  scripts for calculating: a doubt is a check for the checker.
+- What bash is for, as a list of commands.
+
+## Workflows
+Name each kind of request the team takes and write it as numbered steps:
+who is dispatched, with what, in what order, and when it stops. Put them in
+one ref the lead reads first. Usual ones: make something new; change
+something existing (the contract changes first); check only; operate or
+watch; fix after feedback from use. End with "when something fails": a
+specialist gives up, cannot run, or reports something not checked.
+Bound the loop: "defect, maker, checker; at most 2 rounds, then report what
+is open". Without a bound a small model loops.
+
+## Reports
+A specialist's last message is all the lead sees, and it adds to the lead's
+context every time. Give each specialist a fixed format of a few labelled
+lines: result, files, the evidence (a command and its output), deviations.
+A defect names the unit, the measured value and the required value, so the
+lead can pass it on word for word as the maker's `fix` field.
+
+## Briefs of specialists
+- Required: the contract's path and the unit's name. Nothing the contract
+  already says.
+- A `fix` field for a later round: the checker's defect lines, verbatim.
+- No free-text "task": it invites the lead to restate the contract.
+
+## Helpers for a team
+A command sequence a specialist repeats becomes one helper that prints a
+short verdict and exits non-zero on failure (distill.md). For a team this
+matters twice: it keeps each context short, and the maker and the checker
+judge by the same tool.
+
+## Pictures
+A model server can cap the images in one conversation (vLLM's
+`--limit-mm-per-prompt image=1` is common). A child that reads a second
+picture then gets "At most 1 image(s) may be provided" on every later
+request and ends with exit 1 and no report; its lead sees only "ended
+abnormally" and retries into the same wall.
+- Plan one picture per child, read last, after its checks pass.
+- Give it a helper that puts every view it needs into one image.
+- Write the rule with its reason in each member's Rules; the lead reads no
+  pictures, only its specialists' one-line account of theirs.
+- Judge by numbers; a picture only confirms appearance.
+
+## Roles
+`role: lead` is for a team's lead: the developer's rails (writes in its
+working folder and the temp dir, no git writes or installs) plus the expert
+tool; it can start only the experts its `team` names. Give makers
+`developer`, checkers `developer` (they write their own check files) or
+`reviewer` (temp dir only), watchers `reviewer` or `readonly`. `tester` is
+the built-in tester's own role: its team is fixed.
+
+## Lint and routing
+- Lint every member. A ref of the lead's folder that one member does not
+  name is not a finding: another member reads it.
+- route-check the lead only. Its near-misses should include a request for
+  one specialist's work alone ("check this model"): it still goes to the lead.
+
+## Measure the whole team
+Lint and route-check say the files are right and the task arrives. They do
+not say the team finishes. Run it end to end once:
+1. Pick a task you have a good result for (your own, made by hand or by a
+   larger model).
+2. In a scratch agent dir with the members enabled, run the user's request
+   in print mode: `lets-code --mode json --no-session -p "<request>"`. Run
+   it in a folder outside any large git repository: a session lists the
+   repository's untracked files, and inside a home-directory repository
+   that listing can hang every member for good.
+3. Watch `lets-code-runs/<session>/`: when the contract appears, when the
+   first specialist starts, what each report says.
+4. Compare the result with yours on facts: does it meet each requirement,
+   how many parts, how long it took, what a human would have to fix.
+What to look at first: the brief the calling model wrote (did it add
+ideas?), the time to the first dispatch (over 15 minutes: the lead is doing
+the work), a member that ends with exit 1 and no report (read the last
+lines of its `.pi.jsonl` for the server's error), and whether the checker
+found what you can see is wrong.
+A helper that reports a failure badly costs more than a weak instruction: a
+member spent twenty minutes bisecting a failed assert that its helper
+printed as an unrelated hint. Make every helper say what failed, where, and
+with what value.
+Then run a second, different task. A team tuned on one task has learned
+that task; the second one shows what the refs really teach.
+One run at a time, thinking medium or low: the GPU is shared.
+MD
     cat > "${d}/bin/expert-lint" <<'JS'
 #!/usr/bin/env node
 // Written by lets-code (expert-builder); regenerated on launch, edits are overwritten.
@@ -17762,7 +17924,8 @@ function lintFile(file, opt) {
 		for (const f of files) {
 			const abs = path.join(d, f); const st = fs.statSync(abs);
 			if (!st.isFile()) continue;
-			if (sub === "ref" && f.endsWith(".md") && !mentioned.has(abs) && !promptText.includes(`${sub}/${f}`)) warn("refs", `${top}/ref/${f} is never named in the instructions: the child will not know to read it`);
+			// only in its own folder: a team's specialists point into their lead's, and read some of its refs each
+			if (sub === "ref" && top === name && f.endsWith(".md") && !mentioned.has(abs) && !promptText.includes(`${sub}/${f}`)) warn("refs", `${top}/ref/${f} is never named in the instructions: the child will not know to read it`);
 			if (sub === "bin") {
 				const head = fs.readFileSync(abs, "utf8").slice(0, 200);
 				// Windows has no exec bit: Git Bash runs a file that starts with #!

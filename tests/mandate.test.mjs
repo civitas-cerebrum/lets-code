@@ -207,6 +207,20 @@ const sh = (p) => (process.platform === "win32" ? p.replace(/\\/g, "/") : p);
 	if (tmpWas === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = tmpWas;
 }
 
+// --- lead: a team lead's role: the developer's rails, plus the expert tool
+{
+	const tmpWas = process.env.TMPDIR; const scratch = join(work, "lead-tmp"); mkdirSync(scratch); process.env.TMPDIR = scratch;
+	const h = await load({ LETS_CODE_ROLE: "lead", LETS_CODE_SUBAGENT_DEPTH: "1" }); const d = repo(); await h.start(d);
+	const outside = repo();
+	t("lead: write in the workspace passes", await h.call(d, "write", { path: join(d, "spec.md") }), undefined);
+	t("lead: write outside blocked", blocked(await h.call(d, "write", { path: join(outside, "spec.md") })), true);
+	t("lead: git commit blocked", blocked(await h.call(d, "bash", { command: "git commit -am wip" })), true);
+	t("lead: npm install blocked", blocked(await h.call(d, "bash", { command: "npm install left-pad" })), true);
+	t("lead: the expert tool passes", await h.call(d, "expert", { action: "run", name: "cad-modeler", brief: { part: "stand" } }), undefined);
+	t("lead: no subagent tool", blocked(await h.call(d, "subagent", { agent: "worker", task: "x" })), true);
+	if (tmpWas === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = tmpWas;
+}
+
 // --- developer: the developer expert's role: edits and runs in its workspace
 // (the working folder) and the temp dir, never outside; no git writes, installs,
 // recursive deletes or sudo

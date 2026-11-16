@@ -17635,7 +17635,10 @@ the built-in tester's own role: its team is fixed.
 
 ## Lint and routing
 - Lint every member. A ref of the lead's folder that one member does not
-  name is not a finding: another member reads it.
+  name is not a finding when another member names it; a ref nobody names
+  still is.
+- A team works for experts of the user's own (files in the agent dir): the
+  lead's extra level and its team are set up for those only.
 - route-check the lead only. Its near-misses should include a request for
   one specialist's work alone ("check this model"): it still goes to the lead.
 
@@ -17921,6 +17924,11 @@ function lintFile(file, opt) {
 	if (n > BODY_WORDS) warn("body", `${n} words always in the child's prompt: move reference material into ${name}/ref/*.md, read on demand`);
 	if (/\b(Skill|Task|TodoWrite|WebFetch|WebSearch|MultiEdit|NotebookEdit|Glob)\s*(tool|\(|\{)/.test(promptText)) warn("body", "names a tool pi does not have (Skill, Task, TodoWrite, WebFetch, ...): the child has only its tools list");
 	const own = path.join(A, name);
+	// does another expert's file in the agent dir name this path (a ref of a shared folder)?
+	const namedByAnother = (rel) => {
+		let files = []; try { files = fs.readdirSync(path.join(A, "agents")).filter((x) => x.endsWith(".md")); } catch { return false; }
+		return files.some((x) => { const fp = path.join(A, "agents", x); if (path.resolve(fp) === path.resolve(file)) return false; try { return fs.readFileSync(fp, "utf8").includes(rel); } catch { return false; } });
+	};
 	// every path under the agent dir the instructions name must exist; the
 	// expert's own dir and any dir they point into have their refs checked
 	const mentioned = new Set(); const dirs = new Set([name]);
@@ -17940,8 +17948,9 @@ function lintFile(file, opt) {
 		for (const f of files) {
 			const abs = path.join(d, f); const st = fs.statSync(abs);
 			if (!st.isFile()) continue;
-			// only in its own folder: a team's specialists point into their lead's, and read some of its refs each
-			if (sub === "ref" && top === name && f.endsWith(".md") && !mentioned.has(abs) && !promptText.includes(`${sub}/${f}`)) warn("refs", `${top}/ref/${f} is never named in the instructions: the child will not know to read it`);
+			// only in its own folder, and not when a teammate names it: a team's specialists point
+			// into their lead's folder and read some of its refs each, which the lead never names
+			if (sub === "ref" && top === name && f.endsWith(".md") && !mentioned.has(abs) && !promptText.includes(`${sub}/${f}`) && !namedByAnother(`${top}/${sub}/${f}`)) warn("refs", `${top}/ref/${f} is never named in the instructions: the child will not know to read it`);
 			if (sub === "bin") {
 				const head = fs.readFileSync(abs, "utf8").slice(0, 200);
 				// Windows has no exec bit: Git Bash runs a file that starts with #!

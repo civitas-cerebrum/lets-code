@@ -17569,6 +17569,35 @@ numbers of your test tasks out of every ref, example and snippet.
   the plan nobody questions it; makers build it and the checker checks the
   result against it. Give it the user's words verbatim and the plan's path.
 
+## Keep what was asked for
+A team loses the user's request in small, reasonable steps: the lead
+paraphrases it, a reviewer finds a problem, the lead solves the problem by
+dropping the feature that caused it, and the checker passes the result
+because it matches the revised contract. What stopped it:
+- The contract opens with the request, copied, and a short list of what
+  it must have, each with the feature that delivers it. The list is
+  written once; a revision may change the feature, never drop the line.
+- "A fix changes how, never what": written in the lead's rules. A problem
+  that can only be solved by dropping something asked for means the plan
+  is wrong, not the request.
+- The reviewer of the plan and the checker of the result both get the
+  user's words verbatim and check them line by line, as well as the
+  contract. A result can match its contract and still not be what was
+  asked for.
+- A change to the contract after its last review goes back to the reviewer
+  before anyone builds it.
+
+## Units that must fit each other
+Makers who work in parallel each test against a stand-in for the other's
+unit. Stand-ins go stale the moment a unit changes shape. So:
+- The contract's shared table carries each unit's whole outside size
+  where units meet, and the lead updates it when a maker reports a change.
+- A maker uses the real neighbouring unit when its file already exists.
+- The checker's first test puts the real units together, in every position
+  they have. It records each result in a file as it gets it, and does the
+  decisive tests first: a checker that writes one long test script and
+  runs out of time has checked nothing.
+
 ## Keep the lead small
 A lead on a small model over-designs and over-thinks. What stopped it:
 - Requirements come from the user's words only. Say so, and write the

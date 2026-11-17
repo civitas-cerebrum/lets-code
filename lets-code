@@ -17569,6 +17569,34 @@ numbers of your test tasks out of every ref, example and snippet.
   the plan nobody questions it; makers build it and the checker checks the
   result against it. Give it the user's words verbatim and the plan's path.
 
+## Small decisions, proposed and reviewed
+A small model reviews better than it creates. Given a whole plan to
+invent, it over-builds, contradicts itself and defends its first idea;
+given one finished proposal and the user's words, it finds what is wrong
+and does the arithmetic. Shape the team around that:
+- The lead is an orchestrator. It decides nothing about the work: it asks
+  one small question, has one specialist answer it, has another review the
+  answer, records the settled answer, and asks the next question.
+- A proposer answers one question in a fresh context: several options,
+  the same facts worked out as numbers for each, one choice, and the two
+  or three lines to record. It writes them to a file.
+- A reviewer reads that one file against the user's words and the rules,
+  redoes the numbers, and returns OK or the problems, each with the
+  smallest change. The pair repeats until it holds, a few rounds at most;
+  a question that will not settle is split in two.
+- A record holds the request, word for word, and each settled decision in
+  a few lines. Every specialist reads it first; only the lead writes it.
+  The contract is then the record put in order, not something invented.
+- Checking is split the same way: one scope a run (the units together,
+  the request, one unit), each small enough to finish.
+Where the questions come from: write down how a competent worker really
+does the job once, on a real case, and look at the order of the decisions,
+what was compared at each, and what was checked. The order becomes the
+orchestrator's list of questions (usually from the most constrained point
+outwards, each decision taking the earlier ones as fixed). What was
+compared becomes the proposer's rules; what was checked becomes the
+reviewer's list. Then delete the case: keep the method, not the example.
+
 ## Keep what was asked for
 A team loses the user's request in small, reasonable steps: the lead
 paraphrases it, a reviewer finds a problem, the lead solves the problem by

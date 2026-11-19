@@ -17589,6 +17589,21 @@ and does the arithmetic. Shape the team around that:
   The contract is then the record put in order, not something invented.
 - Checking is split the same way: one scope a run (the units together,
   the request, one unit), each small enough to finish.
+- What a tool can measure is measured, not argued. A reviewer reasons as
+  badly about hard facts as the proposer does, and a confident wrong
+  objection overturns a right decision. Where the domain has a ground
+  truth that can be run (a compiler, a test, a solver, a CAD kernel), put
+  a third specialist between proposer and reviewer: it builds the smallest
+  thing that tests the proposal's claims and reports each as agrees,
+  disagrees or not testable, with the number. Its facts outrank everyone's
+  reasoning; the reviewer may question what was measured, never the
+  measurement. A claim nobody measured is a request to measure, not a
+  finding.
+- Give the proposer and the reviewer a calculator (bash for arithmetic
+  only). One spent 500 turns doing geometry by hand and ran out of time.
+- The calling model rewrites the user's request on the way in, whatever the
+  brief's hint says. A `dispatch_rule` that says "put the user's message in
+  <field> exactly as written" is what kept it intact.
 Where the questions come from: write down how a competent worker really
 does the job once, on a real case, and look at the order of the decisions,
 what was compared at each, and what was checked. The order becomes the

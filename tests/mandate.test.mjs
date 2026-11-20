@@ -216,7 +216,7 @@ const sh = (p) => (process.platform === "win32" ? p.replace(/\\/g, "/") : p);
 	t("lead: write outside blocked", blocked(await h.call(d, "write", { path: join(outside, "spec.md") })), true);
 	t("lead: git commit blocked", blocked(await h.call(d, "bash", { command: "git commit -am wip" })), true);
 	t("lead: npm install blocked", blocked(await h.call(d, "bash", { command: "npm install left-pad" })), true);
-	t("lead: the expert tool passes", await h.call(d, "expert", { action: "run", name: "cad-modeler", brief: { part: "stand" } }), undefined);
+	t("lead: the expert tool passes", await h.call(d, "expert", { action: "run", name: "maker", brief: { unit: "a" } }), undefined);
 	t("lead: no subagent tool", blocked(await h.call(d, "subagent", { agent: "worker", task: "x" })), true);
 	if (tmpWas === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = tmpWas;
 }

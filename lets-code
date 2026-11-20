@@ -17630,6 +17630,26 @@ because it matches the revised contract. What stopped it:
 - A change to the contract after its last review goes back to the reviewer
   before anyone builds it.
 
+## A rules file for the job
+One short file per job, beside the contract, that every specialist reads
+first on every dispatch: the user's own words, the must-keep list, and DO
+and DON'T lines learned on this job. It answers two things the contract
+cannot: a specialist's early context is gone after a long run, and a
+fresh specialist repeats the mistake the last one was sent back for.
+- The lead creates it with the request copied, and alone writes it.
+- Each specialist's file says: read it first; read it again when you are
+  not sure you still have it word for word; before the final message go
+  through it line by line against your result.
+- Reviewers and checkers return a `LESSONS` field: at most two lines, in
+  general words with the measured fact, only for a mistake that cost a
+  round and could be made again. The lead copies them in. The reviewer
+  marks as broken any proposal that breaks a line.
+- Keep it under about 30 lines, one line each; merge lines that say the
+  same thing. A file nobody can hold in mind is not read.
+- A lesson never changes the user's words or the must-keep list.
+- It belongs to the job. A lesson that would hold for every job is a rule
+  for the reference files, written without the job's objects in it.
+
 ## Units that must fit each other
 Makers who work in parallel each test against a stand-in for the other's
 unit. Stand-ins go stale the moment a unit changes shape. So:

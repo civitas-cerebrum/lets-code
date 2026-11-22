@@ -40,6 +40,13 @@ model on your own hardware:
   `expert-reviewer`, `design-reviewer`, `acceptance-judge`, `developer`,
   `software-factory`, `researcher`, `reverse-engineer`, `expert-builder`,
   `termux-device`
+- teams of experts of your own: the expert builder's `team.md` (when a team
+  is worth it, a lead and its specialists, the contract they share, their
+  workflows and context budgets, one picture per child, measuring the whole
+  team end to end), the `lead` mandate role (the developer's rails plus the
+  expert tool, which runs only its team), and `expert-lint` asking each
+  expert to name the refs of its own folder only, so specialists can share
+  their lead's
 - the `video` expert and `lets-code video`: any video analysed on your own
   server (its transcript from a speech-to-text endpoint, `SPEECH_URL`; what
   is seen, read by the vision model; a summary with chapters and key

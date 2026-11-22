@@ -130,6 +130,17 @@ has "lint: the same name twice"    "$(lint "${L}/agents/conf.md")" "error: name:
 printf -- '---\nname: cfg\ndescription: x\nexpert: true\nuse_for: validating YAML and TOML config files\n---\nx\n' > "${L}/agents/conf2.md"
 has "lint: overlap with an expert" "$(lint "${L}/agents/conf.md")" "warning: overlap: expert cfg shares"
 rm -f "${L}/agents/conf2.md"
+# a team: a specialist points into its lead's folder and reads some of its refs; the lead's
+# other refs are not the specialist's to name, and the lead still has to name its own
+good | sed "s|@L@|${L}|g" > "${L}/agents/conf.md"
+echo "# lead only" > "${L}/conf/ref/plan.md"
+printf -- '---\nname: conf-check\ndescription: Checks a converted config file\ntools: bash, read\nexpert: true\nroute: false\nuse_for: checking one converted config file against its source\nbrief:\n  - file (required): the path\n---\nRead %s/conf/ref/formats.md, then check the file.\n' "${L}" > "${L}/agents/conf-check.md"
+t   "lint: a specialist is not told to name its lead's other refs" "$(lint "${L}/agents/conf-check.md" | grep -c 'is never named')" 0
+has "lint: the lead still names a ref nobody else names" "$(lint "${L}/agents/conf.md")" "warning: refs: conf/ref/plan.md is never named"
+echo "# for the specialist" > "${L}/conf/ref/checking.md"
+printf 'Read %s/conf/ref/checking.md too.\n' "${L}" >> "${L}/agents/conf-check.md"
+t   "lint: a ref only a specialist names is not the lead's finding" "$(lint "${L}/agents/conf.md" | grep -c 'checking.md is never named')" 0
+rm -f "${L}/agents/conf-check.md" "${L}/conf/ref/plan.md" "${L}/conf/ref/checking.md"
 printf '#!/usr/bin/env bash\nif then\n' > "${L}/conf/bin/broken"; chmod 755 "${L}/conf/bin/broken"
 has "lint: a helper bash -n fails" "$(lint "${L}/agents/conf.md")" "error: bin: conf/bin/broken: bash -n:"
 rm -f "${L}/conf/bin/broken"

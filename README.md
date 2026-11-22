@@ -1853,9 +1853,17 @@ prints each verdict and recall, false triggers and precision.
 The references in `~/.pi/agent/expert-builder/ref/` are the documentation
 for both ways: `format.md` (every field, its meaning and limits),
 `use-for.md` (routing, and writing the prompts file), `distill.md`
-(turning docs, a repo or a method into instructions), `setup.md` (setup,
+(turning docs, a repo or a method into instructions), `team.md` (one
+expert or a team: a lead, its specialists, the contract they share, their
+workflows, and measuring the whole team end to end), `setup.md` (setup,
 pinning, helpers, platforms), `safety.md` (irreversible and outward
 actions, consent) and `contribute.md` (the checklist for a built-in).
+
+A team of your own is a lead with `team: a, b` and `expert` in its tools,
+and specialists with `route: false`. Give the lead `role: lead`: the
+developer's rails plus the expert tool, which lists and runs only its team.
+The specialists' files may point into the lead's folder; `expert-lint`
+asks each expert to name the refs of its own folder only.
 
 On borealis the builder made `config-convert` ("make me an expert that
 converts and validates JSON/YAML/TOML config files") in 7.5 minutes: a

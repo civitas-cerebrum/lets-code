@@ -6938,6 +6938,14 @@ const BUILTIN: Manifest = {
 			label: "tester", tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "tool_search", "expert"], write: [".", lcwTmpDir()], external: "deny", mcp: "deny", dispatch: ["ui-tester", "api-tester"], network: "on",
 			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
 		},
+		// a team lead's (an expert of the user's with a `team`): the developer's
+		// rails plus the expert tool. Which experts it starts is not this role's
+		// to say: a child with a team has an expert tool that lists and runs
+		// only its team (LETS_CODE_EXPERT_TEAM), and it has no subagent tool
+		lead: {
+			label: "lead", tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "tool_search", "expert"], write: [".", lcwTmpDir()], external: "deny", mcp: "deny", dispatch: ["*"], network: "on",
+			bash: { "*": "allow", "git-write": "deny", "package-install": "deny", privileged: "deny", destructive: "deny", "network-exec": "deny" },
+		},
 		// the researcher expert's: the reviewer's, and its browser only through
 		// its helper (researcher/bin/web, which allows only navigation and
 		// reading): no Playwright CLI, the runtime that holds it, its daemon,
@@ -7430,7 +7438,7 @@ export default function (pi: ExtensionAPI) {
 	// roles; a subagent role is still taken by name). With it off, "yolo" (no
 	// mode: the dormant state), auto (the rails taken up in the session) and the
 	// dormant modes there are, plan and orchestration
-	const SUBAGENT_ROLES = ["readonly", "reviewer", "developer", "tester", "researcher"];
+	const SUBAGENT_ROLES = ["readonly", "reviewer", "developer", "tester", "lead", "researcher"];
 	const OFF = "yolo";
 	const current = () => (on ? roleName : OFF);
 	const known = (m: string) => (ACTIVE ? !!manifest.roles[m] : m === OFF || m === "auto" || (m === "plan" && (PLAN || ACTIVE)) || (m === "orchestration" && ORCHESTRATOR));
@@ -17004,6 +17012,7 @@ expert's own files are under `@@AGENT@@/<name>/` (`ref/`, `bin/`, `setup`).
   - `@@EB@@/ref/format.md`: every frontmatter field, its meaning and limits
   - `@@EB@@/ref/use-for.md`: use_for, keywords and job that route well; the prompts file
   - `@@EB@@/ref/distill.md`: turning docs, a repo or a method into instructions a 27B model follows
+  - `@@EB@@/ref/team.md`: one expert or a team; a lead, its specialists, their workflows and context budgets
   - `@@EB@@/ref/setup.md`: setup scripts, pinning, helpers, platform gating
   - `@@EB@@/ref/safety.md`: rules for irreversible or outward actions, consent
   - `@@EB@@/ref/contribute.md`: a built-in expert for lets-code (scope builtin)
@@ -17015,6 +17024,10 @@ expert's own files are under `@@AGENT@@/<name>/` (`ref/`, `bin/`, `setup`).
 3. Read the sources the brief names: docs, repo, scripts. Read only what
    the expert needs; note exact commands, flags, traps and versions.
 4. Design, before writing (format.md, use-for.md, safety.md):
+   - one expert or a team (team.md): a team when the job has phases that
+     need different knowledge, makes long output, or must be checked by
+     someone other than its maker; then design the lead and each
+     specialist with the points below, and the workflows that join them
    - name: lower-case, a noun for the job (`config-convert`, not `helper`)
    - use_for: the tasks a user asks for, 6 to 14 words; keywords: 2-3 words
    - job: one line, what it does and how long it may take
@@ -17036,6 +17049,8 @@ expert's own files are under `@@AGENT@@/<name>/` (`ref/`, `bin/`, `setup`).
    once, lint again and rerun once. Keep the better wording of the two and
    report both lines; never run it a third time. Prompts that name files
    need those files: create them in a folder and pass `--cwd`.
+   A team: route-check the lead only (its specialists are `route: false`),
+   and say in the report that an end-to-end run (team.md) is still to do.
 8. Builtin scope only: contribute.md, on a new branch in a git worktree.
 9. Report.
 
@@ -17102,9 +17117,9 @@ entirely (it is not listed anywhere), so lint before you rely on it.
 | `name` | the name in the line and in `expert({name})` | letters, digits, `. _ -`, starts with a letter or digit; default: the file name. Use lower-case with `-`, and name the file `<name>.md` |
 | `description` | one line; the child's prompt starts `You are the "<name>" agent. <description>` | required in practice |
 | `tools` | the child's tools, comma list or block list | pi's: `read, bash, edit, write, grep, find, ls`; MCP tools as `mcp__<server>_<tool>`. None given: all tools. Give the least it needs |
-| `team` | experts this one starts itself (it needs `expert` in tools) | comma list of expert names. The child gets one level more and its expert tool lists and runs only these; they start nothing. A lead and its specialists, as `tester` with `ui-tester` and `api-tester` |
+| `team` | experts this one starts itself (it needs `expert` in tools) | comma list of expert names. The child gets one level more and its expert tool lists and runs only these; they start nothing. A lead and its specialists, as `tester` with `ui-tester` and `api-tester`; team.md says when and how |
 | `thinking` | the child's thinking level | `off minimal low medium high xhigh`; default medium. Avoid xhigh on a local GPU |
-| `role` | the mandate role the child runs under | built-ins: `readonly` (reads and read-only commands only), `reviewer` (runs tests and commands, writes only under the temp dir, no git writes or installs: reviewers and judges), `developer` (edits and runs in its working folder and the temp dir only, no git writes or installs: an expert that changes code), `tester` (the developer's, plus the expert tool for its team: the test lead), `researcher` (the reviewer's, and no Playwright CLI or its runtime from bash: the researcher expert), `plan`, `auto`, `ask`, `yolo`; or a role from your `mandate.json`. Default: the session's mode |
+| `role` | the mandate role the child runs under | built-ins: `readonly` (reads and read-only commands only), `reviewer` (runs tests and commands, writes only under the temp dir, no git writes or installs: reviewers and judges), `developer` (edits and runs in its working folder and the temp dir only, no git writes or installs: an expert that changes code), `tester` (the developer's, plus the expert tool for its team: the test lead), `lead` (the developer's, plus the expert tool: the lead of a team of your own, which starts only the experts its `team` names), `researcher` (the reviewer's, and no Playwright CLI or its runtime from bash: the researcher expert), `plan`, `auto`, `ask`, `yolo`; or a role from your `mandate.json`. Default: the session's mode |
 | `agent_dir` | the child's own `PI_CODING_AGENT_DIR` (own mcp.json, settings) | a directory under the agent dir |
 | `skills` | paths passed as `--skill` | under the agent dir |
 | `append_prompt` | a file appended to the system prompt | under the agent dir. With an empty body, only this file is the prompt |
@@ -17488,6 +17503,301 @@ and work only in `<repo>-<name>`.
 - Installs only in its setup (run when the user enables it), pinned, npm
   with `--ignore-scripts`.
 MD
+    cat > "${d}/ref/team.md" <<'MD'
+# One expert or a team
+
+A child is a small model with one context. Everything it reads, runs and
+writes stays in that context until it ends. A job that fills it gets worse
+towards the end: the model forgets the brief, repeats work, or stops
+delegating and tries to do everything itself. A team splits such a job so
+that no one holds all of it.
+
+## When a team is worth it
+Build one expert unless at least one of these is true:
+- The job has phases that need different knowledge: deciding what to make,
+  making it, checking it, operating something. One body cannot hold all of
+  it under 700 words, and the refs together pass about 6000 words.
+- The work makes long output that later steps do not need: generated code,
+  logs, test output, pictures.
+- The result must be checked by someone who did not make it.
+- The job repeats one unit of work several times (a part, a file, a page):
+  each unit can have a fresh context.
+A team costs time: every dispatch starts a model that reads its refs again.
+A job one context does in ten minutes stays one expert.
+
+## The shape
+- One lead: routed (`use_for`), `team: a, b, c`, `expert` in its tools. It
+  takes the user's brief and owns the result.
+- Two to four specialists: `route: false`, no `team`, no `expert` tool.
+  Each does one kind of work on one unit and returns a report.
+- Depth stops there: a specialist starts nothing.
+- A maker and a checker are different specialists. The checker runs
+  everything itself and changes nothing.
+- The specialists' files point into the lead's folder (`<lead>/ref`,
+  `<lead>/bin`); each names only the refs it reads. One folder, one install.
+
+## Who holds what
+| | holds | never |
+|---|---|---|
+| lead | the contract, the reports, the verdict | reads or writes the product, calculates, simulates |
+| maker | one unit and its refs | another unit, the plan |
+| checker | the contract and its own checks | edits the product, trusts a report |
+A lead that does a specialist's work by hand has lost the benefit: say so
+in its rules, with the reason ("that fills your context").
+
+## The contract
+The lead writes one file before any dispatch: what each unit must do, the
+numbers units share, and the check that proves each requirement. It is the
+brief: a specialist's brief is the path to it and the name of its unit.
+- Paths, not summaries: a summary in a brief is a second, weaker contract.
+- One page. What, not how: the maker decides the rest and reports it.
+- Shared numbers in one table, each with a name the units must use.
+- Final text only: no reasoning, no corrections inside it.
+Give its format and one worked example in a ref, on a task unlike any you
+will measure with.
+
+## Rules, not answers
+The refs hold rules, things to look out for, techniques and the checks.
+They never describe a particular product of the team's work: no table of
+ready designs, no finished script for "the usual case", no sizes taken
+from a result you liked. A team given the answer to its test passes the
+test and can do nothing else. When an end-to-end run fails, fix it with a
+general rule, a better helper or a review step, and ask of every change:
+would this help on a task I have not thought of? Keep the nouns and
+numbers of your test tasks out of every ref, example and snippet.
+- A reviewer of the plan, before anything is built, earns its place: after
+  the plan nobody questions it; makers build it and the checker checks the
+  result against it. Give it the user's words verbatim and the plan's path.
+
+## Small decisions, proposed and reviewed
+A small model reviews better than it creates. Given a whole plan to
+invent, it over-builds, contradicts itself and defends its first idea;
+given one finished proposal and the user's words, it finds what is wrong
+and does the arithmetic. Shape the team around that:
+- The lead is an orchestrator. It decides nothing about the work: it asks
+  one small question, has one specialist answer it, has another review the
+  answer, records the settled answer, and asks the next question.
+- A proposer answers one question in a fresh context: several options,
+  the same facts worked out as numbers for each, one choice, and the two
+  or three lines to record. It writes them to a file.
+- A reviewer reads that one file against the user's words and the rules,
+  redoes the numbers, and returns OK or the problems, each with the
+  smallest change. The pair repeats until it holds, a few rounds at most;
+  a question that will not settle is split in two.
+- A record holds the request, word for word, and each settled decision in
+  a few lines. Every specialist reads it first; only the lead writes it.
+  The contract is then the record put in order, not something invented.
+- Checking is split the same way: one scope a run (the units together,
+  the request, one unit), each small enough to finish.
+- What a tool can measure is measured, not argued. A reviewer reasons as
+  badly about hard facts as the proposer does, and a confident wrong
+  objection overturns a right decision. Where the domain has a ground
+  truth that can be run (a compiler, a test, a solver, a CAD kernel), put
+  a third specialist between proposer and reviewer: it builds the smallest
+  thing that tests the proposal's claims and reports each as agrees,
+  disagrees or not testable, with the number. Its facts outrank everyone's
+  reasoning; the reviewer may question what was measured, never the
+  measurement. A claim nobody measured is a request to measure, not a
+  finding.
+- Give the proposer and the reviewer a calculator (bash for arithmetic
+  only). One spent 500 turns doing geometry by hand and ran out of time.
+- The calling model rewrites the user's request on the way in, whatever the
+  brief's hint says. A `dispatch_rule` that says "put the user's message in
+  <field> exactly as written" is what kept it intact.
+Where the questions come from: write down how a competent worker really
+does the job once, on a real case, and look at the order of the decisions,
+what was compared at each, and what was checked. The order becomes the
+orchestrator's list of questions (usually from the most constrained point
+outwards, each decision taking the earlier ones as fixed). What was
+compared becomes the proposer's rules; what was checked becomes the
+reviewer's list. Then delete the case: keep the method, not the example.
+
+## Keep what was asked for
+A team loses the user's request in small, reasonable steps: the lead
+paraphrases it, a reviewer finds a problem, the lead solves the problem by
+dropping the feature that caused it, and the checker passes the result
+because it matches the revised contract. What stopped it:
+- The contract opens with the request, copied, and a short list of what
+  it must have, each with the feature that delivers it. The list is
+  written once; a revision may change the feature, never drop the line.
+- "A fix changes how, never what": written in the lead's rules. A problem
+  that can only be solved by dropping something asked for means the plan
+  is wrong, not the request.
+- The reviewer of the plan and the checker of the result both get the
+  user's words verbatim and check them line by line, as well as the
+  contract. A result can match its contract and still not be what was
+  asked for.
+- A change to the contract after its last review goes back to the reviewer
+  before anyone builds it.
+
+## A rules file for the job
+One short file per job, beside the contract, that every specialist reads
+first on every dispatch: the user's own words, the must-keep list, and DO
+and DON'T lines learned on this job. It answers two things the contract
+cannot: a specialist's early context is gone after a long run, and a
+fresh specialist repeats the mistake the last one was sent back for.
+- The lead creates it with the request copied, and alone writes it.
+- Each specialist's file says: read it first; read it again when you are
+  not sure you still have it word for word; before the final message go
+  through it line by line against your result.
+- Reviewers and checkers return a `LESSONS` field: at most two lines, in
+  general words with the measured fact, only for a mistake that cost a
+  round and could be made again. The lead copies them in. The reviewer
+  marks as broken any proposal that breaks a line.
+- Keep it under about 30 lines, one line each; merge lines that say the
+  same thing. A file nobody can hold in mind is not read.
+- A lesson never changes the user's words or the must-keep list.
+- It belongs to the job. A lesson that would hold for every job is a rule
+  for the reference files, written without the job's objects in it.
+
+## A brief first, then a refinement per question
+Before the first question, one specialist reads the request and writes a
+short brief the whole team starts from; before each later question it
+writes a few lines for whoever answers that question.
+- The first brief holds only what follows from what the user gave and a
+  rule in the references, whatever the solution turns out to be: the
+  given things, what the result must do, the figures that apply to those
+  things, the limits, what was assumed. The lead copies it into the
+  contract and the rules file, so the first question is not asked twice.
+- It leaves out anything that depends on a choice nobody has made yet (a
+  count times a spacing, the size of the whole, a margin). A figure
+  written before the choice it depends on gets treated as decided, and
+  the team then bends its rules to honour it.
+- The per-question note gathers, it does not derive: the values already
+  fixed that the question builds on, the rule lines an answer could
+  break, what to leave for later, and two or three checks that can be
+  measured. No new figures and no named option: a small model takes
+  either as chosen, and unlike the proposer's answer, nothing measures
+  the note before it is acted on.
+- Review the first brief once. Do not review the per-question notes.
+
+## Units that must fit each other
+Makers who work in parallel each test against a stand-in for the other's
+unit. Stand-ins go stale the moment a unit changes shape. So:
+- The contract's shared table carries each unit's whole outside size
+  where units meet, and the lead updates it when a maker reports a change.
+- A maker uses the real neighbouring unit when its file already exists.
+- The checker's first test puts the real units together, in every position
+  they have. It records each result in a file as it gets it, and does the
+  decisive tests first: a checker that writes one long test script and
+  runs out of time has checked nothing.
+
+## Keep the lead small
+A lead on a small model over-designs and over-thinks. What stopped it:
+- Requirements come from the user's words only. Say so, and write the
+  lead's brief hints as "word for word; add nothing": the calling model
+  otherwise adds its own design ideas to the brief and the lead builds them.
+- A procedure for reaching the plan, in numbered steps (say what it must
+  do; walk through the use; decide how each thing holds), and rules to
+  reason from, so it derives instead of inventing.
+- "Take the first design that works", as a ladder from simplest up.
+- A time box on the contract ("one pass, within 10 minutes") and a ban on
+  scripts for calculating: a doubt is a check for the checker.
+- What bash is for, as a list of commands.
+
+## Workflows
+Name each kind of request the team takes and write it as numbered steps:
+who is dispatched, with what, in what order, and when it stops. Put them in
+one ref the lead reads first. Usual ones: make something new; change
+something existing (the contract changes first); check only; operate or
+watch; fix after feedback from use. End with "when something fails": a
+specialist gives up, cannot run, or reports something not checked.
+Bound the loop: "defect, maker, checker; at most 2 rounds, then report what
+is open". Without a bound a small model loops.
+
+## Reports
+A specialist's last message is all the lead sees, and it adds to the lead's
+context every time. Give each specialist a fixed format of a few labelled
+lines: result, files, the evidence (a command and its output), deviations.
+A defect names the unit, the measured value and the required value, so the
+lead can pass it on word for word as the maker's `fix` field.
+
+## Time
+- A specialist that reaches its `timeout` is stopped and its report is
+  lost: the lead gets its last words, not its findings. Have a checker
+  append each finding to a file as it finds it, and tell the lead to read
+  that file when a run ends without a report.
+- The lead's `timeout` must cover every specialist's run and every fix
+  round: several hours for a team of three. A lead stopped by its own
+  timeout loses the whole job.
+- Start independent units in one turn (one expert call per unit): they run
+  at the same time.
+- Do not buy speed with a "stop testing after N minutes" rule: a team that
+  finishes late with a checked result beats one that reports on time
+  without one. Make the helpers fast instead: a check a member runs thirty
+  times should take seconds, write nothing, and leave exports and pictures
+  to a final run.
+
+## Briefs of specialists
+- Required: the contract's path and the unit's name. Nothing the contract
+  already says.
+- A `fix` field for a later round: the checker's defect lines, verbatim.
+- No free-text "task": it invites the lead to restate the contract.
+
+## Helpers for a team
+A command sequence a specialist repeats becomes one helper that prints a
+short verdict and exits non-zero on failure (distill.md). For a team this
+matters twice: it keeps each context short, and the maker and the checker
+judge by the same tool.
+
+## Pictures
+A model server can cap the images in one conversation (vLLM's
+`--limit-mm-per-prompt image=1` is common). A child that reads a second
+picture then gets "At most 1 image(s) may be provided" on every later
+request and ends with exit 1 and no report; its lead sees only "ended
+abnormally" and retries into the same wall.
+- Plan one picture per child, read last, after its checks pass.
+- Give it a helper that puts every view it needs into one image.
+- Write the rule with its reason in each member's Rules; the lead reads no
+  pictures, only its specialists' one-line account of theirs.
+- Judge by numbers; a picture only confirms appearance.
+
+## Roles
+`role: lead` is for a team's lead: the developer's rails (writes in its
+working folder and the temp dir, no git writes or installs) plus the expert
+tool; it can start only the experts its `team` names. Give makers
+`developer`, checkers `developer` (they write their own check files) or
+`reviewer` (temp dir only), watchers `reviewer` or `readonly`. `tester` is
+the built-in tester's own role: its team is fixed.
+
+## Lint and routing
+- Lint every member. A ref of the lead's folder that one member does not
+  name is not a finding when another member names it; a ref nobody names
+  still is.
+- A team works for experts of the user's own (files in the agent dir): the
+  lead's extra level and its team are set up for those only.
+- route-check the lead only. Its near-misses should include a request for
+  one specialist's work alone ("check this model"): it still goes to the lead.
+
+## Measure the whole team
+Lint and route-check say the files are right and the task arrives. They do
+not say the team finishes. Run it end to end once:
+1. Pick a task you have a good result for (your own, made by hand or by a
+   larger model).
+2. In a scratch agent dir with the members enabled, run the user's request
+   in print mode: `lets-code --mode json --no-session -p "<request>"`. Run
+   it in a folder outside any large git repository: a session lists the
+   repository's untracked files, and inside a home-directory repository
+   that listing can hang every member for good.
+3. Watch `lets-code-runs/<session>/`: when the contract appears, when the
+   first specialist starts, what each report says.
+4. Compare the result with yours on facts: does it meet each requirement,
+   how many parts, how long it took, what a human would have to fix.
+What to look at first: the brief the calling model wrote (did it add
+ideas?), the time to the first dispatch (over 15 minutes: the lead is doing
+the work), a member that ends with exit 1 and no report (read the last
+lines of its `.pi.jsonl` for the server's error), and whether the checker
+found what you can see is wrong.
+A helper that reports a failure badly costs more than a weak instruction: a
+member spent twenty minutes bisecting a failed assert that its helper
+printed as an unrelated hint. Make every helper say what failed, where, and
+with what value.
+Then run a second, different task, one that no ref describes. A team
+tuned on one task has learned that task; the second shows what the refs
+really teach. If it passes only after you described its object in a ref,
+you have measured your ref, not your team.
+One run at a time, thinking medium or low: the GPU is shared.
+MD
     cat > "${d}/bin/expert-lint" <<'JS'
 #!/usr/bin/env node
 // Written by lets-code (expert-builder); regenerated on launch, edits are overwritten.
@@ -17743,6 +18053,11 @@ function lintFile(file, opt) {
 	if (n > BODY_WORDS) warn("body", `${n} words always in the child's prompt: move reference material into ${name}/ref/*.md, read on demand`);
 	if (/\b(Skill|Task|TodoWrite|WebFetch|WebSearch|MultiEdit|NotebookEdit|Glob)\s*(tool|\(|\{)/.test(promptText)) warn("body", "names a tool pi does not have (Skill, Task, TodoWrite, WebFetch, ...): the child has only its tools list");
 	const own = path.join(A, name);
+	// does another expert's file in the agent dir name this path (a ref of a shared folder)?
+	const namedByAnother = (rel) => {
+		let files = []; try { files = fs.readdirSync(path.join(A, "agents")).filter((x) => x.endsWith(".md")); } catch { return false; }
+		return files.some((x) => { const fp = path.join(A, "agents", x); if (path.resolve(fp) === path.resolve(file)) return false; try { return fs.readFileSync(fp, "utf8").includes(rel); } catch { return false; } });
+	};
 	// every path under the agent dir the instructions name must exist; the
 	// expert's own dir and any dir they point into have their refs checked
 	const mentioned = new Set(); const dirs = new Set([name]);
@@ -17762,7 +18077,9 @@ function lintFile(file, opt) {
 		for (const f of files) {
 			const abs = path.join(d, f); const st = fs.statSync(abs);
 			if (!st.isFile()) continue;
-			if (sub === "ref" && f.endsWith(".md") && !mentioned.has(abs) && !promptText.includes(`${sub}/${f}`)) warn("refs", `${top}/ref/${f} is never named in the instructions: the child will not know to read it`);
+			// only in its own folder, and not when a teammate names it: a team's specialists point
+			// into their lead's folder and read some of its refs each, which the lead never names
+			if (sub === "ref" && top === name && f.endsWith(".md") && !mentioned.has(abs) && !promptText.includes(`${sub}/${f}`) && !namedByAnother(`${top}/${sub}/${f}`)) warn("refs", `${top}/ref/${f} is never named in the instructions: the child will not know to read it`);
 			if (sub === "bin") {
 				const head = fs.readFileSync(abs, "utf8").slice(0, 200);
 				// Windows has no exec bit: Git Bash runs a file that starts with #!
